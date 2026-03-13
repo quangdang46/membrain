@@ -10217,8 +10217,9 @@ membrain/
 │   ├── OPERATIONS.md             # production runbooks
 │   └── CONTRIBUTING.md           # contributor workflow
 │
+├── install.sh                   # production-grade curl-pipe installer (root level)
+│
 └── scripts/
-    ├── install.sh               # one-line installer
     ├── bench.sh                 # run all benchmarks
     └── test-all.sh              # run full test suite with coverage
 ```
@@ -10395,7 +10396,19 @@ Stack: Rust + Tokio + SQLite WAL + FTS5 + USearch + fastembed + local reranker +
 - petgraph NodeIndex is not stable across serialization — always use Uuid as primary key
 ```
 
-### 11.7 GitHub Actions CI/CD
+### 11.7 GitHub Actions CI/CD + curl-pipe Installer
+
+Three drop-in files implement the full distribution pipeline:
+
+```
+membrain/
+├── .github/workflows/
+│   ├── ci.yml        ← fmt + clippy + test, 3-OS matrix
+│   └── release.yml   ← cross-compile 5 targets on vX.Y.Z tag
+└── install.sh        ← production-grade curl-pipe installer
+```
+
+#### 11.7.1 ci.yml — Format + Clippy + Test (3-OS matrix)
 
 ```yaml
 # .github/workflows/ci.yml
@@ -10403,80 +10416,427 @@ name: CI
 
 on:
   push:
-    branches: [main]
+    branches: [main, dev]
   pull_request:
     branches: [main]
 
 env:
   CARGO_TERM_COLOR: always
-  RUSTFLAGS: ""  # No target-cpu=native in CI (generic runner)
 
 jobs:
-  test:
-    runs-on: ubuntu-latest
+  check:
+    name: Check (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
         with:
-          components: clippy, rustfmt
+          components: rustfmt, clippy
       - uses: Swatinem/rust-cache@v2
 
-      - name: Format check
-        run: cargo fmt --all -- --check
+      - run: cargo fmt --all -- --check
+      - run: cargo clippy --all-targets --all-features -- -D warnings
+      - run: cargo test --workspace --all-features
+```
 
-      - name: Clippy
-        run: cargo clippy --all-targets --all-features -- -D warnings
+#### 11.7.2 release.yml — Cross-compile 5 targets + GitHub Release
 
-      - name: Tests (unit — no fastembed)
-        run: cargo test --lib --all
+Trigger: push tag matching `vX.Y.Z`.
 
-      - name: Tests (integration — requires model download)
-        run: cargo test --test '*' --all
-        env:
-          MEMBRAIN_TEST_MODEL: "all-MiniLM-L6-v2"
+Build matrix (5 targets):
 
-  release:
-    if: startsWith(github.ref, 'refs/tags/v')
-    needs: test
+| Target | Runner | Method | Asset Suffix |
+|---|---|---|---|
+| `x86_64-unknown-linux-musl` | ubuntu-latest | `cross` | `linux-x86_64` |
+| `aarch64-unknown-linux-musl` | ubuntu-latest | `cross` | `linux-aarch64` |
+| `x86_64-apple-darwin` | macos-latest | native | `macos-x86_64` |
+| `aarch64-apple-darwin` | macos-latest | native | `macos-aarch64` |
+| `x86_64-pc-windows-msvc` | windows-latest | native | `windows-x86_64` |
+
+Two jobs:
+1. **build** — parallel matrix → `.tar.gz` (Unix) or `.zip` (Windows) per target + `.sha256` sidecar
+2. **release** — download all artifacts → attach to GitHub Release via `softprops/action-gh-release@v2`
+
+```yaml
+# .github/workflows/release.yml
+name: Release
+
+on:
+  push:
+    tags: ["v[0-9]+.[0-9]+.[0-9]+*"]
+
+permissions:
+  contents: write
+
+env:
+  CARGO_TERM_COLOR: always
+  BIN_NAME: membrain
+
+jobs:
+  build:
+    name: Build ${{ matrix.suffix }}
+    runs-on: ${{ matrix.runner }}
     strategy:
+      fail-fast: false
       matrix:
         include:
-          - os: ubuntu-latest
-            target: x86_64-unknown-linux-gnu
-            artifact: membrain-linux-x86_64
-          - os: macos-latest
-            target: x86_64-apple-darwin
-            artifact: membrain-macos-x86_64
-          - os: macos-latest
-            target: aarch64-apple-darwin
-            artifact: membrain-macos-aarch64
-          - os: windows-latest
-            target: x86_64-pc-windows-msvc
-            artifact: membrain-windows-x86_64.exe
-    runs-on: ${{ matrix.os }}
+          - target: x86_64-unknown-linux-musl
+            runner: ubuntu-latest
+            suffix: linux-x86_64
+            use_cross: true
+          - target: aarch64-unknown-linux-musl
+            runner: ubuntu-latest
+            suffix: linux-aarch64
+            use_cross: true
+          - target: x86_64-apple-darwin
+            runner: macos-latest
+            suffix: macos-x86_64
+            use_cross: false
+          - target: aarch64-apple-darwin
+            runner: macos-latest
+            suffix: macos-aarch64
+            use_cross: false
+          - target: x86_64-pc-windows-msvc
+            runner: windows-latest
+            suffix: windows-x86_64
+            use_cross: false
     steps:
       - uses: actions/checkout@v4
+
       - uses: dtolnay/rust-toolchain@stable
         with:
           targets: ${{ matrix.target }}
+
+      - name: Install cross
+        if: matrix.use_cross
+        run: cargo install cross --git https://github.com/cross-rs/cross
+
       - uses: Swatinem/rust-cache@v2
+        with:
+          key: ${{ matrix.target }}
 
-      - name: Build release
+      - name: Build release binary
         run: |
-          cargo build --release --target ${{ matrix.target }} \
+          ${{ matrix.use_cross && 'cross' || 'cargo' }} build \
+            --release --locked --target ${{ matrix.target }} \
             -p membrain-cli
+        shell: bash
 
-      - name: Upload binary
+      - name: Package (Unix)
+        if: runner.os != 'Windows'
+        run: |
+          TAG="${GITHUB_REF_NAME}"
+          ARCHIVE="${BIN_NAME}-${TAG}-${{ matrix.suffix }}.tar.gz"
+          cd target/${{ matrix.target }}/release
+          tar -czf "../../../${ARCHIVE}" "${BIN_NAME}"
+          cd ../../..
+          sha256sum "${ARCHIVE}" > "${ARCHIVE}.sha256"
+        shell: bash
+
+      - name: Package (Windows)
+        if: runner.os == 'Windows'
+        run: |
+          $TAG = $env:GITHUB_REF_NAME
+          $ARCHIVE = "${env:BIN_NAME}-${TAG}-${{ matrix.suffix }}.zip"
+          Compress-Archive -Path "target/${{ matrix.target }}/release/${env:BIN_NAME}.exe" -DestinationPath $ARCHIVE
+          $hash = (Get-FileHash -Algorithm SHA256 $ARCHIVE).Hash.ToLower()
+          "$hash  $ARCHIVE" | Out-File -Encoding ascii "${ARCHIVE}.sha256"
+        shell: pwsh
+
+      - name: Upload artifact
         uses: actions/upload-artifact@v4
         with:
-          name: ${{ matrix.artifact }}
-          path: target/${{ matrix.target }}/release/membrain*
+          name: dist-${{ matrix.suffix }}
+          path: |
+            ${{ env.BIN_NAME }}-*.tar.gz
+            ${{ env.BIN_NAME }}-*.zip
+            ${{ env.BIN_NAME }}-*.sha256
+
+  release:
+    name: GitHub Release
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Download all artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: dist
+          pattern: dist-*
+          merge-multiple: true
 
       - name: Create GitHub Release
-        uses: softprops/action-gh-release@v1
+        uses: softprops/action-gh-release@v2
         with:
-          files: target/${{ matrix.target }}/release/membrain*
+          generate_release_notes: true
+          files: dist/*
 ```
+
+Key design decisions:
+- **musl for Linux**: produces fully static binaries — no glibc dependency on user machines
+- **cross for Linux ARM64**: builds aarch64 from ubuntu-latest (x86_64 runner) via QEMU
+- **.sha256 sidecar per archive**: `install.sh` verifies checksum after download
+- **`softprops/action-gh-release@v2`**: not v1 — v2 supports `generate_release_notes`
+- **`permissions: contents: write`**: required to create releases from GitHub Actions
+
+#### 11.7.3 install.sh — Production-Grade curl-pipe Installer
+
+Modeled after `beads_rust` by Dicklesworthstone. Root-level file (`install.sh`, not `scripts/install.sh`).
+
+Install command for README:
+```bash
+curl -fsSL "https://raw.githubusercontent.com/quangdang46/membrain/main/install.sh?$(date +%s)" | bash
+```
+
+Features:
+- `set -euo pipefail` + `umask 022` safety header
+- Platform detection: `uname -s` / `uname -m` → asset suffix mapping
+- Version resolution: GitHub API → redirect fallback → die
+- Download with retry + resume (`--continue-at -`) + proxy support
+- `.sha256` checksum verification (sidecar from release.yml)
+- Atomic binary installation (`install -m 0755` + `mv`)
+- Concurrent install locking (`mkdir` lock dir)
+- `--easy-mode` auto-PATH update in `~/.bashrc` / `~/.zshrc`
+- `--from-source` fallback via `cargo build --release`
+- `--uninstall` cleanup (binary + PATH lines)
+- `--verify` post-install self-test (`membrain --version`)
+- curl|bash buffering safety wrapper at script end
+
+Configuration block:
+```bash
+BINARY_NAME="membrain"
+OWNER="quangdang46"
+REPO="membrain"
+DEST="${DEST:-$HOME/.local/bin}"
+VERSION="${VERSION:-}"
+QUIET=0; EASY=0; VERIFY=0; FROM_SOURCE=0; UNINSTALL=0
+MAX_RETRIES=3; DOWNLOAD_TIMEOUT=120
+```
+
+Flags:
+| Flag | Effect |
+|---|---|
+| `--dest <path>` | Install to custom directory |
+| `--version <tag>` | Pin to specific release (e.g. `v0.3.0`) |
+| `--system` | Install to `/usr/local/bin` (requires sudo) |
+| `--easy-mode` | Auto-append `export PATH` to shell rc files |
+| `--verify` | Run `membrain --version` after install |
+| `--from-source` | Skip binary download, build from source via cargo |
+| `--quiet` / `-q` | Suppress info logs |
+| `--uninstall` | Remove binary + PATH lines from rc files |
+
+Full script skeleton (all production patterns):
+
+```bash
+#!/usr/bin/env bash
+set -euo pipefail
+umask 022
+
+# === Config ===
+BINARY_NAME="membrain"
+OWNER="quangdang46"
+REPO="membrain"
+DEST="${DEST:-$HOME/.local/bin}"
+VERSION="${VERSION:-}"
+QUIET=0; EASY=0; VERIFY=0; FROM_SOURCE=0; UNINSTALL=0
+MAX_RETRIES=3; DOWNLOAD_TIMEOUT=120
+LOCK_DIR="/tmp/${BINARY_NAME}-install.lock.d"
+TMP=""
+
+# === Logging ===
+log_info()    { [ "$QUIET" -eq 1 ] && return; echo "[${BINARY_NAME}] $*" >&2; }
+log_warn()    { echo "[${BINARY_NAME}] WARN: $*" >&2; }
+log_success() { [ "$QUIET" -eq 1 ] && return; echo "✓ $*" >&2; }
+die()         { echo "ERROR: $*" >&2; exit 1; }
+
+# === Cleanup & lock ===
+cleanup() { rm -rf "$TMP" "$LOCK_DIR" 2>/dev/null || true; }
+trap cleanup EXIT
+acquire_lock() {
+    mkdir "$LOCK_DIR" 2>/dev/null || die "Another install running. rm -rf $LOCK_DIR"
+    echo $$ > "$LOCK_DIR/pid"
+}
+
+# === Args ===
+while [ $# -gt 0 ]; do
+    case "$1" in
+        --dest)       DEST="$2";   shift 2;;
+        --dest=*)     DEST="${1#*=}"; shift;;
+        --version)    VERSION="$2"; shift 2;;
+        --version=*)  VERSION="${1#*=}"; shift;;
+        --system)     DEST="/usr/local/bin"; shift;;
+        --easy-mode)  EASY=1;      shift;;
+        --verify)     VERIFY=1;    shift;;
+        --from-source) FROM_SOURCE=1; shift;;
+        --quiet|-q)   QUIET=1;     shift;;
+        --uninstall)  UNINSTALL=1; shift;;
+        *) shift;;
+    esac
+done
+
+# === Uninstall ===
+if [ "$UNINSTALL" -eq 1 ]; then
+    rm -f "$DEST/$BINARY_NAME"
+    for rc in "$HOME/.bashrc" "$HOME/.zshrc"; do
+        [ -f "$rc" ] && sed -i "/${BINARY_NAME} installer/d" "$rc" 2>/dev/null || true
+    done
+    echo "✓ ${BINARY_NAME} uninstalled"; exit 0
+fi
+
+# === Platform ===
+detect_platform() {
+    local os arch
+    case "$(uname -s)" in
+        Linux*)  os="linux";;   Darwin*) os="darwin";;
+        MINGW*|MSYS*|CYGWIN*) os="windows";;
+        *) die "Unsupported OS";;
+    esac
+    case "$(uname -m)" in
+        x86_64|amd64)  arch="x86_64";;
+        aarch64|arm64) arch="aarch64";;
+        *) die "Unsupported arch";;
+    esac
+    echo "${os}_${arch}"
+}
+
+# === Version ===
+resolve_version() {
+    [ -n "$VERSION" ] && return 0
+    VERSION=$(curl -fsSL --connect-timeout 10 --max-time 30 \
+        "https://api.github.com/repos/${OWNER}/${REPO}/releases/latest" 2>/dev/null \
+        | grep '"tag_name":' | sed -E 's/.*"([^"]+)".*/\1/') || true
+    if ! [[ "$VERSION" =~ ^v[0-9] ]]; then
+        VERSION=$(curl -fsSL -o /dev/null -w '%{url_effective}' \
+            "https://github.com/${OWNER}/${REPO}/releases/latest" 2>/dev/null \
+            | sed -E 's|.*/tag/||') || true
+    fi
+    [[ "$VERSION" =~ ^v[0-9] ]] || die "Could not resolve version"
+    log_info "Latest: $VERSION"
+}
+
+# === Download ===
+download_file() {
+    local url="$1" dest="$2" partial="${2}.part" attempt=0
+    while [ $attempt -lt $MAX_RETRIES ]; do
+        attempt=$((attempt + 1))
+        curl -fL --connect-timeout 30 --max-time "$DOWNLOAD_TIMEOUT" \
+             -sS --retry 2 \
+             $( [ -s "$partial" ] && echo "--continue-at -") \
+             -o "$partial" "$url" \
+          && mv -f "$partial" "$dest" && return 0
+        [ $attempt -lt $MAX_RETRIES ] && { log_warn "Retry $attempt..."; sleep 3; }
+    done
+    return 1
+}
+
+# === Atomic install ===
+install_binary_atomic() {
+    local tmp="${2}.tmp.$$"
+    install -m 0755 "$1" "$tmp" && mv -f "$tmp" "$2" || { rm -f "$tmp"; die "Install failed"; }
+}
+
+# === PATH ===
+maybe_add_path() {
+    case ":$PATH:" in *":$DEST:"*) return 0;; esac
+    if [ "$EASY" -eq 1 ]; then
+        for rc in "$HOME/.zshrc" "$HOME/.bashrc"; do
+            [ -f "$rc" ] && [ -w "$rc" ] || continue
+            grep -qF "$DEST" "$rc" && continue
+            printf '\nexport PATH="%s:$PATH"  # %s installer\n' "$DEST" "$BINARY_NAME" >> "$rc"
+        done
+    fi
+    log_warn "Restart shell or: export PATH=\"$DEST:\$PATH\""
+}
+
+# === Source build ===
+build_from_source() {
+    command -v cargo >/dev/null || die "cargo not found — install Rust: https://rustup.rs"
+    git clone --depth 1 "https://github.com/${OWNER}/${REPO}.git" "$TMP/src"
+    (cd "$TMP/src" && CARGO_TARGET_DIR="$TMP/target" cargo build --release)
+    install_binary_atomic "$TMP/target/release/$BINARY_NAME" "$DEST/$BINARY_NAME"
+}
+
+# === Main ===
+main() {
+    acquire_lock
+    TMP=$(mktemp -d)
+    mkdir -p "$DEST"
+
+    local platform; platform=$(detect_platform)
+    log_info "Platform: $platform | Dest: $DEST"
+
+    if [ "$FROM_SOURCE" -eq 0 ]; then
+        resolve_version
+        local ext="tar.gz"; [[ "$platform" == windows* ]] && ext="zip"
+        # Map platform to asset suffix used by release.yml
+        local suffix
+        case "$platform" in
+            linux_x86_64)   suffix="linux-x86_64";;
+            linux_aarch64)  suffix="linux-aarch64";;
+            darwin_x86_64)  suffix="macos-x86_64";;
+            darwin_aarch64) suffix="macos-aarch64";;
+            windows_x86_64) suffix="windows-x86_64";;
+            *) die "No prebuilt binary for $platform";;
+        esac
+        local archive="${BINARY_NAME}-${VERSION}-${suffix}.${ext}"
+        local url="https://github.com/${OWNER}/${REPO}/releases/download/${VERSION}/${archive}"
+
+        if download_file "$url" "$TMP/$archive"; then
+            # Verify checksum if sidecar exists
+            if download_file "${url}.sha256" "$TMP/checksum.sha256" 2>/dev/null; then
+                local expected actual
+                expected=$(awk '{print $1}' "$TMP/checksum.sha256")
+                actual=$(sha256sum "$TMP/$archive" 2>/dev/null | awk '{print $1}' \
+                      || shasum -a 256 "$TMP/$archive" | awk '{print $1}')
+                [ "$expected" = "$actual" ] || die "Checksum mismatch"
+                log_info "Checksum verified"
+            fi
+            # Extract
+            case "$archive" in
+                *.tar.gz) tar -xzf "$TMP/$archive" -C "$TMP";;
+                *.zip)    unzip -q "$TMP/$archive" -d "$TMP";;
+            esac
+            local bin; bin=$(find "$TMP" -name "$BINARY_NAME" -type f -perm -111 \
+                          2>/dev/null | head -1)
+            [ -n "$bin" ] || die "Binary not found after extract"
+            install_binary_atomic "$bin" "$DEST/$BINARY_NAME"
+        else
+            log_warn "Binary download failed — building from source..."
+            build_from_source
+        fi
+    else
+        build_from_source
+    fi
+
+    maybe_add_path
+
+    [ "$VERIFY" -eq 1 ] && "$DEST/$BINARY_NAME" --version
+
+    echo ""
+    echo "✓ $BINARY_NAME installed → $DEST/$BINARY_NAME"
+    echo "  $("$DEST/$BINARY_NAME" --version 2>/dev/null || true)"
+    echo ""
+    echo "  Usage: $BINARY_NAME --help"
+}
+
+# curl|bash safety: buffer entire script before executing
+if [[ "${BASH_SOURCE[0]:-}" == "${0:-}" ]] || [[ -z "${BASH_SOURCE[0]:-}" ]]; then
+    { main "$@"; }
+fi
+```
+
+#### 11.7.4 First Release
+
+After all three files are committed:
+```bash
+git tag v0.1.0 && git push origin main --tags
+```
+
+This triggers `release.yml` → builds 5 targets → creates GitHub Release with archives + checksums → `install.sh` can resolve `v0.1.0` automatically.
 
 ---
 
@@ -11018,10 +11378,13 @@ DELIVERABLES:
   - Benchmark suite (criterion): encode, recall (Tier1/2/3), consolidation
   - All benchmark targets verified:
     Tier1 <0.1ms, Tier2 <5ms, Tier3 <50ms, encode <10ms
-  - README.md: installation, usage, configuration, MCP setup
+  - README.md: installation (curl-pipe command), usage, configuration, MCP setup
   - AGENTS.md: context for AI coding assistants
-  - GitHub Actions: CI (test + clippy + fmt) + Release (multi-platform binaries)
-  - `scripts/install.sh`: one-line installer
+  - `.github/workflows/ci.yml`: fmt + clippy + test, 3-OS matrix (ubuntu, macos, windows)
+  - `.github/workflows/release.yml`: cross-compile 5 targets on vX.Y.Z tag,
+    .tar.gz/.zip archives with .sha256 sidecars, GitHub Release via softprops/action-gh-release@v2
+  - `install.sh` (root level): production-grade curl-pipe installer with retry, checksum
+    verification, atomic install, --easy-mode PATH, --from-source fallback, --uninstall
 
 KEY FILES:
   crates/membrain-cli/src/cli/ — all remaining command handlers
@@ -11030,6 +11393,7 @@ KEY FILES:
   AGENTS.md
   .github/workflows/ci.yml
   .github/workflows/release.yml
+  install.sh
 
 ACCEPTANCE CRITERIA (all must pass):
   ✅ All 17 CLI commands functional and return correct JSON with --json flag
@@ -11043,9 +11407,15 @@ ACCEPTANCE CRITERIA (all must pass):
   ✅ Doctor: detects DB corruption, index inconsistency, config errors
   ✅ Diff: shows correct added/forgotten/decayed counts
   ✅ context-for: returns token-budget-aware prompt prefix
-  ✅ Release binary: single statically-linked binary < 50MB
-  ✅ CI: green on push (test + clippy + fmt)
-  ✅ Multi-platform release: linux-x86_64, macos-x86_64, macos-aarch64
+  ✅ Release binary: single statically-linked binary < 50MB (musl, fully static on Linux)
+  ✅ CI: green on push across 3 OS (ubuntu, macos, windows) — fmt + clippy + test
+  ✅ Release: 5-target matrix builds on vX.Y.Z tag push:
+      linux-x86_64 (cross/musl), linux-aarch64 (cross/musl),
+      macos-x86_64, macos-aarch64, windows-x86_64
+  ✅ Release: each archive has .sha256 sidecar, GitHub Release auto-created
+  ✅ install.sh: `curl -fsSL ... | bash` works on Linux x86_64, Linux aarch64,
+      macOS x86_64, macOS aarch64; verifies sha256; falls back to source build
+  ✅ install.sh: --uninstall removes binary + PATH lines from rc files
 ```
 
 ---
@@ -11740,7 +12110,8 @@ Part 5: CLI + MCP + Features + Workspace
   - Top 10 feature extensions with Rust pseudocode
   - Full workspace directory tree
   - AGENTS.md template
-  - GitHub Actions CI/CD
+  - GitHub Actions CI/CD (ci.yml 3-OS matrix + release.yml 5-target cross-compile)
+  - Production-grade curl-pipe installer (install.sh)
 
 Part 6: Milestones + Checklist + Constants + Algorithms
   - 10 implementation milestones with acceptance criteria
