@@ -12015,4 +12015,2298 @@ Keep your current core sections intact, then append these new parts:
 20. Research Notes / Falsifiable Claims
 
 That gives you a mega-plan that still feels like your own plan, not a replacement.
-  
+
+---
+
+## 12. Canonical Architecture Invariants
+
+These invariants are elevated from the supporting design docs into non-negotiable system rules.
+
+### 12.1 Request-path invariants
+
+1. **Hot path must stay bounded**
+   - No unbounded graph walks.
+   - No full scans on request path.
+   - No compaction, repair, or large migrations in foreground.
+   - Every retrieval mode must have a hard candidate budget.
+
+2. **Every memory item must have provenance**
+   - Each item must retain source kind, source reference, timestamps, and lineage.
+   - Any summary, consolidation artifact, or extracted fact must point back to source evidence.
+
+3. **No silent overwrite of contradiction**
+   - If new information conflicts with existing information, the system must represent the contradiction explicitly.
+   - Ranking may prefer one side, but storage must preserve the disagreement.
+
+4. **Tier routing decisions must be traceable**
+   - Why an item entered Tier1, Tier2, or Tier3 must be inspectable after the fact.
+   - Promotion and demotion must be auditable.
+
+5. **Retrieval must be explainable**
+   - Returned context must be explainable in terms of score components, source evidence, graph hops, and policy filters.
+   - A result that cannot be explained is not production-grade.
+
+6. **No hard delete without policy permission**
+   - Hard deletion is for explicit policy / compliance / retention expiry paths only.
+   - Utility-based forgetting must not masquerade as compliance deletion.
+
+### 12.2 Background-job invariants
+
+1. Background jobs must not violate latency budgets for online recall.
+2. Repair jobs must preserve authoritative evidence.
+3. Compaction jobs must preserve lineage or emit a precise irreversible-loss record.
+4. Indexes and graph structures must be rebuildable from durable evidence.
+5. Every destructive or semi-destructive maintenance task must emit before/after telemetry.
+
+### 12.3 Governance invariants
+
+1. Namespace isolation is checked before expensive retrieval work.
+2. Workspace ACL, agent ACL, and session visibility apply equally to write, read, and background execution.
+3. Policy precedence is deterministic and auditable.
+4. Any policy violation must emit an incident-grade auditable event.
+
+---
+
+## 13. Canonical Memory Model Extension
+
+The supporting docs define a compact but strong object model. This section makes that model normative for implementation.
+
+### 13.1 Canonical memory taxonomy
+
+The system must support at least these memory categories:
+
+- **Event**: raw observed occurrence, tool call, message, action, or state change.
+- **Episode**: grouped sequence of related events with temporal continuity.
+- **Fact**: distilled proposition intended for repeated recall.
+- **Relation**: link between entities, memories, goals, or concepts.
+- **Summary**: compressed representation of lower-level evidence.
+- **Goal**: active or historical objective shaping retrieval priority.
+- **Skill**: reusable procedural knowledge extracted from repeated success.
+- **Constraint**: rules, limits, or obligations that must remain visible.
+- **Hypothesis**: tentative belief awaiting confirmation.
+- **ConflictRecord**: explicit contradiction artifact.
+- **PolicyArtifact**: retention/governance/compliance-relevant item.
+- **Observation**: state observation or environmental signal.
+- **ToolOutcome**: result of tool execution with operational value.
+- **UserPreference**: stable user-specific preference or convention.
+- **SessionMarker**: boundary and context marker for session-level grouping.
+
+### 13.2 Required fields for every memory item
+
+Every stored item should carry, directly or derivably, the following attributes:
+
+- `id`
+- `memory_type`
+- `namespace`
+- `workspace_id`
+- `agent_id`
+- `session_id`
+- `task_id`
+- `created_at`
+- `updated_at`
+- `source_kind`
+- `source_ref`
+- `authoritativeness`
+- `content_ref`
+- `compact_text`
+- `fingerprint`
+- `tier`
+- `salience`
+- `confidence`
+- `utility_estimate`
+- `recall_count`
+- `last_access_at`
+- `decay_state`
+- `retention_class`
+- `policy_flags`
+- `lineage`
+- `version`
+- `tags`
+- `entity_refs`
+- `relation_refs`
+
+### 13.3 Schema rules
+
+1. **Version increments on accepted mutation**
+2. **Lineage is preserved across summarize / merge / extract / repair operations**
+3. **Payload and summary should be separable**
+4. **Fingerprints are stable enough for duplicate-family handling**
+5. **Policy flags travel with the memory, not with only one index layer**
+6. **Tier location is state, not an inference**
+
+### 13.4 Contradiction handling contract
+
+When a new fact conflicts with an existing fact:
+- do not overwrite the older fact silently;
+- create or update a `ConflictRecord`;
+- attach evidence references for both sides;
+- let retrieval/ranking choose presentation order later;
+- preserve enough metadata for audit and repair.
+
+---
+
+## 14. Lifecycle and State Transition Rules
+
+### 14.1 Canonical lifecycle
+
+A memory item may move through the following conceptual states:
+
+`created -> indexed -> recalled -> reinforced -> decayed -> demoted -> archived -> deleted`
+
+This is a logical model; some implementations may encode the state implicitly across fields.
+
+### 14.2 Transition guards
+
+Before any transition is committed, the system must validate:
+- namespace access control
+- policy pinning
+- retention constraints
+- legal hold state
+- lineage preservation
+- unresolved contradiction semantics
+- job lock / repair lock safety
+
+### 14.3 Failure behavior
+
+If a transition fails mid-flight:
+- preserve the last known valid state
+- emit a transition error event
+- enqueue a repairable job if possible
+- never leave the item in a silent half-mutated state
+
+### 14.4 Reinforcement and decay rules
+
+1. Recall can strengthen memory importance, but not bypass policy.
+2. Decay should be lazy where possible, using derived effective strength rather than heavy eager writes.
+3. Reinforcement must not create runaway immortal noise.
+4. Important but rarely accessed memories may surface as `decaying soon` rather than silently disappearing.
+
+---
+
+## 15. Retrieval Architecture Contract
+
+The retrieval docs define the retrieval objective as: **return the smallest evidence set that maximizes downstream task success**.
+
+### 15.1 Supported retrieval modes
+
+At minimum, the architecture should support:
+- exact retrieval
+- recent retrieval
+- semantic retrieval
+- associative retrieval
+- constraint retrieval
+- reconstruction retrieval
+
+### 15.2 Canonical candidate generation pipeline
+
+The canonical order is:
+
+1. direct key or id hints
+2. Tier1 active-window scan
+3. Tier2 exact index search
+4. Tier2 graph neighborhood expansion
+5. Tier2 semantic candidate generation
+6. Tier3 fallback
+7. dedup and diversify
+8. ranking
+9. packaging
+
+This order may be short-circuited by planner logic, but not violated semantically.
+
+### 15.3 Candidate explosion controls
+
+Every request path implementation must include:
+- hard caps by query type
+- per-edge traversal budgets
+- early-stop thresholds
+- stale candidate penalties
+- namespace pruning
+- low-confidence suppression
+- duplicate family collapse
+- diversity constraints
+
+### 15.4 Packaging contract
+
+Returned memory bundles should contain:
+- enough evidence to be useful,
+- enough provenance to be explainable,
+- enough compactness to stay within token budget,
+- enough structure for downstream prompt builders to separate facts, reminders, episodes, and warnings.
+
+### 15.5 Retrieval explainability
+
+For a given response, the system should be able to explain:
+- why each candidate entered the pool,
+- which policy filters removed alternatives,
+- how many graph hops were used,
+- why final items ranked above other candidates,
+- which items were omitted because of budget or policy.
+
+---
+
+## 16. Ranking and Scoring Rules
+
+The ranking docs and formulas should be treated as a tunable scoring framework, not as fixed dogma.
+
+### 16.1 Ranking principles
+
+1. Policy masks apply before soft ranking.
+2. Ranking should be simple enough to reason about and debug.
+3. A small number of strong signals beats a large number of fragile heuristics.
+4. The ranker must penalize stale, low-confidence, or noisy candidates.
+5. Contradictions should not be erased; they should be represented and scored responsibly.
+
+### 16.2 Expected score inputs
+
+The ranker may combine:
+- recency
+- salience
+- confidence
+- utility estimate
+- query alignment
+- goal alignment
+- memory type priors
+- contradiction penalty or contradiction surfacing bonus
+- duplicate-family collapse penalties
+- noise penalty
+
+### 16.3 Ranking output requirements
+
+Each scored result should ideally expose:
+- total score
+- component breakdown
+- decaying-soon signal if applicable
+- contradiction/conflict marker if applicable
+- source tier
+- source lineage handle
+
+---
+
+## 17. Storage and Tiering Design Addendum
+
+### 17.1 Tier responsibilities
+
+**Tier1**
+- in-process hot memory
+- bounded by strict size limits
+- optimized for ultra-fast exact and recent recall
+- must not own large payloads
+
+**Tier2**
+- warm indexed store
+- primary home for exact search, filtered retrieval, and bounded hybrid recall
+- must be write-friendly and repairable
+
+**Tier3**
+- cold durable archive
+- optimized for cheap storage and reconstructable recall
+- may tolerate higher latency but not correctness loss
+
+### 17.2 Tier routing rules
+
+Routing should consider at least:
+- salience
+- recency
+- utility estimate
+- access frequency
+- retention class
+- policy pinning
+- payload size
+- summary availability
+
+### 17.3 Tier transition principles
+
+1. Transitions are explicit state changes.
+2. Demotion is preferred over deletion.
+3. Compression is preferred over deletion when possible.
+4. Tier1 should store handles, compact forms, or small summaries rather than heavy blobs.
+5. Tier3 must retain enough evidence for later rebuild and repair.
+
+---
+
+## 18. Indexing Plan
+
+The indexing docs recommend a multi-index strategy. This section makes those choices concrete.
+
+### 18.1 Required logical indexes
+
+The design should support at least these index families:
+- primary id index
+- entity inverted index
+- tag index
+- session index
+- goal index
+- time-bucket index
+- graph adjacency index
+- ANN sidecar index
+- bloom filters
+- prefix indexes
+
+### 18.2 Index design rules
+
+1. Tier2 indexes should be write-friendly.
+2. Tier3 indexes should be sparse and cheap.
+3. Every index must be rebuildable from durable records.
+4. Rebuild commands and repair paths must exist.
+5. Index health must be observable.
+
+### 18.3 Index telemetry
+
+Each major index family should expose:
+- hit rate
+- miss rate
+- stale index ratio
+- repair backlog
+- rebuild duration
+- item count divergence from durable truth
+
+### 18.4 Rebuild rule
+
+If an index disagrees with durable evidence, durable evidence wins.
+
+---
+
+## 19. Association Graph Design
+
+The graph-related docs imply a distinct graph subsystem, even if final implementation details vary.
+
+### 19.1 Graph purpose
+
+The graph exists to support:
+- associative recall
+- entity neighborhood expansion
+- relation traversal
+- contradiction surfacing
+- episodic reconstruction
+- skill extraction and clustering support
+
+### 19.2 Graph constraints
+
+1. Graph traversal on request path must be budgeted.
+2. Graph edges must have provenance or reproducible derivation.
+3. Graph repair must be possible from lineage and durable indexes.
+4. Cross-namespace leakage through graph edges is forbidden.
+5. Fanout explosions must be detectable and containable.
+
+### 19.3 Graph operational requirements
+
+The system should track:
+- average node degree
+- high-fanout nodes
+- traversal depth distribution
+- graph repair queue
+- graph/index disagreement rate
+
+---
+
+## 20. Cache and Prefetch Plan
+
+Cache and prefetch are only valid if they reduce tail latency without poisoning correctness.
+
+### 20.1 Cache families
+
+The design may include:
+- Tier1 item cache
+- negative cache
+- result cache
+- entity neighborhood cache
+- summary cache
+- ANN probe cache
+- prefetch hints
+- session warmup
+- goal-conditioned cache
+- cold-start mitigation cache
+
+### 20.2 Cache guardrails
+
+All caches should obey:
+- version-aware invalidation
+- namespace-aware keys
+- bounded memory usage
+- stale-result observability
+- cache hit and miss metrics
+
+### 20.3 Prefetch restrictions
+
+1. Prefetch must be hint-driven, never mandatory for correctness.
+2. Prefetch must not starve real foreground work.
+3. Prefetch should be cancelable when user intent changes.
+4. Prefetch should not cross namespace boundaries.
+
+---
+
+## 21. Consolidation Plan
+
+Consolidation is not optional polish. It is the mechanism that turns raw accumulation into durable utility.
+
+### 21.1 Consolidation goals
+
+- compress repeated evidence
+- extract stable facts
+- derive reusable skills
+- collapse duplicates
+- strengthen useful relations
+- reduce noise before it becomes archival debt
+
+### 21.2 Canonical consolidation operations
+
+- episode summarization
+- fact extraction
+- skill extraction
+- duplicate family collapse
+- contradiction detection
+- relation reinforcement
+- archive compaction support
+
+### 21.3 Episode formation heuristics
+
+Events are good candidates for episode formation when they share:
+- task continuity
+- session continuity
+- goal continuity
+- temporal proximity
+- entity overlap
+- tool-chain continuity
+- fail/retry continuity
+
+### 21.4 Consolidation safety rules
+
+1. Do not destroy authoritative evidence when generating summaries.
+2. A summary without back-links is insufficient.
+3. Consolidation quality matters more than raw compression ratio.
+4. Consolidation jobs must be benchmarked for utility, not just bytes saved.
+
+---
+
+## 22. Forgetting Plan
+
+Forgetting is an active design feature, not an admission of failure.
+
+### 22.1 Forgetting operations
+
+The architecture should support:
+- suppress
+- decay
+- demote
+- compact
+- summarize
+- archive
+- redact
+- soft delete
+- hard delete
+
+### 22.2 Forgetting principles
+
+1. Prefer compression over deletion.
+2. Prefer demotion over deletion.
+3. Never silently remove the last authoritative evidence unless policy explicitly permits it.
+4. Separate utility forgetting from privacy/compliance deletion.
+5. Preserve enough lineage to explain why something became less visible.
+
+### 22.3 Forgetting-as-signal
+
+Near-decay items may be surfaced as a signal:
+- to warn that useful knowledge is fading,
+- to prompt self-rehearsal or reinforcement,
+- to protect critical but rarely used knowledge from accidental archival disappearance.
+
+---
+
+## 23. Compaction and Repair Acceptance
+
+Compaction reduces cost. Repair restores correctness after crashes, drift, or partial failure.
+
+### 23.1 Core maintenance operations
+
+The design must account for:
+- segment compaction
+- duplicate family collapse
+- lineage pruning
+- index rebuild
+- graph repair
+- tombstone sweep
+- payload detachment
+- summary regeneration
+- shard repair
+- backfill re-encoding
+
+### 23.2 Safety invariants
+
+Each operation must respect:
+- do not lose authoritative evidence
+- preserve lineage or record irreversible loss
+- keep before/after metrics
+- rate-limit large jobs
+- bound foreground interference
+
+### 23.3 Telemetry expectations
+
+Every operation should emit:
+- bytes before and after
+- affected item count
+- error count
+- rebuild duration
+- rollback or fallback status if applicable
+
+### 23.4 Acceptance rule
+
+A maintenance subsystem is not complete until it is:
+- documented,
+- benchmarked,
+- repairable,
+- observable,
+- safe under partial failure.
+
+---
+
+## 24. Governance and Security Enforcement Matrix
+
+The supporting security document identifies twelve governance domains that must be enforced everywhere.
+
+### 24.1 Domains
+
+- namespace isolation
+- workspace ACL
+- agent ACL
+- session visibility
+- redaction
+- retention compliance
+- legal hold
+- deletion guarantees
+- audit logs
+- secrets handling
+- cross-tenant protection
+- policy precedence
+
+### 24.2 Enforcement rule
+
+Each domain must be enforced consistently across:
+- write path
+- read path
+- background jobs
+- maintenance operations
+- export/import or migration paths
+
+### 24.3 Security implementation requirements
+
+1. Policy checks happen before expensive retrieval work where possible.
+2. Cache keys and indexes must respect namespace boundaries.
+3. Explain and inspect APIs must never bypass governance.
+4. Background repair must not surface redacted payloads to unauthorized actors.
+5. Policy decisions must be reproducible under audit.
+
+---
+
+## 25. Operations Acceptance Criteria
+
+The operations doc describes a repeated runbook shape that should be standardized.
+
+### 25.1 Runbooks that must exist
+
+At minimum, production documentation should include runbooks for:
+- capacity planning
+- daily health review
+- backpressure
+- compaction windows
+- shard balancing
+- index rebuild operations
+- retention enforcement
+- incident response
+- migration
+- version rollout
+
+### 25.2 Standard runbook shape
+
+Each runbook should define:
+- preconditions
+- command sequence
+- metrics to watch
+- rollback conditions
+- post-run validation
+
+### 25.3 Operational success criteria
+
+A workflow is accepted only if it completes without violating:
+- latency budgets
+- data integrity guarantees
+- lineage guarantees
+- policy guarantees
+
+---
+
+## 26. Failure Mode Matrix
+
+The failure playbook identifies recurring failure classes that the design must anticipate.
+
+### 26.1 Canonical failure modes
+
+- Tier1 overflow
+- Tier2 index drift
+- Tier3 segment corruption
+- contradiction masking
+- false association
+- duplicate storms
+- planner budget blow-up
+- graph fanout explosion
+- repair backlog growth
+- latency regression
+- cross-namespace leakage
+- retention-policy bug
+
+### 26.2 Immediate-response pattern
+
+For all major incident classes, the system should support the following immediate-response shape:
+- isolate affected namespace or shard if needed
+- stop destructive jobs
+- preserve forensic logs
+- enable degraded mode if available
+
+### 26.3 Root-cause investigation pattern
+
+The investigation checklist should cover:
+- lineage validation
+- index count comparison against durable records
+- recent deploy inspection
+- repair queue growth inspection
+- compaction history inspection
+
+### 26.4 Design implication
+
+A production architecture is incomplete if it cannot enter a safe degraded mode under these failures.
+
+---
+
+## 27. Benchmark Protocol
+
+### 27.1 Benchmark dimensions
+
+The benchmark suite must measure:
+- latency
+- throughput
+- quality
+- stability
+- rebuild performance
+- compaction overhead
+- shard movement cost
+
+### 27.2 Minimum latency benchmark set
+
+The plan should explicitly benchmark:
+- Tier1 exact handle get
+- Tier1 recent-window search
+- Tier2 session search
+- Tier2 entity search
+- Tier2 hybrid retrieval
+- Tier3 archive reconstruction
+- fast encode path
+- full encode path
+
+### 27.3 Benchmark philosophy
+
+1. A feature is not real until benchmarked on representative workloads.
+2. Average latency is insufficient; p95 and p99 matter.
+3. Quality metrics must be tracked alongside latency.
+4. Maintenance overhead belongs in the benchmark story, not in a footnote.
+
+---
+
+## 28. Test Strategy Addendum
+
+The test strategy must cover correctness, performance, durability, and explainability.
+
+### 28.1 Test suites that must exist
+
+- unit tests
+- property tests
+- integration tests
+- latency tests
+- load tests
+- chaos tests
+- rebuild tests
+- migration tests
+- policy tests
+- cross-namespace isolation tests
+- recall quality tests
+- compression utility tests
+
+### 28.2 Coverage targets for every suite
+
+Each test family should intentionally probe:
+- normal flow
+- edge cases
+- adversarial inputs
+- crash-recovery behavior
+- observability signal verification
+
+### 28.3 Output contract
+
+Every suite should emit structured artifacts that support regression analysis over time.
+
+### 28.4 Acceptance rule
+
+A subsystem is not accepted when it merely works once; it is accepted when its failure classes are testable and observable.
+
+---
+
+## 29. Sharding and Distribution Plan
+
+Scale-out should only be introduced when workload patterns justify it.
+
+### 29.1 Candidate strategies
+
+The design space includes:
+- namespace sharding
+- workspace sharding
+- time-range sharding
+- hot/cold split
+- rebalancing
+- tenant isolation
+- cross-shard recall
+- shard-local caching
+- replication
+- disaster recovery
+
+### 29.2 Shared trade-offs
+
+Across these strategies, the recurring advantages are:
+- better locality for some workloads
+- bounded shard sizes
+- easier maintenance windows
+
+The recurring costs are:
+- cross-shard recall complexity
+- rebalancing cost
+- metadata coordination overhead
+
+### 29.3 Rule for adoption
+
+No distribution strategy should be made default until:
+- the dominant workload is understood,
+- rebalancing cost is benchmarked,
+- failure and repair paths are defined,
+- governance boundaries remain enforceable across shards.
+
+---
+
+## 30. Open Research and Falsifiable Claims
+
+The neuro-mapping and research docs are valuable as design inspiration, but every biological analogy must survive empirical validation.
+
+### 30.1 Claims that must remain falsifiable
+
+- that salience-driven routing improves downstream task success
+- that reconsolidation-like updates improve memory utility without destabilizing truth
+- that active forgetting reduces noise while preserving critical knowledge
+- that skill extraction improves repeated-task performance
+- that graph-assisted recall beats simpler retrieval under bounded budgets
+- that decaying-soon signals improve preservation of rare but important knowledge
+
+### 30.2 Questions that should not be closed too early
+
+- how to estimate utility robustly
+- how strong contradiction-aware ranking should be
+- how aggressive memory compression can be before utility drops
+- how dense association graphs should become
+- how to calibrate hybrid retrieval and hybrid ranking
+- how to avoid false-memory style associations at scale
+- how to measure reconstruction fidelity in realistic agent tasks
+
+### 30.3 Research discipline rule
+
+If a brain-inspired mechanism cannot demonstrate measurable benefit under benchmark and ablation, it should remain optional rather than canonical.
+
+---
+
+## 31. Implementation Priority Overlay
+
+To keep the mega-plan executable, the supporting docs imply this priority order:
+
+### 31.1 Priority order
+
+1. freeze object model and invariants
+2. build benchmark and test harnesses
+3. implement Tier1 fast path
+4. implement Tier2 indexed retrieval baseline
+5. add ranking explainability and contradiction handling
+6. add graph-assisted recall under strict budgets
+7. add consolidation and forgetting
+8. add compaction and repair
+9. add sharding/distribution only when justified
+
+### 31.2 Reason for this order
+
+This order minimizes the risk of building a large but unmeasurable system. It front-loads observability, correctness, and benchmarkability before scale complexity.
+
+---
+
+## 32. Canonical Summary of What Supporting Docs Add to This Plan
+
+The additional docs do not replace the original thesis. They sharpen it.
+
+- `ARCHITECTURE.md` adds explicit invariants and system decomposition.
+- `MEMORY_MODEL.md` defines the canonical taxonomy and required fields.
+- `RETRIEVAL.md` defines the retrieval objective and candidate pipeline.
+- `STORAGE.md` defines the tier responsibilities and storage principles.
+- `INDEXING_STRATEGIES.md` defines the index families and observability expectations.
+- `CACHE_AND_PREFETCH.md` defines the cache families and correctness guardrails.
+- `COMPACTION_AND_REPAIR.md` defines safe maintenance operations.
+- `SECURITY_GOVERNANCE.md` defines universal policy enforcement domains.
+- `OPERATIONS.md` defines the standard production runbook shape.
+- `FAILURE_PLAYBOOK.md` defines the failure matrix and degraded-mode assumptions.
+- `BENCHMARKS.md` defines what must be measured.
+- `TEST_STRATEGY.md` defines what must be verified.
+- `SHARDING_AND_DISTRIBUTION.md` defines the scale-out decision space.
+
+Together, these docs transform the project from a strong idea into a design that can be audited, benchmarked, repaired, and shipped.
+
+---
+
+## 33. Detailed Data Schema
+
+This section appends a more implementation-oriented schema layer to the plan. It should be treated as the canonical data-contract baseline for storage, indexing, repair, and policy enforcement.
+
+### 33.1 Schema goals
+
+The schema layer must satisfy all of the following at once:
+- preserve provenance
+- preserve lineage
+- support fast retrieval and filtering
+- support compaction and repair
+- support contradiction representation
+- support retention and deletion policy enforcement
+- support sharding and migration
+- support explainability after retrieval
+
+A schema that is fast but not repairable is insufficient.
+A schema that is expressive but not benchmarkable is insufficient.
+A schema that stores memories but cannot explain them is insufficient.
+
+### 33.2 Canonical base object: `MemoryItem`
+
+All major memory-like objects should either be stored directly as `MemoryItem` records with type-specific extensions, or be translatable to that shape without loss of policy- or lineage-critical information.
+
+#### Required base fields
+
+- `id`
+- `memory_type`
+- `namespace`
+- `created_at_ms`
+- `updated_at_ms`
+- `version`
+
+#### Strongly expected core fields
+
+- `workspace_id`
+- `agent_id`
+- `session_id`
+- `task_id`
+- `source_kind`
+- `source_ref`
+- `authoritativeness`
+- `content_ref`
+- `payload_ref`
+- `compact_text`
+- `fingerprint`
+- `tier`
+- `salience`
+- `confidence`
+- `utility_estimate`
+- `recall_count`
+- `last_access_at_ms`
+- `retention_class`
+- `decay_state`
+- `policy_flags`
+- `lineage`
+- `tags`
+- `entity_refs`
+- `relation_refs`
+
+#### Base validation rules
+
+1. `id` must be globally unique within the applicable namespace policy boundary.
+2. `created_at_ms <= updated_at_ms`.
+3. `version` must increment on accepted mutation.
+4. `payload_ref` / `content_ref` must be stable, resolvable, or explicitly tombstoned.
+5. `namespace` must always be present and valid before persistence.
+6. `tier`, `retention_class`, and `decay_state` must be representable even if encoded compactly.
+7. `lineage` must never be dropped silently during merge, summarization, compaction, or repair.
+
+### 33.3 Canonical Rust-style structural sketch
+
+```rust
+pub enum MemoryTier {
+    Tier1,
+    Tier2,
+    Tier3,
+}
+
+pub enum MemoryType {
+    Event,
+    Episode,
+    Fact,
+    Relation,
+    Summary,
+    Goal,
+    Skill,
+    Constraint,
+    Hypothesis,
+    ConflictRecord,
+    PolicyArtifact,
+    Observation,
+    ToolOutcome,
+    UserPreference,
+    SessionMarker,
+}
+
+pub struct MemoryItem {
+    pub id: MemoryId,
+    pub memory_type: MemoryType,
+    pub namespace: String,
+    pub workspace_id: Option<String>,
+    pub agent_id: Option<String>,
+    pub session_id: Option<String>,
+    pub task_id: Option<String>,
+    pub created_at_ms: i64,
+    pub updated_at_ms: i64,
+    pub source_kind: Option<String>,
+    pub source_ref: Option<String>,
+    pub authoritativeness: Option<f32>,
+    pub content_ref: Option<String>,
+    pub payload_ref: Option<String>,
+    pub compact_text: String,
+    pub fingerprint: u64,
+    pub tier: MemoryTier,
+    pub salience: f32,
+    pub confidence: f32,
+    pub utility_estimate: f32,
+    pub recall_count: u32,
+    pub last_access_at_ms: Option<i64>,
+    pub retention_class: RetentionClass,
+    pub decay_state: DecayState,
+    pub policy_flags: Vec<String>,
+    pub lineage: Vec<MemoryId>,
+    pub version: u64,
+    pub tags: Vec<String>,
+    pub entity_refs: Vec<EntityRef>,
+    pub relation_refs: Vec<RelationRef>,
+}
+```
+
+This sketch is illustrative, but the semantic content is mandatory even if the final Rust layout differs.
+
+### 33.4 Type-specific schema families
+
+The `DATA_SCHEMAS.md` document identifies a base shape repeated across major memory families. The plan should formalize these as type-specific overlays on top of `MemoryItem`.
+
+#### 33.4.1 Event
+
+**Purpose**
+- capture raw observed occurrences
+- preserve tool outputs, actions, and state transitions before consolidation
+
+**Required fields**
+- `id`
+- `created_at_ms`
+- `updated_at_ms`
+- `namespace`
+- `version`
+
+**Typical optional fields**
+- `workspace_id`
+- `agent_id`
+- `session_id`
+- `task_id`
+- `payload_ref`
+- `tags`
+
+**Additional expected fields in practice**
+- `source_kind`
+- `source_ref`
+- `compact_text`
+- `tier`
+- `salience`
+- `confidence`
+- `lineage`
+
+**Validation rules**
+- must preserve source traceability
+- may be consolidated later, but never without lineage links
+- should be safe to demote or archive when summarized elsewhere
+
+#### 33.4.2 Episode
+
+**Purpose**
+- group related events into a higher-value temporal unit
+
+**Required fields**
+- `id`
+- `created_at_ms`
+- `updated_at_ms`
+- `namespace`
+- `version`
+
+**Typical optional fields**
+- `workspace_id`
+- `agent_id`
+- `session_id`
+- `task_id`
+- `payload_ref`
+- `tags`
+
+**Additional expected fields**
+- `lineage` back to source events
+- `entity_refs`
+- `compact_text` summary of the episode
+- optional `goal` linkage
+- optional `failure/success` outcome markers
+
+**Validation rules**
+- must point to constituent evidence
+- must not erase the original event family
+- must be reconstructable enough for explainability
+
+#### 33.4.3 Fact
+
+**Purpose**
+- represent distilled semantic knowledge for repeated reuse
+
+**Required fields**
+- `id`
+- `created_at_ms`
+- `updated_at_ms`
+- `namespace`
+- `version`
+
+**Typical optional fields**
+- `workspace_id`
+- `agent_id`
+- `session_id`
+- `task_id`
+- `payload_ref`
+- `tags`
+
+**Additional expected fields**
+- `authoritativeness`
+- `confidence`
+- `source_ref`
+- `lineage`
+- contradiction linkage where applicable
+
+**Validation rules**
+- facts must never silently replace conflicting facts
+- confidence must be mutable without breaking provenance
+- fact extraction must preserve a path back to evidence
+
+#### 33.4.4 Summary
+
+**Purpose**
+- compress lower-level evidence into a bounded, explainable representation
+
+**Required fields**
+- `id`
+- `created_at_ms`
+- `updated_at_ms`
+- `namespace`
+- `version`
+
+**Typical optional fields**
+- `workspace_id`
+- `agent_id`
+- `session_id`
+- `task_id`
+- `payload_ref`
+- `tags`
+
+**Additional expected fields**
+- `lineage`
+- `compact_text`
+- optional source counts / scope metadata
+- optional utility metrics
+
+**Validation rules**
+- a summary without lineage is invalid for canonical storage
+- summary regeneration must be possible if the summary is stale or corrupted
+
+#### 33.4.5 Relation
+
+**Purpose**
+- link entities, memories, goals, or concepts in a form usable by graph-assisted retrieval
+
+**Required fields**
+- `id`
+- `created_at_ms`
+- `updated_at_ms`
+- `namespace`
+- `version`
+
+**Typical optional fields**
+- `workspace_id`
+- `agent_id`
+- `session_id`
+- `task_id`
+- `payload_ref`
+- `tags`
+
+**Additional expected fields**
+- relation endpoints
+- relation kind / edge label
+- confidence
+- provenance or derivation handle
+- graph repair metadata
+
+**Validation rules**
+- relation endpoints must resolve or be tombstoned explicitly
+- relation edges must never bypass namespace policy
+- relation derivation should be reproducible or auditable
+
+#### 33.4.6 ConflictRecord
+
+**Purpose**
+- represent contradiction explicitly rather than hiding it in overwrite behavior
+
+**Required fields**
+- `id`
+- `created_at_ms`
+- `updated_at_ms`
+- `namespace`
+- `version`
+
+**Typical optional fields**
+- `workspace_id`
+- `agent_id`
+- `session_id`
+- `task_id`
+- `payload_ref`
+- `tags`
+
+**Additional expected fields**
+- references to conflicting memories
+- evidence handles for both sides
+- optional conflict status (open/resolved/superseded)
+- optional resolution explanation
+
+**Validation rules**
+- must be created or updated when contradiction is detected
+- must preserve both sides of the disagreement
+- may influence ranking, but not storage erasure
+
+#### 33.4.7 Goal
+
+**Purpose**
+- represent active or historical objectives that shape relevance and behavior
+
+**Required fields**
+- `id`
+- `created_at_ms`
+- `updated_at_ms`
+- `namespace`
+- `version`
+
+**Typical optional fields**
+- `workspace_id`
+- `agent_id`
+- `session_id`
+- `task_id`
+- `payload_ref`
+- `tags`
+
+**Additional expected fields**
+- goal status
+- priority
+- utility linkage
+- parent/child goal references
+
+**Validation rules**
+- goal state changes must remain auditable
+- inactive goals may still remain relevant for episodic reconstruction
+
+#### 33.4.8 Skill
+
+**Purpose**
+- represent procedural knowledge extracted from repeated successful behavior
+
+**Required fields**
+- `id`
+- `created_at_ms`
+- `updated_at_ms`
+- `namespace`
+- `version`
+
+**Typical optional fields**
+- `workspace_id`
+- `agent_id`
+- `session_id`
+- `task_id`
+- `payload_ref`
+- `tags`
+
+**Additional expected fields**
+- lineage to repeated episodes or outcomes
+- success signals
+- context applicability metadata
+- confidence / maturity indicator
+
+**Validation rules**
+- a skill extracted from thin evidence should remain tentative
+- skill extraction should not delete underlying procedural evidence
+
+#### 33.4.9 Constraint
+
+**Purpose**
+- preserve rules, obligations, limits, and non-negotiable instructions
+
+**Required fields**
+- `id`
+- `created_at_ms`
+- `updated_at_ms`
+- `namespace`
+- `version`
+
+**Typical optional fields**
+- `workspace_id`
+- `agent_id`
+- `session_id`
+- `task_id`
+- `payload_ref`
+- `tags`
+
+**Additional expected fields**
+- constraint scope
+- priority or hardness
+- policy interaction markers
+- source authority metadata
+
+**Validation rules**
+- constraints must remain highly retrievable
+- constraints should resist accidental forgetting more strongly than normal events
+
+#### 33.4.10 DecayState
+
+**Purpose**
+- track current forgetting posture or effective decay status
+
+**Required fields**
+- `id`
+- `created_at_ms`
+- `updated_at_ms`
+- `namespace`
+- `version`
+
+**Typical optional fields**
+- `workspace_id`
+- `agent_id`
+- `session_id`
+- `task_id`
+- `payload_ref`
+- `tags`
+
+**Additional expected fields**
+- decay bucket / effective strength
+- decay warning status
+- last reinforcement marker
+- bypass-decay or pinned-decay flags
+
+**Validation rules**
+- decay metadata must not violate retention policy
+- decay state should be derivable or repairable when possible
+
+#### 33.4.11 RetentionRule
+
+**Purpose**
+- capture explicit retention and deletion policy constraints
+
+**Required fields**
+- `id`
+- `created_at_ms`
+- `updated_at_ms`
+- `namespace`
+- `version`
+
+**Typical optional fields**
+- `workspace_id`
+- `agent_id`
+- `session_id`
+- `task_id`
+- `payload_ref`
+- `tags`
+
+**Additional expected fields**
+- retention class
+- effective period
+- legal hold marker
+- deletion mode and guarantees
+
+**Validation rules**
+- must be authoritative for deletion behavior
+- must remain auditable after migration and rebuild
+
+#### 33.4.12 ShardDescriptor
+
+**Purpose**
+- represent shard allocation and distribution metadata
+
+**Required fields**
+- `id`
+- `created_at_ms`
+- `updated_at_ms`
+- `namespace`
+- `version`
+
+**Typical optional fields**
+- `workspace_id`
+- `agent_id`
+- `session_id`
+- `task_id`
+- `payload_ref`
+- `tags`
+
+**Additional expected fields**
+- shard key or shard range
+- placement metadata
+- balancing status
+- migration / repair markers
+
+**Validation rules**
+- shard descriptors must remain compatible with disaster recovery and rebalancing workflows
+- shard metadata must not be the only source of truth for memory existence
+
+### 33.5 Shared validation rules across all schema families
+
+The repeated schema docs imply these common validation rules:
+
+1. ids must be globally unique within namespace policy
+2. `created_at_ms` must not exceed `updated_at_ms`
+3. `version` must increment on mutation
+4. `payload_ref` must be stable or tombstoned
+
+This plan extends that into a stronger shared contract:
+
+5. no object may exist without namespace binding
+6. no object may bypass policy metadata when persisted
+7. no object may lose lineage silently during consolidation or repair
+8. no object may cross namespace boundaries through relation fields without explicit policy support
+9. any tombstoned payload must still preserve audit-safe metadata unless compliance requires stronger deletion
+
+### 33.6 Type families not fully expanded in DATA_SCHEMAS but required by the memory model
+
+The `MEMORY_MODEL.md` taxonomy includes several types that should also receive schema overlays even if not spelled out in `DATA_SCHEMAS.md` yet.
+
+#### 33.6.1 Hypothesis
+- tentative statement
+- requires confidence and validation status
+- should link to supporting and disconfirming evidence
+
+#### 33.6.2 PolicyArtifact
+- policy-relevant memory object
+- should carry stronger audit fields and retention controls
+
+#### 33.6.3 Observation
+- raw or near-raw observation distinct from action outcome
+- useful for episodic grouping and factual extraction
+
+#### 33.6.4 ToolOutcome
+- normalized representation of tool execution result
+- should preserve tool identity, execution context, outcome category, and provenance
+
+#### 33.6.5 UserPreference
+- durable user-specific preference
+- should be highly retrievable and policy-scoped
+- should support supersession without silent erasure
+
+#### 33.6.6 SessionMarker
+- session boundary / checkpoint marker
+- should support reconstruction, grouping, and debugging of temporal context
+
+### 33.7 Suggested relational storage shape
+
+The docs do not hard-code SQL DDL, but they strongly imply a practical decomposition.
+
+#### Core durable tables
+- `memory_items`
+- `memory_payloads`
+- `memory_lineage_edges`
+- `memory_entity_refs`
+- `memory_relation_refs`
+- `memory_tags`
+- `conflict_records`
+- `goals`
+- `skills`
+- `retention_rules`
+- `shard_descriptors`
+- `transition_events`
+- `repair_jobs`
+
+#### Why split these tables
+- keep hot metadata compact
+- keep payloads detachable
+- make lineage explicit and repairable
+- allow typed overlays without bloating every hot-row access path
+- preserve indexability for session/entity/goal filters
+
+### 33.8 Suggested index coverage for schema fields
+
+At the schema layer, the following indexability assumptions should be built in:
+
+- `id` -> primary lookup
+- `namespace` -> universal filter
+- `workspace_id` -> workspace isolation and recall
+- `agent_id` -> actor-scoped retrieval
+- `session_id` -> episodic grouping and session replay
+- `task_id` -> task-context lookup
+- `created_at_ms` / `updated_at_ms` -> temporal windows
+- `tags` -> thematic lookup
+- `entity_refs` -> entity-centric retrieval
+- `goal` or goal linkage -> goal-aware ranking and retrieval
+- `fingerprint` -> duplicate family handling
+- `tier` -> maintenance and routing analysis
+- `retention_class` / `policy_flags` -> governance checks
+
+### 33.9 State-machine alignment with schema
+
+The `STATE_MACHINES.md` document shows a repeated lifecycle pattern for major object types.
+
+For Event, Episode, Fact, Summary, Goal, Skill, Constraint, ConflictRecord, Relation, RetentionClass-like objects, DecayState-like objects, and ShardState-like objects, the common lifecycle is:
+
+- `created`
+- `indexed`
+- `recalled`
+- `reinforced`
+- `decayed`
+- `consolidated`
+- `demoted`
+- `archived`
+- `deleted`
+
+#### Required transition guards
+- policy pinning
+- namespace access control
+- unresolved contradiction state
+- lineage preservation requirement
+- repair job lock
+
+#### Failure handling contract
+If a transition fails:
+- write a transition error event
+- preserve the prior state
+- enqueue a repairable task
+
+This means the schema must have room for:
+- current lifecycle state or equivalent derived status
+- transition audit history
+- repair queue references
+- policy and contradiction guards
+
+### 33.10 Data durability and repair rules
+
+The schema must support all of the following repairs without inventing missing truth:
+- index rebuild from durable records
+- graph repair from relation and lineage data
+- summary regeneration from source evidence
+- payload detachment and reattachment where allowed
+- duplicate-family collapse with preserved ancestry
+- shard repair after balancing or migration
+
+If a repair cannot reconstruct full original fidelity, the system must record the loss explicitly rather than hiding it.
+
+### 33.11 Schema evolution rules
+
+When the schema evolves:
+
+1. old data must remain interpretable or migratable
+2. migration must preserve lineage, timestamps, namespace, and version semantics
+3. policy-critical metadata must survive migrations exactly
+4. index rebuild must be possible after migration
+5. schema versioning must be explicit and testable
+
+### 33.12 Canonical schema acceptance checklist
+
+A data schema design is only acceptable if it can answer yes to all of the following:
+
+- Can every stored memory be traced back to source or lineage?
+- Can contradictions be represented without overwrite?
+- Can policy be enforced from stored metadata alone?
+- Can payloads be detached without losing core memory identity?
+- Can indexes be rebuilt from durable truth?
+- Can background compaction run without losing authoritative evidence?
+- Can retrieval explain why a result was returned?
+- Can migrations preserve policy and lineage semantics?
+- Can sharding metadata evolve without becoming the sole source of truth?
+- Can failure handling preserve the prior valid state?
+
+If not, the schema is not yet ready to be called canonical.
+
+---
+
+## 34. Detailed MCP API Contract
+
+This section expands the MCP surface into a more explicit contract. The names come from `MCP_API.md`; the semantics here make them implementation-ready.
+
+### 34.1 Global MCP design rules
+
+Every MCP tool must:
+- preserve namespace and policy context
+- never bypass governance checks
+- return enough metadata for explainability
+- distinguish user error, policy denial, and internal failure
+- preserve idempotency where practical
+- expose stable machine-readable outputs for automation
+
+### 34.2 Common request envelope
+
+Every MCP request should conceptually carry:
+- `namespace`
+- `workspace_id` if applicable
+- `agent_id` if applicable
+- `session_id` if applicable
+- `task_id` if applicable
+- `request_id`
+- `policy_context`
+- `time_budget_ms` or retrieval budget where relevant
+
+### 34.3 Common response envelope
+
+Every MCP response should be able to carry:
+- `ok`
+- `request_id`
+- `namespace`
+- `result`
+- `warnings`
+- `policy_filters_applied`
+- `explain_handle` or embedded explanation
+- `metrics` for latency / candidate counts where relevant
+
+### 34.4 Tool: `memory_put`
+
+**Purpose**
+- ingest a new memory item or structured memory payload
+
+**Expected inputs**
+- namespace context
+- memory type
+- content or payload reference
+- source metadata
+- optional salience / tags / entity refs / relation refs
+- optional explicit retention or pinning hints
+
+**Expected outputs**
+- memory id
+- chosen tier
+- validation outcome
+- routing reason summary
+- deferred enrichment job handle if created
+
+**Rules**
+- writes must validate policy first
+- contradictory writes must not silently overwrite existing evidence
+- the response should indicate whether the write created conflict metadata
+
+### 34.5 Tool: `memory_get`
+
+**Purpose**
+- retrieve a memory item by id or canonical handle
+
+**Expected outputs**
+- typed memory view
+- provenance fields
+- current tier
+- policy-redacted fields where applicable
+
+**Rules**
+- exact lookup does not bypass redaction or namespace checks
+- missing and unauthorized must be distinguishable at the internal API boundary, even if collapsed externally for security reasons
+
+### 34.6 Tool: `memory_search`
+
+**Purpose**
+- run bounded search over indexes, tags, entities, time ranges, or filtered text/semantic hints
+
+**Expected inputs**
+- query string or structured filters
+- namespace and scope filters
+- optional memory types
+- optional session/task/goal filters
+- result budget
+
+**Expected outputs**
+- candidate list
+- filter summary
+- index families used
+- omitted-result note if capped
+
+### 34.7 Tool: `memory_recall`
+
+**Purpose**
+- perform task-oriented bounded retrieval for context construction
+
+**Expected inputs**
+- task or goal description
+- retrieval mode hints
+- token budget or result budget
+- namespace / actor context
+
+**Expected outputs**
+- ranked evidence set
+- score summaries
+- contradiction markers
+- decaying-soon markers if enabled
+- packaging metadata suitable for prompt construction
+
+### 34.8 Tool: `memory_link`
+
+**Purpose**
+- create or update explicit relations between memories, entities, or goals
+
+**Rules**
+- links require namespace compatibility and policy approval
+- link provenance must be stored
+- graph repair must be possible after link creation
+
+### 34.9 Tool: `memory_inspect`
+
+**Purpose**
+- retrieve diagnostic and structural details about a memory item or memory family
+
+**Should expose**
+- current tier
+- lineage
+- policy flags
+- lifecycle state
+- index presence
+- graph neighborhood summary
+- decay / retention information
+
+### 34.10 Tool: `memory_explain`
+
+**Purpose**
+- explain why a memory was stored, routed, recalled, ranked, filtered, demoted, or forgotten
+
+**Should explain**
+- routing signals
+- ranking components
+- policy filters
+- lineage ancestry
+- consolidation ancestry
+- forgetting / demotion reasons
+
+### 34.11 Tool: `memory_consolidate`
+
+**Purpose**
+- trigger or schedule consolidation workloads
+
+**Should support**
+- session-scoped consolidation
+- task-scoped consolidation
+- duplicate collapse
+- fact extraction
+- summary generation
+- skill extraction
+
+**Rules**
+- must preserve evidence
+- must emit artifact ids for generated summaries/facts/relations
+- must be safe to run in bounded background windows
+
+### 34.12 Tool: `memory_pin`
+
+**Purpose**
+- raise retention protection or bypass normal forgetting/demotion behavior
+
+**Rules**
+- pinning is policy-relevant and auditable
+- pinning should not bypass redaction or governance
+- pinning reason should be recorded
+
+### 34.13 Tool: `memory_forget`
+
+**Purpose**
+- perform controlled forgetting operations
+
+**Operations may include**
+- suppress
+- decay
+- demote
+- compact
+- summarize
+- archive
+- redact
+- soft delete
+- hard delete where policy permits
+
+**Rules**
+- must distinguish utility-driven forgetting from compliance deletion
+- must preserve lineage when required
+- must never remove last authoritative evidence unless policy explicitly allows it
+
+### 34.14 Tool: `memory_repair`
+
+**Purpose**
+- run or schedule repair actions for indexes, graph, lineage, summaries, or shards
+
+**Rules**
+- durable evidence wins over derived state
+- repair output should include what was fixed, rebuilt, or left unresolved
+- partial-fidelity repair must record explicit loss
+
+---
+
+## 35. Detailed CLI Contract
+
+The CLI is the operator and developer surface for the same core system. It must expose power without bypassing policy.
+
+### 35.1 CLI design principles
+
+- CLI commands map cleanly onto core memory actions
+- CLI should be scriptable and machine-readable
+- human-readable output should be layered on top of a structured result model
+- CLI must not create hidden behavior different from MCP behavior
+
+### 35.2 Core commands from `CLI.md`
+
+```bash
+membrain put event --namespace ws/app --type user_message --content "..."
+membrain get --id mem_123
+membrain search --query "rust linker failure"
+membrain recall --goal "fix build pipeline"
+membrain consolidate --session sess_42
+membrain inspect --id mem_456
+membrain benchmark tier1
+membrain repair index --namespace ws/app
+```
+
+### 35.3 Required command families
+
+The plan should treat the following CLI families as canonical:
+- `put`
+- `get`
+- `search`
+- `recall`
+- `consolidate`
+- `inspect`
+- `benchmark`
+- `repair`
+- `pin`
+- `forget`
+- `stats`
+- `doctor`
+- `export`
+- `import`
+
+### 35.4 `put` contract
+
+Should support:
+- event ingestion
+- typed content
+- namespace selection
+- structured metadata
+- tags/entity refs/relation refs
+- optional retention hints
+
+### 35.5 `get` contract
+
+Should support:
+- lookup by id
+- raw JSON output
+- human-readable pretty output
+- optional lineage expansion
+- optional policy-debug info for authorized operators
+
+### 35.6 `search` contract
+
+Should support:
+- query text
+- structured filters
+- namespace restriction
+- type restriction
+- time range filters
+- result limits
+- JSON output
+
+### 35.7 `recall` contract
+
+Should support:
+- goal-based recall
+- task-text recall
+- bounded result count
+- bounded token budget output
+- explain mode
+- include-conflicts mode
+- include-decaying mode
+
+### 35.8 `consolidate` contract
+
+Should support:
+- per-session consolidation
+- per-task consolidation
+- duplicate collapse
+- summary regeneration
+- dry-run mode
+- metrics output
+
+### 35.9 `inspect` contract
+
+Should support:
+- memory item inspection
+- lineage view
+- graph neighborhood preview
+- retention and decay state
+- tier routing explanation
+
+### 35.10 `benchmark` contract
+
+Should support:
+- Tier1 benchmark
+- Tier2 benchmark
+- Tier3 benchmark
+- encode benchmark
+- retrieval benchmark
+- maintenance benchmark
+- JSON artifact emission
+
+### 35.11 `repair` contract
+
+Should support:
+- index repair
+- graph repair
+- summary regeneration
+- duplicate-family cleanup
+- shard repair
+- dry-run mode
+- bounded execution mode
+
+### 35.12 CLI output modes
+
+Every major command should support:
+- human-readable text
+- structured JSON
+- exit codes that separate validation failure, policy denial, and internal error
+
+---
+
+## 36. Algorithm and Pseudocode Canonicalization
+
+The pseudocode and algorithm docs should be interpreted as canonical patterns, not as line-by-line required implementations.
+
+### 36.1 Canonical encode pattern
+
+```text
+fn fast_encode(event):
+    norm = normalize(event)
+    fp = fingerprint(norm)
+    class = shallow_classify(norm)
+    sal = provisional_salience(norm, class)
+    tier = route_fast(class, sal, norm.payload_size)
+    item = make_memory_item(norm, fp, class, sal, tier)
+    persist(item)
+    schedule_deferred_enrichment(item.id)
+    return item.id
+```
+
+### 36.2 Canonical retrieval planner pattern
+
+```text
+fn retrieval_plan(query_ctx):
+    if query_ctx.id_hint:
+        return ExactById
+    if query_ctx.active_session and query_ctx.is_small_lookup:
+        return Tier1RecentThenTier2Exact
+    if query_ctx.entity_heavy:
+        return Tier2EntityThenGraph
+    if query_ctx.semantic_need_high:
+        return Tier2HybridWithBudget
+    return Tier2ExactThenTier3Fallback
+```
+
+### 36.3 Canonical Tier1 access pattern
+
+```text
+fn tier1_get(key):
+    slot = hot_index.lookup(key)
+    if slot is None:
+        return None
+    item = arena.read(slot)
+    if item.expired():
+        return None
+    return item
+```
+
+### 36.4 Canonical hybrid recall pattern
+
+```text
+fn hybrid_recall(query):
+    cands = []
+    cands += exact_indexes(query)
+    cands += entity_indexes(query)
+    if budget_left():
+        cands += ann_candidates(query)
+    cands = dedup(cands)
+    cands = bounded_graph_expand(cands, query)
+    return rank(cands, query)
+```
+
+### 36.5 Canonical decay update pattern
+
+```text
+fn decay_update(item, now):
+    age = now - item.last_access_or_create()
+    disuse = sigmoid(age / tau_age)
+    penalty = disuse * (1 - item.utility_estimate)
+    if item.retention_class.is_pinned():
+        penalty *= 0.1
+    item.decay_score = clamp(penalty, 0, 1)
+    return item
+```
+
+### 36.6 Canonical consolidation pattern
+
+```text
+fn consolidate_episode(events):
+    cluster = sort_by_time(events)
+    summary = summarize(cluster)
+    facts = extract_facts(cluster)
+    relations = derive_relations(cluster)
+    write(summary)
+    for fact in facts:
+        write(fact)
+    for rel in relations:
+        write(rel)
+    mark_cluster_consolidated(cluster.ids)
+```
+
+### 36.7 Algorithm families from `ALGORITHM_CATALOG.md`
+
+The algorithm catalog is broad, but it clearly identifies the major subsystems that deserve explicit implementations:
+- Tier1 algorithms
+- Tier2 algorithms
+- Tier3 algorithms
+- encode algorithms
+- ranking algorithms
+- graph algorithms
+- compaction algorithms
+- rebuild algorithms
+- sharding algorithms
+- caching algorithms
+
+### 36.8 Implementation rule
+
+For each algorithm family, the production code should prefer:
+- a small number of benchmarked implementations,
+- explicit invariants,
+- explainable failure modes,
+- replaceable strategy boundaries,
+- no hidden unbounded work on the request path.
+
+---
+
+## 37. Detailed Ranking and Formula Calibration
+
+`RANKING_FORMULAS.md` intentionally keeps formulas simple. This is a strength, not a weakness.
+
+### 37.1 Shared formula shape
+
+Most ranking-like scores can start from this common template:
+
+```text
+score = bias
+      + w_recency * recency_feature
+      + w_salience * salience_feature
+      + w_confidence * confidence_feature
+      + w_utility * utility_feature
+      + w_goal * goal_alignment_feature
+      - w_noise * noise_feature
+```
+
+### 37.2 Scores that should share this calibration philosophy
+
+- salience score
+- confidence score
+- utility estimate
+- decay score
+- promotion score
+- demotion score
+- conflict severity
+- retrieval relevance
+- novelty score
+- compression value
+
+### 37.3 Calibration notes
+
+- normalize features into bounded ranges
+- prefer monotonic transforms
+- calibrate by workload, not globally across all tasks
+- apply hard policy masks before soft ranking
+- keep score decomposition inspectable
+
+### 37.4 Practical consequence
+
+The architecture should expose score components as first-class observability data so tuning can happen without guesswork.
+
+---
+
+## 38. Performance Budget and Fast Path Restrictions
+
+The performance docs all repeat the same core message: low latency only becomes believable when the hot path is structurally constrained.
+
+### 38.1 Universal fast path tactics
+
+- choose stable and compact representations
+- avoid dynamic allocations where possible
+- split hot metadata from cold payloads
+- cap work by query class
+- prefer precomputed handles over expensive reconstruction
+
+### 38.2 Engineering patterns repeatedly emphasized
+
+The hot path should preferentially use or evaluate:
+- CPU-cache-friendly layouts
+- arena allocation where beneficial
+- branch-predictable control flow
+- stable hashing strategy
+- small-object layout discipline
+- Tier1 ring buffer or equivalent bounded hot structure
+- metadata splitting
+- hot/cold field separation
+- syscall avoidance on request path
+- bounded candidate generation
+- graph traversal budgeting
+- SIMD-friendly scans where justified
+- lock avoidance or read-optimized concurrency patterns
+- batched writes and write coalescing off the request path
+- pinned-object fast path for high-priority memories
+
+### 38.3 Performance budget decomposition
+
+A request budget should be decomposed into at least:
+- planner budget
+- index lookup budget
+- graph expansion budget
+- ranking budget
+- packaging budget
+- policy-check budget
+
+### 38.4 Hard restrictions
+
+1. no full archive scan on request path
+2. no unbounded graph traversal on request path
+3. no maintenance job on request path
+4. no payload-heavy reconstruction on request path unless the query class explicitly allows it
+5. no namespace check after expensive work that could have been pruned earlier
+
+---
+
+## 39. Speed Checklist Canonicalization
+
+Although `SPEED_CHECKLIST.md` is expansive, the intent can be collapsed into a deployment-quality checklist.
+
+### 39.1 Pre-merge performance checklist
+
+Before accepting a hot-path-sensitive change, verify:
+- bounded work remains bounded
+- no large new allocations were introduced on request path
+- no payload bloat entered Tier1
+- score explanation still works
+- namespace checks still happen early
+- graph traversal remains budgeted
+- p95 and p99 were measured
+- stale cache behavior remains observable
+
+### 39.2 Pre-release performance checklist
+
+Before promoting a release, verify:
+- Tier1 exact latency target still holds on representative workloads
+- Tier2 retrieval latency still holds under mixed load
+- Tier3 fallback remains bounded enough for its declared class
+- compaction and repair jobs do not break foreground SLOs
+- shard balancing and rebuild paths were tested if enabled
+
+---
+
+## 40. Milestone Gates and Go / No-Go Rules
+
+The roadmap gives phases. This section adds promotion criteria.
+
+### 40.1 Phase 0 gate
+
+Phase 0 is complete only when:
+- object model is frozen enough for benchmarkable work
+- core invariants are written down and testable
+- benchmark harness exists
+- Tier1 MVP exists with measurable latency
+
+### 40.2 Phase 1 gate
+
+Phase 1 is complete only when:
+- Tier2 indexed retrieval exists
+- session and entity queries work
+- ranking baseline is measurable
+- retrieval explanations exist at least in debug/operator form
+
+### 40.3 Phase 2 gate
+
+Phase 2 is complete only when:
+- graph support is budgeted and repairable
+- contradiction records exist
+- explainable packaging exists for recall output
+
+### 40.4 Phase 3 gate
+
+Phase 3 is complete only when:
+- consolidation improves utility on benchmark corpora
+- forgetting reduces noise without unacceptable fact loss
+- compaction and repair are safe under failure injection
+
+### 40.5 Phase 4 gate
+
+Phase 4 is complete only when:
+- sharding strategy is justified by actual workload pressure
+- operations runbooks exist
+- shard movement, repair, and recovery are benchmarked
+- governance remains enforceable across shards
+
+### 40.6 Global no-go rules
+
+Do not promote a phase if any of the following are true:
+- retrieval quality regresses without explanation
+- contradiction handling is still silent overwrite
+- policy enforcement is incomplete
+- repairs are not observable
+- p95/p99 latency is unknown
+- maintenance work can corrupt durable truth
+
+---
+
+## 41. Rust Module and Workspace Skeleton
+
+The current plan already sketches a workspace tree. This section turns it into a more explicit module contract.
+
+### 41.1 Suggested workspace modules
+
+At minimum, the project should maintain a shape like:
+- `membrain-core`
+- `membrain-cli`
+- optional daemon/service crate
+- benchmark crates or bench targets
+- integration test support modules
+
+### 41.2 Suggested `membrain-core` boundaries
+
+Core library modules should be explicitly separated around these responsibilities:
+- `types`
+- `constants`
+- `config`
+- `brain_store`
+- `store::hot`
+- `store::warm` or `store::tier2`
+- `store::cold` / `archive`
+- `engine::encode`
+- `engine::recall`
+- `engine::ranking`
+- `engine::consolidation`
+- `engine::forgetting`
+- `engine::repair`
+- `graph`
+- `embed`
+- `index`
+- `migrate`
+- `observability`
+- `policy`
+
+### 41.3 Boundary rules
+
+- policy logic should not be hidden inside unrelated modules
+- store modules should not decide product semantics silently
+- repair logic should be testable independently
+- graph logic should be optional in retrieval plans when budget requires it
+- CLI should call core APIs, not reimplement memory semantics
+
+---
+
+## 42. Contributor Workflow and PR Acceptance
+
+`CONTRIBUTING.md` adds important execution discipline that belongs in the mega-plan.
+
+### 42.1 Contributor principles
+
+- keep hot path measurable
+- preserve provenance
+- write repairable code
+- prefer explicit invariants over hidden behavior
+- benchmark before and after performance-sensitive changes
+
+### 42.2 Required for major PRs
+
+Every major change should include:
+- a design note
+- a benchmark result
+- a migration note if schema changes
+- a rollback note if behavior changes
+
+### 42.3 PR rejection rules
+
+A major PR should be rejected or sent back if:
+- it changes hot path behavior without benchmark evidence
+- it alters schema without migration notes
+- it changes forgetting/deletion semantics without governance analysis
+- it adds performance-sensitive complexity without observability
+- it weakens repairability or lineage preservation
+
+---
+
+## 43. README and Index Role Clarification
+
+The docs set suggests a simple hierarchy:
+- `README.md` is the project entry point
+- `INDEX.md` is a light doc pointer
+- `PLAN.md` is the canonical mega-plan
+- topic-specific docs exist to deepen one subsystem at a time
+
+### 43.1 Documentation rule
+
+`PLAN.md` should remain the canonical design contract.
+Subsystem docs should elaborate, not contradict.
+If a subsystem doc and the plan diverge, the conflict should be resolved explicitly rather than left implicit.
+
+---
+
+## 44. Final Execution Order for Building membrain
+
+To make the plan directly actionable, the full docs imply this concrete build order.
+
+### 44.1 Step-by-step execution order
+
+1. define canonical types, schema semantics, and invariants
+2. define policy model and namespace enforcement
+3. implement Tier1 fast encode and exact/recent retrieval
+4. implement Tier2 durable indexed storage and search
+5. implement ranking explanation and inspect/explain surfaces
+6. implement contradiction representation and conflict-aware storage
+7. implement graph-assisted retrieval under hard budgets
+8. implement consolidation pipelines
+9. implement forgetting and demotion pipelines
+10. implement repair and rebuild paths
+11. implement benchmark harnesses and regression artifacts
+12. implement operational tooling and doctor commands
+13. introduce sharding only if empirical workload demands it
+
+### 44.2 Why this order matters
+
+This order ensures the system becomes:
+- measurable before it becomes complex,
+- correct before it becomes distributed,
+- explainable before it becomes highly optimized,
+- repairable before it becomes operationally large.
+
+---
+
+## 45. Final Canonical Thesis After Merging All Supporting Docs
+
+After incorporating every supporting document, the true thesis of membrain becomes:
+
+1. build an agent memory system that is inspired by human memory functions but constrained by engineering budgets;
+2. separate hot, warm, and cold memory responsibilities clearly;
+3. treat provenance, lineage, policy, and repairability as first-class system properties;
+4. use bounded retrieval and explainable ranking to maximize downstream task success;
+5. compress and forget intelligently rather than accumulate noise forever;
+6. refuse biological metaphor unless it survives benchmarking and operational scrutiny;
+7. ship only what can be benchmarked, inspected, repaired, and governed.
+
+That is the complete, append-only expansion implied by the rest of `docs/*.md`.
