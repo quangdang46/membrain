@@ -1,154 +1,257 @@
-# OPERATIONS
+# membrain — Operations Guide
 
-This document describes how to run membrain in production.
+> Canonical source: PLAN.md Sections 25 (Operations Acceptance), 26 (Failure Mode Matrix), 23 (Compaction & Repair).
 
-## 1. Capacity planning
+## Operational Success Criteria
 
-### Scope
-Capacity planning covers a recurring operational workflow.
+A workflow is accepted only if it completes without violating:
+- Latency budgets (Tier1 <0.1ms, Tier2 <5ms, Tier3 <50ms, Encode <10ms)
+- Data integrity guarantees
+- Lineage guarantees
+- Policy guarantees
 
-### Runbook shape
-- preconditions
-- command sequence
-- metrics to watch
-- rollback conditions
-- post-run validation
+---
 
-### Success criteria
-The workflow should complete without violating latency budgets or data integrity guarantees.
+## Standard Runbook Shape
 
-## 2. Daily health review
+Every operational runbook follows this structure:
 
-### Scope
-Daily health review covers a recurring operational workflow.
+1. **Preconditions** — what must be true before starting
+2. **Command sequence** — steps to execute
+3. **Metrics to watch** — what to monitor during execution
+4. **Rollback conditions** — when to abort
+5. **Post-run validation** — how to verify success
 
-### Runbook shape
-- preconditions
-- command sequence
-- metrics to watch
-- rollback conditions
-- post-run validation
+---
 
-### Success criteria
-The workflow should complete without violating latency budgets or data integrity guarantees.
+## 1. Capacity Planning
 
-## 3. Backpressure
+### Preconditions
+- Access to `membrain stats --json` and `membrain health --json`
+- Knowledge of current workload growth rate
 
-### Scope
-Backpressure covers a recurring operational workflow.
+### Command Sequence
+```bash
+membrain stats --json | jq '{hot: .hot_count, cold: .cold_count, utilization: .hot_utilization_pct}'
+membrain health --json | jq '.decay_rate'
+membrain hot-paths --top 20 --json
+membrain dead-zones --min-age 5000 --json
+```
 
-### Runbook shape
-- preconditions
-- command sequence
-- metrics to watch
-- rollback conditions
-- post-run validation
+### Metrics to Watch
+- Hot tier utilization % (alert at >80%)
+- Decay rate per 1k ticks
+- Dead zone accumulation rate
 
-### Success criteria
-The workflow should complete without violating latency budgets or data integrity guarantees.
+### Rollback Conditions
+- Not applicable (read-only assessment)
 
-## 4. Compaction windows
+### Post-run Validation
+- Capacity forecast matches expected growth
+- No tier is unexpectedly near saturation
 
-### Scope
-Compaction windows covers a recurring operational workflow.
+---
 
-### Runbook shape
-- preconditions
-- command sequence
-- metrics to watch
-- rollback conditions
-- post-run validation
+## 2. Daily Health Review
 
-### Success criteria
-The workflow should complete without violating latency budgets or data integrity guarantees.
+### Command Sequence
+```bash
+membrain health --brief
+membrain health --json | jq '{
+  hot_pct: .hot_utilization_pct,
+  avg_strength: .avg_strength,
+  avg_confidence: .avg_confidence,
+  unresolved_conflicts: .unresolved_conflicts,
+  uncertain: .uncertain_count,
+  last_dream: .last_dream_tick
+}'
+membrain doctor run
+```
 
-## 5. Shard balancing
+### Metrics to Watch
+- Hot utilization trending up → schedule consolidation
+- Average confidence dropping → investigate conflict rate
+- Unresolved conflicts accumulating → trigger belief resolution
+- Doctor warnings → schedule repair
 
-### Scope
-Shard balancing covers a recurring operational workflow.
+---
 
-### Runbook shape
-- preconditions
-- command sequence
-- metrics to watch
-- rollback conditions
-- post-run validation
+## 3. Backpressure Management
 
-### Success criteria
-The workflow should complete without violating latency budgets or data integrity guarantees.
+### Preconditions
+- Hot tier utilization > 70%
 
-## 6. Index rebuild operations
+### Command Sequence
+```bash
+membrain consolidate
+membrain dead-zones --forget-all    # archive never-retrieved old memories
+membrain compress --dry-run         # check if compression would help
+membrain compress                   # apply schema compression
+```
 
-### Scope
-Index rebuild operations covers a recurring operational workflow.
+### Metrics to Watch
+- Hot count before/after
+- Consolidation duration
+- Memories archived
 
-### Runbook shape
-- preconditions
-- command sequence
-- metrics to watch
-- rollback conditions
-- post-run validation
+### Rollback Conditions
+- Consolidation takes >30s → interrupt, investigate
+- Critical memories being archived → check min_strength threshold
 
-### Success criteria
-The workflow should complete without violating latency budgets or data integrity guarantees.
+---
 
-## 7. Retention enforcement
+## 4. Compaction Windows
 
-### Scope
-Retention enforcement covers a recurring operational workflow.
+### Preconditions
+- No active high-priority recall workloads
+- Daemon is running
 
-### Runbook shape
-- preconditions
-- command sequence
-- metrics to watch
-- rollback conditions
-- post-run validation
+### Command Sequence
+```bash
+membrain consolidate
+membrain compress
+membrain dream               # run dream cycle if idle
+membrain skills --extract    # extract procedural memories from mature engrams
+```
 
-### Success criteria
-The workflow should complete without violating latency budgets or data integrity guarantees.
+### Metrics to Watch
+- Background job duration
+- Hot-path latency during compaction (must not exceed budget)
+- Schemas created, episodes compressed
 
-## 8. Incident response
+### Rollback Conditions
+- Online recall latency exceeds budget → pause background jobs
 
-### Scope
-Incident response covers a recurring operational workflow.
+---
 
-### Runbook shape
-- preconditions
-- command sequence
-- metrics to watch
-- rollback conditions
-- post-run validation
+## 5. Index Rebuild Operations
 
-### Success criteria
-The workflow should complete without violating latency budgets or data integrity guarantees.
+### Command Sequence
+```bash
+membrain doctor run                    # diagnose issues first
+membrain repair index --dry-run       # preview
+membrain repair index --namespace default
+membrain benchmark tier2              # verify performance restored
+```
 
-## 9. Migration
+### Metrics to Watch
+- Index count vs durable record count (must match)
+- Search latency before/after rebuild
+- Any orphan embeddings or missing vectors
 
-### Scope
-Migration covers a recurring operational workflow.
+### Post-run Validation
+```bash
+membrain benchmark tier2 --json | jq '.p99_us'
+```
 
-### Runbook shape
-- preconditions
-- command sequence
-- metrics to watch
-- rollback conditions
-- post-run validation
+---
 
-### Success criteria
-The workflow should complete without violating latency budgets or data integrity guarantees.
+## 6. Retention Enforcement
 
-## 10. Version rollout
+### Command Sequence
+```bash
+membrain audit --op archive --since <last_check_tick>   # what was archived
+membrain uncertain --top 50                              # low-confidence review
+membrain dead-zones --min-age 10000                     # very old unaccessed
+```
 
-### Scope
-Version rollout covers a recurring operational workflow.
+### Metrics to Watch
+- Archive rate vs encode rate (healthy: archive ~10-20% of encode)
+- Pinned memory count growth (unbounded pinning is an anti-pattern)
 
-### Runbook shape
-- preconditions
-- command sequence
-- metrics to watch
-- rollback conditions
-- post-run validation
+---
 
-### Success criteria
-The workflow should complete without violating latency budgets or data integrity guarantees.
+## 7. Incident Response
 
+### Immediate Response Pattern
+
+For all major incidents:
+1. **Isolate** affected namespace or shard if needed
+2. **Stop** destructive background jobs (`membrain dream --disable`)
+3. **Preserve** forensic logs (`membrain audit --recent 500 --json > incident.json`)
+4. **Enable** degraded mode if available
+
+### Root-Cause Investigation
+
+```bash
+membrain audit <affected-uuid> --json              # full history
+membrain audit --since <incident_tick> --op interference
+membrain doctor run
+membrain diff --since <pre_incident_tick>           # what changed
+```
+
+### Checklist
+- Lineage validation (no broken chains)
+- Index count vs durable records
+- Recent deploy inspection
+- Repair queue growth
+- Compaction history
+
+---
+
+## 8. Migration
+
+### Command Sequence
+```bash
+membrain snapshot --name pre-migration --note "Before schema migration"
+membrain export --format ndjson > backup.ndjson
+# Apply migration
+membrain doctor run                    # verify integrity
+membrain benchmark tier2              # verify performance
+membrain diff --since pre-migration   # review changes
+```
+
+### Rollback Conditions
+- Doctor reports errors post-migration → restore from backup
+- Benchmark shows regression > 20% → investigate
+
+---
+
+## 9. Version Rollout
+
+### Command Sequence
+```bash
+membrain snapshot --name pre-upgrade
+membrain daemon stop
+# Deploy new binary
+membrain daemon start
+membrain doctor run
+membrain health --brief
+membrain benchmark tier1
+membrain benchmark tier2
+```
+
+### Post-run Validation
+- All benchmarks within expected bounds
+- Doctor clean
+- Health dashboard shows no anomalies
+- Recall latency spot-check passes
+
+---
+
+## 10. Snapshot Management
+
+```bash
+membrain snapshot list                              # review existing
+membrain snapshot --name weekly-$(date +%Y%m%d)    # create periodic
+membrain snapshot delete <old-snapshot>              # clean up
+```
+
+---
+
+## Canonical Failure Modes
+
+| Failure | Immediate Action | Investigation |
+|---------|-----------------|---------------|
+| Tier1 overflow | Consolidate, increase cache eviction | Check encode rate vs capacity |
+| Tier2 index drift | Rebuild index | Compare index count vs DB records |
+| Contradiction masking | Review `beliefs --conflicts` | Check conflict detection thresholds |
+| Duplicate storms | Check fingerprint dedup | Review novelty threshold |
+| Graph fanout explosion | Cap BFS depth | Audit engram sizes |
+| Latency regression | Benchmark all tiers | Check background job interference |
+| Cross-namespace leakage | Audit namespace filters | Review visibility rules |
+| Retention-policy bug | Audit archive events | Review decay + forgetting params |
+
+## Design Implication
+
+A production architecture is incomplete if it cannot enter a safe degraded mode under these failures. Every failure must be detectable, isolatable, and recoverable without data loss.
