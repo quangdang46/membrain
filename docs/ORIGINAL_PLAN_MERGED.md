@@ -1,33 +1,61 @@
-<!-- SOURCE: PLAN.md -->
+# membrain — MASTER PLAN
 
-# membrain — PLAN.md
-
-> **Vision**: Port the full set of human-memory mechanisms into an AI agent memory system.  
-> Like the human brain: long-lasting, high-capacity, fast, associative, intelligently forgetting, unbounded.  
-> Built for AI: CLI + MCP, usable from any tool, <1ms fast path, unlimited scale.
+> **Vision**: Build a brain-inspired memory operating system for AI agents.
+> The goal is not to literally reproduce the human brain. The goal is to map the most useful functional mechanisms of human memory into a production-grade memory system that is fast, durable, explainable, governable, and repairable.
+> Built for AI: local-first, CLI + MCP + daemon + IPC, bounded hot path, effectively unbounded cold storage.
 >
-> **Performance targets**: Tier1 <0.1ms | Tier2 <5ms | Tier3 <50ms | Encode <10ms  
-> **Scale target**: Unlimited — like the human brain (~2.5PB equivalent)
+> **Product thesis**:
+> - keep hot information extremely fast
+> - retain important knowledge across long horizons
+> - reconstruct useful context from compressed traces
+> - connect memory items by relation, not only similarity
+> - forget safely to reduce noise and cost
+> - preserve provenance, contradictions, and explainability
+>
+> **Performance targets**: Tier1 <0.1ms | Tier2 <5ms | Tier3 <50ms | Encode <10ms
+> **Scale target**: Effectively unbounded cold storage with bounded foreground latency
+> **Success conditions**: durable cross-session memory, measurable behavior improvement, stable latency as memory grows, explainability/governance/repairability, clean CLI+MCP integration
 
 ---
 
 ## TABLE OF CONTENTS
 
-1. [Current Problem — Why membrain Is Needed](#1-current-problem--why-membrain-is-needed)
-2. [The Human Brain — Complete Analysis](#2-the-human-brain--complete-analysis)
-3. [Gap Analysis — Human Brain vs Current AI Memory](#3-gap-analysis)
-4. [Port to membrain — Mechanism by Mechanism](#4-port-to-membrain)
-5. [Overall Architecture](#5-overall-architecture)
-6. [Performance — Bottlenecks & Optimizations](#6-performance)
-7. [Tech Stack — Analysis & Selection Rationale](#7-techstack)
-8. [Data Schema](#8-data-schema)
-9. [CLI Commands & MCP Tools](#9-cli-commands--mcp-tools)
-10. [Milestones](#10-milestones)
-11. [Acceptance Checklist](#11-acceptance-checklist)
+1. [Executive Thesis and Research Stance](#1-executive-thesis-and-research-stance)
+2. [Current Problem](#2-current-problem)
+3. [The Human Brain — Complete Analysis](#3-the-human-brain--complete-analysis)
+4. [Gap Analysis](#4-gap-analysis)
+5. [Port to membrain — Mechanism by Mechanism](#5-port-to-membrain--mechanism-by-mechanism)
+6. [Overall Architecture](#6-overall-architecture)
+7. [Non-Negotiable Design Invariants](#7-non-negotiable-design-invariants)
+8. [Non-Negotiable Request-Path Restrictions](#8-non-negotiable-request-path-restrictions)
+9. [Performance — Bottlenecks, Budgets, and Benchmark Gates](#9-performance--bottlenecks-budgets-and-benchmark-gates)
+10. [Tech Stack — Analysis & Selection Rationale](#10-techstack)
+11. [Data Schema](#11-data-schema)
+12. [CLI Commands & MCP Tools](#12-cli-commands--mcp-tools)
+13. [Milestones](#13-milestones)
+14. [Risks, Failure Modes, and Redesign Triggers](#14-risks-failure-modes-and-redesign-triggers)
+15. [Acceptance Checklist](#15-acceptance-checklist)
+16. [Constants (Tunable)](#16-constants-tunable)
 
 ---
 
-## 1. Current Problem
+## 1. Executive Thesis and Research Stance
+
+membrain is based on a simple claim: a useful agent memory system is not just a long-term store. It must coordinate working memory, episodic memory, semantic memory, associative recall, consolidation, and intelligent forgetting while keeping the foreground path bounded.
+
+This plan preserves the original brain-inspired thesis, but with a more disciplined engineering stance:
+
+- This is a **brain-inspired engineering plan**, not a claim of neuroscience-faithful replication.
+- Biological concepts are used as functional design inspirations, not as proof that the implementation is biologically equivalent.
+- Performance targets in this document are **benchmark goals**, not assumed outcomes.
+- Each major mechanism is a hypothesis until it proves utility, stays within latency/resource budgets, and remains explainable and repairable.
+- Milestone promotion depends on benchmark evidence and quality gates, not feature completion alone.
+
+The ambition remains the same: build an agent memory system that remembers across sessions, scales far beyond context windows, and carries forward useful knowledge. The difference is that this master plan treats research caution, governance, measurement discipline, and redesign triggers as first-class requirements rather than afterthoughts.
+
+---
+
+## 2. Current Problem
 
 ### What do current AI memory systems accomplish?
 
@@ -57,7 +85,7 @@
 
 ---
 
-## 2. The Human Brain — Complete Analysis
+## 3. The Human Brain — Complete Analysis
 
 ### 2.1 Core Characteristics
 
@@ -410,7 +438,7 @@ IN membrain:
 
 ---
 
-## 3. Gap Analysis
+## 4. Gap Analysis
 
 ### Human Brain vs Current AI Memory vs membrain
 
@@ -437,7 +465,7 @@ IN membrain:
 
 ---
 
-## 4. Port to membrain — Mechanism by Mechanism
+## 5. Port to membrain — Mechanism by Mechanism
 
 ### 4.1 Unbounded Capacity
 
@@ -693,7 +721,7 @@ membrain WorkingMemory:
 
 ---
 
-## 5. Overall Architecture
+## 6. Overall Architecture
 
 ### 5.1 Layered Storage — 3-Tier (Truly Like the Human Brain)
 
@@ -815,6 +843,23 @@ FORGETTING ENGINE (lazy pressure-triggered)
 
 ### 5.3 Process Model
 
+### 6.0 Architecture framing
+
+The original architecture is directionally strong: a three-tier memory model, explicit encode and retrieval flows, and separation between foreground retrieval and background maintenance. The revised master plan keeps that structure and adds production framing that must remain true as implementation evolves:
+
+- the hot path must stay bounded even as total stored memory grows
+- provenance and lineage must survive movement, consolidation, and mutation
+- contradiction handling must be explicit rather than overwrite-driven
+- graph expansion must be bounded and repairable
+- every returned result must be explainable after the fact
+
+The concise system view is:
+
+**Write path**: `ingest -> normalize -> classify -> score -> route -> persist -> schedule background jobs`
+
+**Read path**: `query context -> retrieval planner -> tier1 scan -> tier2 candidate generation -> optional tier3 fallback -> graph expansion -> ranking -> packaging -> reinforcement updates`
+
+
 ```
 membrain daemon (tokio async, always-on)
     │
@@ -838,7 +883,44 @@ If the daemon is not running:
 
 ---
 
-## 6. Performance — Bottlenecks & Optimizations
+## 7. Non-Negotiable Design Invariants
+
+1. **Hot path must stay bounded.** Foreground recall must remain bounded even if total memory grows by 100x.
+2. **Every memory item must have provenance.** Any mutation that would lose provenance must emit an explicit loss or derivation event.
+3. **No hard delete without policy approval or retention expiry.** Archive is the default; irreversible destruction is the exception.
+4. **Graph edges must remain repairable from lineage or re-indexing.** The graph is an optimization and relation layer, not an irrecoverable source of truth.
+5. **Tier routing decisions must be traceable.** Operators must be able to explain why an item was kept hot, consolidated, archived, or skipped.
+6. **Retrieval ranking must be explainable after the fact.** The system must expose which tier, scores, rerank inputs, and graph expansions influenced the result.
+7. **Consolidation must never silently discard authoritative evidence.** Derived semantic memory must retain lineage to source episodes.
+8. **Contradictions must be represented explicitly, not hidden by overwrite.** Ambiguity is a first-class state, not an implementation error.
+9. **Standalone and daemon modes must preserve semantic equivalence for core APIs.** Packaging mode must not change the meaning of memory operations.
+10. **Benchmarks must be reproducible on declared hardware.** No performance claim is credible without hardware, corpus, warm/cold, and concurrency disclosure.
+
+---
+
+## 8. Non-Negotiable Request-Path Restrictions
+
+### Foreground path restrictions
+- No LLM calls in encode, recall, `on_recall`, reconsolidation apply path, or forgetting eligibility path.
+- No full-store O(n) scan in any request path.
+- No decompression of cold payload before final candidate cut.
+- No graph BFS without hard depth and node caps.
+- No policy bypass in CLI, daemon, MCP, or IPC wrappers.
+
+### Storage restrictions
+- Tier1 must not own giant payloads.
+- Tier2 must separate metadata from large content.
+- Tier3 must remain recoverable after rebuild from durable records.
+- Archive must be reversible by default.
+
+### Research restrictions
+- No benchmark claim without dataset cardinality, machine profile, and warm/cold declaration.
+- No p95 claim from tiny sample counts unless explicitly labeled exploratory.
+- No production-performance claim without concurrency disclosure.
+
+---
+
+## 9. Performance — Bottlenecks, Budgets, and Benchmark Gates
 
 ### 6.1 Bottleneck Analysis
 
@@ -950,9 +1032,71 @@ Total RSS            <300MB for 50k hot + 1M cold
 Concurrent access    N readers + 1 writer (SQLite WAL)
 ```
 
+### 6.4 Performance budget decomposition
+
+The top-line latency targets need sub-budgets so they cannot be "won" by hiding expensive work elsewhere.
+
+#### Encode fast path
+- cache lookup and hashing: microseconds
+- embedding cache hit: near zero
+- cache miss embedding: bounded on declared hardware
+- novelty search: bounded top-k, not full-store search
+- DB insert + HNSW add: bounded
+- total p95 target: <10ms
+
+#### Tier1
+- exact lookup + score + return
+- p95 <0.1ms
+- p99 must remain close enough that the fast path remains credible
+
+#### Tier2
+- metadata prefilter
+- HNSW search
+- float32 rescore
+- optional engram expansion within a hard budget
+- p95 <5ms at declared hot cardinality
+
+#### Tier3
+- mmap probe
+- sparse metadata fetch
+- float32 rescore
+- cold payload only for final selection
+- p95 <50ms at declared cold cardinality
+
+### 6.5 Benchmark contracts and quality gates
+
+Every benchmark report must disclose:
+- corpus size
+- hardware profile
+- build mode
+- warm/cold state
+- concurrency level
+- p50 / p95 / p99 latency
+- retrieval-quality metric where relevant
+
+Standard benchmark tables to maintain:
+
+#### Retrieval benchmark template
+| Scenario | Corpus size | Warm/Cold | Concurrency | p50 | p95 | p99 | Pass? |
+|---|---:|---|---:|---:|---:|---:|---|
+
+#### Encode benchmark template
+| Scenario | Cache hit rate | Avg payload size | p50 | p95 | p99 | Pass? |
+|---|---:|---:|---:|---:|---:|---|
+
+#### Consolidation benchmark template
+| Job | Items moved | Foreground load | p95 foreground delta | Duration | Pass? |
+|---|---:|---:|---:|---:|---|
+
+#### Forgetting benchmark template
+| Prune class | Eligible set | False prune rate | Restore success | Recall quality delta | Pass? |
+|---|---:|---:|---:|---:|---|
+
+Promotion rule: no milestone is complete on feature presence alone. It is complete only when benchmark targets, correctness gates, and operability gates all pass on declared hardware.
+
 ---
 
-## 7. Techstack
+## 10. Techstack
 
 ### 7.1 Core Language: Rust + Tokio
 
@@ -1168,7 +1312,7 @@ Cold storage       sqlite-vec         usearch mmap           unlimited scale
 
 ---
 
-## 8. Data Schema
+## 11. Data Schema
 
 ### 7.1 hot.db
 
@@ -1450,7 +1594,47 @@ graph(id)
 
 ---
 
-## 10. Milestones
+## 13. Milestones
+
+### Phase summary
+
+#### Phase 0
+- freeze object model
+- build benchmark harness
+- implement Tier1 MVP
+
+#### Phase 1
+- Tier2 indexed retrieval
+- session and entity queries
+- ranking baseline
+
+#### Phase 2
+- graph support
+- contradiction records
+- explainable packaging
+
+#### Phase 3
+- consolidation and forgetting
+- compaction and repair
+
+#### Phase 4
+- distributed sharding
+- advanced operations
+- quality loop and skill memory
+
+### Milestone framing
+
+Every milestone below should be interpreted with the same review frame:
+- Goal
+- Scope
+- Deliverables
+- Dependencies
+- Restrictions
+- Benchmarks
+- Acceptance criteria
+- Redesign triggers
+
+This keeps the original milestone list intact while making roadmap progression depend on evidence rather than feature count alone.
 
 ### Milestone 1 — Foundation (Core Schema + Storage)
 ```
@@ -1615,7 +1799,67 @@ Acceptance: full integration test suite → all benchmarks pass → README compl
 
 ---
 
-## 11. Acceptance Checklist
+## 14. Risks, Failure Modes, and Redesign Triggers
+
+### Architectural risk
+- **Risk**: the three-tier design adds too much complexity before it proves product value.
+- **Why it matters**: the system can become harder to ship than to use.
+- **Early warning signal**: architecture expands faster than benchmark evidence.
+- **Mitigation**: enforce milestone gates and prove Tier1/Tier2 value before later complexity.
+- **Redesign trigger**: Tier3 or graph complexity is introduced without measurable quality gain from the earlier stages.
+
+### Performance risk
+- **Risk**: graph fanout, cold payload fetch, or local embedding cost dominates latency.
+- **Why it matters**: bounded-latency claims fail in real workloads.
+- **Early warning signal**: p95/p99 drift upward as realistic corpora are introduced.
+- **Mitigation**: hard caps, performance budget decomposition, and explicit benchmark disclosure.
+- **Redesign trigger**: tail latency cannot be capped without unacceptable quality loss.
+
+### Product risk
+- **Risk**: biologically inspired mechanisms add elegance but not user benefit.
+- **Why it matters**: complexity without behavior improvement is pure cost.
+- **Early warning signal**: retrieval demos look interesting but task quality does not improve.
+- **Mitigation**: benchmark against real agent workloads, not just synthetic corpora.
+- **Redesign trigger**: a mechanism repeatedly fails to improve practical outcomes.
+
+### Research risk
+- **Risk**: benchmark wins on synthetic datasets do not transfer to production-like traces.
+- **Why it matters**: the plan becomes overfit to the harness.
+- **Early warning signal**: strong microbench numbers with weak cross-session task carryover.
+- **Mitigation**: maintain both synthetic and realistic corpora in the benchmark suite.
+- **Redesign trigger**: stage wins fail to predict end-to-end usefulness.
+
+### Governance risk
+- **Risk**: explainability becomes post hoc narration rather than faithful traceability.
+- **Why it matters**: users and operators lose the ability to trust or repair the system.
+- **Early warning signal**: explanations cannot show actual ranking inputs, tier paths, or lineage.
+- **Mitigation**: bind explanation output to recorded retrieval signals and audit events.
+- **Redesign trigger**: explanation fidelity cannot be maintained without major simplification.
+
+### Forgetting risk
+- **Risk**: pruning removes sparse but valuable information.
+- **Why it matters**: low-frequency facts can still be mission-critical.
+- **Early warning signal**: restored items often turn out to be high-utility memories.
+- **Mitigation**: archive-first policy, false-prune tracking, pinned/authoritative classes.
+- **Redesign trigger**: realistic workloads show repeated high-value false pruning.
+
+### Mutation risk
+- **Risk**: reconsolidation introduces correctness ambiguity or cache/index divergence.
+- **Why it matters**: mutable memory is useful only if it stays governable.
+- **Early warning signal**: updates produce unexplained ranking drift or stale retrieval.
+- **Mitigation**: lineage retention, contradiction records, restart-safe apply logic.
+- **Redesign trigger**: repeated coherence failures remain after a bounded redesign cycle.
+
+### Operational risk
+- **Risk**: repair and rebuild flows are too fragile or expensive.
+- **Why it matters**: a production memory system must survive corruption, upgrades, and rollback.
+- **Early warning signal**: recovery depends on manual tribal knowledge.
+- **Mitigation**: doctor tooling, rebuild drills, migration notes, rollback notes.
+- **Redesign trigger**: seeded failure cases cannot be repaired repeatably.
+
+---
+
+## 15. Acceptance Checklist
 
 ### Biological Accuracy
 ```
@@ -1670,9 +1914,23 @@ Acceptance: full integration test suite → all benchmarks pass → README compl
 □ Config validation on startup
 ```
 
+### Governance, explainability, and operability
+```
+□ Every durable memory item preserves provenance
+□ Tier routing decisions are inspectable after the fact
+□ Retrieval ranking exposes tier, score, rerank, and graph-expansion reasons
+□ Contradictions are represented explicitly, not overwritten
+□ Consolidation retains lineage to authoritative source evidence
+□ Archive/restore roundtrip is tested
+□ Graph and index structures are rebuildable from durable records
+□ Benchmark reports disclose corpus size, hardware, warm/cold state, and concurrency
+□ CLI, daemon, IPC, and MCP preserve core semantic behavior
+□ Doctor / repair flows exist for seeded failure cases
+```
+
 ---
 
-## Constants (Tunable)
+## 16. Constants (Tunable)
 
 ```toml
 # ~/.membrain/config.toml
