@@ -44,6 +44,43 @@ What is added:
 
 ---
 
+## Canonical Technical Corrections (English, superseding conflicting older snippets)
+
+The merged source below contains older snapshot text. The following rules supersede any conflicting detail later in the document:
+
+1. **Official stack**
+   - Rust
+   - Tokio
+   - SQLite in WAL mode
+   - SQLite FTS5 for lexical retrieval
+   - USearch for ANN / HNSW and mmap-backed cold indexes
+   - fastembed for local embeddings
+   - a **local reranker** for final top-K ordering on high-value recall paths
+
+2. **Official retrieval path**
+   - Exact / lexical lane: SQLite tables + FTS5
+   - Semantic lane: USearch hot/cold ANN
+   - Final ordering: local reranker + lightweight score fusion
+   - `sqlite-vec` is **not** part of the official path
+
+3. **Official storage role split**
+   - SQLite stores metadata, provenance, state, leases, policies, graph edges, checkpoints, and FTS5 text indexes
+   - USearch stores ANN indexes
+   - Float embeddings remain authoritative in durable storage; quantized vectors are for search speed
+
+4. **Official graph persistence**
+   - `petgraph` is used for in-memory graph operations
+   - persistent graph data is stored in normalized edge tables in SQLite
+   - do not treat a single JSON/BLOB graph dump as the production source of truth
+
+5. **Official wording**
+   - Use “brain-inspired cognitive runtime” or “brain-inspired memory operating system”
+   - avoid implying literal biological equivalence
+
+
+
+---
+
 ## Canonical Plan Body (Merged Sources)
 
 <!-- SOURCE: PLAN.md -->
@@ -72,6 +109,8 @@ What is added:
 9. [CLI Commands & MCP Tools](#9-cli-commands--mcp-tools)
 10. [Milestones](#10-milestones)
 11. [Acceptance Checklist](#11-acceptance-checklist)
+46. [Feature Implementation Specs (Batch 1)](#46-feature-implementation-specs-batch-1)
+47. [Feature Implementation Specs (Batch 2)](#47-feature-implementation-specs-batch-2)
 
 ---
 
@@ -490,35 +529,41 @@ IN membrain:
 ### 4.1 Unlimited Capacity
 
 ```
-Brain: ~100T synaptic connections, ~2.5PB
-Problem: AI memory tools are limited by RAM, context window, API costs
+Brain: ~100T synaptic connections, ~2.5PB equivalent (order-of-magnitude inspiration)
+Problem: AI memory tools are usually bounded by RAM, context-window pressure, or remote API costs
 
-membrain: Unlimited SQLite (TB-scale on disk)
-          Vectors stored as BLOBs — no need for external vector DB
-          sqlite-vec: brute-force fast enough cho millions of vectors
-          No need to load the entire thing into RAM
+membrain:
+  - Durable metadata and text retrieval live in SQLite
+  - Lexical recall uses SQLite FTS5
+  - Semantic recall uses USearch hot/cold indexes
+  - Cold storage is disk-backed and mmap-friendly
+  - The architecture is disk-bounded, not RAM-bounded
 ```
 
 ### 4.2 Dual-Path Fast/Slow Retrieval
 
 ```
 Brain:
-  Fast path: Neocortex pattern matching ~13ms, no hippocampus needed
-  Slow path: Hippocampus + cortex reconstruction ~100-500ms
+  Fast path: neocortex familiarity / pattern matching
+  Slow path: hippocampal reconstruction + cluster expansion
 
 membrain:
-  Fast path: in-memory HashMap<EngageKey, MemoryId>
-             Hot memories (<1h, high strength) cached in process memory
-             Familiarity check: "know this?" → instant yes/no
-             Return if confidence > threshold
+  Fast path:
+    - Tier1 in-memory cache
+    - exact key lookups
+    - recently primed working-set hits
 
-  Slow path: SQLite query + sqlite-vec similarity search
-             Engram activation → graph traversal → cluster reconstruction
-             Context re-ranking, strength weighting
-             Return full episodic memory with fragments
+  Slow path:
+    - SQLite pre-filter + FTS5 lexical retrieval
+    - USearch ANN retrieval on hot or cold tiers
+    - local reranker for the final top-K
+    - engram/graph expansion with hard caps
+    - context re-ranking and provenance-aware packaging
 
-  Bridge: If fast path is not confident → escalation → slow path
-             Slow path result → update fast path cache
+  Bridge:
+    - If the fast path is confident enough, return immediately
+    - Otherwise escalate to hybrid retrieval
+    - Successful slow-path results can update higher tiers
 ```
 
 ### 4.3 LTP / LTD Engine
@@ -1019,130 +1064,146 @@ WHY TOKIO:
   ✅ SQLite WAL reads concurrently with async tasks
 ```
 
-### 7.2 Vector Index: usearch (Instead of sqlite-vec)
+### 7.2 Official Retrieval Stack
 
 ```
-WHY USEARCH INSTEAD OF SQLITE-VEC:
+The official retrieval stack is:
 
-  sqlite-vec:
-    ✅ Embedded in SQLite, simple
-    ❌ Brute-force KNN — O(n×d) — DEATH at scale
-    ❌ No HNSW
-    ❌ No int8 quantization
-    ❌ There is no mmap mode
+  lexical / exact lane:
+    SQLite tables + FTS5
 
-  usearch:
-    ✅ HNSW — O(log n) ANN search
-    ✅ int8 / float16 / binary quantization native
-    ✅ SIMD AVX2/AVX-512/NEON auto-detect
-    ✅ mmap mode — disk-backed unlimited scale
-    ✅ Used in your smart-grep
-    ✅ <5ms at 1M vectors, <50ms at 1B vectors
+  semantic lane:
+    USearch HNSW for hot memory
+    USearch mmap-backed index for cold memory
 
-STRATEGY:
-  hot_index:  usearch HNSW in-memory, 50k limit, int8
-              → rebuild from hot.db when daemon starts
-  cold_index: usearch mmap, unlimited, int8
-              → persist file ~/.membrain/cold.usearch
+  final ordering lane:
+    local reranker on the top-K candidates
+    plus lightweight score fusion:
+      final_score = a*semantic + b*lexical + c*context + d*strength
 
-QUANTIZATION STRATEGY:
-  Store:  float32 embeddings in SQLite (ground truth)
-  Search: int8 quantized in usearch (fast)
-  Rescore: load float32 from SQLite for top-20 candidates
-           → accurate recovery with minimal overhead
+This stack is chosen because it preserves low-latency local execution while
+avoiding over-reliance on any single retrieval mechanism.
 ```
 
-### 7.3 Storage: SQLite + WAL (metadata only)
+### 7.3 Storage: SQLite + WAL + FTS5
 
 ```
-SQLite is still used for:
-  - Memory metadata (strength, state, timestamps, emotional_tag)
-  - Engram table and engram_members
-  - Procedural store
-  - Archive table
-  - Config and brain_state
+SQLite is the authoritative durable store for:
+  - memory metadata
+  - provenance
+  - lifecycle state
+  - strengths / stability / timestamps
+  - belief state
+  - leases / freshness rules
+  - graph edges
+  - checkpoints
+  - policies / preferences / procedural metadata
 
-DO NOT use SQLite for vector search:
-  → usarch takes over completely
+SQLite FTS5 is the default lexical engine for:
+  - names
+  - ids
+  - rare tokens
+  - exact-ish lookup
+  - negation-sensitive text retrieval
+  - keyword-first recall
 
-WAL mode = concurrent safe:
-  - Multiple readers simultaneously
-  - usearch reads does not block SQLite writes
-  - Crash-safe
+WAL mode is the default because it supports:
+  - many concurrent readers
+  - one writer with short transactions
+  - background work with acceptable read concurrency
+  - crash recovery consistent with SQLite guarantees
 
 Files:
-  ~/.membrain/hot.db          SQLite metadata hot
-  ~/.membrain/cold.db         SQLite metadata cold
-  ~/.membrain/hot.usearch     usearch HNSW hot index (rebuilt on start)
-  ~/.membrain/cold.usearch    usearch mmap cold index (persistent)
+  ~/.membrain/hot.db
+  ~/.membrain/cold.db
+  ~/.membrain/hot.usearch
+  ~/.membrain/cold.usearch
 ```
 
-### 7.4 Embedding: fastembed-rs + LruCache
+### 7.4 Semantic Index: USearch
 
 ```
-fastembed-rs:
-  ✅ Local ONNX inference, offline
-  ✅ Proven in smart-grep
-  ✅ Batch mode: embed_batch() → 3-5x throughput
+USearch is the official vector engine.
 
-MODEL RECOMMENDATION:
-  Default: all-MiniLM-L6-v2
-    Dimensions: 384
-    Size: 80MB
-    Speed: ~5ms single, ~1ms/item batch
-    Quality: good for semantic similarity
-    → This is NOT an LLM — it does not generate text
-    → Only convert text → 384 numbers (vector)
-    → No API calls, no internet required
+Why:
+  - ANN / HNSW support
+  - good low-latency characteristics for hot semantic retrieval
+  - mmap-backed cold index support
+  - quantized search-friendly representations
+  - strong fit for local-first Rust deployment
 
-  High-quality option: nomic-embed-text-v1.5
-    Dimensions: 768
-    Size: 274MB
-    Speed: ~15ms single
-    Quality: significantly better semantic understanding
+Official strategy:
+  hot_index:
+    USearch HNSW, in-memory, bounded hot set
+  cold_index:
+    USearch persisted index, mmap-backed, disk-scale
 
-EMBEDDING CACHE:
-  LruCache<u64, Vec<f32>>
-    key:      xxhash64(content_bytes)
-    capacity: 1000 entries
-    size:     ~1.5MB RAM (384 dims × 4 bytes × 1000)
-    hit rate: >80% in practice
+Quantization strategy:
+  - authoritative embedding: float32
+  - hot search representation: f16/bf16 or int8 depending benchmark outcome
+  - cold search representation: int8 is acceptable if rerank / rescore preserves quality
 ```
 
-### 7.5 Graph: petgraph
+### 7.5 Embeddings + Local Reranker
 
 ```
-WHY PETGRAPH:
-  ✅ Engram clusters = graph traversal problem
-  ✅ BFS/DFS built-in cho associative recall
-  ✅ Serde support — serialize into SQLite BLOB
-  ✅ Same ecosystem with scope tool
+fastembed is the default local embedding layer.
 
-GRAPH MODEL:
-  DiGraph<Uuid, EdgeWeight>
-  Nodes: memory_id
-  Edges: { similarity: f32, edge_type: Associative | Engram | Causal }
-  Storage: petgraph serde → JSON BLOB in the hot.db engrams table
-  Traversal: BFS from seed, max_depth=3, min_edge_weight=0.5
+Why:
+  - local / offline
+  - good developer ergonomics
+  - works well with batching
+  - avoids remote API latency and privacy concerns
+
+Embedding defaults:
+  - model family chosen by benchmarked quality/speed trade-off
+  - caching via LruCache or equivalent
+  - batch embedding in consolidation / import flows
+
+Local reranker:
+  - mandatory on production-quality recall paths where top-K precision matters
+  - applied after lexical + semantic candidate generation
+  - limited to a bounded candidate set (for example 20-100 items)
+  - can be implemented behind a pluggable trait so the runtime stays flexible
+
+Recommended abstraction:
+  trait LocalReranker {
+      fn rerank(&self, query: &str, docs: &[CandidateDoc]) -> Result<Vec<RerankedDoc>>;
+  }
 ```
 
-### 7.6 IPC + MCP
+### 7.6 Graph: petgraph + normalized persistence
 
 ```
-Unix Socket + JSON-RPC 2.0:
+petgraph is used for in-memory graph operations:
+  - BFS / DFS
+  - bounded neighborhood expansion
+  - cluster maintenance
+  - local reasoning over associative links
+
+Production persistence:
+  - graph nodes and edges are stored in normalized SQLite tables
+  - not in a single JSON/BLOB snapshot
+  - rebuildable and auditable
+
+This keeps the graph debuggable, repairable, and migration-friendly.
+```
+
+### 7.7 IPC + MCP
+
+```
+Unix socket + JSON-RPC 2.0:
   Path: ~/.membrain/membrain.sock
-  Protocol: JSON-RPC 2.0 (standard, libraries all languages)
-  Python: 3 lines of code to connect
-  Node:   net.createConnection()
-  Rust:   tokio::net::UnixStream
+  Purpose: local IPC for tools and sidecar clients
 
-rmcp (MCP server):
-  stdio transport cho Claude Code / Cursor
-  membrain mcp → spawn process, talk stdio
-  Tools: remember, recall, forget, strengthen, stats, consolidate
+MCP:
+  stdio transport for Claude Code / Cursor style integrations
+
+CLI:
+  remains first-class for local inspection, debugging, benchmarks, and maintenance
 ```
 
-### 7.7 Complete Dependency List
+### 7.8 Complete Dependency List
 
 ```toml
 [workspace]
@@ -1150,37 +1211,21 @@ members = ["membrain-core", "membrain-cli"]
 
 # membrain-core
 [dependencies]
-# Storage
 rusqlite    = { version = "0.31", features = ["bundled"] }
-
-# Vector index
-usearch     = "2"                        # HNSW + int8 + mmap + SIMD
-
-# Embedding
-fastembed   = "3"                        # local ONNX, no API
-
-# Graph
+usearch     = "2"
+fastembed   = "3"
 petgraph    = { version = "0.6", features = ["serde-1"] }
-
-# Async
 tokio       = { version = "1", features = ["full"] }
-
-# Cache
-lru         = "0.12"                     # LruCache cho Tier1 + embedding cache
-
-# Hashing (embedding cache key)
+lru         = "0.12"
 xxhash-rust = { version = "0.8", features = ["xxh64"] }
-
-# Serialization
 serde       = { version = "1", features = ["derive"] }
 serde_json  = "1"
-
-# IDs
 uuid        = { version = "1", features = ["v4", "serde"] }
-
-# Error
 thiserror   = "1"
 anyhow      = "1"
+
+# optional helpers often useful in this plan
+ordered-float = "4"
 
 # membrain-cli
 [dependencies]
@@ -1188,84 +1233,74 @@ membrain-core = { path = "../membrain-core" }
 clap          = { version = "4", features = ["derive"] }
 rmcp          = "0.1"
 tokio         = { version = "1", features = ["full"] }
-
-# Build flags
-[profile.release]
-opt-level     = 3
-lto           = true
-codegen-units = 1
-# Run with: RUSTFLAGS="-C target-cpu=native" cargo build --release
-# Enables AVX2/AVX-512 SIMD automatically via usearch
 ```
 
-### 7.8 Compare Techstack Before vs After
+### 7.9 Compare Techstack Before vs After
 
 ```
-COMPONENT BEFORE (slow) AFTER (optimal) SPEEDUP
-───────────────────────────────────────────────────────────────────
-Vector index       sqlite-vec         usearch HNSW           100x+
-                   O(n×d) brute       O(log n) ANN
-Vector precision   float32 only       int8 search +          2x faster
-                                      float32 rescore        4x smaller
-Decay              eager O(n) tick    lazy O(1) on-demand    ∞ idle
-Embedding          single call        LruCache + batch       0ms cache hit
-Search space       full scan          SQL pre-filter 5000    200x reduction
-Fast path without LruCache Tier1 <0.1ms
-Cold storage       sqlite-vec         usearch mmap           unlimited scale
+COMPONENT          REJECTED / OLD IDEA         OFFICIAL DIRECTION
+---------------------------------------------------------------------------
+lexical retrieval  ad-hoc SQL only             SQLite FTS5
+vector retrieval   sqlite-vec on hot path      USearch hot/cold
+ranking            vector score only           local reranker + score fusion
+graph persistence  one JSON/BLOB dump          normalized SQLite edge tables
+storage role split mixed responsibilities      SQLite for state, USearch for ANN
 ```
 
 ---
 
 ## 8. Data Schema
 
+**Schema note:** any older `vec0` / `sqlite-vec` examples below are historical snapshots and are superseded by the FTS5 + USearch schema above.
+
 ### 7.1 hot.db
 
 ```sql
--- Core memories (hippocampus)
+-- Core memories (authoritative metadata)
 CREATE TABLE memories (
-  id              TEXT PRIMARY KEY,  -- UUID
-  engram_id TEXT, -- NULL if not clustered
-  kind            TEXT NOT NULL,     -- Episodic|Semantic|Procedural|Emotional
-  content         TEXT NOT NULL,
-  context TEXT, -- context at encoding
-  state           TEXT NOT NULL,     -- Labile|SynapticDone|Consolidating|Consolidated
-  
-  -- LTP/LTD dynamics
-  strength        REAL NOT NULL DEFAULT 0.5,
-  stability       REAL NOT NULL DEFAULT 1.0,  -- Ebbinghaus S
-  access_count    INTEGER NOT NULL DEFAULT 0,
-  
-  -- Emotional (Amygdala)
-  emotional_valence  REAL NOT NULL DEFAULT 0.0,  -- -1.0 to 1.0
-  emotional_arousal  REAL NOT NULL DEFAULT 0.0,  -- 0.0 to 1.0
-  bypass_decay       INTEGER NOT NULL DEFAULT 0, -- boolean
-  
-  -- Reconsolidation
-  labile_since INTEGER, -- interaction_count when labile started
-  labile_window INTEGER, -- how many interactions to reconsolidate
-  pending_update  TEXT,              -- JSON update content
-  
-  -- Temporal (interaction-based, not real time)
-  created_at INTEGER NOT NULL, -- interaction_count at creation
-  last_accessed INTEGER NOT NULL, -- interaction_count at last recall
-  
-  -- Metadata
-  source TEXT, -- ai/tool ​​encode this memory
-  attention_score REAL,
-  novelty_score   REAL
+  id                  TEXT PRIMARY KEY,
+  engram_id           TEXT,
+  kind                TEXT NOT NULL,
+  content             TEXT NOT NULL,
+  context             TEXT,
+  state               TEXT NOT NULL,
+  strength            REAL NOT NULL DEFAULT 0.5,
+  stability           REAL NOT NULL DEFAULT 1.0,
+  access_count        INTEGER NOT NULL DEFAULT 0,
+  emotional_valence   REAL NOT NULL DEFAULT 0.0,
+  emotional_arousal   REAL NOT NULL DEFAULT 0.0,
+  bypass_decay        INTEGER NOT NULL DEFAULT 0,
+  labile_since        INTEGER,
+  labile_window       INTEGER,
+  pending_update      TEXT,
+  created_at          INTEGER NOT NULL,
+  last_accessed       INTEGER NOT NULL,
+  source              TEXT,
+  attention_score     REAL,
+  novelty_score       REAL
 );
 
--- Vector index cho hot memories
-CREATE VIRTUAL TABLE vec_memories USING vec0(
-  memory_id TEXT PARTITION KEY,
-  content_embedding float[384],
-  context_embedding float[384]
+-- Lexical search (official exact / keyword lane)
+CREATE VIRTUAL TABLE memory_fts USING fts5(
+  memory_id UNINDEXED,
+  content,
+  context,
+  tokenize = 'unicode61'
+);
+
+-- Embedding registry (authoritative float embeddings can live in SQLite or sidecar files)
+CREATE TABLE memory_embeddings (
+  memory_id           TEXT PRIMARY KEY REFERENCES memories(id),
+  dims                INTEGER NOT NULL,
+  dtype               TEXT NOT NULL,            -- f32 authoritative
+  content_embedding   BLOB NOT NULL,
+  context_embedding   BLOB
 );
 
 -- Engram clusters
 CREATE TABLE engrams (
   id                  TEXT PRIMARY KEY,
-  centroid_embedding  BLOB NOT NULL,   -- averaged embedding
+  centroid_embedding  BLOB NOT NULL,
   strength            REAL NOT NULL DEFAULT 0.5,
   member_count        INTEGER NOT NULL DEFAULT 0,
   created_at          INTEGER NOT NULL,
@@ -1273,42 +1308,57 @@ CREATE TABLE engrams (
 );
 
 CREATE TABLE engram_members (
-  engram_id   TEXT NOT NULL REFERENCES engrams(id),
-  memory_id   TEXT NOT NULL REFERENCES memories(id),
-  similarity  REAL NOT NULL,
+  engram_id           TEXT NOT NULL REFERENCES engrams(id),
+  memory_id           TEXT NOT NULL REFERENCES memories(id),
+  similarity          REAL NOT NULL,
   PRIMARY KEY (engram_id, memory_id)
 );
 
--- Global state
-CREATE TABLE brain_state (
-  key   TEXT PRIMARY KEY,
-  value TEXT NOT NULL
+-- Normalized graph persistence
+CREATE TABLE graph_edges (
+  src_memory_id       TEXT NOT NULL REFERENCES memories(id),
+  dst_memory_id       TEXT NOT NULL REFERENCES memories(id),
+  edge_type           TEXT NOT NULL,
+  weight              REAL NOT NULL,
+  created_at          INTEGER NOT NULL,
+  PRIMARY KEY (src_memory_id, dst_memory_id, edge_type)
 );
--- Keys: interaction_count, total_strength, last_consolidation, version
+
+CREATE TABLE brain_state (
+  key                 TEXT PRIMARY KEY,
+  value               TEXT NOT NULL
+);
 ```
 
 ### 7.2 cold.db
 
 ```sql
--- Consolidated semantic memories (neocortex)
 CREATE TABLE cold_memories (
-  id              TEXT PRIMARY KEY,
-  hot_memory_id TEXT, -- pointer to hot_store
-  kind            TEXT NOT NULL,
-  content         TEXT NOT NULL,     -- compressed/summarized
-  strength        REAL NOT NULL,
-  emotional_valence REAL,
-  emotional_arousal REAL,
-  bypass_decay    INTEGER,
-  access_count    INTEGER DEFAULT 0,
-  consolidated_at INTEGER NOT NULL,
-  last_accessed   INTEGER NOT NULL,
-  source          TEXT
+  id                  TEXT PRIMARY KEY,
+  hot_memory_id       TEXT,
+  kind                TEXT NOT NULL,
+  content             TEXT NOT NULL,
+  strength            REAL NOT NULL,
+  emotional_valence   REAL,
+  emotional_arousal   REAL,
+  bypass_decay        INTEGER,
+  access_count        INTEGER DEFAULT 0,
+  consolidated_at     INTEGER NOT NULL,
+  last_accessed       INTEGER NOT NULL,
+  source              TEXT
 );
 
-CREATE VIRTUAL TABLE vec_cold USING vec0(
-  cold_memory_id TEXT PARTITION KEY,
-  content_embedding float[384]
+CREATE VIRTUAL TABLE cold_memory_fts USING fts5(
+  cold_memory_id UNINDEXED,
+  content,
+  tokenize = 'unicode61'
+);
+
+CREATE TABLE cold_embeddings (
+  cold_memory_id      TEXT PRIMARY KEY REFERENCES cold_memories(id),
+  dims                INTEGER NOT NULL,
+  dtype               TEXT NOT NULL,
+  content_embedding   BLOB NOT NULL
 );
 ```
 
@@ -1774,7 +1824,7 @@ min_edge_weight            = 0.5
 ---
 
 *membrain — port of human brain mechanism to AI agent. Build order: M1 → M10.*
-*Stack: Rust + Tokio + usearch HNSW + SQLite WAL + fastembed-rs + petgraph*  
+*Stack: Rust + Tokio + SQLite WAL + FTS5 + USearch + fastembed + local reranker + petgraph*  
 *Targets: Tier1 <0.1ms | Tier2 <5ms | Tier3 <50ms | Scale: unlimited*
 
 
@@ -1789,7 +1839,7 @@ min_edge_weight            = 0.5
 >
 > **Performance targets**: Tier1 <0.1ms | Tier2 <5ms | Tier3 <50ms | Encode <10ms
 > **Scale target**: Unlimited — usearch mmap + SQLite, TB-scale on disk
-> **Stack**: Rust + Tokio + usearch HNSW + SQLite WAL + fastembed-rs + petgraph
+> **Stack**: Rust + Tokio + SQLite WAL + FTS5 + USearch + fastembed + local reranker + petgraph
 > **Integration**: CLI + MCP (Claude Code / Cursor) + Unix socket IPC + Python/Node clients
 
 ---
@@ -9669,458 +9719,300 @@ OUTPUT:
 
 ## 10. Top 10 Feature Extensions
 
-Each feature includes: biological basis, implementation cost, API design, and Rust pseudocode.
+Each section below is written in English and focuses on **how to build the feature pragmatically**.
 
-### 10.1 Feature 1: Temporal Time-Travel Recall
+### 10.1 Dual Memory Output
 
-```
-BIOLOGICAL BASIS:
-  Humans can mentally "time travel" — reconstruct their knowledge state
-  at a past point in time. "What did I know before I learned X?"
-  This is supported by hippocampal temporal indexing (place cells + time cells).
+**What it adds**
+- Every important recall returns two parallel products:
+  - **Evidence Pack**
+  - **Action Pack**
 
-IMPLEMENTATION COST: LOW
-  Pure SQL: parameterize effective_strength formula with historical tick.
-  No new data structures needed.
+**Why it matters**
+- Separates “what the system knows” from “what the system suggests doing”.
+- Improves trust, auditability, and UX clarity.
 
-API:
-  membrain recall "authentication" --as-of 5000
-  membrain recall "what I knew about JWT" --as-of 2000
+**How to implement**
+1. Add `EvidenceItem` and `ActionArtifact` as separate result types.
+2. Keep evidence items tied to provenance and timestamps.
+3. Let action artifacts be derived summaries, procedures, heuristics, or next-step suggestions.
+4. Extend recall API to return:
+   - `evidence_pack`
+   - `action_pack`
+   - `uncertainty`
+5. Add a mode flag:
+   - `strict`
+   - `balanced`
+   - `fast`
 
-HOW IT WORKS:
-  fn effective_strength_at(memory: &MemoryIndex, at_tick: u64) -> f32 {
-      // Use historical last_accessed_tick as reference
-      // For memories accessed after at_tick: use at_tick as ceiling
-      let reference_tick = memory.last_accessed_tick.min(at_tick);
-      let elapsed = at_tick.saturating_sub(reference_tick) as f32;
-      let retention = (-elapsed / memory.stability).exp();
-      memory.base_strength_at_tick(at_tick) * retention
-      // base_strength_at_tick: would require storing strength history
-      // SIMPLIFICATION: use current base_strength as approximation
-      // Good enough for most time-travel use cases
-  }
-  
-  // SQL pre-filter with historical tick
-  WHERE created_tick <= ?  -- only memories that existed at that tick
-  AND (base_strength * EXP(-(?-last_tick)/stability)) > ?  -- effective strength at that tick
-
-USE CASE:
-  Agent encountered a new API breaking change.
-  "What did I think about this API before I saw the changelog?"
-  → time-travel to before the changelog tick → shows pre-update beliefs
-  → identify which memories need to be reconsolidated with new info
-
-IMPLEMENTATION:
-  // Minimal change: RecallQuery already has as_of_tick: Option<u64>
-  // In recall pipeline:
-  let now = query.as_of_tick.unwrap_or(brain.tick());
-  // Use `now` as the time reference throughout the recall pipeline
-  // SQL pre-filter adds: AND created_tick <= ?  with as_of_tick as param
-```
-
-### 10.2 Feature 2: Contrastive Anti-Query
-
-```
-BIOLOGICAL BASIS:
-  Humans can think contrastively: "What contradicts what I believe?"
-  The PFC can explicitly suppress activation of certain memory patterns
-  and amplify competing patterns.
-  Directed forgetting research: PFC suppresses hippocampal retrieval.
-
-IMPLEMENTATION COST: MEDIUM
-  Requires: EdgeType::Contradictory edges in engram graph.
-  During encoding: detect high-similarity but conflicting content.
-  New CLI flag + recall pipeline branch.
-
-API:
-  membrain recall "JWT is stateless" --contradicts
-  membrain recall "Stripe works well" --contradicts
-
-HOW IT WORKS:
-  // During encoding: detect contradictions
-  // Heuristic: high similarity (>0.7) but contains negation markers
-  fn detect_contradiction(new_content: &str, existing_content: &str, similarity: f32) -> bool {
-      if similarity < 0.7 || similarity > 0.99 { return false; }
-      let negation_markers = ["not", "never", "wrong", "incorrect", "opposite",
-                               "but", "however", "actually", "mistake", "error"];
-      let combined = format!("{} {}", new_content, existing_content);
-      negation_markers.iter().any(|m| combined.contains(m))
-  }
-  
-  // If contradiction detected: add EdgeType::Contradictory edge
-  
-  // Anti-query retrieval:
-  fn recall_contradicting(query: &str, brain: &BrainStore) -> Vec<ScoredMemory> {
-      // 1. Find memories most similar to query
-      let query_vec = embed(query);
-      let similar = brain.recall(query, top_k=50);
-      
-      // 2. Find memories connected with EdgeType::Contradictory edges
-      let contradictions = similar.iter()
-          .flat_map(|m| {
-              brain.engram_graph
-                  .edges_with_type(m.id, EdgeType::Contradictory)
-                  .map(|(target_id, _)| target_id)
-          })
-          .collect::<Vec<_>>();
-      
-      // 3. Return the contradicting memories
-      brain.fetch_and_score(contradictions, query_vec)
-  }
-
-USE CASE:
-  Agent believes "Python is slow for this workload."
-  membrain recall "Python is slow" --contradicts
-  → Returns memories like "PyPy achieves C-level speed for numeric loops"
-  → Enables more nuanced reasoning from the agent
-```
-
-### 10.3 Feature 3: Memory Priming / Spotlight Mode
-
-```
-(Already fully documented in Section 9.12 and Performance section)
-
-BIOLOGICAL BASIS:
-  Mental preparation activates relevant engrams in advance.
-  Pre-activation lowers retrieval threshold for those memories.
-  Athletes, surgeons use this before high-performance tasks.
-
-SUMMARY:
-  membrain prime "context description"
-  → embeds context → queries Tier2 broadly → pre-loads into Tier1
-  → PrimedContext stored with boost_factor and expiry_tick
-  → all subsequent recalls: score += priming_boost × context_match
-  → dramatically reduces first-recall latency for primed topics
-```
-
-### 10.4 Feature 4: Auto-Abstraction
-
-```
-BIOLOGICAL BASIS:
-  Episodic memories decay → semantic knowledge remains.
-  "I don't remember the Tuesday I learned cycling, but I know how to cycle."
-  NREM sleep: repeated replay → extract semantic essence → abstract memory.
-  
-IMPLEMENTATION COST: MEDIUM-HIGH
-  Requires: LLM call OR heuristic rule extraction during NREM.
-  LLM version: call during consolidation to generate semantic summary.
-  Heuristic version: find common patterns across engram members.
-
-API:
-  membrain consolidate --auto-abstract
-  # Or: triggered automatically when engram has N decaying episodic members
-
-HOW IT WORKS (heuristic, no LLM):
-  fn try_auto_abstract(engram: &Engram, members: &[MemoryRecord]) -> Option<String> {
-      // Find members that are:
-      //   1. Episodic kind
-      //   2. Effective strength below ABSTRACT_THRESHOLD
-      //   3. Access count > MIN_ACCESS (has been recalled at least once)
-      let candidates: Vec<_> = members.iter()
-          .filter(|m| {
-              m.index.kind == MemoryKind::Episodic
-              && effective_strength(&m.index, now_tick) < ABSTRACT_THRESHOLD
-              && m.index.access_count >= MIN_ACCESS_FOR_ABSTRACT
-          })
-          .collect();
-      
-      if candidates.len() < MIN_ABSTRACT_COUNT { // e.g., 5
-          return None;
-      }
-      
-      // Heuristic: find longest common substring across candidate contents
-      // Or: extract most frequent n-grams
-      // Or: use first sentence of highest-strength member as abstract
-      
-      // This is the "poor man's abstraction" — LLM version much better
-      Some(extract_common_theme(candidates))
-  }
-  
-HOW IT WORKS (with LLM — optional, expensive):
-  // During NREM consolidation, after migrating decaying episodic memories:
-  if has_decaying_episodics_in_engram {
-      let episodes = collect_episode_contents(&decaying_members);
-      let abstract = llm_call(
-          "Synthesize the key semantic knowledge from these episodes: {episodes}"
-      ).await?;
-      
-      // Create new Semantic memory with the abstract
-      brain.encode(EncodeRequest {
-          content: abstract,
-          kind: MemoryKind::Semantic,
-          source: MemorySource::Consolidate,
-          // Higher strength (distilled knowledge)
-          // Inherits engram from episodic members
-      }).await?;
-      
-      // Archive the source episodics (their essence is now preserved)
-      for m in decaying_members {
-          brain.archive_memory(m.id, now_tick, ArchiveReason::Abstracted);
-      }
-  }
-
-USE CASE:
-  Agent has 20 episodic memories about fixing auth bugs over 1000 ticks.
-  Each is decaying (rarely recalled individually).
-  Auto-abstraction: "Auth bugs in this codebase often stem from timezone
-  handling — always use UTC, never local time for token expiry."
-  → One semantic memory preserves the lesson from 20 fading episodes.
-```
-
-### 10.5 Feature 5: Prospective Memory / Triggers
-
-```
-(Already fully documented in Section 9.13 and 4.15)
-
-BIOLOGICAL BASIS:
-  "Remember to buy milk when you pass the supermarket."
-  Context-triggered future recall.
-  Medial prefrontal cortex stores intention + trigger context.
-
-SUMMARY:
-  membrain remind --when "context" --then "content"
-  → embeds trigger context
-  → on every encode(): check all active triggers vs current_context_embedding
-  → when similarity > threshold: surface the linked memory in next recall
-  → fire_count incremented, deactivated at max_fires
-```
-
-### 10.6 Feature 6: Memory Diff
-
-```
-(Already documented in Section 9.10)
-
-BIOLOGICAL BASIS:
-  Humans have metamemory: awareness of what we know and how it changed.
-  "I know more about X than I did last month."
-  Supported by PFC monitoring of retrieval success/failure patterns.
-
-SUMMARY:
-  membrain diff --from 5000 --to 10000
-  Pure SQL: compare created_tick, effective_strength at two points.
-  Shows: added, forgotten, significantly decayed, engrams changed.
-  Implementation cost: very low — no new data structures.
-```
-
-### 10.7 Feature 7: Source Provenance Graph
-
-```
-BIOLOGICAL BASIS:
-  Humans track where their knowledge came from (source monitoring).
-  "I read this in the docs" vs "I heard this from a colleague."
-  Source monitoring errors: remembering a fact but forgetting the source.
-  Source credibility affects memory strength in humans.
-
-IMPLEMENTATION COST: MEDIUM
-  Requires: provenance JSON field + source graph edges.
-
-API:
-  membrain remember "content" --source-url "https://docs.example.com/api"
-  membrain show <ID> --provenance
-  membrain invalidate-source "https://docs.example.com/api"  # marks all sourced memories for update
-
-DATA MODEL ADDITION:
-  // In memory_index:
-  provenance: Option<serde_json::Value>
-  // Example:
-  {
-    "source_url": "https://stripe.com/docs/api/rate-limits",
-    "source_type": "documentation",
-    "fetched_tick": 1247,
-    "confidence": 0.9
-  }
-
-  // New table:
-  CREATE TABLE source_nodes (
-      id          BLOB PRIMARY KEY,
-      url         TEXT UNIQUE,
-      source_type TEXT,
-      first_seen  INTEGER,
-      last_seen   INTEGER,
-      credibility REAL DEFAULT 1.0
-  );
-
-  CREATE TABLE memory_sources (
-      memory_id   BLOB REFERENCES memory_index(id),
-      source_id   BLOB REFERENCES source_nodes(id),
-      PRIMARY KEY (memory_id, source_id)
-  );
-
-  // Invalidation:
-  fn invalidate_source(url: &str, brain: &mut BrainStore) {
-      // Find all memories sourced from this URL
-      // Mark them with reduced credibility / set to Labile
-      // Surface them for human review
-  }
-
-USE CASE:
-  Agent learned about an API from version 2 documentation.
-  Version 3 is released: membrain invalidate-source "https://docs.api.com/v2"
-  → All memories sourced from v2 docs flagged for review
-  → Agent knows which beliefs may be outdated
-```
-
-### 10.8 Feature 8: Memory Resonance
-
-```
-(Already implemented in core architecture — see Section 4.9 on_recall and Section 4.10 engram BFS)
-
-BIOLOGICAL BASIS:
-  When one engram cell fires, connected cells receive subthreshold activation.
-  Dense, well-connected engrams → highly stable (resonance pool).
-  Sparse engrams → individual members decay faster.
-
-SUMMARY:
-  Part of on_recall() pipeline:
-  LTP applied to recalled memory → RESONANCE_FACTOR × LTP spread to engram neighbors.
-  Result: expert knowledge (dense engrams) is collectively very stable.
-  No explicit feature flag needed — built into core recall path.
-  
-  Additional explicit API:
-  membrain strengthen --engram <ENGRAM_ID>
-  → Apply LTP to all members of the engram (simulate engram reactivation)
-```
-
-### 10.9 Feature 9: Context-Injected Prompt Builder
-
-```
-BIOLOGICAL BASIS:
-  "Working memory loading": before starting a complex task, humans
-  mentally review relevant knowledge to prime their working memory.
-  This is precisely what a context-for-LLM operation should do.
-
-IMPLEMENTATION COST: LOW-MEDIUM
-  New CLI command + simple recall pipeline variant.
-  Token budget management (count tokens in recalled content).
-
-API:
-  membrain context-for "implement Stripe webhook handler"
-  membrain context-for "debug the failing test" --max-tokens 2000 --format markdown
-
-HOW IT WORKS:
-  pub async fn build_context_prompt(
-      task_description: &str,
-      max_tokens: usize,
-      brain: &BrainStore,
-      now_tick: u64,
-  ) -> Result<String> {
-      // 1. Recall top-20 most relevant memories
-      let result = brain.recall(RecallQuery {
-          content: task_description.to_string(),
-          top_k: 20,
-          confidence_requirement: ConfidenceLevel::High,
-          ..Default::default()
-      }, now_tick).await?;
-      
-      // 2. Build prompt prefix within token budget
-      let mut prompt = String::new();
-      let mut token_count = 0;
-      
-      prompt.push_str("# Relevant Context from Memory\n\n");
-      
-      for memory in result.memories {
-          let entry = format!(
-              "- [{}] {}\n",
-              match memory.kind {
-                  MemoryKind::Semantic => "KNOW",
-                  MemoryKind::Episodic => "REMEMBER",
-                  MemoryKind::Procedural => "DO",
-                  _ => "NOTE",
-              },
-              memory.content
-          );
-          
-          let entry_tokens = estimate_tokens(&entry);
-          if token_count + entry_tokens > max_tokens {
-              break;
-          }
-          
-          prompt.push_str(&entry);
-          token_count += entry_tokens;
-      }
-      
-      // 3. Surface any triggered prospective memories
-      let triggers = brain.check_prospective_triggers(
-          &result.memories[0].embedding,
-          now_tick
-      ).await?;
-      
-      if !triggers.is_empty() {
-          prompt.push_str("\n# Active Reminders\n\n");
-          for trigger_memory in triggers {
-              prompt.push_str(&format!("⚠️ REMINDER: {}\n", trigger_memory.content));
-          }
-      }
-      
-      Ok(prompt)
-  }
-
-OUTPUT:
-  # Relevant Context from Memory
-
-  - [KNOW] Stripe webhook handlers must verify the signature using STRIPE_WEBHOOK_SECRET
-  - [KNOW] Stripe sends webhook retries for up to 72 hours — make handlers idempotent
-  - [REMEMBER] Production webhook failure: handler was not idempotent, caused duplicate charges (tick:8341)
-  - [KNOW] Our Stripe webhook endpoint is at /api/webhooks/stripe
-  - [KNOW] Stripe rate limit: 200 req/s for paid plans
-
-  # Active Reminders
-
-  ⚠️ REMINDER: Always check X-Stripe-Signature header before processing webhook
-
-  ---
-  (token count: 287)
-```
-
-### 10.10 Feature 10: Forgetting-as-Signal
-
-```
-BIOLOGICAL BASIS:
-  Metacognition: awareness of what you're forgetting.
-  "I haven't thought about X in a long time — I should review it."
-  The brain's tip-of-tongue state signals incomplete retrieval.
-  Spaced repetition systems exploit this: surface before forgotten.
-
-IMPLEMENTATION COST: VERY LOW
-  Just a threshold check in effective_strength.
-  Combine with watch command (already documented).
-
-API:
-  membrain watch                        # continuous monitoring
-  membrain list --decaying              # snapshot
-  membrain recall --include-decaying    # see what's almost gone
-  membrain stats (shows decaying_count) # in stats output
-
-HOW IT WORKS:
-  fn is_decaying_soon(memory: &MemoryIndex, now_tick: u64) -> bool {
-      !memory.bypass_decay
-      && memory.effective_strength(now_tick) < (MIN_STRENGTH * DECAY_WARNING_FACTOR)
-      // DECAY_WARNING_FACTOR = 2.0 (warn when at 2× the archive threshold)
-  }
-  
-  // Returned in ScoredMemory:
-  pub decaying_soon: bool
-  
-  // In recall output:
-  // [2] score=0.87 strength=0.11 ⚠️ DECAYING SOON
-  //     "PostgreSQL EXPLAIN ANALYZE: look for Seq Scan on large tables"
-  //     Consider: membrain strengthen <id>  OR  membrain recall it to reinforce
-  
-  // In watch mode: poll brain every N interactions
-  // Surface DECAYING_SOON memories proactively
-  // Useful for: agent to self-review important knowledge before it fades
-
-USE CASE:
-  Production engineer agent has rarely-accessed but critical knowledge:
-  "Emergency Postgres failover procedure: connect to replica, promote to primary."
-  It hasn't been recalled in 5000 ticks → strength = 0.08 → DECAYING SOON.
-  watch surfaces it → agent strengthens it → critical knowledge preserved.
-  
-  Without this feature: it silently archives. Next production incident: agent forgot.
-  With this feature: agent is notified and can proactively rehearse critical knowledge.
-```
+**Minimum schema impact**
+- new `action_artifacts` table
+- source linkage from action artifact → supporting evidence ids
 
 ---
+
+### 10.2 Belief Ledger
+
+**What it adds**
+- A first-class store for what the agent currently believes, not just what it has seen.
+
+**Why it matters**
+- Memory is raw material.
+- Belief is the current operational stance.
+
+**How to implement**
+1. Add `beliefs`, `belief_support`, and `belief_conflicts` tables.
+2. Each belief must track:
+   - proposition
+   - confidence
+   - freshness
+   - status
+3. Status values:
+   - `active`
+   - `disputed`
+   - `stale`
+   - `superseded`
+4. Never overwrite support/conflict history silently.
+5. Add a `resolve_belief()` pipeline after retrieval / verification.
+
+**Minimum API**
+- `beliefs.propose`
+- `beliefs.verify`
+- `beliefs.get`
+- `beliefs.list_conflicts`
+
+---
+
+### 10.3 Memory Leases
+
+**What it adds**
+- Every memory-like object has a freshness policy or lease.
+
+**Why it matters**
+- Some knowledge expires fast.
+- Some knowledge should remain trusted much longer.
+- This reduces stale-memory failures.
+
+**How to implement**
+1. Add `lease_policy` and `freshness_state` fields to key objects.
+2. Define policy classes:
+   - `volatile`
+   - `normal`
+   - `durable`
+   - `pinned`
+3. On recall or action planning:
+   - if stale and action-critical → re-check or lower confidence
+4. Add a background lease scanner for transitions only; no full expensive recalculation in hot path.
+
+**Minimum schema**
+- `lease_policy`
+- `lease_expires_at` or interaction-based equivalent
+- `freshness_state`
+
+---
+
+### 10.4 Reflection Compiler
+
+**What it adds**
+- Converts successful and failed episodes into reusable procedures, anti-patterns, and checklists.
+
+**Why it matters**
+- The system should not only accumulate memories.
+- It should improve behavior over time.
+
+**How to implement**
+1. After a task closes, gather:
+   - goal
+   - actions
+   - tool outcomes
+   - outcome quality
+2. Run a structured reflection pass:
+   - what worked
+   - what failed
+   - what should be reused
+3. Emit:
+   - `Procedure`
+   - `Checklist`
+   - `ReflectionArtifact`
+4. Keep reflection artifacts derived from evidence; do not pretend they are raw facts.
+
+**Minimum release rule**
+- Reflection is advisory until validated by repeated usefulness or human approval.
+
+---
+
+### 10.5 Cognitive Blackboard
+
+**What it adds**
+- A visible working-state object for active cognition.
+
+**Why it matters**
+- Agents become easier to understand, steer, debug, and resume.
+
+**How to implement**
+1. Add a `blackboard_state` object per active task/session.
+2. Store:
+   - current goal
+   - subgoals
+   - active evidence
+   - active beliefs
+   - unknowns
+   - next action
+   - blocked reason
+3. Let retrieval promote items into the blackboard instead of exposing raw floods of candidates.
+4. Snapshot blackboard state at checkpoints.
+
+**Minimum API**
+- `blackboard.get`
+- `blackboard.pin`
+- `blackboard.dismiss`
+- `blackboard.snapshot`
+
+---
+
+### 10.6 Resumable Goal Stack + Checkpoints
+
+**What it adds**
+- Long-running tasks can survive interruption, crash, or restart.
+
+**Why it matters**
+- This is one of the biggest gaps between flashy demos and useful agents.
+
+**How to implement**
+1. Represent goals explicitly:
+   - goal
+   - subgoals
+   - plan steps
+   - dependencies
+2. Create checkpoints at:
+   - major decisions
+   - tool boundaries
+   - user-visible milestones
+3. Store:
+   - active goal stack
+   - blackboard summary
+   - selected evidence ids
+   - pending dependencies
+4. Add restart tests that verify resume quality.
+
+**Minimum acceptance**
+- resume must reconstruct task state without guessing from scratch
+
+---
+
+### 10.7 Safe Preflight Sandbox
+
+**What it adds**
+- A dry-run / validation layer before risky actions.
+
+**Why it matters**
+- Prevents reckless tool usage and incomplete action execution.
+
+**How to implement**
+1. Before risky actions, run:
+   - policy checks
+   - required-input checks
+   - freshness checks
+   - dependency checks
+   - confidence checks
+2. Return a preflight report:
+   - ready
+   - blocked
+   - missing data
+   - stale knowledge
+3. Allow user-facing “why blocked?” diagnostics.
+
+**Minimum API**
+- `preflight.run`
+- `preflight.explain`
+- `preflight.allow`
+
+---
+
+### 10.8 Namespace Lenses / Role Capsules
+
+**What it adds**
+- One brain, many explicit contexts.
+
+**Why it matters**
+- Reduces cross-contamination between users, workspaces, projects, and operating modes.
+
+**How to implement**
+1. Add a `role_capsule` or `namespace_lens` concept.
+2. Use it to condition:
+   - retrieval priors
+   - policies
+   - allowed procedures
+   - style and preference biases
+3. Default every operation to a namespace and optional capsule.
+4. Keep shared/global knowledge explicit, not accidental.
+
+**Minimum schema**
+- `namespaces`
+- `role_capsules`
+- mapping tables for visibility and defaults
+
+---
+
+### 10.9 Uncertainty Surface
+
+**What it adds**
+- A structured way to say what is known, inferred, uncertain, and missing.
+
+**Why it matters**
+- Helps the system avoid presenting guesses as facts.
+- Strongly improves trust and debugging.
+
+**How to implement**
+1. Extend result objects with:
+   - `known`
+   - `assumed`
+   - `uncertain`
+   - `missing`
+   - `change_my_mind_conditions`
+2. Derive uncertainty from:
+   - evidence coverage
+   - belief confidence
+   - freshness
+   - retrieval diversity
+3. Surface uncertainty in high-stakes paths by default.
+
+**Minimum rule**
+- no high-confidence output without matching evidence or justified belief support
+
+---
+
+### 10.10 Deterministic Journal + Doctor + Time Travel
+
+**What it adds**
+- Replayability, repairability, and historical inspection.
+
+**Why it matters**
+- Makes the system production-grade rather than merely clever.
+
+**How to implement**
+1. Journal all important mutations:
+   - encode
+   - consolidate
+   - archive
+   - patch
+   - reverify
+   - rebuild
+2. Keep periodic snapshots for fast recovery.
+3. Implement a doctor tool that checks:
+   - orphan edges
+   - missing embeddings
+   - stale indexes
+   - broken lineage
+   - checkpoint corruption
+4. Add time-travel inspection:
+   - “what did the system know / believe at tick T?”
+
+**Minimum commands**
+- `doctor run`
+- `repair dry-run`
+- `replay from`
+- `diff --from --to`
 
 ## 11. Workspace Structure
 
@@ -10350,7 +10242,7 @@ mcp/server.rs:
 
 ## Project
 membrain: Rust memory system porting human brain mechanisms to AI agents.
-Stack: Rust + Tokio + usearch HNSW + SQLite WAL + fastembed-rs + petgraph + rmcp
+Stack: Rust + Tokio + SQLite WAL + FTS5 + USearch + fastembed + local reranker + petgraph + rmcp
 
 ## Workspace Layout
 - crates/membrain-core/  — all brain logic (no CLI/daemon concerns)
@@ -14310,3 +14202,2023 @@ After incorporating every supporting document, the true thesis of membrain becom
 7. ship only what can be benchmarked, inspected, repaired, and governed.
 
 That is the complete, append-only expansion implied by the rest of `docs/*.md`.
+
+---
+
+## 46. Feature Implementation Specs (Batch 1)
+
+> 10 implementation-ready feature specs to complement the high-level extensions in Section 10.
+> Each spec covers: concept, schema changes, core logic, API/CLI surface, and milestone placement.
+> Where a feature overlaps with a Section 10 extension, the cross-reference is noted.
+
+---
+
+### 46.1 Dream Mode (Offline Synthesis Engine)
+
+**Concept**
+
+When the daemon is idle (no agent activity for N ticks), membrain runs a background
+"dream" job that scans for memories with high embedding similarity but no existing
+graph edge between them. It creates new synthetic engram links autonomously.
+This mirrors REM sleep — cross-domain association formation without conscious input.
+The system becomes smarter while idle.
+
+**Schema Changes**
+
+```sql
+-- Add to hot.db
+CREATE TABLE dream_links (
+  src_memory_id  TEXT NOT NULL REFERENCES memories(id),
+  dst_memory_id  TEXT NOT NULL REFERENCES memories(id),
+  similarity     REAL NOT NULL,
+  created_at_tick INTEGER NOT NULL,
+  confidence     REAL NOT NULL DEFAULT 0.5,
+  PRIMARY KEY (src_memory_id, dst_memory_id)
+);
+
+-- Add to brain_state
+-- key: 'last_dream_tick', value: INTEGER
+-- key: 'dream_links_created', value: INTEGER (cumulative)
+```
+
+**Core Logic**
+
+```rust
+pub struct DreamEngine {
+    idle_threshold_ticks: u64,   // default: 100
+    similarity_floor: f32,       // default: 0.65
+    similarity_ceiling: f32,     // default: 0.92 (avoid near-duplicates)
+    max_links_per_dream: usize,  // default: 200
+    batch_size: usize,           // default: 500
+}
+
+impl DreamEngine {
+    pub async fn run_dream_cycle(&self, store: &mut BrainStore) -> DreamReport {
+        // 1. Sample N random hot memories (avoid iterating all)
+        // 2. For each sample: usearch ANN search, floor < sim < ceiling
+        // 3. Filter: no existing graph_edge AND no existing dream_link
+        // 4. Insert dream_link with confidence proportional to similarity
+        // 5. If two memories share >= 3 dream_links to same engram: trigger engram merge
+        // 6. Return DreamReport { links_created, engrams_merged, duration_ms }
+    }
+}
+
+pub struct DreamReport {
+    pub links_created: usize,
+    pub engrams_merged: usize,
+    pub duration_ms: u64,
+    pub tick: u64,
+}
+```
+
+**Config**
+
+```toml
+[dream]
+enabled                = true
+idle_threshold_ticks   = 100
+similarity_floor       = 0.65
+similarity_ceiling     = 0.92
+max_links_per_dream    = 200
+```
+
+**CLI / MCP**
+
+```bash
+membrain dream              # trigger manually
+membrain dream --status     # last run, links created
+membrain dream --disable    # pause background dreaming
+```
+
+```
+MCP tool: dream()
+  → { links_created: n, engrams_merged: n, last_run_tick: n }
+```
+
+**Milestone Placement**
+
+Implement after **Milestone 7 (Engram Graph)**. Requires: engram BFS, graph_edges table,
+usearch ANN. Add as optional sub-step in Milestone 7 or early Milestone 8.
+
+---
+
+### 46.2 Contradiction Detection + Belief Versioning
+
+> Cross-ref: Extends Section 10.2 (Belief Ledger) with concrete schema, detection logic, and state machine.
+
+**Concept**
+
+When encoding a new memory that semantically conflicts with an existing one
+(high similarity + divergent content), instead of silent overwrite or duplicate,
+membrain creates a belief version chain. Old memory is marked `Superseded` and
+linked to the new version. The agent can query belief evolution over time.
+
+**Schema Changes**
+
+```sql
+ALTER TABLE memories ADD COLUMN superseded_by TEXT REFERENCES memories(id);
+ALTER TABLE memories ADD COLUMN belief_version INTEGER NOT NULL DEFAULT 1;
+ALTER TABLE memories ADD COLUMN belief_chain_id TEXT;
+
+CREATE TABLE belief_conflicts (
+  id              TEXT PRIMARY KEY,
+  chain_id        TEXT NOT NULL,
+  old_memory_id   TEXT NOT NULL REFERENCES memories(id),
+  new_memory_id   TEXT NOT NULL REFERENCES memories(id),
+  similarity      REAL NOT NULL,
+  detected_at     INTEGER NOT NULL,
+  resolution      TEXT NOT NULL  -- 'superseded' | 'coexist' | 'merged'
+);
+```
+
+**Core Logic**
+
+```rust
+pub struct ConflictDetector {
+    conflict_sim_min: f32,  // default: 0.82
+    conflict_sim_max: f32,  // default: 0.97
+}
+
+impl ConflictDetector {
+    pub fn detect_on_encode(
+        &self,
+        new_memory: &Memory,
+        new_vec: &[f32],
+        store: &BrainStore,
+    ) -> Option<ConflictResolution> {
+        // 1. ANN search in similarity band [0.82, 0.97]
+        // 2. For each candidate: content divergence check
+        //    (if content_sim > 0.97 → duplicate, skip)
+        //    (if content_sim in band → likely contradiction)
+        // 3. Return ConflictResolution describing what to do
+    }
+}
+
+pub enum ConflictResolution {
+    Supersede { old_id: Uuid },
+    Coexist,
+    UpdateExisting { target_id: Uuid },
+}
+
+pub enum MemoryState {
+    Labile,
+    SynapticDone,
+    Consolidating,
+    Consolidated,
+    Superseded,   // replaced by newer belief
+    Archived,
+}
+```
+
+**CLI / MCP**
+
+```bash
+membrain beliefs "user preferences"   # show belief chain for topic
+membrain beliefs --conflicts          # list all detected contradictions
+membrain beliefs --resolve <id>       # manually resolve a pending conflict
+membrain inspect <uuid> --history     # show full version chain for a memory
+```
+
+```
+MCP tool: belief_history(query)
+  → { chain_id, versions: [{id, content, tick, superseded_by}], conflicts: n }
+```
+
+**Milestone Placement**
+
+Implement in **Milestone 3 (LTP/LTD)** — the interference check already does
+a similar ANN search. Contradiction detection is a natural extension of that pass.
+Add `superseded_by` and `belief_version` to schema in **Milestone 1**.
+
+---
+
+### 46.3 Query-by-Example (`--like` / `--unlike`)
+
+**Concept**
+
+Allow using an existing memory's stored vector as the query instead of
+re-embedding a text string. `--like <uuid>` finds semantically similar memories.
+`--unlike <uuid>` finds the most distant memories — useful for diversity,
+counterargument retrieval, and avoiding echo chambers in agent reasoning.
+
+**Schema Changes**
+
+None. Uses existing `memory_embeddings` table.
+
+**Core Logic**
+
+```rust
+pub enum RecallQuerySource {
+    Text(String),
+    LikeMemory(Uuid),
+    UnlikeMemory(Uuid),
+}
+
+pub struct RecallQuery {
+    pub source: RecallQuerySource,
+    pub context: Option<String>,
+    pub top_k: usize,
+    pub min_strength: f32,
+    pub filters: RecallFilters,
+}
+
+fn resolve_query_vector(source: &RecallQuerySource, store: &BrainStore) -> Vec<f32> {
+    match source {
+        Text(s) => embed(s),
+        LikeMemory(id) => store.get_embedding(id).content_embedding,
+        UnlikeMemory(id) => store.get_embedding(id).content_embedding, // sort inverted
+    }
+}
+```
+
+**CLI / MCP**
+
+```bash
+membrain recall --like <uuid>             # find similar memories
+membrain recall --like <uuid> --top 10
+membrain recall --unlike <uuid>           # find most different memories
+membrain recall --unlike <uuid> --top 5  # counterexamples
+```
+
+```
+MCP tool: recall(like_id?: uuid, unlike_id?: uuid, ...)
+  → same RetrievalResult shape
+```
+
+**Milestone Placement**
+
+Add during **Milestone 4 (3-Tier Retrieval Engine)**. Zero new storage.
+One enum variant change to RecallQuery. Very low risk.
+
+---
+
+### 46.4 Context Budget API
+
+**Concept**
+
+Agent calls `context_budget(n_tokens)` with its remaining context window budget.
+membrain returns a ranked, deduplicated, pre-formatted list of memories to inject —
+scored not just by relevance but by `utility = relevance × strength × (1 − overlap_with_working_memory)`.
+Memories already in working memory are penalized. Output is ready-to-inject text.
+
+**Schema Changes**
+
+None. Operates on existing working_memory state + recall pipeline.
+
+**Core Logic**
+
+```rust
+pub struct ContextBudgetRequest {
+    pub token_budget: usize,
+    pub current_context: Option<String>,
+    pub working_memory_ids: Vec<Uuid>,
+    pub format: InjectionFormat,
+}
+
+pub struct ContextBudgetResponse {
+    pub injections: Vec<InjectionItem>,
+    pub tokens_used: usize,
+    pub tokens_remaining: usize,
+}
+
+pub struct InjectionItem {
+    pub memory_id: Uuid,
+    pub content: String,
+    pub utility_score: f32,
+    pub token_count: usize,
+    pub reason: String,
+}
+
+impl BrainStore {
+    pub fn context_budget(&self, req: ContextBudgetRequest) -> ContextBudgetResponse {
+        // 1. Recall top-50 by relevance to current_context
+        // 2. Score each: utility = relevance * strength * (1 - wm_overlap_penalty)
+        // 3. Sort by utility desc
+        // 4. Greedy pack: add items until token_budget exhausted
+        // 5. Format output as ready-to-inject string
+    }
+}
+
+fn wm_overlap_penalty(candidate: &Memory, wm_ids: &[Uuid]) -> f32 {
+    if wm_ids.contains(&candidate.id) { 1.0 } else { 0.0 }
+}
+```
+
+**Token Counting**
+
+Use a simple approximation: `tokens ≈ content.len() / 4`. No tokenizer dependency.
+Configurable via `token_chars_ratio` constant.
+
+**CLI / MCP**
+
+```bash
+membrain budget --tokens 2000                          # what to inject given 2k token budget
+membrain budget --tokens 2000 --context "debugging"   # context-aware
+membrain budget --tokens 2000 --format markdown
+```
+
+```
+MCP tool: context_budget(token_budget, current_context?, working_memory_ids?, format?)
+  → { injections: [{memory_id, content, utility_score, token_count, reason}], tokens_used }
+```
+
+**Milestone Placement**
+
+Add in **Milestone 9 (Daemon + MCP)** — needs working recall pipeline.
+This is a high-value MCP tool that makes membrain directly useful to Claude Code.
+
+---
+
+### 46.5 Temporal Landmark System
+
+**Concept**
+
+Certain memories act as temporal anchors — "project started", "switched stack",
+"user mentioned deadline". Landmarks are auto-detected when a memory has high
+emotional arousal + high novelty + no similar memory in a recent time window.
+They define "eras" that other memories are anchored to, enabling timeline queries.
+
+**Schema Changes**
+
+```sql
+ALTER TABLE memories ADD COLUMN is_landmark INTEGER NOT NULL DEFAULT 0;
+ALTER TABLE memories ADD COLUMN landmark_label TEXT;
+ALTER TABLE memories ADD COLUMN era_id TEXT;
+
+CREATE TABLE landmarks (
+  id           TEXT PRIMARY KEY REFERENCES memories(id),
+  label        TEXT NOT NULL,
+  era_start    INTEGER NOT NULL,
+  era_end      INTEGER,
+  memory_count INTEGER DEFAULT 0
+);
+
+CREATE INDEX idx_memories_era ON memories(era_id);
+```
+
+**Core Logic**
+
+```rust
+pub struct LandmarkDetector {
+    arousal_threshold: f32,   // default: 0.7
+    novelty_threshold: f32,   // default: 0.75
+    min_era_gap_ticks: u64,   // default: 50
+    similarity_floor: f32,    // default: 0.85
+}
+
+impl LandmarkDetector {
+    pub fn evaluate_on_encode(&self, memory: &Memory, store: &BrainStore) -> bool {
+        // 1. Check arousal > threshold AND novelty > threshold
+        // 2. Check no existing landmark with similarity > floor in last min_era_gap_ticks
+        // 3. If landmark: close current era, open new era, assign label
+    }
+
+    fn auto_label(memory: &Memory) -> String {
+        memory.content.chars().take(50).collect()
+    }
+}
+```
+
+**CLI / MCP**
+
+```bash
+membrain timeline                         # list all landmarks in order
+membrain timeline --detail                # landmarks + memory count per era
+membrain recall "debugging" --era <id>   # recall within a specific era
+membrain landmark <uuid>                  # manually promote memory to landmark
+membrain landmark --label "v2 launch" <uuid>
+```
+
+```
+MCP tool: timeline()
+  → { landmarks: [{id, label, era_start, era_end, memory_count}] }
+
+MCP tool: recall(query, era_id?)
+  → existing RetrievalResult, filtered to era
+```
+
+**Milestone Placement**
+
+Schema columns in **Milestone 1**. Detection logic in **Milestone 2 (Encoding Pipeline)**.
+CLI commands in **Milestone 10**. Low risk — is_landmark is just a boolean flag.
+
+---
+
+### 46.6 Passive Observation Mode
+
+**Concept**
+
+membrain reads from stdin pipe or watches a file/directory, automatically segments
+the stream into discrete memories using embedding-based topic boundary detection,
+and encodes them without explicit `remember()` calls. This eliminates the biggest
+adoption friction: agents don't need to be instrumented to call `remember`.
+
+**Schema Changes**
+
+```sql
+ALTER TABLE memories ADD COLUMN observation_source TEXT;
+ALTER TABLE memories ADD COLUMN observation_chunk_id TEXT;
+```
+
+**Core Logic**
+
+```rust
+pub struct ObserveConfig {
+    chunk_size_chars: usize,      // default: 500
+    topic_shift_threshold: f32,   // default: 0.35
+    min_chunk_chars: usize,       // default: 50
+    overlap_chars: usize,         // default: 50
+    default_attention: f32,       // default: 0.6
+    context: Option<String>,
+}
+
+pub struct ObserveEngine;
+
+impl ObserveEngine {
+    pub async fn observe_stream<R: AsyncRead>(
+        &self,
+        reader: R,
+        config: ObserveConfig,
+        store: &mut BrainStore,
+    ) -> ObserveReport {
+        // Rolling window: embed every N chars, compare with prev
+        // On shift: encode buffered chunk as new memory
+        // Tag with observation_source, observation_chunk_id
+    }
+
+    pub async fn watch_directory(
+        &self,
+        path: &Path,
+        config: ObserveConfig,
+        store: &mut BrainStore,
+    ) {}
+}
+
+pub struct ObserveReport {
+    pub memories_created: usize,
+    pub bytes_processed: usize,
+    pub topic_shifts_detected: usize,
+    pub duration_ms: u64,
+}
+```
+
+**Dependencies**
+
+```toml
+notify = "6"   # cross-platform file watching (inotify/kqueue/FSEvents)
+```
+
+**CLI / MCP**
+
+```bash
+# Pipe mode
+cat conversation.txt | membrain observe
+echo "user prefers dark mode" | membrain observe --context "preferences"
+claude --output-format stream 2>&1 | membrain observe --context "coding session"
+
+# Watch mode
+membrain observe --watch ~/.claude/conversations/
+membrain observe --watch ./logs/ --pattern "*.jsonl"
+
+# Options
+membrain observe --chunk-size 300 --topic-threshold 0.4 --context "project-x"
+membrain observe --dry-run   # show what would be encoded, don't write
+```
+
+```
+MCP tool: observe(content, context?, chunk_size?, source_label?)
+  → { memories_created: n, topic_shifts: n }
+```
+
+**Milestone Placement**
+
+Implement in **Milestone 9 (Daemon + MCP)**. Core observe logic can be added to
+`membrain-core` as `engine::observe`. File watching requires `notify` crate — add
+to Cargo.toml. `--dry-run` flag makes this safe to test.
+
+---
+
+### 46.7 Memory Confidence Intervals
+
+> Cross-ref: Extends Section 10.9 (Uncertainty Surface) with concrete confidence scoring and corroboration mechanics.
+
+**Concept**
+
+Each memory carries a `confidence: f32` separate from `strength`.
+Strength = how consolidated. Confidence = how reliable/certain.
+Confidence decreases when a memory is reconsolidated many times (unstable belief)
+or conflicts with newer memories. Confidence increases when multiple independent
+memories corroborate the same fact. Agents can filter by confidence threshold.
+
+**Schema Changes**
+
+```sql
+ALTER TABLE memories ADD COLUMN confidence REAL NOT NULL DEFAULT 1.0;
+ALTER TABLE memories ADD COLUMN corroboration_count INTEGER NOT NULL DEFAULT 0;
+ALTER TABLE memories ADD COLUMN reconsolidation_count INTEGER NOT NULL DEFAULT 0;
+
+ALTER TABLE cold_memories ADD COLUMN confidence REAL NOT NULL DEFAULT 1.0;
+```
+
+**Core Logic**
+
+```rust
+fn update_confidence_on_reconsolidate(m: &mut Memory) {
+    m.reconsolidation_count += 1;
+    let penalty = 0.05 * (m.reconsolidation_count as f32).sqrt();
+    m.confidence = (m.confidence - penalty).max(0.1);
+}
+
+fn update_confidence_on_corroborate(m: &mut Memory) {
+    m.corroboration_count += 1;
+    let bonus = 0.1 / (m.corroboration_count as f32).sqrt();
+    m.confidence = (m.confidence + bonus).min(1.0);
+}
+
+fn update_confidence_on_conflict(m: &mut Memory) {
+    m.confidence = (m.confidence - 0.2).max(0.1);
+}
+
+pub struct RecallFilters {
+    pub min_confidence: Option<f32>,
+    pub min_strength: f32,
+}
+```
+
+**CLI / MCP**
+
+```bash
+membrain recall "user preferences" --min-confidence 0.8
+membrain uncertain                   # list memories with confidence < 0.5
+membrain uncertain --top 20
+membrain inspect <uuid>              # now shows confidence + reconsolidation_count
+membrain stats                       # now shows avg_confidence, low_confidence_count
+```
+
+```
+MCP tool: recall(query, min_confidence?: f32, ...)
+  → memories now include confidence field
+
+MCP tool: uncertain(top_k?)
+  → { memories: [{id, content, confidence, reconsolidation_count}] }
+```
+
+**BrainStats Extension**
+
+```rust
+pub struct BrainStats {
+    // existing fields...
+    pub avg_confidence: f32,
+    pub low_confidence_count: usize,
+    pub high_confidence_count: usize,
+}
+```
+
+**Milestone Placement**
+
+Schema columns in **Milestone 1**. Update rules in **Milestone 3 (LTP/LTD)** and
+**Milestone 5 (Reconsolidation)**. Corroboration check in **Milestone 2 (Encoding)**.
+CLI/MCP surface in **Milestone 10**.
+
+---
+
+### 46.8 Skill Extraction from Episodic Clusters
+
+> Cross-ref: Extends Section 10.4 (Reflection Compiler) with a concrete no-LLM extraction pipeline.
+
+**Concept**
+
+When an engram reaches a member_count threshold, membrain inspects whether the
+episodic memories share a consistent pattern (same MemoryKind, overlapping keywords,
+similar embedding centroid). If so, it synthesizes a single `Procedural` memory
+from the cluster — an abstract skill/pattern distilled from repeated episodes.
+No LLM required: uses TF-IDF on cluster members + centroid content.
+
+**Schema Changes**
+
+```sql
+ALTER TABLE engrams ADD COLUMN extraction_attempted INTEGER NOT NULL DEFAULT 0;
+ALTER TABLE engrams ADD COLUMN extracted_procedural_id TEXT REFERENCES memories(id);
+
+ALTER TABLE memories ADD COLUMN distilled_from_engram TEXT REFERENCES engrams(id);
+ALTER TABLE memories ADD COLUMN distilled_at INTEGER;
+```
+
+**Core Logic**
+
+```rust
+pub struct SkillExtractor {
+    min_cluster_size: usize,     // default: 15
+    min_episode_consistency: f32, // default: 0.6
+    keyword_top_k: usize,        // default: 10
+}
+
+impl SkillExtractor {
+    pub fn evaluate_engram(&self, engram: &Engram, store: &BrainStore) -> Option<ProceduralDraft> {
+        if engram.member_count < self.min_cluster_size { return None; }
+        if engram.extraction_attempted != 0 { return None; }
+
+        let members = store.get_engram_members(engram.id);
+
+        // 1. Check kind consistency: most members are Episodic?
+        let episodic_ratio = members.iter().filter(|m| m.kind == MemoryKind::Episodic).count()
+            as f32 / members.len() as f32;
+        if episodic_ratio < 0.7 { return None; }
+
+        // 2. Check centroid coherence: avg pairwise sim > threshold
+        // 3. Extract top keywords via TF-IDF across all member contents
+        // 4. Synthesize procedural content: "When [context], [action pattern]"
+        // 5. Return ProceduralDraft for insertion as MemoryKind::Procedural
+    }
+}
+
+pub struct ProceduralDraft {
+    pub content: String,
+    pub keywords: Vec<String>,
+    pub source_engram_id: Uuid,
+    pub confidence: f32,
+}
+```
+
+**CLI / MCP**
+
+```bash
+membrain skills                          # list all extracted procedural memories
+membrain skills --extract                # manually trigger extraction pass
+membrain inspect <uuid> --show-source   # if procedural: show source engram
+membrain engram <uuid> --extract        # trigger extraction for specific engram
+```
+
+```
+MCP tool: skills()
+  → { procedures: [{id, content, source_engram_id, confidence, member_count}] }
+
+MCP tool: extract_skills()
+  → { extracted: n, skipped: n }
+```
+
+**Milestone Placement**
+
+Implement after **Milestone 7 (Engram Graph)**. The extraction pass runs as part
+of the **Milestone 6 (Consolidation Engine)** background cycle — natural fit
+alongside NREM/REM equivalents. Add `extracted_procedural_id` to schema in Milestone 1.
+
+---
+
+### 46.9 Cross-Agent Memory Sharing
+
+> Cross-ref: Extends Section 10.8 (Namespace Lenses / Role Capsules) with concrete multi-agent visibility and sharing mechanics.
+
+**Concept**
+
+Memories can be marked with a visibility level: `Private` (default), `Shared`
+(accessible within a namespace), or `Public` (global). Agents in the same namespace
+can recall each other's shared memories. One agent learns → shares → all agents know.
+Transforms membrain from single-agent memory into collective intelligence layer.
+
+**Schema Changes**
+
+```sql
+ALTER TABLE memories ADD COLUMN namespace_id TEXT NOT NULL DEFAULT 'default';
+ALTER TABLE memories ADD COLUMN agent_id TEXT NOT NULL DEFAULT 'default';
+ALTER TABLE memories ADD COLUMN visibility TEXT NOT NULL DEFAULT 'private';
+
+CREATE TABLE shared_memories (
+  memory_id      TEXT PRIMARY KEY,
+  namespace_id   TEXT NOT NULL,
+  shared_at      INTEGER NOT NULL,
+  shared_by      TEXT NOT NULL,
+  access_count   INTEGER DEFAULT 0
+);
+
+CREATE INDEX idx_shared_ns ON shared_memories(namespace_id);
+```
+
+**Core Logic**
+
+```rust
+pub struct AgentContext {
+    pub agent_id: String,
+    pub namespace_id: String,
+}
+
+pub trait BrainStore: Send + Sync {
+    fn remember(&mut self, input: EncodeInput, ctx: &AgentContext) -> Result<Uuid>;
+    fn recall(&self, query: RecallQuery, ctx: &AgentContext) -> Result<RetrievalResult>;
+    fn share(&mut self, id: Uuid, namespace: &str) -> Result<()>;
+    fn unshare(&mut self, id: Uuid) -> Result<()>;
+}
+
+fn namespace_filter(ctx: &AgentContext) -> String {
+    format!(
+        "(agent_id = '{aid}' OR visibility = 'shared' AND namespace_id = '{ns}' OR visibility = 'public')",
+        aid = ctx.agent_id,
+        ns = ctx.namespace_id
+    )
+}
+```
+
+**Config**
+
+```toml
+[agent]
+agent_id     = "default"
+namespace_id = "default"
+```
+
+**CLI / MCP**
+
+```bash
+membrain remember "deploy steps for project-x" --share --namespace project-x
+membrain recall "deploy steps" --namespace project-x
+membrain share <uuid> --namespace project-x
+membrain unshare <uuid>
+membrain namespace list
+membrain namespace stats project-x
+```
+
+```
+MCP tool: remember(content, visibility?, namespace_id?, ...)
+MCP tool: recall(query, namespace_id?, include_public?, ...)
+MCP tool: share(id, namespace_id)
+```
+
+**Milestone Placement**
+
+`namespace_id` and `agent_id` columns in **Milestone 1** (critical — cannot add later).
+`visibility` column in **Milestone 1** as well. Full sharing API in **Milestone 9**.
+
+---
+
+### 46.10 Brain Health Dashboard
+
+**Concept**
+
+`membrain health` renders a full terminal dashboard: tier utilization, decay curve
+health, top engrams, landmark count, conflict count, confidence distribution,
+dream engine status, and recent activity. Makes the brain feel alive and debuggable.
+`--watch` mode refreshes live. The single best demo/showcase command.
+
+**Schema Changes**
+
+None. Pure read queries over existing tables.
+
+**Core Logic**
+
+```rust
+pub struct BrainHealthReport {
+    pub hot_memories: usize,
+    pub hot_capacity: usize,
+    pub cold_memories: usize,
+    pub hot_utilization_pct: f32,
+
+    pub avg_strength: f32,
+    pub avg_confidence: f32,
+    pub low_confidence_count: usize,
+
+    pub decay_rate: f32,
+    pub archive_count: usize,
+
+    pub total_engrams: usize,
+    pub avg_cluster_size: f32,
+    pub top_engrams: Vec<(String, usize)>,
+
+    pub landmark_count: usize,
+    pub unresolved_conflicts: usize,
+    pub uncertain_count: usize,
+    pub dream_links_total: usize,
+    pub last_dream_tick: Option<u64>,
+
+    pub total_recalls: u64,
+    pub total_encodes: u64,
+    pub current_tick: u64,
+    pub daemon_uptime_ticks: u64,
+}
+
+pub fn render_health_dashboard(report: &BrainHealthReport) -> String {
+    // ASCII progress bars, aligned columns
+    // Uses only std — no terminal dependency required
+    // Color via ANSI escape codes (disabled if NO_COLOR env set)
+}
+```
+
+**Output Example**
+
+```
+╔══════════════════════════════════════════════════════╗
+║  membrain — Brain Health                            ║
+╠══════════════════════════════════════════════════════╣
+║  TIER UTILIZATION                                   ║
+║  Hot   [████████████░░░░░░░░] 38k / 50k  76%       ║
+║  Cold  [██░░░░░░░░░░░░░░░░░░] 120k        —         ║
+╠══════════════════════════════════════════════════════╣
+║  QUALITY                                            ║
+║  Avg strength    0.71   ▓▓▓▓▓▓▓░░░                 ║
+║  Avg confidence  0.84   ▓▓▓▓▓▓▓▓░░                 ║
+║  Decay rate      1.2%/1k ticks  ✓ healthy          ║
+╠══════════════════════════════════════════════════════╣
+║  ENGRAMS                                            ║
+║  Total: 312   Avg size: 8.4                        ║
+║  Top: [rust-debugging:42] [project-x:31] [prefs:18]║
+╠══════════════════════════════════════════════════════╣
+║  SIGNALS                                            ║
+║  Landmarks       7 temporal anchors                ║
+║  Conflicts       3 unresolved ⚠                    ║
+║  Uncertain       12 low-confidence memories        ║
+║  Dream links     1,847 total  last: 2h ago         ║
+╠══════════════════════════════════════════════════════╣
+║  ACTIVITY                                           ║
+║  Tick: 48,291   Encodes: 2,104   Recalls: 9,871    ║
+║  Daemon uptime: 48,291 ticks                       ║
+╚══════════════════════════════════════════════════════╝
+```
+
+**CLI / MCP**
+
+```bash
+membrain health                   # full dashboard, one-shot
+membrain health --watch           # refresh every 2 seconds
+membrain health --watch --interval 5
+membrain health --json            # machine-readable for scripting
+membrain health --brief           # one-line summary
+```
+
+```
+MCP tool: health()
+  → BrainHealthReport as JSON
+```
+
+**Milestone Placement**
+
+Basic version (tiers + engrams + activity) in **Milestone 6**.
+Full version including all feature signals in **Milestone 10**.
+`--watch` mode in **Milestone 10**. No dependencies beyond existing queries.
+
+---
+
+### 46.11 Batch 1 Summary Table
+
+| # | Feature | Schema Changes | Milestone | Effort | Section 10 Cross-ref |
+|---|---------|---------------|-----------|--------|----------------------|
+| 1 | Dream Mode | `dream_links` table | After M7 | Medium | — |
+| 2 | Belief Versioning | `superseded_by`, `belief_version`, `belief_chain_id`, `belief_conflicts` | M1 schema + M3 logic | Medium | 10.2 Belief Ledger |
+| 3 | Query-by-Example | None | M4 | Very Low | — |
+| 4 | Context Budget API | None | M9 | Low | — |
+| 5 | Temporal Landmarks | `is_landmark`, `era_id`, `landmarks` table | M1 schema + M2 logic | Low | — |
+| 6 | Passive Observation | `observation_source`, `observation_chunk_id` | M9 | Medium | — |
+| 7 | Confidence Intervals | `confidence`, `corroboration_count`, `reconsolidation_count` | M1 schema + M3 logic | Low | 10.9 Uncertainty Surface |
+| 8 | Skill Extraction | `distilled_from_engram`, `extracted_procedural_id` | After M7 | Medium | 10.4 Reflection Compiler |
+| 9 | Cross-Agent Sharing | `namespace_id`, `agent_id`, `visibility`, `shared_memories` | M1 schema (critical) + M9 API | Medium | 10.8 Namespace Lenses |
+| 10 | Health Dashboard | None | M6 basic + M10 full | Very Low | — |
+
+### 46.12 Critical M1 Schema Additions (must be in first migration)
+
+These columns must be present in Milestone 1's initial schema to avoid costly ALTER TABLE
+migrations later. Features 2, 5, 7, 8, and 9 all require columns that affect query filters
+or are referenced by foreign keys across the system.
+
+```sql
+-- Feature 2: Belief Versioning
+ALTER TABLE memories ADD COLUMN superseded_by TEXT;
+ALTER TABLE memories ADD COLUMN belief_version INTEGER NOT NULL DEFAULT 1;
+ALTER TABLE memories ADD COLUMN belief_chain_id TEXT;
+
+-- Feature 5: Temporal Landmarks
+ALTER TABLE memories ADD COLUMN is_landmark INTEGER NOT NULL DEFAULT 0;
+ALTER TABLE memories ADD COLUMN landmark_label TEXT;
+ALTER TABLE memories ADD COLUMN era_id TEXT;
+
+-- Feature 7: Confidence Intervals
+ALTER TABLE memories ADD COLUMN confidence REAL NOT NULL DEFAULT 1.0;
+ALTER TABLE memories ADD COLUMN corroboration_count INTEGER NOT NULL DEFAULT 0;
+ALTER TABLE memories ADD COLUMN reconsolidation_count INTEGER NOT NULL DEFAULT 0;
+
+-- Feature 8: Skill Extraction
+ALTER TABLE memories ADD COLUMN distilled_from_engram TEXT;
+ALTER TABLE memories ADD COLUMN distilled_at INTEGER;
+
+-- Feature 9: Cross-Agent Sharing (MOST CRITICAL — affects all query filters)
+ALTER TABLE memories ADD COLUMN namespace_id TEXT NOT NULL DEFAULT 'default';
+ALTER TABLE memories ADD COLUMN agent_id TEXT NOT NULL DEFAULT 'default';
+ALTER TABLE memories ADD COLUMN visibility TEXT NOT NULL DEFAULT 'private';
+
+-- Model version (base plan fix)
+ALTER TABLE memory_embeddings ADD COLUMN model_version TEXT NOT NULL DEFAULT 'all-MiniLM-L6-v2';
+```
+
+---
+
+## 47. Feature Implementation Specs (Batch 2)
+
+> 10 additional implementation-ready feature specs (Features 11–20).
+> Each section covers: concept, schema changes, core logic, API/CLI surface, and milestone placement.
+
+---
+
+### 47.1 Causal Chain Tracking ("Why do I believe this?")
+
+**Concept**
+
+When a memory is created *from* another memory — via reconsolidation update,
+skill extraction, schema synthesis, or explicit agent reasoning — track the
+directed causal provenance: `derived_from: Vec<Uuid>`. This is a typed causality
+link. The agent can trace any belief back to its root evidence. If root evidence
+is invalidated, the entire derived chain receives an automatic confidence penalty.
+
+**Schema Changes**
+
+```sql
+CREATE TABLE causal_links (
+  src_memory_id  TEXT NOT NULL REFERENCES memories(id),
+  dst_memory_id  TEXT NOT NULL REFERENCES memories(id),
+  link_type      TEXT NOT NULL,  -- 'derived'|'reconsolidated'|'extracted'|'inferred'
+  created_at     INTEGER NOT NULL,
+  agent_id       TEXT,
+  PRIMARY KEY (src_memory_id, dst_memory_id)
+);
+
+CREATE INDEX idx_causal_src ON causal_links(src_memory_id);
+CREATE INDEX idx_causal_dst ON causal_links(dst_memory_id);
+
+ALTER TABLE memories ADD COLUMN has_causal_parents INTEGER NOT NULL DEFAULT 0;
+ALTER TABLE memories ADD COLUMN has_causal_children INTEGER NOT NULL DEFAULT 0;
+```
+
+**Core Logic**
+
+```rust
+pub enum CausalLinkType {
+    Derived,
+    Reconsolidated,
+    Extracted,
+    Inferred,
+}
+
+pub struct CausalLink {
+    pub src: Uuid,
+    pub dst: Uuid,
+    pub link_type: CausalLinkType,
+    pub created_at: u64,
+}
+
+impl BrainStore {
+    pub fn link_causal(
+        &mut self,
+        child_id: Uuid,
+        parent_ids: &[Uuid],
+        link_type: CausalLinkType,
+    ) -> Result<()>;
+
+    pub fn trace_causality(&self, id: Uuid) -> Result<CausalTrace>;
+
+    pub fn invalidate_causal_chain(&mut self, root_id: Uuid) -> Result<InvalidationReport>;
+}
+
+pub struct CausalTrace {
+    pub root_id: Uuid,
+    pub chain: Vec<CausalStep>,
+    pub depth: usize,
+    pub all_roots_valid: bool,
+}
+
+pub struct CausalStep {
+    pub memory_id: Uuid,
+    pub content: String,
+    pub link_type: CausalLinkType,
+    pub tick: u64,
+    pub confidence: f32,
+    pub strength: f32,
+}
+
+pub struct InvalidationReport {
+    pub root_id: Uuid,
+    pub chain_length: usize,
+    pub memories_penalized: usize,
+    pub avg_confidence_delta: f32,
+}
+
+fn cascade_penalty(depth: usize) -> f32 {
+    match depth {
+        1 => 0.20,
+        2 => 0.10,
+        _ => 0.05,
+    }
+}
+```
+
+**CLI / MCP**
+
+```bash
+membrain why <uuid>                    # trace causal chain to root evidence
+membrain why <uuid> --depth 5         # limit trace depth
+membrain why <uuid> --json            # machine-readable chain
+
+membrain invalidate <uuid>             # mark memory as wrong, cascade penalty
+membrain invalidate <uuid> --dry-run  # show what would be penalized
+
+membrain causal-graph <uuid>           # show full forward+backward causal subgraph
+```
+
+```
+MCP tool: why(id)
+  → { chain: [{memory_id, content, link_type, tick, confidence}], depth, all_roots_valid }
+
+MCP tool: invalidate(id, dry_run?)
+  → { memories_penalized: n, avg_confidence_delta: f32 }
+```
+
+**Milestone Placement**
+
+Schema in **Milestone 1**. `link_causal()` called in **Milestone 5 (Reconsolidation)**
+and **Milestone 8 (Skill Extraction)**. `trace_causality()` CLI in **Milestone 10**.
+`invalidate_causal_chain()` in **Milestone 8**. Low risk — purely additive.
+
+---
+
+### 47.2 Memory Snapshots + Time Travel Recall
+
+> Cross-ref: Extends Section 10.10 (Deterministic Journal + Doctor + Time Travel) with concrete snapshot-based time travel.
+
+**Concept**
+
+`membrain snapshot --name "before-refactor"` records the current brain state tick
+as a named checkpoint — zero data copy, just metadata. Any future recall can be
+scoped to that snapshot: memories created after the snapshot tick are excluded,
+and effective_strength is recomputed using the snapshot tick as `now`. Allows
+querying "what did the agent know at point X in time?"
+
+**Schema Changes**
+
+```sql
+CREATE TABLE snapshots (
+  name         TEXT PRIMARY KEY,
+  tick         INTEGER NOT NULL,
+  created_at   INTEGER NOT NULL,
+  note         TEXT,
+  memory_count INTEGER NOT NULL,
+  namespace_id TEXT NOT NULL DEFAULT 'default'
+);
+```
+
+**Core Logic**
+
+```rust
+pub struct Snapshot {
+    pub name: String,
+    pub tick: u64,
+    pub created_at: u64,
+    pub note: Option<String>,
+    pub memory_count: usize,
+    pub namespace_id: String,
+}
+
+impl BrainStore {
+    pub fn create_snapshot(&self, name: &str, note: Option<&str>) -> Result<Snapshot>;
+
+    pub fn recall_at_snapshot(
+        &self,
+        query: RecallQuery,
+        snapshot_name: &str,
+    ) -> Result<RetrievalResult> {
+        let snap = self.get_snapshot(snapshot_name)?;
+        // Filter: WHERE created_at <= snap.tick AND state != 'Archived'
+        // effective_strength computed with delta = snap.tick - last_accessed
+    }
+
+    pub fn list_snapshots(&self) -> Result<Vec<Snapshot>>;
+    pub fn delete_snapshot(&self, name: &str) -> Result<()>;
+}
+
+fn effective_strength_at(m: &Memory, snap_tick: u64) -> f32 {
+    let effective_last = m.last_accessed.min(snap_tick);
+    let elapsed = snap_tick.saturating_sub(effective_last);
+    if m.bypass_decay {
+        m.strength
+    } else {
+        (-(elapsed as f32) / m.stability).exp() * m.strength
+    }
+}
+```
+
+**CLI / MCP**
+
+```bash
+membrain snapshot --name before-refactor
+membrain snapshot --name v1-launch --note "Day we shipped v1"
+
+membrain snapshot list
+membrain snapshot delete before-refactor
+
+membrain recall "architecture decision" --at before-refactor
+membrain recall "user preferences" --at v1-launch --top 5 --json
+
+membrain stats --at before-refactor
+membrain health --at before-refactor
+```
+
+```
+MCP tool: snapshot(name, note?)
+  → { name, tick, memory_count }
+
+MCP tool: recall(query, at_snapshot?: string, ...)
+  → RetrievalResult scoped to snapshot
+
+MCP tool: list_snapshots()
+  → { snapshots: [{name, tick, note, memory_count}] }
+```
+
+**Milestone Placement**
+
+Schema in **Milestone 1** (zero cost). Core `create_snapshot()` in **Milestone 4 (Retrieval)**.
+`recall_at_snapshot()` in **Milestone 4**. CLI in **Milestone 10**. Near-zero risk.
+
+---
+
+### 47.3 Attention Heatmap + Adaptive Cache Pre-warming
+
+**Concept**
+
+Track which memories are actually retrieved across sessions — the full recall event
+log with query patterns. Derive two outcomes:
+(1) `membrain hot-paths` and `membrain dead-zones` for observability;
+(2) automatic Tier1 cache pre-warming on daemon start using historical hot-path data.
+
+**Schema Changes**
+
+```sql
+CREATE TABLE recall_log (
+  id              INTEGER PRIMARY KEY AUTOINCREMENT,
+  tick            INTEGER NOT NULL,
+  query_hash      TEXT NOT NULL,
+  query_preview   TEXT,
+  retrieved_ids   TEXT NOT NULL,
+  tier            TEXT NOT NULL,
+  latency_us      INTEGER NOT NULL,
+  namespace_id    TEXT NOT NULL DEFAULT 'default'
+);
+
+CREATE INDEX idx_recall_tick ON recall_log(tick DESC);
+CREATE INDEX idx_recall_query ON recall_log(query_hash);
+
+CREATE TABLE hot_path_cache (
+  memory_id       TEXT PRIMARY KEY REFERENCES memories(id),
+  retrieve_count  INTEGER NOT NULL DEFAULT 0,
+  last_retrieved  INTEGER NOT NULL,
+  avg_rank        REAL NOT NULL,
+  score           REAL NOT NULL
+);
+```
+
+**Core Logic**
+
+```rust
+pub struct AttentionHeatmap {
+    log_cap: usize,           // default: 50_000
+    rebuild_interval: u64,    // default: every 500 ticks
+    prewarm_top_n: usize,     // default: 256
+}
+
+impl AttentionHeatmap {
+    pub async fn log_recall_event(&self, event: RecallEvent, store: &BrainStore);
+    pub fn rebuild_hot_paths(&self, store: &mut BrainStore) -> HeatmapReport;
+    pub async fn prewarm_tier1(&self, store: &mut BrainStore) -> PrewarmReport;
+    pub fn hot_paths(&self, top_n: usize, store: &BrainStore) -> Vec<HotPathEntry>;
+    pub fn dead_zones(&self, min_age_ticks: u64, store: &BrainStore) -> Vec<DeadZoneEntry>;
+}
+
+pub struct RecallEvent {
+    pub tick: u64,
+    pub query: String,
+    pub retrieved_ids: Vec<Uuid>,
+    pub tier: RetrievalPath,
+    pub latency_us: u64,
+    pub namespace_id: String,
+}
+
+pub struct HotPathEntry {
+    pub memory_id: Uuid,
+    pub content_preview: String,
+    pub retrieve_count: usize,
+    pub avg_rank: f32,
+    pub score: f32,
+}
+
+pub struct DeadZoneEntry {
+    pub memory_id: Uuid,
+    pub content_preview: String,
+    pub age_ticks: u64,
+    pub strength: f32,
+    pub retrieve_count: usize,
+}
+
+pub struct PrewarmReport {
+    pub loaded: usize,
+    pub skipped_archived: usize,
+    pub duration_ms: u64,
+}
+```
+
+**CLI / MCP**
+
+```bash
+membrain hot-paths                     # top 20 most-retrieved memories
+membrain hot-paths --top 50 --json
+membrain dead-zones                    # memories never retrieved since encoding
+membrain dead-zones --min-age 1000
+membrain dead-zones --forget-all      # archive all dead zones (with confirmation)
+
+membrain recall-patterns
+membrain heatmap --since 5000
+```
+
+```
+MCP tool: hot_paths(top_n?)
+  → { entries: [{memory_id, content_preview, retrieve_count, score}] }
+
+MCP tool: dead_zones(min_age_ticks?)
+  → { entries: [{memory_id, content_preview, age_ticks, strength}] }
+```
+
+**Milestone Placement**
+
+Schema in **Milestone 1**. Logging in **Milestone 4 (Retrieval Engine)**.
+`rebuild_hot_paths()` in **Milestone 6 (Consolidation)**. `prewarm_tier1()` in
+**Milestone 9 (Daemon)**. CLI in **Milestone 10**.
+
+---
+
+### 47.4 Semantic Diff ("What changed in my brain?")
+
+**Concept**
+
+`membrain diff --since <snapshot_or_tick>` produces a human-readable semantic
+summary of brain changes between two points: new beliefs, strengthened memories,
+archived memories, resolved conflicts, and newly formed engrams. Requires the
+Snapshot system (Feature 12 / 47.2) for named checkpoints, but also works with
+raw tick numbers.
+
+**Schema Changes**
+
+None beyond snapshots (47.2). Diff is computed from existing tables using tick-range queries.
+
+**Core Logic**
+
+```rust
+pub struct DiffRequest {
+    pub since: DiffAnchor,
+    pub until: DiffAnchor,
+    pub namespace_id: String,
+    pub top_n: usize,
+}
+
+pub enum DiffAnchor {
+    SnapshotName(String),
+    Tick(u64),
+    Current,
+}
+
+pub struct BrainDiff {
+    pub since_tick: u64,
+    pub until_tick: u64,
+    pub new_memories: Vec<DiffEntry>,
+    pub strengthened: Vec<DiffEntry>,
+    pub weakened: Vec<DiffEntry>,
+    pub archived: Vec<DiffEntry>,
+    pub conflicts_resolved: usize,
+    pub new_engrams: Vec<EngramDiff>,
+    pub landmarks_added: Vec<DiffEntry>,
+    pub skills_extracted: usize,
+    pub dream_links_added: usize,
+}
+
+pub struct DiffEntry {
+    pub memory_id: Uuid,
+    pub content_preview: String,
+    pub before_strength: Option<f32>,
+    pub after_strength: Option<f32>,
+    pub delta: f32,
+    pub kind: MemoryKind,
+}
+
+pub struct EngramDiff {
+    pub engram_id: Uuid,
+    pub member_count: usize,
+    pub top_preview: String,
+}
+```
+
+**Output Example**
+
+```
+BRAIN DIFF  tick 4000 → 8291  (4291 ticks)
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+NEW BELIEFS  (+47)
+  + [Semantic] Switched architecture to microservices
+  + [Episodic] User prefers async patterns over callbacks
+  + [Procedural] Deploy workflow: build → test → stage → prod
+  ... and 44 more
+
+STRENGTHENED  (12 memories recalled 5+ times)
+  ↑ "Rust borrow checker rules"        0.41 → 0.89  (+0.48)
+  ↑ "User prefers concise responses"   0.55 → 0.91  (+0.36)
+
+WEAKENED / ARCHIVED  (23)
+  ↓ "Old Python scraper approach"      0.62 → archived
+  ↓ "Initial monolith design"          0.71 → archived
+
+CONFLICTS RESOLVED  (3)
+  ✓ dark-mode vs light-mode    → dark mode preferred
+  ✓ sync vs async preference   → async confirmed
+
+NEW ENGRAMS  (2)
+  ✦ "deployment-workflow"  18 members
+  ✦ "user-communication"   11 members
+
+LANDMARKS ADDED  (1)
+  ⚑ "Switched to microservices"  tick 6201
+
+SKILLS EXTRACTED  2  |  DREAM LINKS ADDED  847
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+```
+
+**CLI / MCP**
+
+```bash
+membrain diff --since before-refactor
+membrain diff --since 4000
+membrain diff --since before-refactor --until v1-launch
+membrain diff --since 4000 --top 5
+membrain diff --since before-refactor --json
+membrain diff --since before-refactor --brief
+```
+
+```
+MCP tool: diff(since, until?, top_n?)
+  → BrainDiff as structured JSON
+```
+
+**Milestone Placement**
+
+Raw tick diff works from **Milestone 3** onwards. Full diff with all categories in
+**Milestone 10**. Audit log (Feature 19 / 47.9) strengthens the strength-delta queries.
+
+---
+
+### 47.5 Fork + Merge Brain States
+
+**Concept**
+
+`membrain fork --name agent-b` creates a new brain namespace that inherits all
+`public` (and optionally `shared`) memories from the parent — by reference, not
+by copy. The fork gets its own private namespace for new writes. Forks can diverge
+independently. `membrain merge agent-b --into default` harvests new memories from
+the fork back into the parent, using the belief versioning system (Feature 2 / 46.2)
+to handle conflicts. Analogous to git branch + merge for memory state.
+
+**Schema Changes**
+
+```sql
+CREATE TABLE brain_forks (
+  name                TEXT PRIMARY KEY,
+  parent_namespace    TEXT NOT NULL,
+  forked_at_tick      INTEGER NOT NULL,
+  inherited_vis       TEXT NOT NULL DEFAULT 'public',
+  status              TEXT NOT NULL DEFAULT 'active',
+  merged_at_tick      INTEGER,
+  note                TEXT
+);
+
+CREATE TABLE fork_merge_log (
+  id              INTEGER PRIMARY KEY AUTOINCREMENT,
+  fork_name       TEXT NOT NULL,
+  target_ns       TEXT NOT NULL,
+  tick            INTEGER NOT NULL,
+  memories_merged INTEGER NOT NULL,
+  conflicts_found INTEGER NOT NULL,
+  conflicts_auto_resolved INTEGER NOT NULL,
+  conflicts_pending INTEGER NOT NULL
+);
+```
+
+**Core Logic**
+
+```rust
+pub struct ForkConfig {
+    pub name: String,
+    pub parent_namespace: String,
+    pub inherit_visibility: ForkInheritance,
+    pub note: Option<String>,
+}
+
+pub enum ForkInheritance {
+    PublicOnly,
+    SharedToo,
+    All,
+}
+
+pub struct MergeConfig {
+    pub fork_name: String,
+    pub target_namespace: String,
+    pub conflict_strategy: ConflictStrategy,
+    pub dry_run: bool,
+}
+
+pub enum ConflictStrategy {
+    ForkWins,
+    ParentWins,
+    RecencyWins,
+    Manual,
+}
+
+impl BrainStore {
+    pub fn fork(&mut self, config: ForkConfig) -> Result<ForkInfo>;
+    pub fn merge_fork(&mut self, config: MergeConfig) -> Result<MergeReport>;
+}
+
+pub struct MergeReport {
+    pub memories_merged: usize,
+    pub conflicts_found: usize,
+    pub conflicts_auto_resolved: usize,
+    pub conflicts_pending: usize,
+    pub engrams_merged: usize,
+}
+```
+
+**CLI / MCP**
+
+```bash
+membrain fork --name agent-specialist --inherit public
+membrain fork --name experiment --inherit shared --note "testing new approach"
+
+membrain fork list
+membrain fork status agent-specialist
+
+membrain merge agent-specialist --into default
+membrain merge agent-specialist --into default --conflict recency-wins
+membrain merge agent-specialist --into default --dry-run
+
+membrain fork abandon experiment
+```
+
+```
+MCP tool: fork(name, parent_namespace?, inherit?, note?)
+  → { name, forked_at_tick, inherited_count }
+
+MCP tool: merge_fork(fork_name, target_namespace, conflict_strategy?, dry_run?)
+  → MergeReport
+```
+
+**Milestone Placement**
+
+Depends on namespace system (Feature 9 / 46.9). Schema in **Milestone 1**.
+Core fork/merge logic in **Milestone 9**. Requires belief versioning (46.2) for conflict handling.
+
+---
+
+### 47.6 Predictive Pre-recall (Speculative Execution)
+
+**Concept**
+
+Track sequential recall patterns within sessions: if query A is frequently followed
+by query B, learn this association. When A is recalled, proactively embed and
+pre-load the predicted B results into Tier1 cache — before the agent asks.
+Analogous to CPU branch prediction applied to memory retrieval.
+
+**Schema Changes**
+
+```sql
+CREATE TABLE recall_sequences (
+  query_hash_a   TEXT NOT NULL,
+  query_hash_b   TEXT NOT NULL,
+  count          INTEGER NOT NULL DEFAULT 1,
+  last_seen      INTEGER NOT NULL,
+  avg_gap_ticks  REAL NOT NULL DEFAULT 10.0,
+  namespace_id   TEXT NOT NULL DEFAULT 'default',
+  PRIMARY KEY (query_hash_a, query_hash_b, namespace_id)
+);
+
+CREATE INDEX idx_seq_a ON recall_sequences(query_hash_a, namespace_id);
+```
+
+**Core Logic**
+
+```rust
+pub struct PredictiveEngine {
+    min_count_threshold: usize,   // default: 3
+    max_gap_ticks: u64,           // default: 50
+    top_predictions: usize,       // default: 3
+    prewarm_top_k: usize,         // default: 5
+}
+
+impl PredictiveEngine {
+    pub async fn record_transition(
+        &self,
+        prev_query_hash: u64,
+        current_query_hash: u64,
+        gap_ticks: u64,
+        store: &BrainStore,
+    );
+
+    pub async fn trigger_prewarm(
+        &self,
+        query_hash: u64,
+        store: &mut BrainStore,
+        tier1: &mut LruCache<u64, Vec<ScoredMemory>>,
+    ) -> PredictionResult;
+}
+
+pub struct PredictionResult {
+    pub predictions: Vec<PredictedQuery>,
+    pub prewarmed: usize,
+}
+
+pub struct PredictedQuery {
+    pub query_hash: u64,
+    pub confidence: f32,
+    pub prewarmed_ids: Vec<Uuid>,
+}
+```
+
+**Config**
+
+```toml
+[predictive]
+enabled              = true
+min_count_threshold  = 3
+max_gap_ticks        = 50
+top_predictions      = 3
+prewarm_top_k        = 5
+```
+
+**CLI / MCP**
+
+```bash
+membrain recall-patterns               # show learned A→B sequences
+membrain recall-patterns --top 20
+membrain recall-patterns --reset       # clear learned sequences
+
+membrain stats                         # now includes prewarm_hit_rate
+membrain health                        # shows predictive cache hit/miss
+```
+
+**Milestone Placement**
+
+Depends on recall_log (47.3, Milestone 4). Core sequence tracking in **Milestone 6**.
+Async pre-warming in **Milestone 9 (Daemon)**. Stats in **Milestone 10**.
+
+---
+
+### 47.7 Memory Schema Compression
+
+**Concept**
+
+When many episodic memories accumulate around the same *type of situation*
+(not necessarily the same engram), membrain runs a schema extraction pass
+that synthesizes them into a single `Schema` memory. Original episodics have
+their strength reduced (not deleted). The schema memory bypasses decay.
+Distinct from Skill Extraction (46.8) which targets action patterns within a
+single engram — Schema Compression operates across engrams and targets
+*situation patterns*.
+
+**Schema Changes**
+
+```sql
+ALTER TABLE memories ADD COLUMN compressed_into TEXT REFERENCES memories(id);
+ALTER TABLE memories ADD COLUMN compression_tick INTEGER;
+
+CREATE TABLE compression_log (
+  id                  INTEGER PRIMARY KEY AUTOINCREMENT,
+  schema_memory_id    TEXT NOT NULL REFERENCES memories(id),
+  source_memory_count INTEGER NOT NULL,
+  tick                INTEGER NOT NULL,
+  namespace_id        TEXT NOT NULL DEFAULT 'default',
+  keyword_summary     TEXT
+);
+```
+
+**Core Logic**
+
+```rust
+pub struct SchemaCompressor {
+    min_episode_count: usize,       // default: 20
+    centroid_coherence_min: f32,    // default: 0.55
+    strength_reduction_factor: f32, // default: 0.5
+    keyword_top_k: usize,           // default: 15
+    min_keyword_frequency: f32,     // default: 0.4
+}
+
+impl SchemaCompressor {
+    pub fn run_compression_pass(&self, store: &mut BrainStore) -> CompressionReport;
+    fn find_compressible_clusters(&self, store: &BrainStore) -> Vec<EpisodicCluster>;
+    fn synthesize_schema(&self, cluster: &EpisodicCluster, store: &BrainStore) -> Result<SchemaDraft>;
+    fn apply_compression(&self, draft: SchemaDraft, store: &mut BrainStore) -> Result<Uuid>;
+}
+
+pub struct EpisodicCluster {
+    pub representative_ids: Vec<Uuid>,
+    pub centroid_embedding: Vec<f32>,
+    pub coherence_score: f32,
+    pub dominant_keywords: Vec<String>,
+}
+
+pub struct SchemaDraft {
+    pub content: String,
+    pub keywords: Vec<String>,
+    pub source_ids: Vec<Uuid>,
+    pub confidence: f32,
+    pub strength: f32,
+}
+
+pub struct CompressionReport {
+    pub schemas_created: usize,
+    pub episodes_compressed: usize,
+    pub storage_reduction_pct: f32,
+}
+```
+
+**Compression Trigger Conditions**
+
+```
+Trigger compression pass when:
+  - consolidation cycle runs AND
+  - total episodic memories > SOFT_CAP * 0.7 AND
+  - at least one cluster has > min_episode_count members
+
+Per-cluster trigger:
+  - member_count > min_episode_count
+  - centroid_coherence > centroid_coherence_min
+  - not already compressed (compressed_into IS NULL)
+  - majority MemoryKind::Episodic
+```
+
+**CLI / MCP**
+
+```bash
+membrain compress                      # manually trigger compression pass
+membrain compress --dry-run           # show what would be compressed
+membrain schemas                       # list all schema memories
+membrain schemas --top 10
+membrain inspect <uuid> --show-source
+membrain uncompress <schema-uuid>     # restore strength to source episodes
+```
+
+```
+MCP tool: compress(dry_run?)
+  → { schemas_created, episodes_compressed, storage_reduction_pct }
+
+MCP tool: schemas(top_n?)
+  → { schemas: [{id, content, source_count, confidence, keywords}] }
+```
+
+**Milestone Placement**
+
+Implement during **Milestone 6 (Consolidation Engine)** as a compression sub-pass.
+Add `compressed_into` column to schema in **Milestone 1**.
+
+---
+
+### 47.8 Emotional Trajectory Tracking
+
+**Concept**
+
+Track the aggregate emotional state (valence + arousal) of memories encoded per era.
+Creates a mood timeline across sessions. Two outcomes:
+(1) `membrain mood` for observability;
+(2) optional mood-congruent retrieval boost — memories encoded in a similar emotional
+state are ranked slightly higher, mirroring state-dependent memory in neuroscience.
+
+**Schema Changes**
+
+```sql
+CREATE TABLE emotional_timeline (
+  id             INTEGER PRIMARY KEY AUTOINCREMENT,
+  era_id         TEXT,
+  tick_start     INTEGER NOT NULL,
+  tick_end       INTEGER,
+  avg_valence    REAL NOT NULL,
+  avg_arousal    REAL NOT NULL,
+  memory_count   INTEGER NOT NULL DEFAULT 0,
+  namespace_id   TEXT NOT NULL DEFAULT 'default'
+);
+
+CREATE INDEX idx_emotion_tick ON emotional_timeline(tick_start);
+
+ALTER TABLE memories ADD COLUMN encoding_valence REAL;
+ALTER TABLE memories ADD COLUMN encoding_arousal REAL;
+```
+
+**Core Logic**
+
+```rust
+pub struct EmotionalTracker {
+    window_size_ticks: u64,         // default: 500
+    congruence_weight: f32,         // default: 0.1
+    congruence_enabled: bool,       // default: false (opt-in)
+}
+
+impl EmotionalTracker {
+    pub fn snapshot_encoding_mood(&self, store: &BrainStore) -> MoodSnapshot;
+    pub fn emit_timeline_row(&self, store: &mut BrainStore) -> Result<()>;
+    pub fn mood_congruence_score(
+        &self,
+        candidate: &Memory,
+        current_mood: &MoodSnapshot,
+    ) -> f32;
+}
+
+pub struct MoodSnapshot {
+    pub avg_valence: f32,
+    pub avg_arousal: f32,
+    pub sample_size: usize,
+    pub tick: u64,
+}
+
+pub enum MoodState {
+    CalmPositive,     // valence > 0.2, arousal < 0.4
+    ActivePositive,   // valence > 0.2, arousal >= 0.4
+    CalmNegative,     // valence < -0.2, arousal < 0.4
+    Stressed,         // valence < -0.2, arousal >= 0.6
+    Neutral,          // |valence| <= 0.2
+}
+```
+
+**CLI / MCP**
+
+```bash
+membrain mood                          # current mood state
+membrain mood --history               # full timeline
+membrain mood --history --since 5000
+membrain mood --history --json
+
+membrain recall "debugging session" --mood-congruent
+```
+
+```
+MCP tool: mood_history(since_tick?, namespace_id?)
+  → { timeline: [{tick_start, tick_end, avg_valence, avg_arousal, state, memory_count}] }
+
+MCP tool: recall(query, mood_congruent?: bool, ...)
+  → existing RetrievalResult with mood_boost_applied flag
+```
+
+**Milestone Placement**
+
+Schema columns in **Milestone 1**. `snapshot_encoding_mood()` in **Milestone 2 (Encoding)**.
+`emit_timeline_row()` in **Milestone 6 (Consolidation)**. Mood-congruent retrieval in
+**Milestone 4** as opt-in. CLI in **Milestone 10**.
+
+---
+
+### 47.9 Write-Ahead Memory Audit Log
+
+**Concept**
+
+Every mutation on the memory system — encode, recall (LTP), strengthen, archive,
+reconsolidate, forget, interference penalty, dream link creation — is appended to
+an immutable audit log for forensics: "why does this memory have strength 0.2
+when it started at 0.8?" `membrain audit <uuid>` produces a full operation history.
+
+**Schema Changes**
+
+```sql
+CREATE TABLE memory_audit_log (
+  id              INTEGER PRIMARY KEY AUTOINCREMENT,
+  op              TEXT NOT NULL,
+  memory_id       TEXT NOT NULL,
+  tick            INTEGER NOT NULL,
+  before_strength REAL,
+  after_strength  REAL,
+  before_conf     REAL,
+  after_conf      REAL,
+  triggered_by    TEXT NOT NULL,
+  delta_note      TEXT,
+  namespace_id    TEXT NOT NULL DEFAULT 'default'
+);
+
+CREATE INDEX idx_audit_memory ON memory_audit_log(memory_id, tick);
+CREATE INDEX idx_audit_tick   ON memory_audit_log(tick DESC);
+CREATE INDEX idx_audit_op     ON memory_audit_log(op);
+```
+
+**Core Logic**
+
+```rust
+pub struct AuditLogger {
+    max_rows: usize,         // default: 200_000
+    purge_batch: usize,      // default: 10_000
+    enabled: bool,           // default: true
+}
+
+pub struct AuditEntry {
+    pub op: AuditOp,
+    pub memory_id: Uuid,
+    pub tick: u64,
+    pub before_strength: Option<f32>,
+    pub after_strength: Option<f32>,
+    pub before_confidence: Option<f32>,
+    pub after_confidence: Option<f32>,
+    pub triggered_by: AuditTrigger,
+    pub delta_note: Option<String>,
+    pub namespace_id: String,
+}
+
+pub enum AuditOp {
+    Encode, Recall, Strengthen, Weaken, Archive, Reconsolidate,
+    Interference, Consolidate, DreamLink, Invalidate, Compress,
+}
+
+pub enum AuditTrigger {
+    User, Agent, Decay, Interference, Consolidation, Dream, Ltp, System,
+}
+
+impl AuditLogger {
+    pub fn log(&self, entry: AuditEntry, db: &Connection) -> Result<()>;
+    pub fn maybe_purge(&self, db: &Connection) -> Result<()>;
+}
+
+impl BrainStore {
+    pub fn audit_memory(&self, id: Uuid) -> Result<Vec<AuditEntry>>;
+    pub fn audit_range(&self, since_tick: u64, op: Option<AuditOp>) -> Result<Vec<AuditEntry>>;
+}
+```
+
+**CLI / MCP**
+
+```bash
+membrain audit <uuid>                       # full history for one memory
+membrain audit <uuid> --since 5000
+membrain audit <uuid> --op recall
+
+membrain audit --since 5000 --op archive
+membrain audit --recent 100
+membrain audit --json
+```
+
+```
+MCP tool: audit(memory_id?, since_tick?, op?, limit?)
+  → { entries: [{op, memory_id, tick, before_strength, after_strength, triggered_by, note}] }
+```
+
+**Milestone Placement**
+
+Schema in **Milestone 1**. `AuditLogger` integration in **Milestone 2** (encode path)
+and **Milestone 3** (LTP/LTD, decay, interference). By **Milestone 6**, all mutation
+paths instrumented. CLI in **Milestone 10**. Overhead: one INSERT per mutation, ~microseconds.
+
+---
+
+### 47.10 Query Intent Classification + Auto-routing
+
+**Concept**
+
+`membrain ask "natural language question"` automatically classifies query intent
+using fast keyword pattern matching (no LLM, no ML model) and routes to the
+appropriate retrieval configuration. One unified entry point that does the right thing.
+
+**Schema Changes**
+
+None.
+
+**Core Logic**
+
+```rust
+pub enum QueryIntent {
+    SemanticBroad,        // "what do I know about X"
+    ExistenceCheck,       // "did I / have I / do I know"
+    RecentFirst,          // "recently / lately / today / last time"
+    StrengthWeighted,     // "important / critical / key / essential"
+    UncertaintyFocused,   // "uncertain / not sure / might / possibly"
+    CausalTrace,          // "why do I believe / how did I learn / origin of"
+    TemporalAnchor,       // "before X / after X / when did"
+    DiverseSample,        // "different / varied / alternatives / counterexample"
+    ProceduralLookup,     // "how to / steps for / procedure"
+    EmotionalFilter,      // "worried / frustrated / excited about"
+}
+
+pub struct IntentClassifier;
+
+impl IntentClassifier {
+    pub fn classify(query: &str) -> (QueryIntent, f32);
+
+    pub fn intent_to_recall_config(intent: QueryIntent, query: &str) -> RecallQuery {
+        match intent {
+            SemanticBroad       => RecallQuery { top_k: 10, min_strength: 0.1, ..default() },
+            ExistenceCheck      => RecallQuery { top_k: 1, min_strength: 0.05, include_archived: true, ..default() },
+            RecentFirst         => RecallQuery { top_k: 5, sort_by: SortBy::Recency, ..default() },
+            StrengthWeighted    => RecallQuery { top_k: 5, min_strength: 0.6, sort_by: SortBy::Strength, ..default() },
+            UncertaintyFocused  => RecallQuery { top_k: 10, max_confidence: Some(0.5), ..default() },
+            CausalTrace         => RecallQuery { top_k: 1, follow_causal: true, ..default() },
+            ProceduralLookup    => RecallQuery { top_k: 5, kind_filter: Some(MemoryKind::Procedural), ..default() },
+            DiverseSample       => RecallQuery { top_k: 10, diversity_penalty: 0.3, ..default() },
+            TemporalAnchor      => RecallQuery { top_k: 5, era_filter: parse_era(query), ..default() },
+            EmotionalFilter     => RecallQuery { top_k: 10, mood_congruent: true, ..default() },
+        }
+    }
+}
+
+const PATTERNS: &[(&str, QueryIntent)] = &[
+    ("did i|have i|do i know|have i ever|did i ever", ExistenceCheck),
+    ("why do i believe|how did i learn|where did i|origin of", CausalTrace),
+    ("how to|steps for|procedure for|workflow for", ProceduralLookup),
+    ("recently|lately|today|last time|most recent", RecentFirst),
+    ("important|critical|key|essential|must know", StrengthWeighted),
+    ("uncertain|not sure|might|possibly|unsure", UncertaintyFocused),
+    ("before|after|when did|timeline|era", TemporalAnchor),
+    ("different|varied|alternative|counterexample|unlike", DiverseSample),
+    ("worried|frustrated|stressed|excited|anxious", EmotionalFilter),
+];
+```
+
+**Response Formatting by Intent**
+
+```rust
+pub fn format_ask_response(result: RetrievalResult, intent: QueryIntent) -> String {
+    match intent {
+        ExistenceCheck   => format_existence(result),
+        CausalTrace      => format_causal_chain(result),
+        ProceduralLookup => format_steps(result),
+        _                => format_standard(result),
+    }
+}
+```
+
+**CLI / MCP**
+
+```bash
+membrain ask "what do I know about Rust lifetimes?"
+membrain ask "did I ever encounter a borrow checker error with async?"
+membrain ask "what's most important about the deploy process?"
+membrain ask "what was I uncertain about last week?"
+membrain ask "why do I believe microservices are better here?"
+membrain ask "how to deploy the service?"
+
+membrain ask "..." --explain-intent     # show classified intent + config used
+membrain ask "..." --override-intent semantic-broad
+```
+
+```
+MCP tool: ask(query, explain_intent?)
+  → {
+      intent: string,
+      intent_confidence: f32,
+      result: RetrievalResult,
+      formatted_response: string
+    }
+```
+
+**Milestone Placement**
+
+Fully self-contained — no new storage. Implement as a thin wrapper in **Milestone 9 (MCP)**
+or **Milestone 10 (CLI Polish)**. `ask` becomes the primary MCP tool agents use,
+with `remember/recall/forget` as power-user tools.
+
+---
+
+### 47.11 Batch 2 Summary Table
+
+| #  | Feature | Schema Changes | Key Dependency | Milestone | Effort |
+|----|---------|---------------|----------------|-----------|--------|
+| 11 | Causal Chain Tracking | `causal_links` table, 2 columns | Reconsolidation (M5) | M5+M10 | Low |
+| 12 | Snapshots + Time Travel | `snapshots` table | None | M4 | Very Low |
+| 13 | Attention Heatmap | `recall_log`, `hot_path_cache` | Retrieval (M4) | M4+M9 | Low |
+| 14 | Semantic Diff | None (uses snapshots) | Feature 12 | M4+M10 | Low |
+| 15 | Fork + Merge | `brain_forks`, `fork_merge_log` | Namespace (46.9) | M9 | Medium |
+| 16 | Predictive Pre-recall | `recall_sequences` | Feature 13 | M6+M9 | Low |
+| 17 | Schema Compression | `compression_log`, 2 columns | Engrams (M7) | M6 | Medium |
+| 18 | Emotional Trajectory | `emotional_timeline`, 2 columns | Encoding (M2) | M2+M6 | Low |
+| 19 | Write-Ahead Audit Log | `memory_audit_log` | None | M2 | Very Low |
+| 20 | Query Intent Routing | None | Full retrieval stack | M9/M10 | Very Low |
+
+### 47.12 Critical M1 Schema Additions (Batch 2)
+
+All columns that must be present from the first migration:
+
+```sql
+-- Feature 11: Causal tracking
+ALTER TABLE memories ADD COLUMN has_causal_parents  INTEGER NOT NULL DEFAULT 0;
+ALTER TABLE memories ADD COLUMN has_causal_children INTEGER NOT NULL DEFAULT 0;
+
+-- Feature 17: Compression
+ALTER TABLE memories ADD COLUMN compressed_into   TEXT REFERENCES memories(id);
+ALTER TABLE memories ADD COLUMN compression_tick  INTEGER;
+
+-- Feature 18: Emotional trajectory
+ALTER TABLE memories ADD COLUMN encoding_valence REAL;
+ALTER TABLE memories ADD COLUMN encoding_arousal REAL;
+
+-- New tables (safe to create at M1, used later)
+CREATE TABLE causal_links ( ... );       -- Feature 11
+CREATE TABLE snapshots ( ... );          -- Feature 12
+CREATE TABLE recall_log ( ... );         -- Feature 13
+CREATE TABLE hot_path_cache ( ... );     -- Feature 13
+CREATE TABLE recall_sequences ( ... );   -- Feature 16
+CREATE TABLE compression_log ( ... );    -- Feature 17
+CREATE TABLE emotional_timeline ( ... ); -- Feature 18
+CREATE TABLE memory_audit_log ( ... );   -- Feature 19
+CREATE TABLE brain_forks ( ... );        -- Feature 15
+CREATE TABLE fork_merge_log ( ... );     -- Feature 15
+```
+
+> Full CREATE TABLE statements are in each feature section above.
+> Tables created at M1 but unused until their respective milestone are zero-cost.
