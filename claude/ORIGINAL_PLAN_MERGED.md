@@ -1,0 +1,11712 @@
+<!-- SOURCE: PLAN.md -->
+
+# membrain — PLAN.md
+
+> **Vision**: Port the full set of human-memory mechanisms into an AI agent memory system.  
+> Like the human brain: long-lasting, high-capacity, fast, associative, intelligently forgetting, unbounded.  
+> Built for AI: CLI + MCP, usable from any tool, <1ms fast path, unlimited scale.
+>
+> **Performance targets**: Tier1 <0.1ms | Tier2 <5ms | Tier3 <50ms | Encode <10ms  
+> **Scale target**: Unlimited — like the human brain (~2.5PB equivalent)
+
+---
+
+## TABLE OF CONTENTS
+
+1. [Current Problem — Why membrain Is Needed](#1-current-problem--why-membrain-is-needed)
+2. [The Human Brain — Complete Analysis](#2-the-human-brain--complete-analysis)
+3. [Gap Analysis — Human Brain vs Current AI Memory](#3-gap-analysis)
+4. [Port to membrain — Mechanism by Mechanism](#4-port-to-membrain)
+5. [Overall Architecture](#5-overall-architecture)
+6. [Performance — Bottlenecks & Optimizations](#6-performance)
+7. [Tech Stack — Analysis & Selection Rationale](#7-techstack)
+8. [Data Schema](#8-data-schema)
+9. [CLI Commands & MCP Tools](#9-cli-commands--mcp-tools)
+10. [Milestones](#10-milestones)
+11. [Acceptance Checklist](#11-acceptance-checklist)
+
+---
+
+## 1. Current Problem
+
+### What do current AI memory systems accomplish?
+
+| System | Approach | Limitations |
+|--------|----------|-----------|
+| MemGPT / Letta | OS virtual memory — page in/out context | No decay, no emotional weighting, no true consolidation |
+| Mem0 | Two-phase extraction + graph | No LTP/LTD, no reconsolidation, slow retrieval |
+| LangMem | Relevance scoring + lifecycle | No engram clusters, no interference handling |
+| OpenAI Memory | Simple key-value extraction | Very primitive, with no biological mechanisms at all |
+
+### What are they all missing?
+
+```
+❌ No LTP/LTD — memory strength does not change dynamically
+❌ No Ebbinghaus decay — no time-based forgetting
+❌ No reconsolidation — memory does not update on recall
+❌ No sleep/consolidation cycle — episodic memory does not become semantic memory
+❌ No emotional tagging — all memories are treated equally
+❌ No engram clusters — no true associative recall
+❌ No interference handling — memories do not affect each other
+❌ No active forgetting — only accumulation, no intelligent pruning
+❌ No dual-path (fast/slow) — every query is handled the same way
+❌ No working-memory layer — no real capacity limit
+```
+
+**Result**: Agents using these systems accumulate noise, retrieval gets slower over time, they do not learn from experience, and no personality emerges from memory.
+
+---
+
+## 2. The Human Brain — Complete Analysis
+
+### 2.1 Core Characteristics
+
+```
+UNBOUNDED            The brain has ~100 billion neurons and ~100 trillion synaptic connections
+                     Practical capacity: ~2.5 petabytes (estimated)
+                     membrain: unbounded — usearch mmap + SQLite at TB scale on disk
+                     Not limited by RAM — the cold tier uses the OS page cache
+
+FAST                 Pattern recognition: ~13ms (neocortex fast path)
+                     Deliberate recall: ~100-500ms (hippocampus slow path)
+                     membrain Tier1: <0.1ms (in-memory LRU cache, SIMD dot product)
+                     membrain Tier2: <5ms  (usearch HNSW, AVX2, 50k vectors RAM)
+                     membrain Tier3: <50ms (usearch mmap, millions on disk)
+
+LONG-LASTING         Semantic memory can last a lifetime if reinforced
+                     Emotional memory is highly durable and almost never decays
+                     membrain: strength-based persistence, emotional bypass decay
+                     Lazy decay — computed on demand, with no idle iteration
+
+ASSOCIATIVE          A small cue → pulls in the related cluster (engram)
+                     Associative, not lookup by ID
+                     membrain: engram graph (petgraph) + usearch HNSW cascade
+                     SQL pre-filter → HNSW over the candidate set → BFS engram expansion
+
+INTELLIGENT FORGETTING The brain does not forget at random — it forgets what is not predictive
+                     Signal/noise optimization qua sleep pruning
+                     membrain: active forgetting engine, predictive scoring
+                     Lazy pruning — no full iteration, only scan under pressure
+```
+
+### 2.2 Brain Regions & Functions
+
+```
+HIPPOCAMPUS
+  Function:  Index network — points to content, does not store content directly
+             Episodic memory formation, spatial memory
+             Pattern completion from a partial cue
+  Damage:    Anterograde amnesia — unable to form new memories
+  Port:      hot_store (SQLite WAL) — fast index, episodic events, pointers
+             usearch HNSW hot index (~50k vectors in RAM, AVX2 SIMD)
+
+NEOCORTEX
+  Function:  Stores the actual content — visual, auditory, semantic
+             Long-term semantic memory after systems consolidation
+             Does not require the hippocampus once fully consolidated
+  Port:      cold_store (SQLite + usearch mmap) — unlimited disk scale
+             int8 quantized vectors — 4x smaller than float32, 2x faster search
+             The OS page cache acts as an automatic warm cache
+
+AMYGDALA
+  Function:  Emotional tagging — marks the level of importance
+             Operates in parallel with the hippocampus
+             High arousal → strengthen consolidation
+  Port:      emotional_tag { valence: f32, arousal: f32 } — bypasses decay if strong enough
+
+PREFRONTAL CORTEX
+  Function:  Working memory (7±2 items), executive attention
+             Retrieval control, context management
+             Decision-making based on memory
+  Port:      WorkingMemory struct — 7 slots, attention controller
+             LruCache<512> — Tier1 fast path, <0.1ms familiarity check
+
+CEREBELLUM + BASAL GANGLIA
+  Function:  Procedural memory — motor skills, habits
+             Does not require conscious recall
+             Automated through repetition
+  Port:      procedural_store — pattern → action mappings, accessed without full recall
+
+ENTORHINAL CORTEX
+  Function:  Gateway between hippocampus ↔ neocortex
+             Information converges here before entering the hippocampus
+  Port:      encoding_pipeline — preprocessing, embedding cache, pre-filter
+```
+
+### 2.3 Memory Classification
+
+```
+DECLARATIVE (Explicit)
+├── Episodic     "I ate pho at 7am this morning at restaurant X"
+│                → Has specific time, place, and context
+│                → Stored: hot_store, decays over time
+│
+└── Semantic     "Pho is a Vietnamese dish with rice noodles, broth, and meat"
+                 → No specific time, it is knowledge
+                 → Stored: cold_store, stable, with little decay
+
+NON-DECLARATIVE (Implicit)
+├── Procedural   Cycling, typing — no conscious thought required
+│                → Stored: procedural_store, no decay
+│
+├── Priming      See "table" → recognize "chair" faster
+│                → Implicit activation boost
+│                → Port: retrieval score boost for related items
+│
+├── Conditioning Pavlov — learned stimulus → response
+│                → Port: pattern → action associations
+│
+└── Emotional    Fear response, comfort associations
+                 → Port: emotional_tag with valence + arousal
+```
+
+### 2.4 Encoding — How the Brain Records Information
+
+```
+BRAIN ENCODING PIPELINE:
+
+Sensory input
+    ↓ [attention filter — without attention = discarded within ms]
+Sensory register (iconic/echoic, <1 second)
+    ↓ [if attended]
+Working Memory (7±2 chunks, 20-30 seconds)
+    ↓ [if rehearsed, emotional, or novel]
+Encoding into LTM:
+    ├── Acoustic coding (primarily STM)
+    ├── Visual coding
+    └── Semantic coding (strongest for LTM)
+
+FACTORS THAT DETERMINE ENCODING STRENGTH:
+  attention_score   → higher = stronger encoding
+  emotional_arousal → amygdala activation = priority cao
+  novelty           → novel information = higher initial strength
+  repetition        → cumulative LTP across repetitions
+  context           → encoding-time context stored with the content
+
+ENCODING SPECIFICITY PRINCIPLE:
+  Retrieval context ≈ encoding context → better recall
+  → membrain: stores context_embedding alongside content_embedding
+```
+
+### 2.5 LTP / LTD — The Physical Basis of Learning
+
+```
+LTP (Long-Term Potentiation):
+  Mechanism: Glutamate → NMDA receptors → Ca2+ → increased AMPA receptors
+  Result: Stronger synapses, neurons fire together more easily
+  "Neurons that fire together, wire together"
+  Trigger: Successful recall, repetition, emotional activation
+
+LTD (Long-Term Depression):
+  Mechanism: Low-frequency activation → phosphatase → decreased AMPA receptors
+  Result: Weaker synapses, memory fades
+  Role: CRITICAL — without LTD, synapses max out and learning stops
+  Trigger: Non-use, time passing, interference
+
+EBBINGHAUS FORGETTING CURVE:
+  R(t) = e^(-t/S)
+  t = interaction count since the last recall (not real time)
+  S = stability (increases after each successful recall)
+
+  Retention without review:
+  20 minutes → 58%
+  1 hour    → 44%
+  1 day     → 33%
+  1 week    → 25%
+  1 month   → 21%
+
+LAZY DECAY — CRITICAL OPTIMIZATION:
+  DO NOT iterate over all memories every tick → O(n) death at large scale
+  Compute decay ON DEMAND at recall time → O(1) per access, O(0) while idle
+
+  fn effective_strength(memory: &Memory, current_tick: u64) -> f32 {
+    let elapsed = current_tick - memory.last_accessed;
+    let retention = (-elapsed as f32 / memory.stability).exp();
+    memory.base_strength * retention
+    // Persist back only on recall or consolidation
+  }
+```
+
+### 2.6 Consolidation — Stabilization
+
+```
+SYNAPTIC CONSOLIDATION (minutes → hours):
+  Occurs at the synapse immediately after encoding
+  Protein synthesis creates structural changes
+  Memory is fragile during this stage
+  Completes after ~6 hours → resistant to disruption
+
+SYSTEMS CONSOLIDATION (days → decades):
+  Transfers memory from hippocampus → neocortex
+  Hippocampus: temporary index (RAM)
+  Neocortex: permanent storage (SSD)
+  Gradient: the older the memory, the more cortex-independent it becomes
+
+IN membrain (no time-based clock → uses event/load triggers):
+  Synaptic consolidation: after N writes into hot_store
+  Systems consolidation: when hot_store > capacity threshold
+  → consolidation micro-cycles run asynchronously in the background
+```
+
+### 2.7 Sleep — The Brain’s Consolidation Engine
+
+```
+NREM (Slow-Wave Sleep):
+  The hippocampus replays memories from that day
+  Gradually transfers episodic → semantic memory into the neocortex
+  Result: "What I learned today" → "General knowledge"
+
+REM Sleep:
+  Process emotional memories
+  Reduces the emotional charge of traumatic memories
+  Creates cross-associations between otherwise unrelated memories
+  Integrates new memories with existing knowledge
+
+SYNAPTIC HOMEOSTASIS:
+  While awake: synaptic strength increases continuously (LTP)
+  While sleeping: overall strength is downscaled toward baseline
+  Purpose: free up capacity for learning the next day
+  Result: important memories survive, weak ones are pruned
+
+IN membrain (continuous, no actual sleep required):
+  NREM equivalent: when hot_store > threshold → batch migrate → cold_store
+  REM equivalent: after M emotional memories → process queue
+  Homeostasis: when total_strength > MAX_LOAD → bulk_scale + prune
+```
+
+### 2.8 Retrieval — How the Brain Retrieves Information
+
+```
+RECONSTRUCTION, NOT PLAYBACK:
+  Every recall = reconstruction from fragments
+  The hippocampus receives a cue → finds the nearest engram → pulls content from cortex
+  Gaps are filled by prior knowledge and schema
+  → Human memory is WRONG because of reconstruction error
+  → membrain: reconstructs from fragments, then writes back changes
+
+DUAL-PATH RETRIEVAL:
+  Fast path (~ms):  Neocortex pattern matching, familiarity check
+                    Does not require the hippocampus
+                    "Familiar or unfamiliar?" — instant yes/no
+  Slow path (~100ms): Hippocampus activation, engram expansion
+                    "When was it, where was it, what context?"
+                    → membrain: in-memory cache (fast) + SQLite+vec (slow)
+
+PATTERN COMPLETION:
+  Hippocampus CA3 = pattern completion network
+  Partial cue → full engram activated
+  Smelling coffee → remembering a specific morning years ago
+  → membrain: vector search → top hit → engram graph traverse → cluster
+
+ENCODING SPECIFICITY:
+  Retrieval context ≈ encoding context → better recall
+  State-dependent: emotion, location, and state should match
+  → membrain: context_embedding re-ranking during retrieval
+
+TIP-OF-TONGUE:
+  Partial retrieval — you know you know it, but cannot pull it out
+  Only fragments remain: "starts with the letter T", "French person"
+  → membrain: returns MemoryFragment if there is no full match
+```
+
+### 2.9 Reconsolidation — Memory Changes When Recalled
+
+```
+THE MOST IMPORTANT DISCOVERY OF MODERN NEUROSCIENCE:
+
+Stable memory → reactivated (recalled) → returns to a LABILE state
+Within the labile window (~hours): memory CAN be modified
+After that: it must reconsolidate → re-stabilize
+If reconsolidation fails → the memory weakens or is lost
+
+TWO ROLES:
+  1. Memory updating: new information integrates into old memory during recall
+  2. Strengthening: each successful recall makes the memory more durable
+
+AGE-DEPENDENT:
+  Young memories (just formed): easily become labile and are easy to alter
+  Old memories (consolidated): more resistant, require stronger cues
+  → membrain: labile_window = f(memory_age) — the older the memory, the shorter the window
+```
+
+### 2.10 Forgetting — Active, Not Passive
+
+```
+THE BRAIN DOES NOT FORGET RANDOMLY:
+  Forgetting is an optimization mechanism
+  Remove non-predictive information → improve signal/noise
+  Preserve abstract patterns, remove unnecessary specific details
+  Result: better generalization, preserved learning capacity
+
+5 TYPES OF FORGETTING:
+  1. Decay         Time-based weakening (Ebbinghaus)
+  2. Interference  Proactive (old→new) & Retroactive (new→old)
+  3. Retrieval failure  The memory exists but cannot be accessed
+  4. Motivated     Suppresses negative memories (trauma)
+  5. Active pruning Sleep homeostasis — systematic downscale
+
+PROACTIVE INTERFERENCE:
+  Old memories make it harder to encode/recall similar new memories
+  French → makes learning Spanish harder
+
+RETROACTIVE INTERFERENCE:
+  New memories blur similar old memories
+  Learning Spanish → confuses old French memories
+  → membrain: similarity-based interference penalty
+```
+
+### 2.11 Working Memory — Active Working Storage
+
+```
+BADDELEY'S MODEL:
+  Phonological Loop      — verbal/acoustic processing
+  Visuospatial Sketchpad — visual/spatial processing
+  Episodic Buffer        — integrates with LTM
+  Central Executive      — attention control, coordination
+
+CAPACITY: 7 ± 2 chunks (Miller, 1956)
+  In practice: ~4 meaningful chunks
+  Chunking: group related items = 1 slot
+  Expert chunking: effective capacity is higher because chunks are larger
+
+MECHANISM:
+  The PFC uses gamma oscillations to "hold" items
+  It can only maintain a finite number of oscillatory circuits simultaneously
+  → Explains why capacity is fixed
+
+IN membrain:
+  working_memory: [Option<MemoryItem>; 7]
+  Overflow: evict least-attended item
+  Central executive: uses attention_score to prioritize
+  → This is the agent’s "context window," but with a hard capacity limit
+```
+
+### 2.12 Engram — The Physical Cluster of Memory
+
+```
+DEFINITION:
+  A group of neurons active during learning → undergoes changes → forms a stable trace
+  During recall: that same neuron group is reactivated
+
+PROPERTIES:
+  Sparse:       Only a small fraction of neurons encode a memory
+  Distributed:  Spread across multiple brain regions
+  Overlapping:  Multiple memories share neurons → interference
+  Context-gated: Neurons fire only in the right context
+
+LIFECYCLE:
+  Learning → Sparse neurons activate
+           → Synaptic modifications (LTP)
+           → Consolidation (sleep/replay)
+           → Stable engram
+           → Retrieval: partial cue → pattern completion → full activation
+           → Reconsolidation or Forgetting
+
+IN membrain:
+  engram: cluster of related memory_ids
+  activation_pattern: signature vector
+  graph traversal: partial cue → nearest engram → expand cluster
+```
+
+---
+
+## 3. Gap Analysis
+
+### Human Brain vs Current AI Memory vs membrain
+
+| Mechanism | Human Brain | MemGPT/Letta | Mem0 | membrain |
+|---------|-----------|--------------|------|---------|
+| Unlimited capacity | ✅ ~2.5PB | ⚠️ DB limit | ⚠️ DB limit | ✅ SQLite TB-scale |
+| Fast retrieval | ✅ ~13ms | ❌ slow | ⚠️ varies | ✅ <1ms cache, <50ms full |
+| LTP/LTD strength | ✅ biological | ❌ | ❌ | ✅ |
+| Ebbinghaus decay | ✅ | ❌ | ❌ | ✅ |
+| Emotional tagging | ✅ amygdala | ❌ | ❌ | ✅ valence+arousal |
+| Sleep consolidation | ✅ NREM/REM | ❌ | ❌ | ✅ event-triggered |
+| Reconsolidation | ✅ | ❌ | ❌ | ✅ |
+| Active forgetting | ✅ | ❌ | ❌ | ✅ |
+| Engram clusters | ✅ | ❌ | ⚠️ graph | ✅ petgraph |
+| Interference handling | ✅ | ❌ | ❌ | ✅ |
+| Dual-path retrieval | ✅ fast+slow | ❌ | ❌ | ✅ |
+| Working memory limit | ✅ 7±2 | ❌ | ❌ | ✅ |
+| Context-dependent recall | ✅ | ⚠️ partial | ⚠️ partial | ✅ |
+| Associative recall | ✅ | ⚠️ basic | ⚠️ basic | ✅ |
+| CLI access | N/A | ❌ | ❌ | ✅ |
+| MCP support | N/A | ❌ | ❌ | ✅ |
+| Embedded Rust lib | N/A | ❌ | ❌ | ✅ |
+| Offline/local | ✅ | ⚠️ | ❌ | ✅ |
+
+---
+
+## 4. Port to membrain — Mechanism by Mechanism
+
+### 4.1 Unbounded Capacity
+
+```
+Brain:     ~100T synaptic connections, ~2.5PB
+Problem:   AI memory tools are constrained by RAM, context windows, and API costs
+
+membrain: SQLite is effectively unbounded (TB-scale on disk)
+          Vectors stored as BLOBs — no external vector DB required
+          sqlite-vec: brute-force fast enough for millions of vectors
+          No need to load everything into RAM
+```
+
+### 4.2 Dual-Path Fast/Slow Retrieval
+
+```
+Brain:
+  Fast path: Neocortex pattern matching ~13ms, no hippocampus needed
+  Slow path: Hippocampus + cortex reconstruction ~100-500ms
+
+membrain:
+  Fast path: in-memory HashMap<EngageKey, MemoryId>
+             Hot memories (<1h, high strength) cached in process memory
+             Familiarity check: "do I know this?" → instant yes/no
+             Return if confidence > threshold
+
+  Slow path: SQLite query + sqlite-vec similarity search
+             Engram activation → graph traversal → cluster reconstruction
+             Context re-ranking, strength weighting
+             Return full episodic memory with fragments
+
+  Bridge:    If the fast path is not confident → escalate → slow path
+             Slow-path result → updates the fast-path cache
+```
+
+### 4.3 LTP / LTD Engine
+
+```
+Brain:
+  LTP: recall → synapse strengthen → easier to fire again
+  LTD: non-use → synapse weaken → harder to recall
+
+membrain:
+  on_recall(id):
+    strength = min(strength + LTP_DELTA, MAX_STRENGTH)
+    stability += STABILITY_INCREMENT  // harder to forget after each recall
+    last_accessed = now()
+    access_count += 1
+
+  decay_tick() — triggered by:
+    - Every N interactions (interaction-based clock)
+    - When hot_store > pressure threshold
+    
+    for each memory:
+      if !bypass_decay:
+        // Ebbinghaus: R = e^(-interactions_since_last_access / stability)
+        retention = exp(-interactions_elapsed / stability)
+        strength *= retention
+      
+      if strength < MIN_STRENGTH && !bypass_decay:
+        archive(memory)  // do not delete, only archive
+```
+
+### 4.4 Encoding Pipeline
+
+```
+Brain:
+  Attention → Sensory register → Working memory → Encoding → LTM
+  With novelty detection, emotional tagging, and context binding
+
+membrain encode(input, context, attention, emotional):
+  1. attention_score < THRESHOLD → discard (sensory buffer only)
+  2. compute embedding = fastembed(input)
+  3. compute context_embedding = fastembed(context)
+  4. novelty_score = 1.0 - max_cosine_similarity(embedding, existing)
+  5. emotional_tag = { valence, arousal } (caller-provided or LLM-scored)
+  6. initial_strength = BASE
+                      * (1 + novelty_score * NOVELTY_WEIGHT)
+                      * (1 + attention_score * ATTENTION_WEIGHT)
+                      * emotional_tag.strength_multiplier()
+  7. bypass_decay = arousal > AROUSAL_THRESHOLD && |valence| > VALENCE_THRESHOLD
+  8. state = Labile
+  9. INSERT into hot_store
+  10. interference_check → weaken similar older memories
+  11. engram_builder.try_cluster(new_memory)
+```
+
+### 4.5 Consolidation Micro-Cycles
+
+```
+Brain:
+  Synaptic consolidation: 6h after encoding
+  Systems consolidation: days → years, hippocampus → neocortex
+  Sleep NREM: replay + migrate episodic → semantic
+
+membrain (event-triggered, not time-based):
+  Trigger: hot_store.len() > HOT_STORE_CAPACITY
+           or: hot_store.total_strength > STRENGTH_PRESSURE
+           or: explicitly called
+
+  NREM equivalent (migrate_to_cold):
+    1. Score all hot memories: score = strength * access_count * recency
+    2. Top N → extract semantic pattern → cold_store.upsert
+    3. Mark as Consolidated
+    4. Keep a pointer in hot_store (the hippocampus still indexes it)
+
+  REM equivalent (process_emotional):
+    1. Queue all emotional memories (arousal > threshold)
+    2. Gradually reduce emotional_weight (desensitization)
+    3. Create cross-links to related memories in the engram graph
+
+  Homeostasis (downscale):
+    1. Compute total load of hot_store
+    2. If > MAX_LOAD: bulk_scale(HOMEOSTASIS_FACTOR)
+    3. Prune strength < MIN_STRENGTH → archive
+```
+
+### 4.6 Reconsolidation
+
+```
+Brain:
+  Stable memory → recalled → labile → can change → reconsolidate
+
+membrain:
+  On every recall:
+    memory.state = Labile { since: now(), window: reconsolidation_window(age) }
+    memory.pending_update = Some(new_context)
+
+  reconsolidation_window(age):
+    base = RECONSOLIDATION_BASE_WINDOW
+    factor = 1.0 / (1.0 + age_in_days / 30.0)  // older = shorter window
+    return base * factor
+
+  reconsolidation_tick():
+    for each Labile memory:
+      if now() - since > window:
+        if pending_update.is_some():
+          content = merge(content, pending_update)
+          embedding = re_embed(content)
+          strength += RECONSOLIDATION_BONUS
+        state = Stable
+```
+
+### 4.7 Active Forgetting Engine
+
+```
+Brain:
+  Does not forget at random — removes non-predictive information
+  Signal/noise optimization
+  Sleep homeostasis systematic pruning
+
+membrain forgetting_engine() — async background:
+  1. Decay pruning:
+     weak = query(strength < MIN_STRENGTH, !bypass_decay)
+     archive_batch(weak)
+
+  2. Interference resolution:
+     pairs = find_similar_pairs(min=0.7, max=0.99)
+     for (m1, m2) in pairs:
+       older.strength *= INTERFERENCE_PENALTY
+
+  3. Predictive pruning:
+     never_used = query(access_count == 0, age > OLD_THRESHOLD)
+     for m in never_used:
+       m.strength *= NON_PREDICTIVE_DECAY
+
+  4. Capacity management:
+     if total_memories > SOFT_CAP:
+       sort by (strength * recency * emotional_weight)
+       archive bottom percentile
+```
+
+### 4.8 Engram Graph & Associative Recall
+
+```
+Brain:
+  Engram: sparse distributed representation, pattern completion
+  A cue → activates a cluster → reconstruction
+
+membrain:
+  struct Engram {
+    id: Uuid,
+    memory_ids: Vec<Uuid>,
+    centroid_embedding: Vec<f32>,   // average of the members
+    formation_context: Vec<f32>,
+    strength: f32,
+  }
+
+  Engram builder:
+    When encoding a new memory:
+      similar_engrams = engram_index.search(embedding, top=3)
+      if max_similarity > CLUSTER_THRESHOLD:
+        existing_engram.add(new_memory)
+        update centroid
+      else:
+        create new engram
+
+  Associative recall:
+    query_embedding = embed(cue)
+    1. Vector search → top K memory candidates
+    2. For each candidate → fetch its engram
+    3. Graph traverse: engram neighbors qua petgraph
+    4. Collect all memory_ids in the cluster
+    5. Score and rank
+    6. Reconstruct from fragments
+```
+
+### 4.9 Interference Handling
+
+```
+Brain:
+  Proactive: old memory → confuses a similar new memory
+  Retroactive: new memory → weakens a similar old memory
+
+membrain:
+  When encoding a new memory:
+    similar = vector_search(embedding, min_sim=0.7, max_sim=0.99)
+    // identical (>0.99) is not interference, it is a duplicate
+    for each similar:
+      penalty = interference_penalty(similarity)
+      similar.strength -= penalty  // retroactive: new → weakens old
+
+  When recalling an old memory:
+    if has_similar_newer_memory:
+      // proactive: old confuses new → log interference event
+      newer.retrieval_difficulty += PROACTIVE_PENALTY
+```
+
+### 4.10 Working Memory Layer
+
+```
+Brain:
+  7±2 slots, LIFO with attention weighting
+  Central executive coordinates attention
+
+membrain WorkingMemory:
+  slots: FixedVec<MemoryItem, 7>
+  attention: HashMap<MemoryId, f32>
+
+  add(item):
+    if full:
+      evict = min_by(attention_score)
+      // Evicted item: if strong enough → encode into hot_store
+      if evict.strength > ENCODE_THRESHOLD:
+        hot_store.insert(evict)
+      slots.remove(evict)
+    slots.push(item)
+
+  focus(id):
+    attention[id] += FOCUS_DELTA
+    // Simulates executive attention
+```
+
+---
+
+## 5. Overall Architecture
+
+### 5.1 Layered Storage — 3-Tier (Truly Like the Human Brain)
+
+```
+TIER 1 — WORKING CACHE (<0.1ms)
+  Brain:     Prefrontal cortex, actively firing/primed neurons, 7±2 items
+  membrain: LruCache<ContentHash, MemoryRef> in process memory (512 entries)
+            SIMD dot-product familiarity check, zero disk I/O
+
+TIER 2 — HOT HNSW INDEX (<5ms)
+  Brain:     Hippocampus — recently accessed engrams, episodic index
+  membrain: usearch HNSW in-memory (~50k vectors × 384 dims ≈ 75MB RAM)
+            AVX2/AVX-512 SIMD, 95%+ recall accuracy
+            int8 search → float32 rescore top-20
+            SQLite hot.db: full metadata, engram graph, pointers
+
+TIER 3 — COLD MMAP INDEX (<50ms)
+  Brain:     Neocortex — fully consolidated, vast storage, cortex-independent
+  membrain: usearch mmap (disk-backed, unlimited scale)
+            int8 quantized — 4x smaller, 2x faster vs float32
+            OS page cache = automatic warm layer
+            SQLite cold.db: compressed semantic content
+
+PROCEDURAL STORE (O(1) lookup, no decay)
+  Brain:     Cerebellum — habits, skills, automatic
+  membrain: SQLite key-value, pattern_hash → action
+
+ENGRAM GRAPH (BFS traversal)
+  Brain:     Distributed synaptic cluster representation
+  membrain: petgraph DiGraph in hot.db, depth-limited BFS
+```
+
+### 5.2 3-Tier Escalation + Full Data Flow
+
+```
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+ENCODE PATH
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+INPUT
+  │
+  ├─[attention < threshold]──→ DISCARD (sensory buffer)
+  ▼
+WORKING MEMORY (7 slots, LruCache)
+  │
+  ├─[overflow / encode trigger]
+  ▼
+ENCODING PIPELINE
+  ├── embedding_cache.get_or_embed(content)   → content_vec (0ms cache / 5ms miss)
+  ├── embedding_cache.get_or_embed(context)   → context_vec
+  ├── novelty_score = 1 - sim(content_vec, tier2_nearest)
+  ├── emotional_tag {valence, arousal}
+  ├── initial_strength = f(novelty, attention, emotion)
+  ├── state = Labile
+  └── bypass_decay = arousal > θ && |valence| > θ
+  │
+  ▼
+HOT STORE (SQLite WAL + usearch hot index)
+  ├── SQL INSERT with lazy_base_strength + tick snapshot
+  ├── usearch hot_index.add(id, int8(content_vec))
+  ├── interference_check: SQL similar → weaken older (retroactive)
+  ├── engram_builder.try_cluster(id, content_vec)
+  └── tier1_cache.insert(hash(content), memory_ref)
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+RETRIEVAL PATH
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+QUERY
+  │
+  ▼
+[TIER 1] LruCache lookup (content hash)
+  hit + confidence > 0.9 ──────────────────────→ RETURN <0.1ms
+  │ miss
+  ▼
+[PRE-FILTER] SQL
+  SELECT id, base_strength, stability, last_tick
+  WHERE effective_strength(base_strength, stability, Δtick) > MIN
+    AND state != 'Archived'
+  ORDER BY effective_strength DESC LIMIT 5000     ← 200x search space reduction
+  │
+  ▼
+[TIER 2] usearch HNSW hot (in-memory)
+  int8 KNN search(query_vec, top=20) → candidates
+  float32 rescore candidates (accuracy recovery)
+  context_vec re-rank: score = 0.7*content_sim + 0.3*context_sim
+  hit + confidence > 0.8 ───────────────────────→ RETURN <5ms
+  │                                                + update Tier1 cache
+  │ miss (memory consolidated to cold)
+  ▼
+[TIER 3] usearch mmap cold (disk)
+  int8 KNN search cold_index(query_vec, top=20)
+  float32 rescore → context re-rank
+  ──────────────────────────────────────────────→ RETURN <50ms
+  │ (all tiers)
+  ▼
+[ENGRAM EXPAND]
+  top_hit.engram_id → petgraph BFS (depth=3)
+  collect cluster members → reconstruct coherent memory
+  on_recall: effective_strength → persist, LTP delta, stability++
+  trigger labile (reconsolidation window)
+  update Tier1 + Tier2 cache
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+BACKGROUND (async, never blocks retrieval)
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+CONSOLIDATION MICRO-CYCLE (pressure-triggered)
+  trigger: hot_index.len() > HOT_CAPACITY
+  NREM: score hot memories → migrate strong → cold_index + cold.db
+  REM:  process emotional queue → reduce arousal → cross-links
+  Homeostasis: bulk effective_strength scan → prune < MIN → archive
+
+RECONSOLIDATION TICK (per interaction)
+  scan Labile memories → if window expired → apply update → Stable
+
+FORGETTING ENGINE (lazy pressure-triggered)
+  interference resolution: similar pairs → penalty
+  predictive pruning: access_count=0 && old → decay
+  capacity management: archive bottom % when > SOFT_CAP
+```
+
+### 5.3 Process Model
+
+```
+membrain daemon (tokio async, always-on)
+    │
+    ├── [stdin/stdout]     MCP server mode (rmcp)
+    │                      → Claude Code, Cursor
+    │
+    ├── [Unix socket]      IPC for Rust tools
+    │   ~/.membrain/       → smart-grep, scope, why
+    │   membrain.sock      → Python, Node scripts
+    │
+    └── [subprocess]       CLI mode (clap)
+                           → Human directly
+                           → Script automation
+
+If the daemon is not running:
+    membrain [cmd] → standalone mode
+                   → SQLite remains concurrency-safe (WAL)
+                   → Background jobs do not run
+                   → Fine for CLI usage, not fine for a live agent
+```
+
+---
+
+## 6. Performance — Bottlenecks & Optimizations
+
+### 6.1 Bottleneck Analysis
+
+```
+BOTTLENECK 1: Embedding cost
+  Naive:    embed every request → 5-15ms/call → 30ms encode (2 embeds)
+  Fix:      LruCache<ContentHash, Vec<f32>> — 0ms cache hit
+            Batch embedding during consolidation — 3-5x throughput
+            Result: encode <1ms (cache hit), <10ms (cache miss)
+
+BOTTLENECK 2: KNN search at scale
+  Naive:    brute-force O(n×d) — 10-50ms at 10k, DEAD at 1M
+  Fix:      usearch HNSW O(log n) — <5ms at 1M vectors
+            SQL pre-filter: reduces the search space 200x before HNSW
+            int8 quantization: 4x smaller → 2x faster distance compute
+            Result: <5ms hot, <50ms cold at unlimited scale
+
+BOTTLENECK 3: Decay iteration
+  Naive:    decay_tick() iterates over all memories → O(n) death
+  Fix:      LAZY decay — computed on demand during recall
+            effective_strength(base, stability, Δtick) = O(1)
+            Persist strength only on recall or consolidation
+            Result: O(0) idle, O(1) per recall
+
+BOTTLENECK 4: Context window cold start
+  Naive:    every process spawn → loads model → 500ms+
+  Fix:      daemon mode — model loaded once, always warm
+            Standalone mode: acceptable for CLI use, not for agents
+            Result: daemon <1ms, standalone ~500ms on the first call
+
+BOTTLENECK 5: Consolidation blocking retrieval
+  Naive:    consolidation job locks store → retrieval blocked
+  Fix:      tokio async — consolidation runs in the background
+            SQLite WAL: consolidation writes do not block reads
+            Result: 0ms impact on retrieval latency
+```
+
+### 6.2 Optimization Stack
+
+```
+OPT 1 — TIERED INDEX (closest to the human brain)
+  Tier1: LruCache<512> in-memory     → <0.1ms (familiarity, fast path)
+  Tier2: usearch HNSW in-memory      → <5ms   (50k vectors, hot episodic)
+  Tier3: usearch mmap on disk        → <50ms  (unlimited, cold semantic)
+  Escalation: T1 miss → T2 → T3, result updates higher tiers
+
+OPT 2 — INT8 QUANTIZATION + FLOAT32 RESCORE
+  Search phase:   int8 vectors (1 byte/dim vs 4 bytes)
+                  4x smaller → fits more in CPU cache → 2x faster
+  Rescore phase:  float32 on top-20 candidates only
+                  Accuracy recovery: ~99% vs pure float32
+  usearch native: ScalarKind::I8 — zero extra code
+
+OPT 3 — SIMD DISTANCE COMPUTATION
+  usearch built-in: auto-detect AVX2 / AVX-512 / NEON
+  AVX2:   8 floats/op → 8x vs scalar
+  AVX-512: 16 floats/op → 16x vs scalar
+  Zero effort — compile with target-cpu=native
+
+OPT 4 — LAZY DECAY (CRITICAL)
+  // DO NOT do this:
+  fn decay_tick() { for m in all_memories { m.strength *= ... } }  // O(n) DEATH
+
+  // DO this:
+  fn effective_strength(m: &Memory, now: u64) -> f32 {
+    let elapsed = now - m.last_accessed_tick;
+    (-(elapsed as f32) / m.stability).exp() * m.base_strength
+  }
+  // O(1), computed only when needed
+
+OPT 5 — EMBEDDING CACHE
+  LruCache<u64, Vec<f32>>  // key = xxhash64(content)
+  capacity: 1000 entries   // ~1.5MB RAM for 384-dim
+  hit rate: >80% in practice (the agent recalls the same content many times)
+
+OPT 6 — SQL PRE-FILTER BEFORE HNSW
+  // Do not search 1M vectors — filter down to 5000 first
+  SELECT id FROM memories
+  WHERE (base_strength * EXP(-(? - last_tick) / stability)) > 0.1
+    AND state NOT IN ('Archived')
+  LIMIT 5000
+  // Run HNSW only over 5000 candidates → 200x speedup
+
+OPT 7 — BATCH EMBEDDING DURING CONSOLIDATION
+  // Instead of embedding items one by one in the NREM job:
+  let contents: Vec<&str> = candidates.iter().map(|m| m.content.as_str()).collect();
+  let embeddings = fastembed.embed_batch(contents);  // 3-5x throughput
+```
+
+### 6.3 Benchmark Targets
+
+```
+Operation            Target    Method
+──────────────────────────────────────────────────────
+Recall (Tier1 hit)   <0.1ms    LruCache lookup
+Recall (Tier2 HNSW)  <5ms      usearch HNSW + pre-filter
+Recall (Tier3 mmap)  <50ms     usearch mmap cold
+Encode (cache hit)   <1ms      cached embedding + SQL insert
+Encode (cache miss)  <10ms     fastembed + SQL + HNSW add
+Consolidation        0ms       async background, non-blocking
+Decay tick           0ms idle  lazy on-demand
+
+Scale                Target
+──────────────────────────────────────────────────────
+Hot tier             50k memories (~75MB RAM)
+Cold tier            Unlimited (TB on disk, mmap)
+Embedding cache      1000 entries (~1.5MB RAM)
+Total RSS            <300MB for 50k hot + 1M cold
+Concurrent access    N readers + 1 writer (SQLite WAL)
+```
+
+---
+
+## 7. Techstack
+
+### 7.1 Core Language: Rust + Tokio
+
+```
+WHY RUST:
+  ✅ Zero GC pauses — critical for <1ms Tier1, <5ms Tier2
+  ✅ SIMD control: target-cpu=native → AVX2/AVX-512 auto-enable
+  ✅ Memory safety: brain data must not be corrupted
+  ✅ 1 binary, no runtime, embedded anywhere
+  ✅ Same stack: linehash, smart-grep, scope, why
+  ✅ usearch, fastembed-rs, and petgraph are all native Rust
+
+WHY TOKIO:
+  ✅ Consolidation + forgetting engine run in the background without blocking
+  ✅ Unix socket server concurrent
+  ✅ SQLite WAL reads are concurrent with async tasks
+```
+
+### 7.2 Vector Index: usearch (THAY sqlite-vec)
+
+```
+WHY USEARCH INSTEAD OF SQLITE-VEC:
+
+  sqlite-vec:
+    ✅ Embedded in SQLite, simple
+    ❌ Brute-force KNN — O(n×d) — DEAD at scale
+    ❌ No HNSW
+    ❌ No int8 quantization
+    ❌ No mmap mode
+
+  usearch:
+    ✅ HNSW — O(log n) ANN search
+    ✅ int8 / float16 / binary quantization native
+    ✅ SIMD AVX2/AVX-512/NEON auto-detect
+    ✅ mmap mode — disk-backed unlimited scale
+    ✅ Already used in your smart-grep tool
+    ✅ <5ms at 1M vectors, <50ms at 1B vectors
+
+STRATEGY:
+  hot_index:  usearch HNSW in-memory, 50k limit, int8
+              → rebuild from hot.db when the daemon starts
+  cold_index: usearch mmap, unlimited, int8
+              → persist file ~/.membrain/cold.usearch
+
+QUANTIZATION STRATEGY:
+  Store:  float32 embeddings in SQLite (ground truth)
+  Search: int8 quantized in usearch (fast)
+  Rescore: load float32 from SQLite for the top-20 candidates
+           → accuracy recovery with minimal overhead
+```
+
+### 7.3 Storage: SQLite + WAL (metadata only)
+
+```
+SQLite is still used for:
+  - Memory metadata (strength, state, timestamps, emotional_tag)
+  - Engram table and engram_members
+  - Procedural store
+  - Archive table
+  - Config and brain_state
+
+DO NOT use SQLite for vector search:
+  → usearch handles it entirely
+
+WAL mode = concurrent safe:
+  - Multiple concurrent readers
+  - usearch reads do not block SQLite writes
+  - Crash-safe
+
+Files:
+  ~/.membrain/hot.db          SQLite metadata hot
+  ~/.membrain/cold.db         SQLite metadata cold
+  ~/.membrain/hot.usearch     usearch HNSW hot index (rebuilt on start)
+  ~/.membrain/cold.usearch    usearch mmap cold index (persistent)
+```
+
+### 7.4 Embedding: fastembed-rs + LruCache
+
+```
+fastembed-rs:
+  ✅ Local ONNX inference, offline
+  ✅ Proven in smart-grep
+  ✅ Batch mode: embed_batch() → 3-5x throughput
+
+MODEL RECOMMENDATION:
+  Default: all-MiniLM-L6-v2
+    Dimensions: 384
+    Size: 80MB
+    Speed: ~5ms single, ~1ms/item batch
+    Quality: good for semantic similarity
+    → This is NOT an LLM — it does not generate text
+    → It only converts text → 384 numbers (a vector)
+    → No API calls, no internet required
+
+  High-quality option: nomic-embed-text-v1.5
+    Dimensions: 768
+    Size: 274MB
+    Speed: ~15ms single
+    Quality: significantly better semantic understanding
+
+EMBEDDING CACHE:
+  LruCache<u64, Vec<f32>>
+    key:      xxhash64(content_bytes)
+    capacity: 1000 entries
+    size:     ~1.5MB RAM (384 dims × 4 bytes × 1000)
+    hit rate: >80% in practice
+```
+
+### 7.5 Graph: petgraph
+
+```
+WHY PETGRAPH:
+  ✅ Engram clusters = graph traversal problem
+  ✅ BFS/DFS built in for associative recall
+  ✅ Serde support — serialize into an SQLite BLOB
+  ✅ Same ecosystem as the scope tool
+
+GRAPH MODEL:
+  DiGraph<Uuid, EdgeWeight>
+  Nodes: memory_id
+  Edges: { similarity: f32, edge_type: Associative | Engram | Causal }
+  Storage: petgraph serde → JSON BLOB in the hot.db engrams table
+  Traversal: BFS from the seed, max_depth=3, min_edge_weight=0.5
+```
+
+### 7.6 IPC + MCP
+
+```
+Unix Socket + JSON-RPC 2.0:
+  Path: ~/.membrain/membrain.sock
+  Protocol: JSON-RPC 2.0 (standard, libraries in every language)
+  Python: 3 lines of code to connect
+  Node:   net.createConnection()
+  Rust:   tokio::net::UnixStream
+
+rmcp (MCP server):
+  stdio transport for Claude Code / Cursor
+  membrain mcp → spawn process, talk stdio
+  Tools: remember, recall, forget, strengthen, stats, consolidate
+```
+
+### 7.7 Complete Dependency List
+
+```toml
+[workspace]
+members = ["membrain-core", "membrain-cli"]
+
+# membrain-core
+[dependencies]
+# Storage
+rusqlite    = { version = "0.31", features = ["bundled"] }
+
+# Vector index
+usearch     = "2"                        # HNSW + int8 + mmap + SIMD
+
+# Embedding
+fastembed   = "3"                        # local ONNX, no API
+
+# Graph
+petgraph    = { version = "0.6", features = ["serde-1"] }
+
+# Async
+tokio       = { version = "1", features = ["full"] }
+
+# Cache
+lru         = "0.12"                     # LruCache for Tier1 + embedding cache
+
+# Hashing (embedding cache key)
+xxhash-rust = { version = "0.8", features = ["xxh64"] }
+
+# Serialization
+serde       = { version = "1", features = ["derive"] }
+serde_json  = "1"
+
+# IDs
+uuid        = { version = "1", features = ["v4", "serde"] }
+
+# Error
+thiserror   = "1"
+anyhow      = "1"
+
+# membrain-cli
+[dependencies]
+membrain-core = { path = "../membrain-core" }
+clap          = { version = "4", features = ["derive"] }
+rmcp          = "0.1"
+tokio         = { version = "1", features = ["full"] }
+
+# Build flags
+[profile.release]
+opt-level     = 3
+lto           = true
+codegen-units = 1
+# Run with: RUSTFLAGS="-C target-cpu=native" cargo build --release
+# Enables AVX2/AVX-512 SIMD automatically via usearch
+```
+
+### 7.8 Tech Stack Comparison: Before vs After
+
+```
+COMPONENT          BEFORE (slow)       AFTER (optimized)      SPEEDUP
+───────────────────────────────────────────────────────────────────
+Vector index       sqlite-vec         usearch HNSW           100x+
+                   O(n×d) brute       O(log n) ANN
+Vector precision   float32 only       int8 search +          2x faster
+                                      float32 rescore        4x smaller
+Decay              eager O(n) tick    lazy O(1) on-demand    ∞ idle
+Embedding          single call        LruCache + batch       0ms cache hit
+Search space       full scan          SQL pre-filter 5000    200x reduction
+Fast path          none               LruCache Tier1         <0.1ms
+Cold storage       sqlite-vec         usearch mmap           unlimited scale
+```
+
+---
+
+## 8. Data Schema
+
+### 7.1 hot.db
+
+```sql
+-- Core memories (hippocampus)
+CREATE TABLE memories (
+  id              TEXT PRIMARY KEY,  -- UUID
+  engram_id       TEXT,              -- NULL if not yet clustered
+  kind            TEXT NOT NULL,     -- Episodic|Semantic|Procedural|Emotional
+  content         TEXT NOT NULL,
+  context         TEXT,              -- context at encoding time
+  state           TEXT NOT NULL,     -- Labile|SynapticDone|Consolidating|Consolidated
+  
+  -- LTP/LTD dynamics
+  strength        REAL NOT NULL DEFAULT 0.5,
+  stability       REAL NOT NULL DEFAULT 1.0,  -- Ebbinghaus S
+  access_count    INTEGER NOT NULL DEFAULT 0,
+  
+  -- Emotional (Amygdala)
+  emotional_valence  REAL NOT NULL DEFAULT 0.0,  -- -1.0 to 1.0
+  emotional_arousal  REAL NOT NULL DEFAULT 0.0,  -- 0.0 to 1.0
+  bypass_decay       INTEGER NOT NULL DEFAULT 0, -- boolean
+  
+  -- Reconsolidation
+  labile_since    INTEGER,           -- interaction_count when the labile state began
+  labile_window   INTEGER,           -- how many interactions are allowed for reconsolidation
+  pending_update  TEXT,              -- JSON update content
+  
+  -- Temporal (interaction-based, not real time)
+  created_at      INTEGER NOT NULL,  -- interaction_count at creation
+  last_accessed   INTEGER NOT NULL,  -- interaction_count at last recall
+  
+  -- Metadata
+  source          TEXT,              -- which AI/tool encoded this memory
+  attention_score REAL,
+  novelty_score   REAL
+);
+
+-- Vector index for hot memories
+CREATE VIRTUAL TABLE vec_memories USING vec0(
+  memory_id TEXT PARTITION KEY,
+  content_embedding float[384],
+  context_embedding float[384]
+);
+
+-- Engram clusters
+CREATE TABLE engrams (
+  id                  TEXT PRIMARY KEY,
+  centroid_embedding  BLOB NOT NULL,   -- averaged embedding
+  strength            REAL NOT NULL DEFAULT 0.5,
+  member_count        INTEGER NOT NULL DEFAULT 0,
+  created_at          INTEGER NOT NULL,
+  last_activated      INTEGER NOT NULL
+);
+
+CREATE TABLE engram_members (
+  engram_id   TEXT NOT NULL REFERENCES engrams(id),
+  memory_id   TEXT NOT NULL REFERENCES memories(id),
+  similarity  REAL NOT NULL,
+  PRIMARY KEY (engram_id, memory_id)
+);
+
+-- Global state
+CREATE TABLE brain_state (
+  key   TEXT PRIMARY KEY,
+  value TEXT NOT NULL
+);
+-- Keys: interaction_count, total_strength, last_consolidation, version
+```
+
+### 7.2 cold.db
+
+```sql
+-- Consolidated semantic memories (neocortex)
+CREATE TABLE cold_memories (
+  id              TEXT PRIMARY KEY,
+  hot_memory_id   TEXT,              -- pointer back to hot_store
+  kind            TEXT NOT NULL,
+  content         TEXT NOT NULL,     -- compressed/summarized
+  strength        REAL NOT NULL,
+  emotional_valence REAL,
+  emotional_arousal REAL,
+  bypass_decay    INTEGER,
+  access_count    INTEGER DEFAULT 0,
+  consolidated_at INTEGER NOT NULL,
+  last_accessed   INTEGER NOT NULL,
+  source          TEXT
+);
+
+CREATE VIRTUAL TABLE vec_cold USING vec0(
+  cold_memory_id TEXT PARTITION KEY,
+  content_embedding float[384]
+);
+```
+
+### 7.3 Rust Structs
+
+```rust
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct Memory {
+    pub id: Uuid,
+    pub engram_id: Option<Uuid>,
+    pub kind: MemoryKind,
+    pub content: String,
+    pub context: Option<String>,
+    pub state: MemoryState,
+
+    // LTP/LTD
+    pub strength: f32,
+    pub stability: f32,
+    pub access_count: u64,
+
+    // Emotional (Amygdala)
+    pub emotional_valence: f32,
+    pub emotional_arousal: f32,
+    pub bypass_decay: bool,
+
+    // Reconsolidation
+    pub labile_since: Option<u64>,    // interaction count
+    pub labile_window: Option<u64>,
+    pub pending_update: Option<String>,
+
+    // Temporal (interaction-based)
+    pub created_at: u64,
+    pub last_accessed: u64,
+
+    // Metadata
+    pub source: Option<String>,
+    pub attention_score: f32,
+    pub novelty_score: f32,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub enum MemoryKind {
+    Episodic,
+    Semantic,
+    Procedural,
+    Emotional,
+    Schema,     // abstract pattern from many episodics
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub enum MemoryState {
+    Labile,
+    SynapticDone,
+    Consolidating,
+    Consolidated,
+    Archived,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct Engram {
+    pub id: Uuid,
+    pub member_ids: Vec<Uuid>,
+    pub centroid_embedding: Vec<f32>,
+    pub strength: f32,
+    pub member_count: usize,
+    pub created_at: u64,
+    pub last_activated: u64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct RetrievalResult {
+    pub memories: Vec<ScoredMemory>,
+    pub engram: Option<Engram>,
+    pub path: RetrievalPath,       // Fast | Slow | Partial
+    pub reconstruction: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub enum RetrievalPath {
+    Fast,      // cache hit
+    Slow,      // full vector search
+    Partial,   // tip-of-tongue, only fragments
+    NotFound,
+}
+
+// Core traits
+pub trait BrainStore: Send + Sync {
+    fn remember(&mut self, input: EncodeInput) -> Result<Uuid>;
+    fn recall(&self, query: RecallQuery) -> Result<RetrievalResult>;
+    fn forget(&mut self, id: Uuid) -> Result<()>;
+    fn strengthen(&mut self, id: Uuid) -> Result<()>;
+    fn stats(&self) -> Result<BrainStats>;
+    fn consolidate(&mut self) -> Result<ConsolidationReport>;
+    fn tick(&mut self) -> Result<()>;   // interaction tick
+}
+```
+
+---
+
+## 9. CLI Commands & MCP Tools
+
+### 8.1 CLI
+
+```bash
+# Encoding
+membrain remember "Today I learned that Rust lifetimes are actually very simple"
+membrain remember "Hit a NullPointer bug at 3am" --emotion "-0.7,0.8"
+membrain remember "Context is: building membrain" --context "coding session"
+
+# Retrieval
+membrain recall "Rust lifetimes"
+membrain recall "bugs encountered recently" --top 5
+membrain recall "coding session" --context "debugging right now" --json
+membrain recall "negative emotions" --include-emotional
+
+# Management
+membrain forget <uuid>
+membrain strengthen <uuid>
+membrain stats
+
+# Brain operations
+membrain consolidate
+membrain export > memories.json
+membrain import < memories.json
+
+# Daemon & Server
+membrain daemon start
+membrain daemon stop
+membrain daemon status
+
+# MCP server (used by Claude Code / Cursor)
+membrain mcp
+
+# Debug
+membrain inspect <uuid>    # xem full memory details
+membrain graph <uuid>      # view the memory’s engram cluster
+membrain health            # brain health report
+```
+
+### 8.2 MCP Tools (Claude Code / Cursor)
+
+```
+remember(content, context?, emotional_valence?, emotional_arousal?, source?)
+  → { id: uuid, strength: f32, engram_id?: uuid }
+
+recall(query, context?, top_k?, min_strength?, include_archived?)
+  → { memories: [...], engram?: {...}, path: "fast"|"slow"|"partial" }
+
+forget(id)
+  → { success: bool }
+
+strengthen(id)
+  → { new_strength: f32 }
+
+consolidate()
+  → { migrated: n, pruned: n, engrams_updated: n }
+
+stats()
+  → { total: n, hot: n, cold: n, avg_strength: f32, top_engrams: [...] }
+
+inspect(id)
+  → full Memory object
+
+graph(id)
+  → { engram: {...}, related_memories: [...], cluster_size: n }
+```
+
+### 8.3 JSON-RPC Interface (Unix Socket)
+
+```json
+// Request
+{"jsonrpc":"2.0","id":1,"method":"remember","params":{"content":"...","context":"..."}}
+
+// Response
+{"jsonrpc":"2.0","id":1,"result":{"id":"uuid","strength":0.72,"engram_id":"uuid"}}
+
+// Recall request
+{"jsonrpc":"2.0","id":2,"method":"recall","params":{"query":"...","top_k":5}}
+
+// Recall response
+{"jsonrpc":"2.0","id":2,"result":{
+  "memories":[{"id":"...","content":"...","strength":0.9,"score":0.87}],
+  "path":"slow",
+  "engram":{"id":"...","member_count":12}
+}}
+```
+
+---
+
+## 10. Milestones
+
+### Milestone 1 — Foundation (Core Schema + Storage)
+```
+□ Workspace setup: membrain-core, membrain-cli
+□ Memory struct with all required fields
+□ MemoryKind, MemoryState enums
+□ hot.db schema: memories + engrams + engram_members
+□ cold.db schema: cold_memories
+□ rusqlite + WAL mode integration
+□ usearch HNSW hot_index (in-memory, int8)
+□ usearch mmap cold_index (disk-backed, int8)
+□ fastembed-rs integration (all-MiniLM-L6-v2)
+□ LruCache Tier1 (512 entries)
+□ LruCache embedding cache (1000 entries, xxhash64 key)
+□ Interaction counter (replaces the real-time clock)
+□ BrainStore trait definition
+□ effective_strength(base, stability, Δtick) lazy formula
+
+Acceptance: INSERT memory → usearch.add → Tier1 cache → verify 3-tier lookup chain
+```
+
+### Milestone 2 — Encoding Pipeline + Optimizations
+```
+□ embedding_cache.get_or_embed() with LruCache + xxhash64
+□ embed(content) → content_vec via fastembed-rs
+□ embed(context) → context_vec
+□ novelty_score = 1 - max_cosine_sim(content_vec, tier2_nearest)
+□ attention_score gating (< threshold → discard)
+□ emotional_tag: {valence, arousal} → bypass_decay, strength_multiplier
+□ initial_strength formula: f(novelty, attention, emotion)
+□ state = Labile on create
+□ lazy base_strength + last_accessed_tick stored (not computed strength)
+□ SQL pre-filter: effective_strength WHERE clause with Δtick
+□ Working memory: LruCache<7> + attention + eviction to hot_store
+□ Source tagging (CLI, MCP, Rust embed)
+
+Acceptance: 1000 encodes → verify embedding cache hit rate >80% → verify strength distribution
+           → pre-filter returns <5000 candidates from 100k memories
+```
+
+### Milestone 3 — LTP/LTD Lazy Decay Engine
+```
+□ effective_strength(m, now_tick) → O(1) lazy computation
+□ on_recall(): base_strength += LTP_DELTA, stability += INCREMENT, update tick
+□ Ebbinghaus: R = e^(-Δtick/stability) — computed on-demand only
+□ emotional bypass: arousal > θ && |valence| > θ → bypass_decay = true
+□ interaction_count global ticker (atomic u64)
+□ Periodic prune job (NOT per-tick): scan WHERE effective_strength < MIN
+□ Archive table: soft delete, not hard delete
+□ Interference check: SQL query similar via usearch → penalty on older
+□ Stats: avg_effective_strength, archive_rate
+
+Benchmark: 1M memories idle → decay_tick() = 0ms overhead
+           recall 1 memory → O(1) effective_strength, <1ms total
+
+Acceptance: 1000 memories → 100 ticks → verify Ebbinghaus curve matches R=e^(-t/S)
+           → verify emotional bypass → verify 0ms idle overhead
+```
+
+### Milestone 4 — 3-Tier Retrieval Engine
+```
+□ Tier1: LruCache<ContentHash, MemoryRef> lookup → <0.1ms
+□ Tier2: SQL pre-filter (effective_strength > MIN, LIMIT 5000)
+         → usearch HNSW hot_index.search(int8 query, top=20)
+         → float32 rescore of top-20 candidates from SQLite
+         → context_vec re-rank: 0.7*content + 0.3*context
+□ Tier3: usearch mmap cold_index search (if Tier2 misses)
+□ Escalation logic: Tier1 → Tier2 → Tier3
+□ Tier1 cache update after each Tier2/Tier3 hit
+□ Engram expand: top_hit.engram_id → BFS petgraph depth=3
+□ Fragment reconstruction
+□ Partial retrieval (tip-of-tongue): return fragments if there is no full match
+□ on_recall: LTP + labile trigger + Tier1 update
+
+Benchmark: Tier1 hit <0.1ms, Tier2 <5ms at 50k, Tier3 <50ms at 1M
+
+Acceptance: recall partial cue → verify 3-tier escalation → verify cluster returned
+           → benchmark latency at 50k and 1M memories
+```
+
+### Milestone 5 — Reconsolidation
+```
+□ Labile state tracking after each recall
+□ reconsolidation_window(age): age-dependent formula
+□ pending_update storage
+□ reconsolidation_tick(): apply update → re-embed → strength bonus
+□ State machine: Labile → Stable
+□ Age-dependent resistance test
+
+Acceptance: recall memory → modify → wait window → verify content updated → verify strength bonus
+```
+
+### Milestone 6 — Consolidation Engine
+```
+□ NREM equivalent: score hot memories → migrate strong → cold_store
+□ Cold store insert: compress content → re-embed → store
+□ REM equivalent: process emotional queue → reduce arousal → cross-links
+□ Homeostasis: bulk_scale(factor) when total_strength > MAX_LOAD
+□ Pressure threshold: hot_store.len() > HOT_CAPACITY → trigger
+□ Engram update after migration
+□ ConsolidationReport struct
+
+Acceptance: fill hot_store → trigger consolidation → verify cold migration → verify homeostasis
+```
+
+### Milestone 7 — Engram Graph
+```
+□ petgraph integration (DiGraph<MemoryId, EdgeWeight>)
+□ Engram builder: cluster by similarity threshold
+□ Centroid update when adding a member
+□ BFS traversal for associative recall
+□ Engram merge when overlap > threshold
+□ Serialize/deserialize engram graph into hot.db
+□ Graph stats: n_engrams, avg_cluster_size, density
+
+Acceptance: encode 500 related memories → verify clusters formed → recall with cue → verify cluster expansion
+```
+
+### Milestone 8 — Active Forgetting + Interference
+```
+□ Forgetting engine: decay pruning, interference resolution, predictive pruning
+□ Proactive interference: old memory → boost retrieval_difficulty of similar new memories
+□ Retroactive interference: new memory → weaken similar old
+□ Capacity management: archive the bottom percentile when > SOFT_CAP
+□ Archive table: memories are not permanently deleted
+□ Non-predictive decay: access_count == 0 && age > threshold
+
+Acceptance: create interfering pairs → verify penalties → capacity test → verify archive not delete
+```
+
+### Milestone 9 — Daemon + IPC + MCP
+```
+□ Tokio async daemon: tokio::main + background task spawning
+□ Unix socket server: JSON-RPC 2.0 handler
+□ All BrainStore methods exposed via JSON-RPC
+□ MCP server: rmcp integration, stdio transport
+□ MCP tools: remember, recall, forget, strengthen, stats, consolidate
+□ Daemon lifecycle: start/stop/status
+□ membrain daemon subcommand
+□ membrain mcp subcommand
+□ Python client (1 file)
+□ Node client (1 file)
+
+Acceptance: start daemon → call from Python → call from Node → MCP in Claude Code → verify all paths
+```
+
+### Milestone 10 — CLI Polish + Production
+```
+□ All CLI commands: remember, recall, forget, strengthen, stats, inspect, graph, health
+□ --json flag for machine-readable output
+□ Config file: ~/.membrain/config.toml (model, thresholds, capacity)
+□ export / import JSON
+□ Graceful shutdown (save state)
+□ Clear error messages
+□ membrain health: brain health report
+□ README + usage examples
+□ Benchmarks: encoding speed, recall latency, capacity test
+□ Cross-platform: Linux, macOS, Windows (WSL)
+
+Acceptance: full integration test suite → all benchmarks pass → README complete
+```
+
+---
+
+## 11. Acceptance Checklist
+
+### Biological Accuracy
+```
+□ LTP: recall → strength increases according to the correct formula
+□ LTD: non-use → Ebbinghaus decay follows the correct curve
+□ Emotional bypass: high arousal+valence → no decay
+□ Reconsolidation: recall → labile → update → re-stable
+□ Dual-path: fast familiarity + slow episodic recall
+□ Engram clustering: similar memories grouped
+□ Associative recall: partial cue → cluster
+□ Interference: similar memories affect each other
+□ Consolidation: episodic → semantic migration
+□ Active forgetting: non-predictive → archived
+□ Working memory: 7-slot capacity limit
+```
+
+### Performance
+```
+□ Tier1 retrieval: <0.1ms (LruCache hit)
+□ Tier2 retrieval: <5ms (usearch HNSW, 50k memories)
+□ Tier3 retrieval: <50ms (usearch mmap, 1M memories)
+□ Encode: <1ms (embedding cache hit), <10ms (cache miss)
+□ Lazy decay: 0ms idle overhead, O(1) per recall
+□ Consolidation: non-blocking (async background, 0ms impact on retrieval)
+□ Pre-filter: reduces search space 200x (1M → 5000 candidates)
+□ 1M memories: recall Tier3 <50ms
+□ 50k hot memories: RSS <150MB (usearch HNSW in-memory)
+□ Concurrent reads: N readers + 1 writer (SQLite WAL)
+□ Embedding cache hit rate: >80% in steady state
+□ int8 quantization: <2% accuracy loss vs float32
+```
+
+### Integration
+```
+□ CLI: all commands work
+□ MCP: Claude Code / Cursor tools work
+□ Python: one-file client works
+□ Node: one-file client works
+□ Rust embed: membrain-core as library dependency
+□ Daemon: start/stop/status work
+□ Standalone mode: works without the daemon
+□ Cross-platform: Linux (WSL), macOS
+```
+
+### Quality
+```
+□ Typed error enums (thiserror)
+□ No unwrap() in production paths
+□ Atomic writes (SQLite transactions)
+□ Graceful degradation: daemon down → standalone fallback
+□ Data integrity: no memory loss on crash (WAL)
+□ Config validation on startup
+```
+
+---
+
+## Constants (Tunable)
+
+```toml
+# ~/.membrain/config.toml
+
+[brain]
+model             = "all-MiniLM-L6-v2"   # or "nomic-embed-text-v1.5"
+hot_capacity      = 50_000               # max memories in the hot HNSW index
+soft_cap          = 1_000_000            # trigger archiving of the bottom % when exceeded
+embedding_cache   = 1_000               # LruCache entries for embeddings
+tier1_cache       = 512                 # LruCache entries Tier1 fast path
+
+[vector]
+dimensions        = 384                  # must match the model
+quantization      = "int8"              # int8 | f16 | f32
+rescore_top_k     = 20                  # float32 rescore after int8 search
+pre_filter_limit  = 5_000              # SQL pre-filter cap before HNSW
+hnsw_ef_construct = 200                # HNSW build quality
+hnsw_ef_search    = 50                 # HNSW search quality
+
+[ltp_ltd]
+ltp_delta              = 0.1
+stability_increment    = 0.2
+max_strength           = 1.0
+min_strength           = 0.05
+
+[emotional]
+amygdala_arousal_threshold = 0.6
+amygdala_valence_threshold = 0.5
+
+[consolidation]
+nrem_importance_threshold  = 0.4
+homeostasis_factor         = 0.9
+homeostasis_trigger_load   = 0.85
+
+[reconsolidation]
+base_window_interactions   = 50
+reconsolidation_bonus      = 0.05
+
+[interference]
+similarity_min     = 0.7
+similarity_max     = 0.99
+interference_penalty = 0.05
+
+[retrieval]
+tier1_confidence_threshold = 0.9
+tier2_confidence_threshold = 0.8
+cluster_expansion_depth    = 3
+min_edge_weight            = 0.5
+```
+
+---
+
+*membrain — ports human memory mechanisms into an AI agent. Build order: M1 → M10.*  
+*Stack: Rust + Tokio + usearch HNSW + SQLite WAL + fastembed-rs + petgraph*  
+*Targets: Tier1 <0.1ms | Tier2 <5ms | Tier3 <50ms | Scale: unlimited*
+
+
+<!-- SOURCE: PLAN_part1.md -->
+
+# membrain — PLAN.md
+# Part 1 of 6: Vision · Problem Statement · Human Brain Deep Dive
+
+> **Vision**: A memory system that ports every known mechanism of the human brain into a fast,
+> local, offline-first Rust library — giving AI agents the same memory architecture that
+> evolution spent 500 million years perfecting.
+>
+> **Performance targets**: Tier1 <0.1ms | Tier2 <5ms | Tier3 <50ms | Encode <10ms
+> **Scale target**: Unlimited — usearch mmap + SQLite, TB-scale on disk
+> **Stack**: Rust + Tokio + usearch HNSW + SQLite WAL + fastembed-rs + petgraph
+> **Integration**: CLI + MCP (Claude Code / Cursor) + Unix socket IPC + Python/Node clients
+
+---
+
+## TABLE OF CONTENTS (Full Document — 6 Parts)
+
+### Part 1 (this file)
+1. [Problem Statement — Why membrain Exists](#1-problem-statement)
+2. [Human Brain — Complete Analysis](#2-human-brain-complete-analysis)
+   - 2.1 Core Properties
+   - 2.2 Brain Regions & Functions
+   - 2.3 Memory Types Taxonomy
+   - 2.4 Encoding — How Memories Form
+   - 2.5 LTP / LTD — The Physical Basis of Learning
+   - 2.6 Forgetting Curve — Ebbinghaus
+   - 2.7 Consolidation — Stabilization Process
+   - 2.8 Sleep — The Brain's Consolidation Engine
+   - 2.9 Reconsolidation — Memory Updates on Recall
+   - 2.10 Active Forgetting — Intelligent Pruning
+   - 2.11 Engrams — Physical Memory Traces
+   - 2.12 Working Memory — The Conscious Workspace
+   - 2.13 Emotional Memory — The Amygdala Effect
+   - 2.14 Interference — Memory Conflicts
+   - 2.15 Pattern Completion — Recall from Partial Cues
+   - 2.16 Encoding Specificity — Context Dependency
+
+### Part 2
+3. [Gap Analysis — Human Brain vs Current AI Memory Systems](#3-gap-analysis)
+4. [Porting the Brain — Mechanism by Mechanism](#4-porting-the-brain)
+
+### Part 3
+5. [Architecture Overview](#5-architecture-overview)
+6. [Performance — Bottlenecks & Optimization Stack](#6-performance)
+
+### Part 4
+7. [Techstack — Analysis & Rationale](#7-techstack)
+8. [Data Schema — Full SQL + Rust Structs](#8-data-schema)
+
+### Part 5
+9. [CLI Commands & MCP Tools](#9-cli-and-mcp)
+10. [Top 10 Feature Extensions](#10-feature-extensions)
+11. [Workspace Structure](#11-workspace-structure)
+
+### Part 6
+12. [Implementation Milestones](#12-milestones)
+13. [Acceptance Checklist](#13-acceptance-checklist)
+14. [Tunable Constants](#14-constants)
+15. [Algorithm Reference](#15-algorithm-reference)
+
+---
+
+## 1. Problem Statement
+
+### 1.1 The Core Problem with AI Agents Today
+
+Every serious AI agent deployment hits the same wall: **memory degrades with scale**.
+
+The more interactions an agent has, the more information accumulates, and the worse retrieval
+becomes. You cannot simply add "remember everything" — the signal-to-noise ratio collapses.
+Context windows fill up. Retrieval becomes slow. The agent starts confusing old irrelevant
+information with current relevant information.
+
+The human brain solved this problem over hundreds of millions of years of evolution. It does not
+remember everything equally. It has a sophisticated system for:
+
+- Deciding what is worth encoding in the first place (attention gating)
+- Making important things stronger over time (LTP)
+- Letting unimportant things decay gracefully (LTD + Ebbinghaus)
+- Periodically reorganizing memories from fast-access to deep-storage (consolidation)
+- Linking related memories into retrievable clusters (engrams)
+- Updating memories when new information conflicts with old (reconsolidation)
+- Actively pruning noise to preserve signal (active forgetting)
+- Recovering full memories from partial cues (pattern completion)
+- Tagging memories with emotional salience (amygdala)
+- Keeping a small but powerful working buffer for active reasoning (prefrontal cortex)
+
+No existing AI memory system implements more than 2-3 of these mechanisms. membrain implements
+all of them.
+
+---
+
+### 1.2 What Existing Systems Do
+
+| System | Core Approach | Mechanisms Present | Critical Missing |
+|--------|--------------|-------------------|-----------------|
+| **MemGPT / Letta** | OS virtual memory metaphor: page memories in/out of context window based on relevance scoring | Tiered storage concept, some retrieval prioritization | No LTP/LTD, no decay, no emotional weighting, no consolidation, no engrams, no interference |
+| **Mem0** | Two-phase: LLM extracts facts → stores in graph + vector DB | Graph relationships, semantic search | No strength dynamics, no reconsolidation, slow (LLM in critical path), no biological accuracy |
+| **LangMem** | Relevance scoring + memory lifecycle states | Lifecycle management, basic decay concept | No engram clusters, no interference handling, no pattern completion, no working memory |
+| **OpenAI Memory** | Simple key-value extraction from conversations | Persistent facts | Entirely primitive: no dynamics, no associations, no decay, no structure |
+| **Zep** | Timeline-aware memory with entity extraction | Temporal ordering, entity graph | No biological mechanisms, no strength dynamics, no forgetting curve |
+| **Cognee** | Knowledge graph construction from documents | Rich graph structure | Static graph, no dynamics, no consolidation, no decay |
+
+### 1.3 What They All Lack
+
+```
+MISSING: LTP / LTD
+  Memory strength never changes dynamically.
+  A memory encoded once stays equally strong forever (or until deleted).
+  In the human brain, synaptic strength is constantly modulated by use.
+  Consequence: AI memories accumulate noise — old irrelevant memories compete
+               equally with recent relevant ones.
+
+MISSING: Ebbinghaus Forgetting Curve
+  Nothing decays according to actual forgetting dynamics.
+  Either a memory exists or it doesn't.
+  In the human brain, retention follows R(t) = e^(-t/S) where S (stability)
+  increases with each successful recall.
+  Consequence: No natural noise reduction. Store grows unboundedly.
+
+MISSING: Reconsolidation
+  When a memory is recalled, it is never updated to incorporate new context.
+  In the human brain, every recall destabilizes the memory (labile state),
+  allowing it to be updated before re-stabilizing.
+  Consequence: Agents cannot update beliefs. Stale information persists.
+
+MISSING: Sleep / Consolidation Cycle
+  No episodic → semantic conversion.
+  In the human brain, NREM sleep replays episodic memories and gradually
+  transfers their essence to stable semantic storage in the neocortex.
+  Consequence: Raw episodic events accumulate. No abstraction. No compression.
+
+MISSING: Emotional Tagging
+  Every memory is weighted equally.
+  In the human brain, the amygdala tags memories with emotional salience,
+  causing high-arousal events to be remembered far longer and recalled first.
+  Consequence: Agent cannot prioritize high-stakes memories.
+
+MISSING: Engram Clusters
+  No associative structure. Each memory is an island.
+  In the human brain, related memories form physical clusters (engrams)
+  that can be retrieved together from a partial cue.
+  Consequence: No associative recall. "What else do I know about X?" fails.
+
+MISSING: Interference Handling
+  Memories do not interact with each other.
+  In the human brain, similar memories interfere (proactive and retroactive),
+  causing natural disambiguation and prioritization of more relevant traces.
+  Consequence: Similar contradictory memories coexist without resolution.
+
+MISSING: Active Forgetting
+  Systems only accumulate. They never prune intelligently.
+  In the human brain, active forgetting removes non-predictive information
+  during sleep homeostasis, optimizing the signal-to-noise ratio.
+  Consequence: Retrieval quality degrades as noise accumulates.
+
+MISSING: Dual-Path Retrieval (Fast / Slow)
+  Every query goes through the same retrieval pipeline.
+  In the human brain, pattern recognition is ~13ms (familiarity, neocortex),
+  while episodic recall is 100-500ms (hippocampus deliberate search).
+  Consequence: No fast familiarity check. Everything is slow and expensive.
+
+MISSING: Working Memory Layer
+  No concept of a limited active workspace.
+  In the human brain, the prefrontal cortex maintains 7±2 items in active
+  working memory for immediate use, with executive attention control.
+  Consequence: No capacity limit. No prioritization of "what I'm using right now."
+```
+
+### 1.4 The Result
+
+```
+Agent using current memory systems:
+  tick 1:     1 memory     → recall perfect
+  tick 100:   100 memories → recall good
+  tick 1000:  1000 memories → recall degrading
+  tick 10000: 10000 memories → recall slow, noisy, unreliable
+  tick 100000: system essentially broken
+
+Agent using membrain:
+  tick 1:     1 memory     → recall perfect
+  tick 100:   ~80 memories (20 decayed) → recall perfect
+  tick 1000:  ~400 memories (600 decayed/consolidated) → recall perfect
+  tick 10000: ~1500 memories (engram-organized, noise pruned) → recall fast + perfect
+  tick 100000: scales indefinitely — brain-like performance at brain-like scale
+```
+
+---
+
+## 2. Human Brain — Complete Analysis
+
+### 2.1 Core Properties
+
+The human brain is the most sophisticated information processing system known to science.
+Understanding its properties is essential for porting them to membrain.
+
+```
+PROPERTY 1: EFFECTIVELY UNLIMITED CAPACITY
+
+  Neurons:              ~86 billion
+  Synaptic connections: ~100 trillion
+  Estimated capacity:   ~2.5 petabytes (Salk Institute, 2016)
+  
+  How: Capacity is not limited by number of neurons but by synaptic connection weights.
+       Each synapse can hold approximately 4.7 bits of information (26 distinguishable
+       strengths experimentally measured). 100 trillion synapses × 4.7 bits = 2.5 PB.
+  
+  membrain port:
+    usearch mmap (disk-backed, unlimited scale)
+    SQLite (TB-scale on disk)
+    No architectural limit — constrained only by available disk space
+    At 384 dims × int8 = 384 bytes/vector: 1TB disk = ~2.7 billion memories
+```
+
+```
+PROPERTY 2: EXTREMELY FAST RETRIEVAL AT SCALE
+
+  Familiarity recognition:  ~13ms  (neocortex pattern matching)
+  Simple recall:            ~100ms (hippocampus fast route)
+  Deliberate recall:        ~500ms (hippocampus slow route, reconstruction)
+  
+  Key insight: The brain has MULTIPLE retrieval pathways operating at different speeds.
+               Fast path: "have I seen this before?" — very cheap familiarity check.
+               Slow path: "what do I know about this?" — full reconstruction.
+  
+  membrain port:
+    Tier 1 (LruCache):        <0.1ms  — familiarity, recently accessed
+    Tier 2 (HNSW in-memory):  <5ms    — hot episodic, 50k vectors
+    Tier 3 (HNSW mmap):       <50ms   — cold semantic, unlimited
+    Three-tier escalation mirrors brain's multi-speed architecture
+```
+
+```
+PROPERTY 3: GRACEFUL, INTELLIGENT FORGETTING
+
+  The brain does NOT remember everything equally.
+  It does NOT forget randomly.
+  
+  Forgetting is ACTIVE and PURPOSEFUL:
+    - Synaptic homeostasis: globally scale down all connections during sleep
+      to prevent saturation (Tononi's synaptic homeostasis hypothesis)
+    - Active forgetting via RAC1 signaling: specific memories pruned
+      based on predictive value
+    - Interference-based forgetting: similar memories compete,
+      less-accessed one weakens
+  
+  Result: High signal-to-noise ratio maintained indefinitely.
+  
+  membrain port:
+    Ebbinghaus decay with stability parameter
+    Emotional bypass for high-salience memories
+    Active forgetting engine (interference + predictive pruning)
+    Homeostasis: bulk strength scaling when store overloads
+```
+
+```
+PROPERTY 4: ASSOCIATIVE RECALL FROM PARTIAL CUES
+
+  Human memory is fundamentally ASSOCIATIVE, not lookup-by-ID.
+  You do not need the exact memory address — any partial fragment
+  of the original encoding can trigger full reconstruction.
+  
+  Mechanism: hippocampal CA3 region acts as an autoassociative network.
+             Partial input pattern → pattern completion via recurrent connections
+             → full pattern activates → spreads to related engrams.
+  
+  Example: smell of perfume → entire episodic memory from 10 years ago.
+           Single word → entire conceptual cluster.
+  
+  membrain port:
+    HNSW vector search (semantic similarity = partial cue matching)
+    Engram BFS traversal (pattern completion → cluster expansion)
+    Context embedding stored alongside content (encoding specificity)
+```
+
+```
+PROPERTY 5: DYNAMIC SYNAPTIC STRENGTH
+
+  Synapse strength is CONTINUOUSLY MODULATED:
+  
+  Long-Term Potentiation (LTP):
+    "Neurons that fire together, wire together" (Hebb, 1949)
+    Repeated co-activation → stronger synaptic connection
+    NMDA receptor activation → Ca2+ influx → AMPA receptor insertion
+    → synapse physically stronger
+  
+  Long-Term Depression (LTD):
+    Non-use → gradual weakening
+    Low-frequency stimulation → phosphatase activation → AMPA removal
+    → synapse physically weaker
+  
+  Critical: LTD is as important as LTP. Without LTD, all synapses
+  eventually saturate at maximum strength → no more learning possible.
+  
+  membrain port:
+    on_recall(): base_strength += LTP_DELTA, stability += INCREMENT
+    Lazy Ebbinghaus: effective_strength = base × e^(-Δtick/stability)
+    Both mechanisms required — LTP on recall, LTD via decay
+```
+
+```
+PROPERTY 6: CONTEXT-DEPENDENT RETRIEVAL (ENCODING SPECIFICITY)
+
+  The Encoding Specificity Principle (Tulving & Thomson, 1973):
+  "Memory retrieval is most effective when the retrieval cues match
+  the encoding context."
+  
+  Examples:
+    - Divers learned word lists underwater recalled better underwater than on land
+    - State-dependent memory: learned drunk → recalled better when drunk
+    - Mood congruence: happy memories recalled better when happy
+  
+  Mechanism: context features are co-encoded with content.
+             Retrieval = content match AND context match.
+  
+  membrain port:
+    context_embedding stored alongside content_embedding
+    Retrieval score = 0.7 × content_sim + 0.3 × context_sim
+    Context switches between tasks naturally boost relevant memories
+```
+
+---
+
+### 2.2 Brain Regions & Functions
+
+#### 2.2.1 Hippocampus
+
+```
+LOCATION: Medial temporal lobe (both hemispheres)
+SHAPE:    Seahorse-shaped (hence "hippocampus" = Greek for seahorse)
+SIZE:     ~3.5cm long, bilateral
+
+PRIMARY FUNCTIONS:
+  ┌─────────────────────────────────────────────────────────────┐
+  │ 1. EPISODIC MEMORY FORMATION                                │
+  │    Binds together: what + where + when → episodic memory   │
+  │    Without hippocampus: cannot form new episodic memories  │
+  │    (anterograde amnesia — H.M. case study)                 │
+  │                                                             │
+  │ 2. SPATIAL MEMORY (COGNITIVE MAPPING)                      │
+  │    Place cells: fire when in specific location             │
+  │    Grid cells (entorhinal): coordinate system              │
+  │    Together: cognitive map of environment                  │
+  │                                                             │
+  │ 3. PATTERN SEPARATION                                       │
+  │    Dentate Gyrus: makes similar inputs very different      │
+  │    Prevents interference between similar memories          │
+  │    High neurogenesis rate supports this function           │
+  │                                                             │
+  │ 4. PATTERN COMPLETION (CA3 region)                         │
+  │    Autoassociative network with recurrent connections      │
+  │    Partial cue → reconstructs full memory pattern         │
+  │    Foundation of "tip of tongue" and associative recall    │
+  │                                                             │
+  │ 5. INDEX FUNCTION                                          │
+  │    Does NOT store content directly                         │
+  │    Stores POINTERS to content distributed in neocortex    │
+  │    Like a database index — fast, small, disposable        │
+  └─────────────────────────────────────────────────────────────┘
+
+EVIDENCE FOR INDEX FUNCTION:
+  - Older memories (decades) survive hippocampal damage
+  - Recent memories (weeks) do not survive
+  - After consolidation: memory becomes hippocampus-independent
+  - Gradient: older = more neocortex-independent
+
+membrain PORT:
+  hot_store (SQLite WAL):
+    - Episodic memory storage (recent, labile)
+    - Fast index to content vectors
+    - usearch HNSW hot_index: 50k vectors, O(log n) search
+    - Pattern completion: HNSW search → top hit → engram BFS
+    - Pattern separation: novelty score (distance from existing)
+    - Temporal ordering: created_tick, last_accessed_tick
+  
+  The hot_store IS the hippocampus:
+    - Temporary (pressure-triggered migration to cold)
+    - Index function (pointers, not primary content store)
+    - Episodic (timestamped, context-bound)
+    - Fast (in-memory HNSW, <5ms)
+```
+
+#### 2.2.2 Neocortex
+
+```
+LOCATION: Outer surface of cerebral hemispheres
+SIZE:     ~2,500 cm² surface area (highly folded)
+LAYERS:   6 cortical layers, each with different neuron types
+THICKNESS: 2-4mm
+
+PRIMARY FUNCTIONS:
+  ┌─────────────────────────────────────────────────────────────┐
+  │ 1. LONG-TERM SEMANTIC MEMORY STORAGE                       │
+  │    Stores the actual content of consolidated memories      │
+  │    Distributed across regions by modality:                 │
+  │    - Visual: occipital + temporal cortex                   │
+  │    - Auditory: temporal cortex                             │
+  │    - Language: Broca + Wernicke areas                     │
+  │    - Concepts: prefrontal + temporal association areas    │
+  │                                                             │
+  │ 2. SLOW INTEGRATION (COMPLEMENTARY LEARNING SYSTEMS)       │
+  │    Integrates new information slowly over many exposures   │
+  │    Avoids catastrophic forgetting by gradual update        │
+  │    Requires hippocampal replay during sleep for updates    │
+  │                                                             │
+  │ 3. PATTERN RECOGNITION (FAST PATH)                         │
+  │    Feedforward processing of familiar patterns             │
+  │    ~13ms for recognition of familiar stimuli               │
+  │    No hippocampus needed for familiar stimuli              │
+  │                                                             │
+  │ 4. CORTICAL COLUMNS: UNIT OF PROCESSING                   │
+  │    ~2mm × ~2mm columns, ~100 neurons each                 │
+  │    Hierarchical feature detection                          │
+  │    Similar memories stored in nearby columns              │
+  └─────────────────────────────────────────────────────────────┘
+
+KEY PROPERTY: Cortex is SLOW to learn but STABLE once learned.
+  - Catastrophic forgetting avoided by slow integration
+  - But: new learning takes many repetitions / sleep cycles
+  - Trade-off: stability vs plasticity
+
+membrain PORT:
+  cold_store (SQLite + usearch mmap):
+    - Consolidated semantic memories (stable, compressed)
+    - Unlimited scale via mmap (like cortex's vast surface area)
+    - int8 quantized vectors (compressed representation)
+    - zstd-compressed content (slow to read but rarely needed)
+    - OS page cache acts as warm layer (like cortical priming)
+  
+  The cold_store IS the neocortex:
+    - Stable (requires consolidation to write)
+    - Content-storing (not just pointers)
+    - Slow to write (consolidation overhead)
+    - Fast to read known patterns (OS page cache + mmap)
+    - Unlimited capacity (disk-bounded)
+```
+
+#### 2.2.3 Amygdala
+
+```
+LOCATION: Temporal lobe, anterior to hippocampus
+SHAPE:    Almond-shaped (Greek: amygdale = almond)
+SIZE:     ~1.5cm, bilateral
+
+PRIMARY FUNCTIONS:
+  ┌─────────────────────────────────────────────────────────────┐
+  │ 1. EMOTIONAL MEMORY TAGGING                                 │
+  │    Tags memories with emotional significance               │
+  │    High arousal → stronger, more persistent memory        │
+  │    Direct input from sensory thalamus (fast path)         │
+  │    And from sensory cortex (slow, processed path)         │
+  │                                                             │
+  │ 2. FEAR CONDITIONING                                        │
+  │    Classically conditioned fear responses                  │
+  │    Stimulus → threat association → defensive response      │
+  │    Lesion: cannot learn fear associations                  │
+  │                                                             │
+  │ 3. MODULATION OF HIPPOCAMPAL CONSOLIDATION                 │
+  │    High emotional arousal → amygdala releases NE          │
+  │    Norepinephrine → enhances hippocampal LTP              │
+  │    → emotionally significant memories are stronger        │
+  │    This is why you remember where you were on 9/11        │
+  │                                                             │
+  │ 4. EMOTIONAL VALENCE TAGGING                               │
+  │    Positive valence: approach, reward, pleasure            │
+  │    Negative valence: avoidance, threat, pain              │
+  │    Neutral: neither approach nor avoidance                │
+  └─────────────────────────────────────────────────────────────┘
+
+TWO-DIMENSIONAL EMOTIONAL SPACE:
+  Valence axis:  Negative ←————→ Positive   (-1.0 to +1.0)
+  Arousal axis:  Calm     ←————→ Excited    (0.0 to 1.0)
+
+  Examples:
+    Terror:   valence=-0.9, arousal=0.9  → extreme negative high arousal
+    Joy:      valence=+0.8, arousal=0.7  → positive high arousal
+    Disgust:  valence=-0.6, arousal=0.4  → negative moderate arousal
+    Serenity: valence=+0.5, arousal=0.1  → positive low arousal
+    Boredom:  valence=-0.1, arousal=0.1  → slightly negative low arousal
+
+FLASHBULB MEMORIES:
+  Exceptionally high-arousal events create "flashbulb memories":
+  - Extremely detailed
+  - Long-lasting (potentially lifetime)
+  - Resistant to interference
+  - Reconsolidated on every recall (slightly updated each time)
+  
+  Mechanism: amygdala activation → massive NE release → maximal LTP
+  In membrain: bypass_decay = true when arousal > 0.8
+
+membrain PORT:
+  EmotionalTag { valence: f32, arousal: f32 }:
+    - Stored with every memory
+    - Determines initial_strength multiplier
+    - Controls bypass_decay (high arousal → no decay)
+    - Influences consolidation priority (emotional → faster migration)
+    - Affects reconsolidation window (emotional → shorter labile window)
+  
+  Strength multiplier formula:
+    emotional_multiplier = 1.0 + (|valence| × arousal × EMOTIONAL_WEIGHT)
+    EMOTIONAL_WEIGHT = 0.5 (tunable)
+    
+    Example: terror (valence=-0.9, arousal=0.9):
+    multiplier = 1.0 + (0.9 × 0.9 × 0.5) = 1.405
+    Initial strength 40.5% stronger than neutral memory
+```
+
+#### 2.2.4 Prefrontal Cortex (PFC)
+
+```
+LOCATION: Anterior portion of frontal lobe
+SIZE:     ~29% of total cortex in humans (vs 17% in chimpanzees)
+NOTABLE:  Largest relative to body size of any brain region in humans
+
+PRIMARY FUNCTIONS:
+  ┌─────────────────────────────────────────────────────────────┐
+  │ 1. WORKING MEMORY (7±2 items)                              │
+  │    Active maintenance of information for immediate use     │
+  │    Miller's Law: 7 ± 2 chunks (1956)                       │
+  │    Phonological loop (verbal), visuospatial sketchpad      │
+  │    Central executive: coordinates, allocates attention     │
+  │                                                             │
+  │ 2. EXECUTIVE ATTENTION                                      │
+  │    Selective attention: what to process, what to ignore    │
+  │    Divided attention: multiple tasks simultaneously        │
+  │    Sustained attention: maintaining focus over time        │
+  │                                                             │
+  │ 3. RETRIEVAL CONTROL                                        │
+  │    Initiates and monitors memory retrieval                 │
+  │    Resolves competition between memory traces              │
+  │    Post-retrieval monitoring: "is this right?"             │
+  │                                                             │
+  │ 4. INHIBITION                                              │
+  │    Suppresses irrelevant memories during retrieval         │
+  │    Suppresses impulsive responses                          │
+  │    Directly relevant: active suppression of distractors   │
+  └─────────────────────────────────────────────────────────────┘
+
+WORKING MEMORY CAPACITY:
+  The "7±2" is contested — modern research suggests 4±1 "chunks"
+  when chunks are truly independent.
+  But: chunks can be hierarchically organized ("chunking")
+       Expert chess players chunk board positions into ~7 patterns
+       Each pattern contains many pieces → much more information
+  
+  For membrain: 7 slots is architecturally clean and biologically motivated.
+  Can be configured (working_memory_capacity: 7)
+
+DORSOLATERAL vs VENTROMEDIAL PFC:
+  dlPFC: working memory, executive function, cognitive control
+  vmPFC: emotional regulation, risk/reward evaluation, social cognition
+  
+  For membrain: vmPFC aspects → emotional_tag influences on retrieval
+                dlPFC aspects → working memory + attention scoring
+
+membrain PORT:
+  WorkingMemory:
+    slots: FixedVec<MemoryItem, 7>
+    attention: HashMap<MemoryId, f32>
+    
+  LruCache<ContentHash, MemoryRef> (Tier 1):
+    Simulates the fast-access, recency-biased nature of working memory
+    512 entries — larger than working memory proper, acting as
+    the "primed neocortex" fast path
+    
+  Attention scoring in encode pipeline:
+    attention_score: f32 (0.0 to 1.0, caller-provided)
+    Threshold gate: attention_score < 0.2 → discard (not attended to)
+    Multiplier: attention_score scales initial_strength
+```
+
+#### 2.2.5 Cerebellum
+
+```
+LOCATION: Posterior and inferior to cerebral hemispheres
+SIZE:     ~10% of brain volume, ~80 billion neurons (close to cerebral cortex)
+NOTABLE:  Despite small size, contains more neurons than the rest of brain combined
+
+PRIMARY FUNCTIONS:
+  ┌─────────────────────────────────────────────────────────────┐
+  │ 1. PROCEDURAL MEMORY (MOTOR LEARNING)                      │
+  │    Motor skills: typing, cycling, playing instruments      │
+  │    Not recalled consciously — executed automatically       │
+  │    Lesion: movement imprecise, cannot learn new skills     │
+  │                                                             │
+  │ 2. TIMING AND SEQUENCE LEARNING                            │
+  │    Precise timing of movements                             │
+  │    Sequence of actions learned as a unit                   │
+  │    Relevant: procedure = sequence of operations           │
+  │                                                             │
+  │ 3. CONDITIONING (eyeblink, timing)                         │
+  │    Simple associative learning with precise timing         │
+  │    CS (tone) → US (airpuff) → CR (eyeblink)               │
+  └─────────────────────────────────────────────────────────────┘
+
+KEY PROPERTY: Procedural memories do NOT require hippocampus.
+  - Patients with hippocampal damage (amnesia) can still learn motor skills
+  - They just don't remember learning them
+  - H.M. improved at mirror drawing over days despite no episodic memory of practice
+
+membrain PORT:
+  procedural_store (SQLite key-value, no vector search):
+    - Pattern → action mappings
+    - No decay (skills don't fade)
+    - No consolidation needed
+    - Direct lookup: O(1) by pattern_hash
+    - Not subject to interference or forgetting
+    
+  Use cases:
+    - "When I see error pattern X, I always do Y"
+    - "When working in module Z, the standard approach is W"
+    - "This API always requires authentication header format F"
+```
+
+#### 2.2.6 Entorhinal Cortex
+
+```
+LOCATION: Medial temporal lobe, adjacent to hippocampus
+ROLE:     Gateway — all information entering/leaving hippocampus passes through here
+
+PRIMARY FUNCTIONS:
+  ┌─────────────────────────────────────────────────────────────┐
+  │ 1. CONVERGENCE ZONE                                         │
+  │    Receives input from: visual, auditory, somatosensory,   │
+  │    olfactory, prefrontal cortex                            │
+  │    Compresses multimodal input into unified representation  │
+  │                                                             │
+  │ 2. HIPPOCAMPAL GATEWAY                                     │
+  │    Projects to dentate gyrus (via perforant path)          │
+  │    Receives output from CA1                                │
+  │    Controls what enters long-term memory                   │
+  │                                                             │
+  │ 3. GRID CELLS                                              │
+  │    Hexagonal firing grid — abstract spatial coordinates   │
+  │    May generalize to non-spatial "conceptual space"        │
+  │    Foundation of cognitive mapping beyond physical space   │
+  └─────────────────────────────────────────────────────────────┘
+
+membrain PORT:
+  encoding_pipeline:
+    - Preprocessing before hot_store insert
+    - Embedding computation (fastembed-rs)
+    - Embedding cache (LruCache — avoids re-encoding same content)
+    - Novelty scoring (is this new information?)
+    - Attention gating (is this worth encoding?)
+    - Emotional tagging (how significant is this?)
+    - Context embedding (what context am I in?)
+    - Initial strength calculation
+    All of this mirrors the entorhinal cortex's role as
+    "quality control" before hippocampal storage.
+```
+
+#### 2.2.7 Basal Ganglia
+
+```
+LOCATION: Subcortical structures (striatum, globus pallidus, substantia nigra, subthalamic nucleus)
+ROLE:     Habit formation, reward-based learning, action selection
+
+PRIMARY FUNCTIONS:
+  ┌─────────────────────────────────────────────────────────────┐
+  │ 1. HABIT LEARNING                                           │
+  │    Converts goal-directed behavior → automatic habits      │
+  │    Stimulus → response chains stored as units              │
+  │    Dopamine: reward prediction error signal                │
+  │                                                             │
+  │ 2. ACTION SELECTION                                         │
+  │    "What to do next" given current state                   │
+  │    Competes between possible actions                       │
+  │    Selects winner, suppresses alternatives                 │
+  │                                                             │
+  │ 3. SEQUENCE LEARNING                                        │
+  │    Serial order of actions                                  │
+  │    With cerebellum: complete action sequences automated    │
+  └─────────────────────────────────────────────────────────────┘
+
+membrain PORT:
+  procedural_store (shared with cerebellum port):
+    - Habit = pattern → action mapping
+    - Access: direct hash lookup, no vector search
+    - "This input pattern always leads to this action"
+    
+  Future (agent-alive): dopamine-like signal
+    - Reward feedback → strengthens procedural pathways
+    - Not in initial membrain scope
+```
+
+---
+
+### 2.3 Memory Types Taxonomy
+
+```
+LONG-TERM MEMORY
+│
+├── DECLARATIVE (Explicit) — consciously recalled
+│   │
+│   ├── EPISODIC
+│   │   Definition: Memories of specific events with temporal + contextual tags
+│   │   "What happened to me at time T in place P"
+│   │   Brain region: Hippocampus (encoding), Neocortex (storage after consolidation)
+│   │   Properties:
+│   │     - Highly context-dependent (encoding specificity)
+│   │     - Subject to decay and interference
+│   │     - Can be updated (reconsolidation)
+│   │     - Temporal ordering critical
+│   │     - First formed, first forgotten (during hippocampal damage)
+│   │   Examples:
+│   │     "I fixed that race condition at tick 847"
+│   │     "During the auth module refactor, I found the JWT expiry bug"
+│   │     "Last time I deployed to prod, the migration failed"
+│   │   membrain: hot_store, Labile state, decay-subject, context_embedding
+│   │
+│   └── SEMANTIC
+│       Definition: General knowledge, facts, concepts — no time/place tag
+│       "What I know about the world"
+│       Brain region: Neocortex (distributed, modality-specific)
+│       Properties:
+│         - Relatively stable (low decay rate)
+│         - Less context-dependent
+│         - Updates slowly (requires many repetitions)
+│         - Not tied to a specific event
+│         - Survives hippocampal damage better than episodic
+│       Examples:
+│         "Rust's borrow checker prevents data races"
+│         "This codebase uses PostgreSQL with SQLx"
+│         "The payments module requires PCI compliance"
+│       membrain: cold_store, Stable state, high stability value, low decay
+│
+└── NON-DECLARATIVE (Implicit) — not consciously recalled
+    │
+    ├── PROCEDURAL
+    │   Definition: Motor skills, cognitive skills, habits
+    │   Brain region: Basal ganglia + Cerebellum
+    │   Properties:
+    │     - Does not decay with non-use (unlike declarative)
+    │     - Cannot be easily verbalized
+    │     - Acquired through repetition (slow)
+    │     - Executed automatically without conscious access
+    │   Examples (for agent):
+    │     "When I see a SQL query without parameterization → flag injection risk"
+    │     "When debugging async code → check for missing await first"
+    │     "In this repo → always run tests before committing"
+    │   membrain: procedural_store, no decay, hash lookup
+    │
+    ├── PRIMING
+    │   Definition: Prior exposure facilitates later processing of related items
+    │   Brain region: Neocortex (modality-specific)
+    │   Properties:
+    │     - Unconscious
+    │     - Short-lived (hours to days)
+    │     - Speeds up recognition of primed items
+    │   membrain port: Tier1 cache + spotlight/priming mode
+    │     "Loading context about X → boosts recall of X-related memories"
+    │
+    ├── CLASSICAL CONDITIONING
+    │   Definition: Stimulus-response associations (Pavlov)
+    │   Brain region: Cerebellum (timing), Amygdala (fear conditioning)
+    │   membrain port: pattern → response in procedural_store
+    │
+    └── EMOTIONAL MEMORY
+        Definition: Emotional responses tied to stimuli/events
+        Brain region: Amygdala
+        Properties:
+          - Extremely durable (some last lifetime)
+          - High interference resistance
+          - Flashbulb quality for extreme events
+        membrain port: emotional_tag + bypass_decay mechanism
+```
+
+---
+
+### 2.4 Encoding — How Memories Form
+
+```
+THE ENCODING PIPELINE IN THE HUMAN BRAIN:
+
+STAGE 1: Sensory Input
+  All information enters through sensory channels:
+    Vision:   retina → optic nerve → primary visual cortex (V1) → association areas
+    Auditory: cochlea → auditory nerve → primary auditory cortex → Wernicke's
+    Touch:    receptors → spinal cord → somatosensory cortex
+    Smell:    olfactory bulb → DIRECTLY to amygdala + hippocampus (unique!)
+    
+  Note: Smell is special — it bypasses the thalamus and reaches memory structures
+  directly. This is why smell is the most powerful memory cue.
+
+STAGE 2: Sensory Register (Iconic/Echoic Memory)
+  Duration: <500ms
+  Capacity: large but decays extremely fast
+  Function: brief persistence that allows attention to select relevant features
+  
+  If attention is NOT directed here: gone forever in <500ms
+  If attention IS directed: passes to working memory
+
+STAGE 3: Attention Filter
+  THE most critical gating step.
+  Resources: limited — only a fraction of sensory input is attended to
+  
+  What gets attended to:
+    - Novel stimuli (novelty detection = automatic attention capture)
+    - Emotionally significant stimuli (amygdala fast-path)
+    - Goal-relevant stimuli (top-down attention from PFC)
+    - High-intensity stimuli (pain, loud noise, bright light)
+  
+  What gets filtered:
+    - Familiar, non-changing background stimuli
+    - Stimuli irrelevant to current task
+    - Low-intensity stimuli not matching any of above
+
+STAGE 4: Working Memory Encoding
+  Duration: 20-30 seconds without rehearsal
+  Capacity: 7 ± 2 chunks (Miller, 1956) / 4 ± 1 independent items (Cowan, 2001)
+  
+  Working memory systems:
+    Phonological loop:     verbal/acoustic information (inner speech)
+    Visuospatial sketchpad: visual and spatial information
+    Episodic buffer:       temporary multimodal binding (Baddeley, 2000)
+    Central executive:     allocates resources between the above
+  
+  If NOT rehearsed AND not emotionally significant AND not novel:
+    → decays and lost from working memory
+  
+  If rehearsed OR emotionally significant OR novel:
+    → encoding into long-term memory begins
+
+STAGE 5: Long-Term Memory Encoding
+  Multiple encoding levels (Craik & Lockhart, 1972):
+    Shallow: phonological → "what does this sound like?" (weak encoding)
+    Intermediate: visual → "what does this look like?"
+    Deep:    semantic → "what does this MEAN?" (strongest encoding)
+  
+  Semantic encoding is ~5x more durable than phonological encoding.
+  
+  Key factors determining encoding strength:
+  ┌──────────────────────────────────────────────────────────────┐
+  │ FACTOR           │ EFFECT                  │ membrain PARAM  │
+  │──────────────────────────────────────────────────────────────│
+  │ Attention level  │ Higher → stronger        │ attention_score │
+  │ Emotional arousal│ Higher → stronger        │ emotional.arousal│
+  │ Novelty          │ Novel → stronger         │ novelty_score   │
+  │ Repetition       │ More → stronger (LTP)   │ (via recall LTP)│
+  │ Elaboration      │ More meaning → stronger  │ (content depth) │
+  │ Context richness │ Rich context → stronger  │ context_embedding│
+  │ Self-relevance   │ Personal → stronger      │ source_kind     │
+  └──────────────────────────────────────────────────────────────┘
+
+STAGE 6: Initial Consolidation (Synaptic Consolidation)
+  Immediately after encoding: memory is FRAGILE (labile state)
+  Duration of fragile window: minutes to hours
+  
+  Molecular process:
+    1. NMDA receptors activated by glutamate
+    2. Ca2+ influx → activates kinases (CaMKII, PKA)
+    3. Kinases → phosphorylate AMPA receptors → insert more AMPA
+    4. Also → CREB transcription factor → new protein synthesis
+    5. New proteins → structural changes in dendritic spines
+    6. After 6+ hours: proteins synthesized, structural changes complete
+    7. Memory becomes resistant to disruption (stable)
+  
+  Disruption during labile window (before stabilization):
+    - Electroconvulsive shock
+    - Protein synthesis inhibitors
+    - Anesthesia
+    → Memory lost permanently
+  
+  membrain port:
+    state = MemoryState::Labile on creation
+    Labile memories have full reconsolidation window
+    state → MemoryState::Stable after initial consolidation tick
+
+membrain ENCODING PIPELINE (complete port):
+
+  encode(content, context, attention_score, emotional_tag, source)
+    │
+    ├─ [attention_score < ATTENTION_THRESHOLD (0.2)] → DISCARD
+    │   Simulates sensory register → attention filter
+    │
+    ├─ embedding_cache.get_or_compute(content)
+    │   → content_vec: Vec<f32>  (384 dims)
+    │   Simulates semantic encoding (deep processing)
+    │
+    ├─ embedding_cache.get_or_compute(context)
+    │   → context_vec: Vec<f32>
+    │   Simulates encoding specificity (context bound)
+    │
+    ├─ novelty_score = compute_novelty(content_vec, hot_index)
+    │   = 1.0 - max_cosine_similarity(content_vec, top_1_neighbor)
+    │   Range: 0.0 (identical to existing) to 1.0 (completely novel)
+    │   Simulates novelty detection → automatic attention capture
+    │
+    ├─ initial_strength = BASE_STRENGTH
+    │     × (1.0 + novelty_score × NOVELTY_WEIGHT)         [0.3]
+    │     × (1.0 + attention_score × ATTENTION_WEIGHT)     [0.4]
+    │     × emotional_tag.strength_multiplier()            [1.0 to 1.5]
+    │   Simulates encoding depth and initial synaptic strength
+    │
+    ├─ bypass_decay = emotional_tag.arousal > AROUSAL_THRESHOLD (0.6)
+    │              && |emotional_tag.valence| > VALENCE_THRESHOLD (0.5)
+    │   Simulates amygdala → NE → enhanced hippocampal LTP
+    │
+    ├─ state = MemoryState::Labile
+    │   Simulates freshly encoded, fragile memory
+    │
+    ├─ INSERT INTO hot.db/memories
+    │   INSERT INTO hot.db/memory_index (for fast pre-filter)
+    │
+    ├─ hot_index.add(id, quantize_i16(content_vec))
+    │   HNSW index updated for future searches
+    │
+    ├─ interference_check(content_vec)
+    │   Find similar existing memories (0.7 < similarity < 0.99)
+    │   Apply retroactive interference penalty to older memories
+    │
+    └─ engram_builder.try_cluster(id, content_vec)
+        Check if this memory belongs to an existing engram
+        If similarity > ENGRAM_THRESHOLD: add to cluster
+        If isolated: create new engram seed
+```
+
+---
+
+### 2.5 LTP / LTD — The Physical Basis of Learning
+
+```
+LONG-TERM POTENTIATION (LTP)
+
+Discovery: Terje Lømo, 1966 (published 1973)
+  Stimulated perforant path → dentate gyrus in rabbit
+  High-frequency stimulation → subsequent single pulses produced LARGER responses
+  Effect lasted hours to weeks → "long-term" potentiation
+
+Molecular mechanism (Schaffer collateral LTP, best understood):
+
+  Step 1: PRESYNAPTIC GLUTAMATE RELEASE
+    Action potential arrives at presynaptic terminal
+    Ca2+ enters through voltage-gated Ca2+ channels
+    Synaptic vesicles fuse → glutamate released into synapse
+
+  Step 2: POSTSYNAPTIC RECEPTOR ACTIVATION
+    Glutamate binds AMPA receptors → Na+ influx → depolarization (EPSP)
+    Glutamate also binds NMDA receptors BUT:
+      NMDA receptor has Mg2+ block at resting potential
+      Only unblocked when membrane is sufficiently depolarized
+      
+  Step 3: NMDA RECEPTOR UNBLOCKING (the "coincidence detector")
+    If EPSP is large enough (from coincident input):
+      Mg2+ block removed → NMDA receptor opens
+      Ca2+ flows in through NMDA receptor
+      Ca2+ = the critical second messenger for LTP
+      
+  Step 4: DOWNSTREAM SIGNALING CASCADE
+    Ca2+ → activates CaMKII (Ca2+/calmodulin-dependent protein kinase II)
+    CaMKII → phosphorylates existing AMPA receptors → increased conductance
+    CaMKII → triggers AMPA receptor insertion from nearby endosomes
+    → MORE AMPA receptors in synapse → stronger response to same presynaptic input
+    
+  Step 5: LATE LTP (E-LTP → L-LTP, >3 hours)
+    Early LTP (E-LTP): post-translational modifications (minutes)
+    Late LTP (L-LTP): requires new protein synthesis (hours to days)
+    PKA → CREB (cAMP response element binding protein) → gene transcription
+    New structural proteins → dendritic spine grows larger
+    More receptor slots available → even stronger synapse
+    
+  Hebb's rule (theoretical framework):
+    "When an axon of cell A is near enough to excite cell B and
+    repeatedly and persistently takes part in firing it, some growth
+    process or metabolic change takes place in one or both cells
+    such that A's efficiency, as one of the cells firing B,
+    is increased."
+    
+    Simplified: "Neurons that fire together, wire together."
+
+membrain LTP port:
+  fn on_recall(memory: &mut Memory, now_tick: u64) {
+      // Simulate Ca2+ cascade → more AMPA receptors → stronger synapse
+      memory.base_strength = (memory.base_strength + LTP_DELTA).min(MAX_STRENGTH);
+      // Simulate protein synthesis → structural spine growth → more stable
+      memory.stability += STABILITY_INCREMENT;
+      // Update "when was this synapse last active"
+      memory.last_accessed_tick = now_tick;
+      // Update memory's state (Labile after recall — reconsolidation window)
+      memory.state = MemoryState::Labile { 
+          since_tick: now_tick,
+          window: reconsolidation_window(memory.age_ticks(now_tick))
+      };
+  }
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+LONG-TERM DEPRESSION (LTD)
+
+Equally important as LTP — often overlooked but CRITICAL.
+Without LTD: all synapses eventually saturate at maximum strength.
+At saturation: no more learning possible (no more differentiation).
+LTD is the "reset" mechanism that enables continued learning.
+
+Molecular mechanism (cerebellar LTD, best understood):
+
+  Context: Climbing fiber (error signal) activates simultaneously with
+           parallel fiber (stimulus signal)
+  
+  Step 1: SIMULTANEOUS ACTIVATION
+    Parallel fiber: glutamate → AMPA receptors → depolarization
+    Climbing fiber: strong depolarization → large Ca2+ influx
+    
+  Step 2: PROTEIN KINASE C ACTIVATION
+    Combined mGluR (metabotropic glutamate receptor) + strong Ca2+
+    → activates Protein Kinase C (PKC)
+    
+  Step 3: AMPA RECEPTOR INTERNALIZATION
+    PKC → phosphorylates AMPA receptors at specific site
+    Phosphorylated AMPA receptors → internalized (endocytosis)
+    FEWER AMPA receptors in synapse → weaker response
+    
+  In hippocampus (homosynaptic LTD):
+    Low-frequency stimulation (1 Hz for 15 min) → LTD
+    Moderate Ca2+ influx through NMDA (not enough for LTP)
+    → activates phosphatases (PP1, PP2B calcineurin)
+    → phosphatases dephosphorylate AMPA receptors
+    → AMPA receptor endocytosis → weaker synapse
+
+  HOMEOSTATIC PLASTICITY (Synaptic Scaling):
+    If a neuron is chronically under-stimulated:
+      → scales UP all synaptic strengths (upward scaling)
+    If a neuron is chronically over-stimulated:
+      → scales DOWN all synaptic strengths (downward scaling)
+    This maintains the neuron in its operational range.
+    
+    Tononi's Synaptic Homeostasis Hypothesis (SHY):
+    Sleep is when synaptic downscaling occurs globally.
+    Wake: net increase in synaptic strength (LTP from experiences)
+    Sleep: net decrease (NREM → global downscaling → SNR improvement)
+
+membrain LTD port (Ebbinghaus Forgetting Curve):
+
+  EBBINGHAUS FORMULA:
+    R(t) = e^(-t/S)
+    
+    R: retention (0.0 to 1.0)
+    t: time since last access (in interaction ticks)
+    S: stability (increases with each successful recall)
+    
+  Original Ebbinghaus data (1885, self-experiment):
+    After 1 review:  S ≈ 1 day equivalent
+    After 2 reviews: S ≈ 3 days
+    After 4 reviews: S ≈ 1 week
+    After 8 reviews: S ≈ 1 month
+    Stability roughly doubles with each recall → logarithmic growth
+  
+  membrain implementation:
+    
+    // LAZY computation — never iterate, only compute on access
+    fn effective_strength(memory: &Memory, now_tick: u64) -> f32 {
+        if memory.bypass_decay {
+            return memory.base_strength;  // emotional memories immune
+        }
+        
+        let elapsed = now_tick.saturating_sub(memory.last_accessed_tick);
+        let retention = (-elapsed as f32 / memory.stability).exp();
+        
+        memory.base_strength * retention
+    }
+    
+    // Called during on_recall() to persist new base strength
+    fn persist_decay(memory: &mut Memory, now_tick: u64) {
+        if !memory.bypass_decay {
+            let new_strength = effective_strength(memory, now_tick);
+            memory.base_strength = new_strength;
+        }
+        // Reset: decay clock restarts from now
+        memory.last_accessed_tick = now_tick;
+    }
+    
+  WHY LAZY (critical for performance):
+    Eager approach: every N ticks → iterate ALL memories → update strength
+    Problem: O(n) operation, blocks retrieval, death at scale
+    
+    Lazy approach: compute effective_strength(memory, now_tick) ONLY when:
+      1. A memory is retrieved (before scoring)
+      2. During pre-filter (WHERE clause in SQL)
+      3. During consolidation cycle (for migration scoring)
+    
+    Cost: O(1) per memory access
+    Overhead at idle: ZERO
+    Result: millions of memories, zero maintenance cost
+```
+
+---
+
+### 2.6 Forgetting Curve — Ebbinghaus
+
+```
+HISTORICAL CONTEXT:
+  Hermann Ebbinghaus (1850-1909)
+  Self-experiment: memorized nonsense syllables (DAX, BUP, LOJ...)
+  Measured retention at intervals from 20 minutes to 31 days
+  Relearning method: measured savings — how much easier was re-learning?
+  
+  Formula derived from data: R = e^(-t/S)
+  This formula has been validated in hundreds of subsequent studies.
+  It remains the most empirically robust model of memory decay.
+
+DECAY DATA (Ebbinghaus, 1885):
+  ┌────────────────────────────────────┐
+  │ Time since learning │  % Retained  │
+  │─────────────────────│─────────────│
+  │ 20 minutes          │     58%      │
+  │ 1 hour              │     44%      │
+  │ 8-9 hours           │     36%      │
+  │ 1 day               │     33%      │
+  │ 2 days              │     28%      │
+  │ 6 days              │     25%      │
+  │ 31 days             │     21%      │
+  └────────────────────────────────────┘
+
+REVIEW EFFECT (spacing):
+  The "spacing effect" — one of the most robust findings in cognitive psychology.
+  Massed practice: study 10 times in one session → poor long-term retention
+  Spaced practice: study 10 times across 10 sessions → excellent long-term retention
+  
+  Mechanism: each review resets decay AND increases stability:
+    After review 1: S ≈ 1 unit
+    After review 2: S ≈ 2 units (stability doubled)
+    After review 3: S ≈ 4 units
+    After review n: S ≈ 2^(n-1) units
+    
+  membrain stability growth:
+    After recall n:  stability = BASE_STABILITY × (1 + n × STABILITY_INCREMENT)
+    More precisely: stability += STABILITY_INCREMENT on each recall
+    Bounded: stability = stability.min(MAX_STABILITY) [prevents infinite stability]
+
+INTERACTION COUNT vs REAL TIME:
+  membrain uses interaction_count instead of real time. Rationale:
+  
+  1. Agents don't have a clock in the human sense
+     An agent running 1000 queries per second and one running 1 per hour
+     should have the same decay dynamics — based on usage, not elapsed time
+  
+  2. Relevance is usage-based, not time-based
+     A memory that's been recalled 100 times in the last 50 ticks is more
+     relevant than one recalled 0 times in the same period, regardless of age
+  
+  3. Implementation: global atomic counter
+     interaction_count: Arc<AtomicU64>
+     Incremented on every encode OR recall
+     Stored as last_accessed_tick at recall time
+     Elapsed = current_tick - memory.last_accessed_tick
+
+STABILITY INTERPRETATION:
+  stability = 100 means: after 100 ticks without recall, retention = e^(-1) ≈ 37%
+  stability = 500 means: after 500 ticks, retention = e^(-1) ≈ 37%
+  
+  A memory with stability=500 takes 5× as long to decay to 37% as stability=100.
+  High stability = "well-consolidated, repeatedly recalled" memory.
+  Low stability = "freshly encoded or rarely reinforced" memory.
+  
+  Initial stability (before any recall):
+    BASE_STABILITY = 50 interactions (tunable)
+    Emotional memories get multiplier: stability × (1 + arousal × 0.5)
+  
+  Stability growth per recall:
+    STABILITY_INCREMENT = 0.2 × current_stability
+    (each recall increases stability by 20% → doubling after ~3.8 recalls)
+    Matches Ebbinghaus spacing effect data approximately.
+```
+
+---
+
+### 2.7 Consolidation — The Stabilization Process
+
+```
+TWO PHASES OF CONSOLIDATION:
+
+PHASE 1: SYNAPTIC CONSOLIDATION (minutes to hours)
+  ─────────────────────────────────────────────────
+  Location:  At the synapse itself
+  Duration:  30 minutes → 6 hours
+  Process:
+    1. Encoding → AMPA insertion (early LTP, minutes)
+    2. CaMKII → CREB activation → gene transcription
+    3. New mRNA produced, transported to dendrites
+    4. Local protein synthesis at synapses (dendritic translation)
+    5. New structural proteins → spine enlargement
+    6. Spine geometry change → permanent synaptic modification
+    
+  State: LABILE during this phase
+    - Vulnerable to disruption (ECS, protein synthesis inhibitors, trauma)
+    - New information can update/overwrite the memory
+    - This is the reconsolidation window
+    
+  After ~6 hours: STABLE
+    - Resistant to disruption
+    - Protein synthesis complete
+    - Structural changes established
+
+PHASE 2: SYSTEMS CONSOLIDATION (days to years)
+  ─────────────────────────────────────────────────
+  Location:  Brain-wide (hippocampus → neocortex)
+  Duration:  Days to years (some memories take decades)
+  Process:
+    1. Newly encoded memory: hippocampus-dependent
+       (hippocampal damage → memory lost)
+    2. Hippocampus replays memory during sleep (NREM)
+    3. Repeated replay → neocortex gradually learns the pattern
+    4. After sufficient replay: neocortex can retrieve independently
+    5. Memory becomes hippocampus-independent
+    
+  Gradient of hippocampal dependence:
+    1 week old:  strongly hippocampus-dependent
+    1 month old: moderately hippocampus-dependent
+    1 year old:  weakly hippocampus-dependent
+    10 years old: hippocampus-independent (neocortical memory)
+    
+  Evidence:
+    - Patient H.M.: anterograde amnesia BUT intact memories from before surgery
+    - Retrograde amnesia gradient: recent memories lost, old ones intact
+    - fMRI: old memories activate neocortex; recent memories activate hippocampus
+
+COMPLEMENTARY LEARNING SYSTEMS (McClelland et al., 1995):
+  The fundamental architecture:
+    Hippocampus: fast learning, one-shot encoding, temporary
+    Neocortex:   slow learning, many exposures needed, permanent
+  
+  Why two systems?
+    Fast learning (hippocampus) is needed for one-shot episodic memories.
+    Slow learning (cortex) prevents catastrophic forgetting.
+    If cortex learned as fast as hippocampus → new information would
+    immediately overwrite all existing knowledge.
+    
+  The compromise:
+    1. Hippocampus encodes everything quickly (fast learning system)
+    2. During sleep: hippocampus replays → cortex gradually integrates
+    3. Integration is INTERLEAVED with existing cortical representations
+       → prevents catastrophic forgetting
+    4. Result: both new AND old memories coexist in cortex
+
+membrain CONSOLIDATION PORT:
+
+  TRIGGER CONDITIONS:
+    1. hot_index.len() > HOT_CAPACITY (50,000 vectors)
+    2. hot_store total effective_strength > STRENGTH_PRESSURE threshold
+    3. explicit call: membrain consolidate
+    4. periodic: every CONSOLIDATION_INTERVAL interactions
+    
+  NREM EQUIVALENT (migrate_to_cold):
+    ──────────────────────────────────────────────────────
+    1. Score all hot memories:
+       consolidation_score = effective_strength(m, now)
+                           × access_count_decay_weighted
+                           × (1.0 + emotional_multiplier)
+       
+    2. Sort by consolidation_score DESC
+    
+    3. For top N memories (N = HOT_CAPACITY × MIGRATION_FRACTION):
+       a. Re-embed with full float32 (final encoding)
+       b. Compress content (zstd level 3)
+       c. INSERT INTO cold.db/cold_memories
+       d. cold_index.add(id, quantize_i8(embedding))  // int8 for cold
+       e. Mark as MemoryState::Consolidated in hot.db
+       f. Keep metadata pointer in hot.db (hippocampus keeps index)
+    
+    4. Update engram centroids for migrated memories
+    
+  REM EQUIVALENT (process_emotional_queue):
+    ──────────────────────────────────────────────────────
+    1. Collect all memories with bypass_decay = true
+       AND emotional_processed = false
+    
+    2. For each:
+       a. Gradually reduce arousal: arousal *= DESENSITIZATION_FACTOR (0.95)
+       b. Create cross-links in engram graph to semantically related memories
+       c. Set emotional_processed = true when arousal < PROCESSED_THRESHOLD
+    
+    3. This simulates REM's role in:
+       - Emotional memory processing (reduces acute emotional charge)
+       - Integration of emotional events with existing knowledge
+       
+  HOMEOSTASIS (downscale):
+    ──────────────────────────────────────────────────────
+    1. Compute total_load = SUM(effective_strength) / COUNT
+    2. If total_load > HOMEOSTASIS_TRIGGER (0.85 × MAX_LOAD):
+       a. For ALL hot memories:
+          base_strength *= HOMEOSTASIS_FACTOR (0.9)
+       b. This globally scales down — strong memories stay relatively strong
+          weak memories get pushed below MIN_STRENGTH → archive
+    3. After scaling: prune all memories below MIN_STRENGTH → archive
+    
+    Simulates Tononi's Synaptic Homeostasis Hypothesis:
+    "Sleep → global synaptic downscaling → improved signal-to-noise ratio"
+```
+
+---
+
+### 2.8 Sleep — The Brain's Consolidation Engine
+
+```
+SLEEP ARCHITECTURE:
+
+  One sleep cycle = ~90 minutes, repeating 4-6 times per night
+  ┌─────────────────────────────────────────────────────────────┐
+  │ NREM Stage 1:  Light sleep, 5-10 min, theta waves         │
+  │ NREM Stage 2:  Sleep spindles + K-complexes, 20 min       │
+  │ NREM Stage 3:  Slow-wave sleep (SWS), 20-40 min           │
+  │ REM:           Rapid eye movement, 10-60 min              │
+  └─────────────────────────────────────────────────────────────┘
+  
+  Early night: More SWS (NREM3), less REM
+  Late night: Less SWS, more REM
+  → Procedural/emotional processing dominated by early vs late night
+
+NREM SLOW-WAVE SLEEP (SWS) — EPISODIC → SEMANTIC TRANSFER:
+
+  Sharp-wave ripples (SWR):
+    Hippocampus generates brief (50-100ms) bursts of activity
+    During these ripples: recent episodic memories are REPLAYED
+    Not replayed verbatim — compressed, pattern-extracted
+    
+  Sleep spindles:
+    Thalamo-cortical oscillations (12-15 Hz, 0.5-3s)
+    Synchronize hippocampal-cortical communication
+    Each spindle = a "transfer packet" from hippocampus to cortex
+    
+  Slow oscillations:
+    ~0.75 Hz large cortical oscillations
+    UP state: cortex receives hippocampal replay
+    DOWN state: cortex offline, consolidates received information
+    
+  Process:
+    1. Hippocampus replays compressed episodic memories
+    2. Cortex receives replay during UP states
+    3. Cortical synapses gradually strengthen for replayed patterns
+    4. After many replay sessions across many nights: cortex "knows" the pattern
+    5. Hippocampal trace becomes redundant → eventually weakens
+
+  MEMORY SELECTION FOR REPLAY:
+    Not all memories replayed equally:
+    - Reward-associated memories preferentially replayed
+    - Emotional memories preferentially replayed
+    - Recently acquired memories preferentially replayed
+    - Frequently recalled memories less likely replayed (already consolidated)
+    
+    membrain consolidation scoring:
+      consolidation_score = effective_strength × recency_weight × emotional_weight
+      High scoring → migrated to cold_store first
+
+REM SLEEP — EMOTIONAL PROCESSING + INTEGRATION:
+
+  REM characteristics:
+    - Brain activity similar to wakefulness
+    - Acetylcholine high, norepinephrine/serotonin low
+    - NE suppression: allows emotional memories to be processed
+      without re-triggering the full emotional response
+    - Muscle atonia (paralysis): prevents acting out dreams
+    
+  Functions:
+  
+  1. EMOTIONAL MEMORY PROCESSING
+     Walker's "Sleep to forget, sleep to remember" hypothesis:
+     - Sleep preserves the memory content
+     - But dampens the emotional charge
+     - NE suppression → "safe" reactivation of emotional memories
+     - Results in emotional regulation ("time heals wounds" — sleep-dependent)
+     
+  2. CREATIVE INTEGRATION / REMOTE ASSOCIATIONS
+     Remote associates: connect memories that share no obvious link
+     During REM: acetylcholine-driven associative search
+     → Distant memories that share abstract features are linked
+     → "Sleep on it" effect for creative problem solving
+     
+  3. SYNAPTIC PRUNING (in some interpretations)
+     Hobson & McCarley's Activation-Synthesis:
+     Random brainstem activation → cortex synthesizes narrative (dreams)
+     But also: weak random activation can cause LTD → synaptic pruning
+     → Another mechanism for noise reduction during sleep
+
+  membrain REM port:
+    process_emotional_queue():
+      - Reduce arousal: simulates NE suppression → emotional dampening
+      - Build cross-links: simulates creative integration
+      - Result: emotional memories become less "loud" over time
+      - Without this: emotional bypass_decay never resolves → memory too heavy
+
+SLEEP SPINDLES + MEMORY REPLAY (technical):
+
+  Timing of replay:
+    NOT random — temporally compressed (20-200× faster than original experience)
+    Original event: 5 minutes of coding session
+    Replay during SWS: 1-3 seconds of hippocampal burst
+    → Allows thousands of experiences to be replayed per night
+    
+  Selective replay and reward:
+    Dopamine-tagged memories (reward) → more likely replayed
+    Awake replay also occurs (during quiet wakefulness)
+    
+  membrain async background jobs:
+    NREM cycle: pressure-triggered, async tokio task
+    REM cycle: after NREM, emotional queue processing
+    Homeostasis: after REM, global downscaling if needed
+    
+    All three run sequentially in one async consolidation cycle:
+      async fn consolidation_cycle(store: Arc<BrainStore>) {
+          let report = store.nrem_cycle().await?;    // migrate hot → cold
+          store.rem_cycle().await?;                  // emotional processing
+          store.homeostasis_cycle().await?;          // global scaling
+          emit_report(report);
+      }
+```
+
+---
+
+### 2.9 Reconsolidation — Memory Updates on Recall
+
+```
+DISCOVERY:
+  Susan Sara (2000) and Karim Nader (2000) independently showed:
+  When a consolidated memory is RECALLED, it becomes LABILE AGAIN.
+  The memory must be RE-CONSOLIDATED (re-stabilized) after recall.
+  
+  During the labile window after recall:
+    - Memory can be MODIFIED (updated with new information)
+    - Memory can be WEAKENED (interfered with)
+    - Memory can be STRENGTHENED (LTP during recall)
+    - Memory can be EXTINGUISHED (active suppression during labile window)
+
+  This overturned decades of belief that consolidated memories were "fixed."
+  Memory is NOT a static recording — it's a dynamic, reconstructive process.
+
+NADER'S EXPERIMENT:
+  Protocol:
+    Day 1: Train rats on fear conditioning (tone → shock)
+    Day 2: Re-expose to tone → fear memory recalled → labile
+    Day 2 (immediately after): inject anisomycin (protein synthesis inhibitor)
+    Day 3: Test → fear memory GONE
+    
+  Control: 
+    Day 2: No re-exposure to tone (memory not recalled → not labile)
+    Day 2: inject anisomycin
+    Day 3: fear memory intact
+    
+  Conclusion: Re-exposure → memory recall → protein synthesis required to restabilize
+              Block protein synthesis during labile window → memory lost
+
+CLINICAL IMPLICATIONS:
+  PTSD treatment (Memory Reconsolidation Therapy):
+    1. Retrieve traumatic memory (make it labile)
+    2. During labile window: introduce incompatible information
+       (safety cues, context incompatible with threat)
+    3. Memory reconsolidates with updated (less threatening) information
+    4. Trauma response diminished
+    
+  This is the basis of EMDR and some CBT protocols.
+
+RECONSOLIDATION WINDOW:
+  Duration of labile state after recall:
+    Recent memories (< 7 days old): ~6 hours labile window
+    Old memories (weeks to months): ~3-4 hours
+    Very old memories (years): ~1-2 hours or may not reconsolidate at all
+    
+  Inverse relationship: older = more stable = shorter labile window
+  This makes sense: repeatedly consolidated memories are harder to update
+  
+  membrain formula:
+    fn reconsolidation_window(age_in_ticks: u64) -> u64 {
+        let base = RECONSOLIDATION_BASE_WINDOW;  // 50 ticks
+        // Older memories have shorter reconsolidation windows
+        // Factor approaches 0 as age → ∞
+        let age_factor = 1.0 / (1.0 + age_in_ticks as f32 / OLD_MEMORY_THRESHOLD);
+        (base as f32 * age_factor) as u64
+    }
+    
+    Result:
+      Very new memory (age=0):    window = 50 ticks
+      Moderately old (age=500):   window ≈ 25 ticks (half)
+      Very old (age=5000):        window ≈ 5 ticks (very short)
+      Ancient (age=50000):        window ≈ 0.5 ticks → rounds to 1 (effectively no update)
+
+BOUNDARY CONDITIONS:
+  Boundary conditions for reconsolidation (when it DOESN'T occur):
+    1. Very weak memories: strength < threshold → no labile state on recall
+    2. Very old memories: window too short to exploit in practice
+    3. Very strong memories: require more interference to destabilize
+    4. Memory not recalled sufficiently: partial cue alone may not trigger labile state
+    
+  membrain boundary conditions:
+    // Only enter labile state if:
+    if effective_strength(m, now) > LABILE_STRENGTH_THRESHOLD (0.2)
+    && m.access_count > 0  // has been recalled before
+    {
+        m.state = MemoryState::Labile { ... };
+    }
+
+membrain RECONSOLIDATION IMPLEMENTATION:
+
+  On every recall:
+    1. Set state = Labile { since_tick: now, window: reconsolidation_window(age) }
+    2. Store in labile_memories table: memory_id, labile_since, window_ticks
+  
+  External update API:
+    membrain update <id> --new-content "..."
+    or: MCP tool update_memory(id, new_content)
+    → stores in pending_updates table: memory_id, new_content, submitted_tick
+    
+  reconsolidation_tick (runs periodically):
+    for each labile memory:
+      if current_tick - since_tick < window:
+        // Still labile — can be updated
+        if has_pending_update:
+          apply_update(memory, pending_update)
+          re_embed(memory)  // new content → new vector
+          memory.base_strength += RECONSOLIDATION_BONUS (0.05)
+          hot_index.update(memory.id, memory.embedding)
+      else:
+        // Window expired — restabilize
+        memory.state = MemoryState::Stable
+        remove pending_update if any (not applied)
+```
+
+---
+
+### 2.10 Active Forgetting — Intelligent Pruning
+
+```
+COMMON MISCONCEPTION:
+  "We forget because memories fade passively over time."
+  
+  REALITY: Forgetting is partly ACTIVE and PURPOSEFUL.
+  
+  Evidence:
+    1. Directed forgetting experiments:
+       Tell subjects "remember this" or "forget this" after each item.
+       Items labeled "forget" are recalled significantly less.
+       Cannot be explained by passive decay alone.
+       
+    2. RAC1-mediated active forgetting (Rac1 GTPase):
+       Shuai & Bhatt (2010): small GTPase RAC1 actively degrades memory traces.
+       Inhibiting RAC1 → memories that would normally fade are RETAINED.
+       RAC1 is bidirectional: also involved in LTP.
+       
+    3. Motivated forgetting:
+       Anderson & Green (2001): think/no-think paradigm.
+       Suppressing recall of a memory → subsequent recall reduced.
+       Prefrontal-hippocampal pathway: PFC inhibits hippocampal retrieval.
+       
+    4. Sleep homeostasis (Tononi):
+       Active downscaling during NREM sleep.
+       Not random — downscaling proportional to usage.
+       Weak synapses → scaled below threshold → eliminated.
+
+PURPOSE OF ACTIVE FORGETTING:
+  
+  SIGNAL-TO-NOISE OPTIMIZATION:
+    Without forgetting: every experience equally accessible.
+    Problem: common, unimportant events crowd out rare, important ones.
+    
+    With active forgetting:
+      Common events: encoded weakly AND actively pruned → low signal
+      Rare, important events: high novelty + emotional → strong + retained
+      → Important things are disproportionately remembered.
+      
+  INTERFERENCE REDUCTION:
+    Similar but different memories interfere with each other.
+    Active forgetting removes the weaker competitor.
+    Result: cleaner, more distinct memory traces.
+    
+  GENERALIZATION (ABSTRACTION):
+    Forgetting specific episodic details allows semantic generalization.
+    "I don't remember which Tuesday I learned to ride a bike,
+     but I know how to ride a bike."
+    Episodic specifics forgotten → procedural generalization remains.
+
+membrain ACTIVE FORGETTING ENGINE:
+
+  COMPONENT 1: Decay-Based Pruning (passive-to-active threshold)
+    Periodically (not every tick — every PRUNE_INTERVAL):
+    
+    // Find memories below threshold
+    SELECT id FROM memory_index
+    WHERE effective_strength(base_strength, stability, NOW - last_tick) < MIN_STRENGTH
+    AND bypass_decay = 0
+    AND state != 'Archived'
+    LIMIT 10000  // don't scan everything at once
+    
+    → Archive (soft delete) — never hard delete
+    → Archive table retains record for potential recovery/analysis
+    
+  COMPONENT 2: Proactive Interference
+    Old memories interfere with recall of new similar memories.
+    Mechanism: when recalling memory B, old similar memory A competes.
+    
+    During encoding of new memory B:
+      Find memories A with 0.7 < sim(A, B) < 0.99
+      For each A:
+        A.retrieval_difficulty += PROACTIVE_INTERFERENCE_WEIGHT
+        // A is now harder to recall (competes with B)
+        
+  COMPONENT 3: Retroactive Interference  
+    New memories interfere with recall of old similar memories.
+    New memory B → old memory A weakens.
+    
+    During encoding of new memory B:
+      For each old memory A with 0.7 < sim(A, B) < 0.99:
+        A.base_strength *= (1.0 - RETROACTIVE_INTERFERENCE_PENALTY)
+        // A is now weaker
+    
+  COMPONENT 4: Predictive Pruning
+    Memories that are NEVER recalled should decay faster.
+    Memories recalled repeatedly should be stable.
+    
+    Predictive value score:
+      predictive_value = access_count / age_in_ticks
+      (access frequency normalized by age)
+      
+    Memories with predictive_value < PREDICTIVE_THRESHOLD
+    AND age > MINIMUM_AGE_FOR_PREDICTIVE_PRUNE:
+      → Apply extra decay: base_strength *= PREDICTIVE_DECAY_FACTOR
+      
+  COMPONENT 5: Capacity-Based Archive
+    When total memory count > SOFT_CAP:
+      Sort by effective_strength ASC (weakest first)
+      Archive bottom ARCHIVE_FRACTION (10%) of memories
+      → This simulates sleep homeostasis global downscaling
+```
+
+---
+
+### 2.11 Engrams — Physical Memory Traces
+
+```
+DEFINITION:
+  "Engram": the physical substrate of a memory trace in the brain.
+  Term coined by Richard Semon (1904), popularized by Karl Lashley.
+  
+  Lashley spent 30 years looking for the "engram" as a single location.
+  Failed — concluded "equipotentiality": memory distributed across cortex.
+  
+  Modern understanding: Engrams ARE distributed, but have STRUCTURE.
+  
+ENGRAM CELLS (Tonegawa Lab, MIT):
+  2012: Xu Liu & Steve Ramirez (Tonegawa lab) identified engram cells.
+  
+  Method: 
+    Activity-dependent labeling (c-fos-tTA system):
+    1. Open "labeling window" (doxycycline removal)
+    2. Fear condition mouse
+    3. Close labeling window
+    4. All cells that were active during conditioning: labeled with ChR2 (channelrhodopsin)
+    
+  Results:
+    - Optogenetic activation of labeled cells (blue light) → fear response
+    - Even in a neutral context that had NEVER been paired with shock
+    - Conclusion: those specific cells ARE the engram for that fear memory
+    
+  2014: "False memory" implantation:
+    1. Label cells active during neutral context A (no shock) → labeled CA1 cells
+    2. In context B: shock while optogenetically activating context A cells
+    3. Result: mouse freezes in context A (which was NEVER paired with shock)
+    4. Conclusion: artificial fear memory created by activating engram cells in new context
+
+ENGRAM STRUCTURE:
+  Not a single cell — a SPARSE DISTRIBUTED PATTERN across cells:
+  
+  Typical engram:
+    ~10-30% of neurons in a region involved (sparse coding)
+    But those neurons form a SPECIFIC PATTERN
+    Partial reactivation of pattern → full memory reconstruction
+    
+  Engram cells properties:
+    - Increased intrinsic excitability (more likely to fire)
+    - More synaptic connections to each other (mutual LTP)
+    - Same cells → active during encoding AND recall
+    - Linked to other engrams via synaptic connections
+    
+ENGRAM CLUSTERS:
+  Related memories share overlapping engram cells.
+  
+  Example:
+    Memory A: "ate sushi in Tokyo last Tuesday"
+    Memory B: "visited sushi restaurant that opened in HCM"
+    Memory C: "learned sushi-grade fish needs flash-freezing"
+    
+    These three memories share cells active for the concept "sushi."
+    Activating any one → partial activation of the others → associative recall.
+    
+  Clinically: this is why Alzheimer's damages memory in a structured way.
+  When engram cells die → whole cluster of related memories lost together.
+  
+membrain ENGRAM IMPLEMENTATION:
+
+  Data structure: petgraph DiGraph<Uuid, EdgeWeight>
+    Nodes: memory_id (Uuid)
+    Edges: EdgeWeight { similarity: f32, edge_type: EdgeType }
+    
+  EdgeType enum:
+    Associative    // semantic similarity (most common)
+    Causal         // A led to B (temporal + semantic)
+    Contradictory  // A contradicts B (for contrastive recall)
+    Temporal       // A happened before B in same session
+    
+  Engram struct:
+    id: Uuid
+    centroid: Vec<f32>        // mean of all member embeddings
+    member_ids: Vec<Uuid>     // all memories in this cluster
+    created_tick: u64
+    last_activated_tick: u64
+    total_strength: f32       // sum of member strengths (resonance pool)
+    
+  ENGRAM FORMATION (engram_builder):
+    On each new memory encoded:
+    1. Query engram_index (centroid HNSW):
+       Find top-5 candidate engrams by centroid similarity
+    2. If similarity(new_memory_vec, engram_centroid) > ENGRAM_THRESHOLD (0.65):
+       Add to that engram:
+         engram.member_ids.push(new_id)
+         engram.centroid = update_centroid(engram.centroid, new_vec, n_members)
+         Add edge: engram_graph.add_edge(new_id, most_similar_member_id, weight)
+    3. If no engram matches:
+       Create new engram seed (single-member engram)
+    4. If new memory matches TWO engrams:
+       Add to closer one, add cross-cluster edge
+       
+  ENGRAM RETRIEVAL (BFS expansion):
+    Given recall result top_hit:
+    1. Get top_hit.engram_id
+    2. BFS from top_hit node in engram_graph:
+       - max_depth = 3
+       - max_nodes = 50
+       - min_edge_weight = 0.5
+       - Priority queue: process highest-weight edges first
+    3. Collect all BFS-reached nodes
+    4. Score each: similarity_to_query × edge_path_weight × effective_strength
+    5. Return top-K from expanded cluster
+    
+  ENGRAM SIZE LIMITS (prevent "god clusters"):
+    soft_limit = 200 members:
+      Trigger: split engram into 2 sub-engrams using K-means (k=2)
+      Parent: becomes abstract node with two children
+    hard_limit = 500 members:
+      Reject new additions, create sibling engram instead
+    
+  MEMORY RESONANCE (collective LTP):
+    When memory M in engram E is recalled:
+      LTP(M): M.base_strength += LTP_DELTA
+      Resonance to cluster:
+        for neighbor in bfs_depth_1(M, engram_graph):
+          neighbor.base_strength += LTP_DELTA × RESONANCE_FACTOR / cluster_size
+      RESONANCE_FACTOR = 0.3 (30% of full LTP spread to neighbors)
+      Effect: entire cluster slightly strengthened when any member is recalled
+              Large clusters with dense recall → collectively very stable
+              Simulates CA3 autoassociative network behavior
+```
+
+---
+
+### 2.12 Working Memory — The Conscious Workspace
+
+```
+BADDELEY'S MODEL OF WORKING MEMORY (1974, revised 2000):
+
+  ┌──────────────────────────────────────────────────────────────┐
+  │                    CENTRAL EXECUTIVE                         │
+  │           (controls, allocates, coordinates)                │
+  │                          │                                   │
+  │         ┌────────────────┼────────────────┐                 │
+  │         ▼                ▼                ▼                 │
+  │  PHONOLOGICAL      VISUOSPATIAL     EPISODIC BUFFER          │
+  │     LOOP           SKETCHPAD        (added 2000)            │
+  │  (verbal/acoustic) (visual/spatial) (multimodal binding)    │
+  └──────────────────────────────────────────────────────────────┘
+
+CENTRAL EXECUTIVE:
+  The boss of working memory.
+  - Allocates attention between subsystems
+  - Switches between tasks
+  - Inhibits irrelevant information
+  - Coordinates with long-term memory
+  Damage (dysexecutive syndrome): difficulty organizing, switching tasks
+
+PHONOLOGICAL LOOP:
+  Phonological store: holds ~2 seconds of speech (7 digits in English)
+  Articulatory rehearsal process: "inner speech" refreshes store
+  Word length effect: shorter words → more words remembered
+  Irrelevant speech effect: background speech disrupts phonological loop
+
+VISUOSPATIAL SKETCHPAD:
+  Visual buffer: static visual images
+  Spatial process: spatial information, movement
+  Double dissociation with phonological loop (separate systems)
+  Capacity: ~3-4 objects
+
+EPISODIC BUFFER (Baddeley, 2000 addition):
+  Temporary multimodal storage
+  Binds together visual, spatial, verbal, temporal information
+  Interface between working memory and long-term memory
+  Capacity: ~4 episodes
+
+CAPACITY DEBATE:
+  Miller (1956): 7 ± 2 chunks
+  Cowan (2001): 4 ± 1 chunks (independent items)
+  
+  Resolution: "chunks" can be hierarchically organized.
+  Expert chess players chunk board positions → 7 patterns × many pieces.
+  
+  For membrain: 7 slots (Miller) — clean architecture, well-motivated.
+  Can be reduced to 4 (Cowan) in config.
+
+WORKING MEMORY AND LTM INTERACTION:
+  Encoding:
+    WM → LTM: items in WM that are rehearsed or significant → encoded to LTM
+    LTM → WM: retrieval "loads" relevant LTM content into WM
+    
+  Recency effect: last few items in a list recalled best = WM still holds them
+  Primacy effect: first few items recalled well = had time for LTM encoding
+
+membrain WORKING MEMORY PORT:
+
+  struct WorkingMemory {
+      slots: VecDeque<MemoryItem>,      // ordered by recency (front = most recent)
+      capacity: usize,                   // default 7 (configurable)
+      attention: HashMap<Uuid, f32>,    // attention weights per memory
+      central_executive: ExecutiveState, // current task context
+  }
+  
+  impl WorkingMemory {
+      fn add(&mut self, item: MemoryItem, store: &mut BrainStore) {
+          if self.slots.len() >= self.capacity {
+              // Evict: remove lowest-attention slot from back
+              let evict = self.slots.pop_back().unwrap();
+              self.attention.remove(&evict.id);
+              
+              // If strong enough: persist to hot_store before eviction
+              if evict.strength > ENCODE_THRESHOLD {
+                  store.encode(evict.into_memory());
+              }
+          }
+          self.slots.push_front(item);
+      }
+      
+      fn focus(&mut self, id: Uuid) {
+          // Simulate executive attention directing to specific item
+          *self.attention.entry(id).or_insert(0.0) += FOCUS_DELTA;
+      }
+      
+      fn get_active(&self) -> Vec<&MemoryItem> {
+          // Return all items, sorted by attention score
+          let mut items: Vec<_> = self.slots.iter().collect();
+          items.sort_by(|a, b| {
+              let att_a = self.attention.get(&a.id).copied().unwrap_or(0.0);
+              let att_b = self.attention.get(&b.id).copied().unwrap_or(0.0);
+              att_b.partial_cmp(&att_a).unwrap()
+          });
+          items
+      }
+  }
+```
+
+---
+
+### 2.13 Emotional Memory — The Amygdala Effect
+
+```
+WHY EMOTIONAL MEMORIES ARE SPECIAL:
+  
+  The Brown-Kulik phenomenon (1977): "flashbulb memories"
+  Extremely vivid, detailed memories of highly emotional events.
+  "Where were you when you heard about 9/11?"
+  "Where were you when JFK was shot?" (older generation)
+  
+  Properties of emotional memories:
+    1. Higher initial encoding strength (amygdala → NE → enhanced LTP)
+    2. More likely to be rehearsed (thought about repeatedly)
+    3. More likely to be talked about (social reinforcement)
+    4. Less subject to interference (amygdala shields them)
+    5. Updated by reconsolidation over time (emotional charge reduces)
+
+NEUROBIOLOGY:
+  
+  Fast path (thalamo-amygdala, "low road"):
+    Sensory thalamus → amygdala DIRECTLY (bypasses cortex)
+    ~12ms latency — faster than conscious perception
+    "Rough and ready" — processes basic emotional significance
+    Evolutionarily ancient: predator detection
+    
+  Slow path (thalamo-cortical-amygdala, "high road"):
+    Sensory thalamus → sensory cortex → amygdala
+    ~30-100ms latency
+    More detailed, contextually appropriate
+    Can override the fast-path initial response
+    
+  LeDoux's "two roads to fear":
+    Both paths converge on basolateral amygdala (BLA)
+    BLA → central amygdala → downstream fear responses
+    BLA → hippocampus: modulates memory consolidation
+    
+  Norepinephrine (NE) mechanism:
+    High emotional arousal → locus coeruleus → NE release
+    NE → β-adrenergic receptors in hippocampus
+    β-AR → cAMP → PKA → enhanced LTP
+    Result: emotional events have ~40% stronger memory traces
+
+VALENCE × AROUSAL SPACE:
+  
+  Russell's Circumplex Model (1980):
+  
+         High Arousal
+              │
+    Stressed  │  Excited
+    Alarmed   │  Elated
+    Tense     │  Happy
+              │
+  Neg ─────────────────── Pos
+  Valence    │           Valence
+              │
+    Sad       │  Calm
+    Depressed │  Relaxed
+    Bored     │  Serene
+              │
+         Low Arousal
+         
+  HIGH AROUSAL × NEGATIVE: fear, anger, panic → maximum memory enhancement
+  HIGH AROUSAL × POSITIVE: joy, excitement → strong memory enhancement
+  LOW AROUSAL × EITHER: moderate or no enhancement
+  
+  membrain formula:
+    fn strength_multiplier(tag: &EmotionalTag) -> f32 {
+        // Both high arousal AND significant valence needed for max effect
+        let emotional_intensity = tag.arousal.abs() * tag.valence.abs();
+        1.0 + (emotional_intensity * EMOTIONAL_WEIGHT)
+        // EMOTIONAL_WEIGHT = 0.5
+        // Max: 1.0 + (1.0 × 1.0 × 0.5) = 1.5
+    }
+    
+    fn should_bypass_decay(tag: &EmotionalTag) -> bool {
+        // Flashbulb threshold: high arousal + strong valence
+        tag.arousal > AROUSAL_THRESHOLD         // 0.6
+        && tag.valence.abs() > VALENCE_THRESHOLD // 0.5
+    }
+
+EMOTIONAL MEMORY DECAY OVER TIME:
+  
+  Emotional memories DO decay but at different rates:
+    The emotional CHARGE decays faster than the CONTENT.
+    "I remember it happened, but no longer feel the fear."
+    
+  REM sleep is critical for emotional charge reduction.
+  
+  membrain:
+    bypass_decay = true → content strength maintained (doesn't decay)
+    emotional_tag.arousal reduced over time during REM equivalent:
+      arousal *= DESENSITIZATION_FACTOR (0.95 per cycle)
+    When arousal drops below PROCESSED_THRESHOLD:
+      bypass_decay = false (memory now subject to normal decay)
+    But by then: stability is HIGH (emotional memory was rehearsed many times)
+    → Still strong, just no longer artificially protected from decay
+```
+
+---
+
+### 2.14 Interference — Memory Conflicts
+
+```
+INTERFERENCE THEORY:
+  One of the oldest and most robust theories in memory research.
+  Explanation for much of everyday forgetting.
+
+PROACTIVE INTERFERENCE (PI):
+  Old learning interferes with new learning.
+  "Forward-going" interference.
+  
+  Classic experiment:
+    Group 1: Learn list A, then list B → recall B → poor
+    Group 2: No prior learning, then list B → recall B → good
+    Difference = proactive interference from list A
+    
+  Example: You've always dialed 555-1234 for pizza.
+           New pizza place: 555-5678.
+           When you think "pizza," the old number competes.
+           The old number causes proactive interference.
+           
+  Mechanism: retrieval of B → A also activated → competition → error
+  
+  membrain port:
+    When encoding NEW memory B:
+      Find all OLD memories A with high similarity to B (0.7 < sim < 0.99)
+      For each A: A.retrieval_difficulty += PROACTIVE_PENALTY
+      (A is now harder to recall, competing with B)
+
+RETROACTIVE INTERFERENCE (RI):
+  New learning interferes with old learning.
+  "Backward-going" interference.
+  
+  Classic experiment:
+    Group 1: Learn list A, then list B → recall A → poor
+    Group 2: Learn list A, then sleep/rest → recall A → good
+    Difference = retroactive interference from list B
+    
+  Example: After learning new pizza number, old number is harder to recall.
+           New information actively degrades old similar information.
+           
+  Mechanism: encoding B → updates representations shared with A → A weakened
+  
+  membrain port:
+    When encoding NEW memory B:
+      Find all OLD memories A with high similarity to B (0.7 < sim < 0.99)
+      For each A (older than B by threshold):
+        A.base_strength *= (1.0 - RETROACTIVE_PENALTY)
+      This directly weakens similar old memories
+
+RELEASE FROM PROACTIVE INTERFERENCE:
+  If category changes between lists → sudden improvement in recall.
+  Change: all the PI built up → released because it doesn't apply.
+  
+  membrain port:
+    Context switching (different context_embedding):
+      → interference penalties only apply within similar context
+      → switching contexts reduces interference effects
+
+INTERFERENCE vs DECAY:
+  Debate: is forgetting due to DECAY or INTERFERENCE?
+  
+  Modern answer: BOTH contribute.
+  - Pure decay: passive loss of strength over time
+  - Interference: active competition from similar memories
+  
+  membrain implements both:
+    Decay: Ebbinghaus formula (lazy, per-memory)
+    Interference: on encode + during forgetting engine cycles
+```
+
+---
+
+### 2.15 Pattern Completion — Recall from Partial Cues
+
+```
+THE CA3 AUTOASSOCIATIVE NETWORK:
+
+  Hippocampal CA3 region is the brain's pattern completion engine.
+  
+  Architecture:
+    CA3 neurons have recurrent collateral connections (neurons → each other)
+    This makes CA3 an autoassociative attractor network.
+    
+    Mathematical model: Hopfield network
+      N neurons, each connected to all others
+      Network stores patterns as attractor states
+      Noisy/incomplete input → network relaxes to nearest attractor
+      = pattern completion
+      
+  Capacity of Hopfield network:
+    Can store ~0.14 × N patterns
+    For CA3 with ~300,000 neurons: ~42,000 patterns
+    Much less than total hippocampal capacity → CA3 is index, not primary store
+
+  CA3 → CA1 → Subiculum → Entorhinal Cortex → Neocortex:
+    CA3 completes pattern → sends to CA1
+    CA1 modulates output (novelty detection) → subiculum
+    → back to neocortex for full pattern reconstruction
+    
+PATTERN SEPARATION (Dentate Gyrus):
+  The complement of pattern completion.
+  DG SEPARATES similar inputs → less interference between similar memories.
+  
+  How: DG has ~1 million neurons (vs CA3's ~300k)
+       Sparse activity (~2% of DG neurons active at any time)
+       Different inputs → very different DG activation patterns
+       
+  Result: Two experiences that share 80% of features
+          → DG produces 20% overlapping patterns
+          → CA3 stores them as distinct attractors
+          → No interference during storage
+          
+  membrain approximation:
+    novelty_score = 1.0 - max_cosine_similarity(new, existing)
+    High novelty → low similarity → natural "separation" in embedding space
+    Dense/similar content: lower novelty, risk of interference → apply penalty
+
+membrain PATTERN COMPLETION IMPLEMENTATION:
+
+  The HNSW search itself implements a form of pattern completion:
+    1. Query vector (partial/noisy) → HNSW nearest neighbor search
+    2. Returns most similar vectors → these ARE the pattern-completed memories
+    3. Engram BFS expansion: top hit → cluster members
+    4. Cluster = "all memories that fire together with this pattern"
+    
+  Partial cue handling:
+    query = "I was fixing that auth bug" (partial)
+    → embedding similar to multiple memories
+    → HNSW returns: auth_bug_memory_1, auth_bug_memory_2, JWT_memory, ...
+    → Engram expansion: auth_bug engram → 15 related memories
+    → All returned as "pattern completed" recall
+    
+  Tip-of-tongue simulation:
+    If max similarity to any existing memory < FULL_RECALL_THRESHOLD (0.8)
+    but > PARTIAL_RECALL_THRESHOLD (0.4):
+    → Return MemoryFragment: partial reconstruction, low confidence
+    → Flag as TipOfTongue state
+    → Still useful information, just lower confidence
+```
+
+---
+
+### 2.16 Encoding Specificity — Context Dependency
+
+```
+THE ENCODING SPECIFICITY PRINCIPLE (Tulving & Thomson, 1973):
+  "A retrieval cue is effective to the extent that information from
+  the cue and information from the encoding situation jointly specify
+  the memory."
+  
+  Simpler: Memories are best recalled when retrieval context matches encoding context.
+
+CLASSIC STUDIES:
+
+  UNDERWATER MEMORY STUDY (Godden & Baddeley, 1975):
+    Divers learned word lists either:
+      - Underwater (scuba diving) OR
+      - On land
+    Then recalled either underwater or on land.
+    
+    Results:
+      Learned underwater, recalled underwater: 11.4 words
+      Learned underwater, recalled on land:    8.4 words
+      Learned on land,    recalled on land:    13.5 words
+      Learned on land,    recalled underwater: 8.6 words
+      
+    Context match → ~35% better recall.
+    
+  STATE-DEPENDENT MEMORY (Goodwin et al., 1969):
+    Participants learned material either sober or drunk.
+    Tested sober or drunk.
+    
+    Results:
+      Learned drunk, recalled drunk: best
+      Learned sober, recalled sober: best
+      Cross-state: significantly worse
+      
+  MOOD CONGRUENCE:
+    Happy mood → happy memories more accessible (congruence effect)
+    Depressed mood → negative memories more accessible
+    (Clinically important: depression maintains itself via memory bias)
+
+MECHANISM:
+  Context features are CO-ENCODED with content.
+  They become part of the engram.
+  Retrieval cue must overlap with engram to activate it.
+  
+  Context features include:
+    - Physical environment (location)
+    - Internal state (mood, physiological arousal)
+    - Cognitive state (what you were thinking about)
+    - Temporal context (what preceded/followed this event)
+    - Social context (who was present)
+
+membrain ENCODING SPECIFICITY PORT:
+
+  Every memory stores TWO embeddings:
+    content_embedding: what the memory is about
+    context_embedding: the context when it was encoded
+    
+  Retrieval score formula:
+    score = (CONTENT_WEIGHT × cosine_sim(query, content_embed))
+          + (CONTEXT_WEIGHT × cosine_sim(current_context, context_embed))
+    
+    CONTENT_WEIGHT = 0.7  (content is more important)
+    CONTEXT_WEIGHT = 0.3  (context boosts relevant memories)
+    
+  Effect: if agent is currently in "debugging auth" context:
+    - All memories encoded during auth debugging get context boost
+    - Memories from unrelated contexts are not boosted
+    - Natural context-dependent retrieval emerges
+    
+  Context construction (caller responsibility):
+    context = "current_task: debugging | current_module: auth | 
+                recent_actions: reading JWT code | goal: fix token expiry"
+    → agent passes this context string with every encode/recall
+    → membrain embeds it and stores/matches accordingly
+
+  Context switching effect:
+    Task A → Task B: context_embedding changes dramatically
+    Memories from Task A: lower context similarity → lower retrieval score
+    Memories from Task B: higher context similarity → higher score
+    Natural focus shift with task switching — exactly like human cognition.
+
+---
+
+## END OF PART 1
+
+**Next: Part 2 — Gap Analysis & Porting the Brain Mechanism by Mechanism**
+
+Parts list:
+- Part 1: Vision, Problem Statement, Human Brain Deep Dive (this file)
+- Part 2: Gap Analysis + Full Port (mechanism → Rust code for each)
+- Part 3: Architecture + Performance
+- Part 4: Techstack + Data Schema
+- Part 5: CLI/MCP + Feature Extensions + Workspace Structure  
+- Part 6: Milestones + Acceptance Checklist + Constants + Algorithm Reference
+
+
+<!-- SOURCE: PLAN_part2.md -->
+
+# membrain — PLAN.md
+# Part 2 of 6: Gap Analysis · Porting the Brain Mechanism by Mechanism
+
+---
+
+## 3. Gap Analysis — Human Brain vs Current AI Memory Systems
+
+### 3.1 Feature Matrix
+
+```
+MECHANISM                    Brain  MemGPT  Mem0  LangMem  OpenAI  Zep  membrain
+─────────────────────────────────────────────────────────────────────────────────
+LTP / LTD (strength dynamics)  ✅     ❌      ❌    ❌       ❌      ❌    ✅
+Ebbinghaus decay (forgetting)  ✅     ❌      ❌    partial  ❌      ❌    ✅
+Emotional tagging              ✅     ❌      ❌    ❌       ❌      ❌    ✅
+Emotional bypass decay         ✅     ❌      ❌    ❌       ❌      ❌    ✅
+Engram clusters                ✅     ❌      partial ❌     ❌      partial ✅
+Associative recall             ✅     ❌      partial ❌     ❌      partial ✅
+Pattern completion             ✅     ❌      ❌    ❌       ❌      ❌    ✅
+Reconsolidation (update on recall)✅  ❌      ❌    ❌       ❌      ❌    ✅
+Consolidation (episodic→semantic)✅   conceptual ❌ ❌      ❌      ❌    ✅
+NREM equivalent                ✅     ❌      ❌    ❌       ❌      ❌    ✅
+REM equivalent                 ✅     ❌      ❌    ❌       ❌      ❌    ✅
+Homeostasis                    ✅     ❌      ❌    ❌       ❌      ❌    ✅
+Active forgetting              ✅     ❌      ❌    ❌       ❌      ❌    ✅
+Interference handling          ✅     ❌      ❌    ❌       ❌      ❌    ✅
+Working memory (capacity limit) ✅    ❌      ❌    ❌       ❌      ❌    ✅
+Dual-path retrieval (fast/slow) ✅    partial  ❌   partial  ❌      ❌    ✅
+Context-dependent retrieval    ✅     ❌      ❌    ❌       ❌      ❌    ✅
+Source provenance              brain  ❌      ❌    ❌       ❌      partial ✅
+Temporal ordering              ✅     partial  partial ✅   ❌      ✅    ✅
+Unlimited scale                ✅     limited  limited limited ❌    limited ✅
+Fast path (<1ms familiarity)   ✅     ❌      ❌    ❌       ❌      ❌    ✅
+Offline / no API dependency    ✅     ❌      ❌    ❌       ❌      ❌    ✅
+─────────────────────────────────────────────────────────────────────────────────
+Score / 22                     22/22  3/22   4/22   4/22   2/22   4/22  22/22
+```
+
+### 3.2 Detailed Gap Analysis Per System
+
+#### 3.2.1 MemGPT / Letta
+
+```
+WHAT IT DOES:
+  Models memory like an operating system's virtual memory.
+  Main context window = RAM (fast, limited)
+  External storage = disk (slow, unlimited)
+  
+  When context fills up: "page out" least relevant memories.
+  When memories needed: "page in" from external storage.
+  
+  Uses LLM calls to decide what to page in/out.
+  
+WHAT IT GETS RIGHT:
+  - Tiered storage concept (acknowledged, even if not optimized)
+  - Persistence beyond single conversation
+  - Some form of relevance-based retrieval
+  
+FUNDAMENTAL PROBLEMS:
+  1. No dynamics: a memory is either in context or not. No strength.
+     There is no concept of "this memory is getting weaker over time."
+     
+  2. LLM in critical path: paging decisions made by LLM calls.
+     Each context switch costs: LLM call latency (500ms+) + API cost.
+     At scale: extremely expensive. Not suitable for real-time agents.
+     
+  3. No biological mechanisms: no decay, no LTP, no engrams.
+     Just a software engineering solution to a context length problem.
+     Does not solve the SIGNAL-TO-NOISE problem.
+     
+  4. No associations: memories are independent chunks.
+     "What else do I know related to X?" requires another LLM call.
+     
+  5. No consolidation: episodic events never become semantic knowledge.
+     Raw conversation snippets stored forever without abstraction.
+     
+  WHY THIS MATTERS:
+  Long-running MemGPT agent: each memory is a raw text chunk with equal weight.
+  After 10,000 interactions: 10,000 equally-weighted raw chunks.
+  Retrieval: cosine similarity → noise dominates signal.
+  Result: agent repeats mistakes, contradicts itself, cannot learn patterns.
+```
+
+#### 3.2.2 Mem0
+
+```
+WHAT IT DOES:
+  Two-phase pipeline:
+  Phase 1: LLM extracts facts from conversation
+  Phase 2: Stores in vector DB + optional graph DB
+  
+  On retrieval: semantic search → top-K results injected into prompt.
+  
+WHAT IT GETS RIGHT:
+  - Semantic vector search
+  - Some graph structure (relationships between entities)
+  - Fact extraction (semantic encoding, not raw episodic)
+  
+FUNDAMENTAL PROBLEMS:
+  1. LLM in write path: every memory encode requires LLM call.
+     Cost: API call per memory. At 1000 memories: 1000 API calls.
+     Latency: 500ms+ per encode. Unusable for real-time.
+     
+  2. No strength dynamics: extracted facts stored with equal weight.
+     "Python is slow" (from 2 years ago) equals "PyPy is fast" (from today).
+     
+  3. No forgetting: memories accumulate without decay.
+     5 years of a developer's interactions → millions of facts.
+     Quality degrades as noise builds.
+     
+  4. No reconsolidation: old facts never updated when new contradicting
+     information arrives. Stale facts persist indefinitely.
+     
+  5. Extraction error propagation: if LLM extracts wrong fact,
+     it's stored with same confidence as correct facts.
+     No mechanism to detect or correct this.
+     
+  6. No pattern completion: can only retrieve what was explicitly extracted.
+     Cannot reconstruct from partial cues.
+     
+  BENCHMARK COMPARISON:
+  Mem0 retrieval: ~50-200ms (API call + vector search)
+  membrain Tier2:  <5ms (local HNSW, no API)
+  Speedup: 10-40×
+  
+  Mem0 encode:    ~500-2000ms (LLM extraction + store)
+  membrain encode: <10ms (local embedding + store)
+  Speedup: 50-200×
+```
+
+#### 3.2.3 LangMem (LangChain)
+
+```
+WHAT IT DOES:
+  Memory with lifecycle management:
+  - Short-term: working context
+  - Long-term: persistent store with relevance scoring
+  - Lifecycle: memories can be created, updated, expired
+  
+  Relevance-based retrieval: score = recency × similarity
+  
+WHAT IT GETS RIGHT:
+  - Lifecycle states (partial decay concept)
+  - Relevance scoring (recency + similarity)
+  - Some structure in storage
+  
+FUNDAMENTAL PROBLEMS:
+  1. "Relevance = recency × similarity" is a crude approximation.
+     Does not model stability (reinforcement effect of repeated recall).
+     Does not model emotional significance.
+     Does not model interference.
+     
+  2. No engrams: memories are independent.
+     No cluster structure for associative recall.
+     
+  3. No consolidation: no episodic → semantic transformation.
+     All memories at same abstraction level.
+     
+  4. LangChain dependency: heavy framework, slow startup, complex deployment.
+     membrain: 1 binary, zero dependencies at runtime.
+     
+  5. No interference handling: contradicting memories coexist silently.
+     
+  6. Decay is periodic and eager: iterate all memories on schedule.
+     At scale: O(n) operation blocks retrieval.
+     membrain: lazy decay, O(0) idle, O(1) per recall.
+```
+
+### 3.3 The Root Problem: Naive Vector Stores
+
+```
+All existing systems reduce to:
+  1. Embed content → vector
+  2. Store vector in DB
+  3. Query: cosine similarity search → top-K
+  4. Return top-K to LLM
+  
+  This is a simple vector database with extra steps.
+  
+  Why this fails at scale:
+  
+  UNIFORM WEIGHT: every vector treated equally.
+  
+    After 10,000 memories:
+      - 9,500 mundane/routine memories (low value)
+      - 500 important/significant memories (high value)
+      
+    Simple cosine search: returns based on semantic similarity only.
+    If query is about topic X: returns all 10,000 memories about X equally.
+    9,500 mundane memories drown out 500 important ones.
+    
+  STATIC REPRESENTATIONS: vectors never change.
+    
+    Memory encoded at t=0: same vector at t=100,000.
+    But: the RELEVANCE of that memory changes dramatically over time.
+    Solution: strength-weighted cosine similarity (membrain).
+    
+  NO STRUCTURE: memories are a flat list.
+    
+    "What else is related to X?" requires:
+      a) LLM to reason about relationships (expensive, error-prone)
+      b) OR: pre-computed graph structure (membrain engrams)
+      
+  NO DYNAMICS: no learning from recall patterns.
+    
+    Which memories are actually useful? Tracked by access_count, strength.
+    LRU cache + LTP: frequently useful → stays strong → fast retrieval.
+    membrain tracks every recall and uses it to strengthen the memory.
+```
+
+---
+
+## 4. Porting the Brain — Mechanism by Mechanism
+
+This section maps every significant brain mechanism to its exact membrain implementation.
+For each mechanism: biological description → computational model → Rust implementation.
+
+---
+
+### 4.1 Hippocampal Index → hot_store
+
+```
+BIOLOGICAL:
+  Hippocampus does not store memory content — it stores POINTERS.
+  The actual content is distributed across the neocortex.
+  Hippocampus: "memory A is about visual features stored in V4,
+                semantic content in temporal cortex, emotional tag in amygdala"
+  
+  This is why hippocampal damage causes amnesia:
+  - Content still exists in neocortex
+  - But cannot be ACCESSED without hippocampal index
+  - Like deleting a database index: data exists, cannot find it
+
+PORT TO membrain:
+
+  hot_store = hippocampal index:
+    - Fast, small, temporary
+    - Stores metadata + pointers (not primary content)
+    - usearch HNSW: enables O(log n) pointer lookup from partial cue
+    - SQLite hot.db: relational metadata with full query capability
+    
+  cold_store = neocortical content:
+    - Slow to write (consolidation required)
+    - Stores compressed semantic content
+    - Large, stable, permanent-ish
+    - No HNSW index required for writing (only for reading)
+
+SCHEMA SEPARATION:
+  memory_index table (hot.db) — the hippocampal part:
+    id, base_strength, stability, last_tick, bypass_decay, kind, engram_id
+    (Everything needed for scoring/filtering — no content)
+    
+  memory_content table (hot.db) — cached content for fast access:
+    id, content, created_tick
+    
+  cold_memories table (cold.db) — neocortical content:
+    id, content_compressed, embedding_f32, created_tick, consolidated_tick
+    
+  KEY INSIGHT: pre-filter queries ONLY touch memory_index.
+    All 50,000 hot memories → single index scan.
+    No content fetched until final top-K results returned.
+    Exactly like: hippocampus (index only) → neocortex (content fetch).
+
+RUST IMPLEMENTATION:
+
+  pub struct HotStore {
+      db: Connection,
+      hot_index: Index,           // usearch HNSW, float16, 50k cap
+      embed_cache: LruCache<u64, Vec<f32>>,
+  }
+  
+  impl HotStore {
+      /// Pre-filter: fast scan of memory_index only
+      /// Returns candidate IDs — no content fetch
+      pub fn prefilter_candidates(
+          &self,
+          now_tick: u64,
+          min_strength: f32,
+          limit: usize,
+      ) -> Result<Vec<Uuid>> {
+          let sql = "
+              SELECT id
+              FROM memory_index
+              WHERE (base_strength * EXP(-(? - last_tick) / stability)) > ?
+              AND bypass_decay = 0
+              AND state NOT IN (2, 3)  -- not Archived or Consolidated-out
+              UNION
+              SELECT id
+              FROM memory_index
+              WHERE bypass_decay = 1   -- emotional memories always candidates
+              AND state NOT IN (2, 3)
+              ORDER BY (base_strength * EXP(-(? - last_tick) / stability)) DESC
+              LIMIT ?
+          ";
+          // Execute with (now_tick, min_strength, now_tick, limit)
+      }
+  }
+```
+
+---
+
+### 4.2 Neocortical Content Storage → cold_store
+
+```
+BIOLOGICAL:
+  Neocortex stores the actual content of consolidated memories.
+  Properties:
+    - Distributed: no single "location" for a memory
+    - Stable: requires many repetitions to update (prevents catastrophic forgetting)
+    - Fast for familiar patterns (columnar fast-path recognition)
+    - Slow to write (consolidation required)
+    - Vast: effectively unlimited by any practical measure
+
+PORT TO membrain:
+
+  cold_store = neocortical content store:
+    - usearch mmap: disk-backed, unlimited scale
+    - int8 quantized vectors: compressed representation (4× smaller than f32)
+    - zstd-compressed content: ~3-4× content compression
+    - SQLite cold.db: metadata + compressed content blobs
+    - OS page cache: automatic warm layer (frequently accessed → cached in RAM)
+    
+  WRITE PATH (consolidation only):
+    1. NREM cycle triggers migration from hot_store
+    2. Re-embed at full float32 precision (final encoding)
+    3. Compress content: zstd::encode(content, level=3)
+    4. INSERT INTO cold.db/cold_memories
+    5. cold_index.add(id, quantize_i8(embedding))
+    6. Mark as Consolidated in hot.db/memory_index
+    
+    This is "slow to write" by design — only consolidation writes cold store.
+    Prevents catastrophic forgetting: new information cannot overwrite cold store directly.
+    
+  READ PATH (retrieval):
+    1. SQL pre-filter on cold.db metadata (effective_strength filter)
+    2. cold_index HNSW search (int8, mmap, fast even for millions)
+    3. Rescore top-20 with float32 embeddings
+    4. Fetch content: SELECT content_compressed FROM cold_memories WHERE id = ?
+    5. zstd::decode(content_compressed) → content string
+    
+  MMAP ARCHITECTURE:
+    cold.usearch file: memory-mapped vector index
+    OS manages: keeps frequently accessed pages in RAM, pages out unused
+    Effect: "hot" cold memories (frequently recalled consolidated memories)
+            → stay in OS page cache → fast access
+            "true cold" memories (rarely accessed) → paged out → slower
+    This mirrors the cortex's columnar fast-path for familiar patterns.
+
+RUST IMPLEMENTATION:
+
+  pub struct ColdStore {
+      db: Connection,
+      cold_index: Index,   // usearch HNSW, int8, mmap-backed
+  }
+  
+  impl ColdStore {
+      pub fn consolidate_from_hot(
+          &mut self,
+          memories: Vec<ConsolidationCandidate>,
+      ) -> Result<ConsolidationReport> {
+          let mut report = ConsolidationReport::default();
+          
+          for candidate in memories {
+              // Compress content
+              let compressed = zstd::encode_all(
+                  candidate.content.as_bytes(), 3
+              )?;
+              
+              // Store in cold.db
+              self.db.execute(
+                  "INSERT INTO cold_memories
+                   (id, content_compressed, embedding_f32, consolidated_tick)
+                   VALUES (?, ?, ?, ?)",
+                  params![
+                      candidate.id,
+                      compressed,
+                      // Store float32 as blob for rescore
+                      bytemuck::cast_slice::<f32, u8>(&candidate.embedding),
+                      candidate.now_tick,
+                  ],
+              )?;
+              
+              // Add to HNSW cold index (int8 quantized)
+              let i8_vec = quantize_i8(&candidate.embedding);
+              self.cold_index.add(candidate.id.as_u64_pair().0, &i8_vec)?;
+              
+              report.migrated_count += 1;
+          }
+          
+          Ok(report)
+      }
+  }
+```
+
+---
+
+### 4.3 Amygdala Tagging → EmotionalTag + bypass_decay
+
+```
+BIOLOGICAL:
+  Amygdala runs in parallel with hippocampal encoding.
+  High-arousal events → NE release → amplified LTP in hippocampus.
+  Result: emotionally significant memories ~40% stronger initially.
+  Also: high-arousal memories resist forgetting (flashbulb effect).
+
+PORT TO membrain:
+
+  EmotionalTag:
+    valence: f32,   // -1.0 (very negative) to +1.0 (very positive)
+    arousal: f32,   // 0.0 (calm) to 1.0 (highly aroused)
+    
+  ENCODING EFFECT:
+    fn strength_multiplier(tag: &EmotionalTag) -> f32 {
+        let intensity = tag.arousal * tag.valence.abs();
+        1.0 + (intensity * EMOTIONAL_WEIGHT)
+    }
+    // EMOTIONAL_WEIGHT = 0.5
+    // panic (valence=-0.95, arousal=0.95): multiplier = 1.45 (+45%)
+    // mild concern (valence=-0.3, arousal=0.3): multiplier = 1.045 (+4.5%)
+    // joy (valence=0.8, arousal=0.7): multiplier = 1.28 (+28%)
+    
+  BYPASS DECAY:
+    fn compute_bypass_decay(tag: &EmotionalTag) -> bool {
+        tag.arousal > AROUSAL_THRESHOLD       // 0.6
+        && tag.valence.abs() > VALENCE_THRESHOLD // 0.5
+    }
+    // Only threshold-crossing emotions bypass decay
+    // moderate emotions: still decay normally
+    // flashbulb-level emotions: permanently strengthened (until REM processing)
+    
+  REM DESENSITIZATION:
+    // During REM equivalent cycle:
+    fn desensitize_emotional_memories(store: &mut BrainStore, now_tick: u64) {
+        let emotional = store.get_emotional_memories();
+        for mut memory in emotional {
+            // Reduce arousal gradually (simulates NE suppression during REM)
+            memory.emotional_tag.arousal *= DESENSITIZATION_FACTOR; // 0.95
+            
+            // When arousal drops below threshold:
+            if memory.emotional_tag.arousal < PROCESSED_THRESHOLD { // 0.3
+                // Emotional bypass removed — memory now subject to normal decay
+                // But stability is HIGH by now (was rehearsed many times)
+                memory.bypass_decay = false;
+                memory.emotional_processed = true;
+            }
+            
+            // Create cross-links to semantically related memories
+            // (REM's creative integration function)
+            let related = store.find_related_non_emotional(&memory, 3);
+            for related_memory in related {
+                store.engram_graph.add_edge(
+                    memory.id,
+                    related_memory.id,
+                    EdgeWeight {
+                        similarity: 0.5,
+                        edge_type: EdgeType::Associative,
+                    }
+                );
+            }
+        }
+    }
+
+CALLER API (how agents provide emotional tags):
+
+  // Option 1: Explicit (agent knows what happened was significant)
+  membrain remember "authentication service crashed in production" \
+    --valence -0.8 --arousal 0.9
+    
+  // Option 2: Implicit scoring (simple heuristic, no LLM needed)
+  fn infer_emotional_tag(content: &str) -> EmotionalTag {
+      let negative_keywords = ["error", "failed", "crash", "bug", "panic", ...];
+      let positive_keywords = ["success", "fixed", "deployed", "works", ...];
+      let high_arousal_keywords = ["critical", "production", "urgent", "breaking", ...];
+      
+      let neg_score = count_matches(content, &negative_keywords);
+      let pos_score = count_matches(content, &positive_keywords);
+      let arousal_score = count_matches(content, &high_arousal_keywords);
+      
+      EmotionalTag {
+          valence: (pos_score - neg_score) as f32 / total_words as f32,
+          arousal: arousal_score as f32 / total_words as f32,
+      }
+  }
+  
+  // Option 3: MCP tool with explicit emotional parameter
+  // "remember" MCP tool: emotional_valence and emotional_arousal params
+```
+
+---
+
+### 4.4 Prefrontal Working Memory → WorkingMemory + Tier1 Cache
+
+```
+BIOLOGICAL:
+  PFC maintains 7±2 items in active working memory.
+  Central executive allocates attention.
+  Items that are attended to longer → more likely encoded to LTM.
+  When WM full: evict lowest-attention item.
+
+PORT TO membrain (dual structure):
+
+  STRUCTURE 1: WorkingMemory (strict 7-slot simulation)
+  ─────────────────────────────────────────────────────
+  Used for: explicit working memory management in agent-alive
+  
+  pub struct WorkingMemory {
+      slots: VecDeque<WorkingMemoryItem>,
+      capacity: usize,                      // default 7
+      attention_weights: HashMap<Uuid, f32>,
+      central_executive: TaskContext,
+  }
+  
+  pub struct WorkingMemoryItem {
+      memory_id: Uuid,
+      content: String,               // raw content for immediate use
+      added_tick: u64,
+      source: WorkingMemorySource,   // External | FromLTM | JustEncoded
+  }
+  
+  pub struct TaskContext {
+      current_task: String,
+      task_context_embedding: Vec<f32>,
+      focus_history: VecDeque<Uuid>,
+  }
+  
+  impl WorkingMemory {
+      pub fn add(&mut self, item: WorkingMemoryItem, store: &mut BrainStore) {
+          if self.slots.len() >= self.capacity {
+              // Find minimum attention item
+              let min_id = self.slots.iter()
+                  .min_by(|a, b| {
+                      let wa = self.attention_weights.get(&a.memory_id).copied().unwrap_or(0.0);
+                      let wb = self.attention_weights.get(&b.memory_id).copied().unwrap_or(0.0);
+                      wa.partial_cmp(&wb).unwrap()
+                  })
+                  .map(|i| i.memory_id);
+              
+              if let Some(evict_id) = min_id {
+                  self.slots.retain(|i| i.memory_id != evict_id);
+                  self.attention_weights.remove(&evict_id);
+                  // Evicted → encode to hot_store if strong enough
+                  // (simulates WM → LTM transfer)
+              }
+          }
+          self.slots.push_front(item);
+      }
+      
+      pub fn focus_on(&mut self, id: Uuid) {
+          *self.attention_weights.entry(id).or_insert(0.0) += FOCUS_DELTA;
+          self.central_executive.focus_history.push_back(id);
+          if self.central_executive.focus_history.len() > 20 {
+              self.central_executive.focus_history.pop_front();
+          }
+      }
+      
+      pub fn get_focused_content(&self) -> Vec<&WorkingMemoryItem> {
+          let mut items: Vec<_> = self.slots.iter().collect();
+          items.sort_by(|a, b| {
+              self.attention_weights.get(&b.memory_id)
+                  .partial_cmp(&self.attention_weights.get(&a.memory_id))
+                  .unwrap()
+          });
+          items
+      }
+  }
+  
+  STRUCTURE 2: Tier1 LruCache (performance fast path)
+  ─────────────────────────────────────────────────────
+  Used for: <0.1ms familiarity check and recent memory caching
+  
+  // In BrainStore:
+  tier1_cache: LruCache<u64, CachedMemory>,   // key: xxhash64(content)
+  tier1_id_cache: LruCache<Uuid, CachedMemory>, // key: memory_id
+  
+  pub struct CachedMemory {
+      id: Uuid,
+      content: String,
+      embedding: Vec<f32>,  // float32 for rescore
+      effective_strength: f32,  // at time of caching
+      cached_at_tick: u64,
+  }
+  
+  // Tier1 cache is updated on every recall (recent → cached)
+  // Tier1 cache evicts LRU on every encode (new → might push out old)
+  // This naturally mirrors PFC working memory:
+  //   - Recent things stay in cache
+  //   - Frequently accessed things stay in cache
+  //   - Older, unused things evicted
+```
+
+---
+
+### 4.5 LTP → on_recall() Strength Increase
+
+```
+BIOLOGICAL:
+  Every successful recall fires the memory's neurons again.
+  Repeated firing → NMDA → Ca2+ → CaMKII → more AMPA receptors.
+  Each recall makes the memory physically stronger.
+  "Neurons that fire together, wire together."
+
+PORT TO membrain:
+
+  Full on_recall() implementation:
+  
+  pub fn on_recall(
+      &mut self,
+      memory_id: Uuid,
+      now_tick: u64,
+      store: &mut BrainStore,
+  ) -> Result<()> {
+      // Fetch current memory state
+      let mut memory = store.hot.get_memory(memory_id)?;
+      
+      // === STEP 1: Persist lazy decay first ===
+      // Before applying LTP, compute current effective strength
+      // and make it the new base (decay clock resets)
+      if !memory.bypass_decay {
+          let current_effective = effective_strength(&memory, now_tick);
+          memory.base_strength = current_effective;
+      }
+      
+      // === STEP 2: LTP — increase strength ===
+      // Simulates NMDA → Ca2+ → CaMKII → AMPA insertion
+      memory.base_strength = (memory.base_strength + LTP_DELTA)
+          .min(MAX_STRENGTH);
+      
+      // === STEP 3: Stability increase ===
+      // Simulates structural spine growth (L-LTP, protein synthesis)
+      // Each recall increases stability → memory decays slower next time
+      memory.stability += STABILITY_INCREMENT * memory.stability;
+      // Exponential growth (each recall increases by % of current stability)
+      // Bounded to prevent infinite stability:
+      memory.stability = memory.stability.min(MAX_STABILITY);
+      
+      // === STEP 4: Update access tracking ===
+      memory.last_accessed_tick = now_tick;
+      memory.access_count += 1;
+      
+      // === STEP 5: Reconsolidation window ===
+      // Recall makes memory labile again (reconsolidation)
+      let window = reconsolidation_window(
+          now_tick - memory.created_tick,
+          memory.base_strength,
+      );
+      if window > 0 {
+          memory.state = MemoryState::Labile {
+              since_tick: now_tick,
+              window_ticks: window,
+          };
+      }
+      
+      // === STEP 6: Engram resonance ===
+      // Partial LTP spread to engram neighbors (CA3 autoassociative effect)
+      if let Some(engram_id) = memory.engram_id {
+          let neighbors = store.engram_graph
+              .neighbors(memory_id)
+              .collect::<Vec<_>>();
+          let resonance_ltp = LTP_DELTA * RESONANCE_FACTOR / neighbors.len() as f32;
+          for neighbor_id in neighbors {
+              store.hot.apply_ltp_delta(neighbor_id, resonance_ltp, now_tick)?;
+          }
+      }
+      
+      // === STEP 7: Update Tier1 cache ===
+      store.tier1_cache.put(
+          xxhash64(memory.content.as_bytes()),
+          CachedMemory {
+              id: memory.id,
+              content: memory.content.clone(),
+              embedding: memory.embedding.clone(),
+              effective_strength: memory.base_strength,
+              cached_at_tick: now_tick,
+          },
+      );
+      
+      // === STEP 8: Persist to hot.db ===
+      store.hot.update_memory(&memory)?;
+      
+      Ok(())
+  }
+```
+
+---
+
+### 4.6 LTD + Ebbinghaus → Lazy Decay
+
+```
+BIOLOGICAL:
+  Non-use → phosphatase activation → AMPA receptor internalization → weaker synapse.
+  The less a memory is used, the weaker it becomes.
+  This follows Ebbinghaus's forgetting curve: R(t) = e^(-t/S)
+
+PORT TO membrain (LAZY computation — critical architecture decision):
+
+  // WRONG approach — eager O(n) iteration:
+  // fn decay_tick(store: &mut BrainStore, now_tick: u64) {
+  //     for mut memory in store.hot.all_memories() {  // O(n) — DEATH at scale
+  //         if !memory.bypass_decay {
+  //             memory.base_strength *= retention_factor(memory.stability, elapsed);
+  //         }
+  //     }
+  // }
+  
+  // CORRECT approach — lazy O(1) per access:
+  
+  /// Compute current effective strength WITHOUT writing to DB
+  /// Called at every retrieval, not on a schedule
+  #[inline]
+  pub fn effective_strength(memory: &MemoryIndex, now_tick: u64) -> f32 {
+      if memory.bypass_decay {
+          return memory.base_strength;
+      }
+      let elapsed = now_tick.saturating_sub(memory.last_accessed_tick) as f32;
+      let retention = (-elapsed / memory.stability).exp();
+      memory.base_strength * retention
+  }
+  
+  /// Persist the decay (called only during recall or consolidation)
+  /// Resets the decay clock — future decay starts from now
+  pub fn persist_decay_and_reset(
+      memory: &mut MemoryIndex,
+      now_tick: u64,
+  ) {
+      if !memory.bypass_decay {
+          memory.base_strength = effective_strength(memory, now_tick);
+      }
+      memory.last_accessed_tick = now_tick;
+  }
+  
+  WHY LAZY IS CORRECT:
+  
+  1. O(0) idle cost: if agent is doing other things, zero decay computation.
+     1 million memories idle → zero CPU overhead.
+     
+  2. O(1) per recall: compute effective strength at recall time.
+     Exact same result as if decay was applied every tick.
+     R(t) = e^(-t/S) is pure math — commutative, no ordering dependency.
+     
+  3. SQL pre-filter: SQLite can evaluate the formula in WHERE clause:
+     WHERE (base_strength * EXP(-(? - last_tick) / stability)) > 0.05
+     → SQLite computes effective_strength during scan
+     → Only candidates above threshold returned
+     → No false positives, no false negatives
+     
+  4. No dirty data: base_strength only updated when actually accessed.
+     The "true" current strength is ALWAYS computed on demand.
+     No risk of decay being applied twice or missed.
+     
+  PERFORMANCE NUMBERS:
+    Eager (O(n)): 50,000 memories × 1 decay tick = 50,000 EXP computations
+                  At 100 ticks/second: 5,000,000 EXP/second overhead
+                  EXP is ~5ns on modern CPU: 25ms/tick overhead — UNACCEPTABLE
+                  
+    Lazy (O(1)):  0 EXP during idle ticks
+                  5,000 EXP during retrieval (pre-filter of 5,000 candidates)
+                  At 100 queries/second: 500,000 EXP/second
+                  But amortized: most queries hit Tier1/Tier2 first
+                  Practical: <1ms for entire pre-filter operation
+  
+  SQL PRE-FILTER WITH LAZY DECAY:
+  
+  -- This SQL computes effective_strength for pre-filter
+  -- SQLite evaluates EXP() natively (fast)
+  SELECT id, 
+         (base_strength * EXP(-(? - last_tick) / CAST(stability AS REAL))) AS eff_str
+  FROM memory_index
+  WHERE (base_strength * EXP(-(? - last_tick) / CAST(stability AS REAL))) > ?
+    AND bypass_decay = 0
+    AND state NOT IN (2, 3)  -- Archived, OutOfHot
+  UNION ALL
+  SELECT id, base_strength as eff_str
+  FROM memory_index
+  WHERE bypass_decay = 1
+    AND state NOT IN (2, 3)
+  ORDER BY eff_str DESC
+  LIMIT ?;
+  
+  -- Parameters: (now_tick, now_tick, min_strength, limit)
+  -- Index needed: CREATE INDEX idx_memory_index_filter 
+  --               ON memory_index(bypass_decay, state, base_strength, stability, last_tick);
+```
+
+---
+
+### 4.7 Consolidation → NREM/REM/Homeostasis Cycles
+
+```
+BIOLOGICAL:
+  NREM: hippocampus replays → cortex learns → episodic → semantic
+  REM: emotional processing, creative integration
+  Homeostasis: global synaptic downscaling for SNR improvement
+
+PORT TO membrain:
+
+  Trigger conditions (not time-based — interaction-based):
+  
+  TRIGGER 1: Hot store pressure
+    When hot_index.len() > HOT_CAPACITY × 0.9:
+    → Consolidation cycle must run (space pressure)
+    
+  TRIGGER 2: Total strength pressure
+    When sum(effective_strength(m, now) for m in hot) > STRENGTH_CEILING:
+    → Homeostasis must run (capacity pressure)
+    
+  TRIGGER 3: Explicit call
+    membrain consolidate
+    → Immediate manual trigger
+    
+  TRIGGER 4: Periodic
+    Every CONSOLIDATION_INTERVAL interactions (e.g. 1000):
+    → Maintenance cycle even without pressure
+
+  ─────────────────────────────────────────────────────────────────
+  NREM EQUIVALENT: migrate_to_cold()
+  ─────────────────────────────────────────────────────────────────
+  
+  pub async fn nrem_cycle(
+      &self,
+      hot: &mut HotStore,
+      cold: &mut ColdStore,
+      now_tick: u64,
+  ) -> Result<NremReport> {
+      // Step 1: Score all hot memories for consolidation candidacy
+      let candidates = hot.db.query_all_for_consolidation(now_tick)?;
+      
+      let mut scored: Vec<(f32, MemoryRecord)> = candidates
+          .into_iter()
+          .map(|m| {
+              // Consolidation score: strong + frequently accessed + emotional
+              let eff_str = effective_strength(&m.index, now_tick);
+              let access_score = (m.index.access_count as f32).ln() + 1.0;
+              let recency_score = 1.0 / (1.0 + (now_tick - m.index.last_accessed_tick) as f32 / 1000.0);
+              let emotional_score = 1.0 + m.index.emotional_arousal * 0.5;
+              
+              let score = eff_str * access_score * recency_score * emotional_score;
+              (score, m)
+          })
+          .collect();
+      
+      // Step 2: Sort by score DESC — most "ripe" for consolidation first
+      scored.sort_by(|a, b| b.0.partial_cmp(&a.0).unwrap());
+      
+      // Step 3: Migrate top fraction to cold store
+      let n_migrate = (hot.len() as f32 * MIGRATION_FRACTION) as usize;
+      let to_migrate = scored.into_iter()
+          .filter(|(score, m)| *score > CONSOLIDATION_THRESHOLD)
+          .take(n_migrate)
+          .map(|(_, m)| m)
+          .collect::<Vec<_>>();
+      
+      // Step 4: For each candidate: full encode + cold store write
+      let mut report = NremReport::default();
+      
+      for memory in to_migrate {
+          // Re-embed if content was updated since last encoding
+          let final_embedding = if memory.index.last_reconsolidated_tick
+                                    > memory.index.created_tick {
+              self.embed_cache.get_or_embed(&memory.content).await?
+          } else {
+              memory.embedding_f32.clone()
+          };
+          
+          cold.consolidate_from_hot(ConsolidationCandidate {
+              id: memory.id,
+              content: memory.content.clone(),
+              embedding: final_embedding,
+              now_tick,
+          })?;
+          
+          // Mark as consolidated in hot (keep metadata, remove from HNSW hot index)
+          hot.mark_consolidated(memory.id, now_tick)?;
+          hot.hot_index.remove(memory.id.as_u64_pair().0)?;
+          
+          report.migrated += 1;
+      }
+      
+      // Step 5: Update engram centroids for migrated memories
+      self.update_engram_centroids(&to_migrate, now_tick)?;
+      
+      Ok(report)
+  }
+  
+  ─────────────────────────────────────────────────────────────────
+  REM EQUIVALENT: process_emotional_queue()
+  ─────────────────────────────────────────────────────────────────
+  
+  pub async fn rem_cycle(
+      &self,
+      hot: &mut HotStore,
+      now_tick: u64,
+  ) -> Result<RemReport> {
+      // Collect all unprocessed emotional memories
+      let emotional_memories = hot.db.query_where(
+          "bypass_decay = 1 AND emotional_processed = 0"
+      )?;
+      
+      let mut report = RemReport::default();
+      
+      for mut memory in emotional_memories {
+          // Reduce arousal (NE suppression during REM)
+          memory.emotional_arousal *= DESENSITIZATION_FACTOR; // 0.95
+          
+          // When sufficiently processed:
+          if memory.emotional_arousal < PROCESSED_THRESHOLD { // 0.3
+              memory.bypass_decay = false;
+              memory.emotional_processed = true;
+              report.fully_processed += 1;
+          }
+          
+          // Cross-link with related non-emotional memories
+          // (creative integration during REM)
+          let query_vec = self.embed_cache.get_or_embed(&memory.content).await?;
+          let related = hot.hot_index.search(&quantize_f16(&query_vec), 5)?;
+          
+          for (related_id, similarity) in related {
+              if similarity > 0.6 && related_id != memory.id.as_u64_pair().0 {
+                  let related_uuid = hot.id_for_usearch(related_id)?;
+                  self.engram_graph.add_edge(
+                      memory.id,
+                      related_uuid,
+                      EdgeWeight {
+                          similarity,
+                          edge_type: EdgeType::Associative,
+                      }
+                  );
+              }
+          }
+          
+          hot.db.update_memory_emotional(&memory)?;
+          report.processed += 1;
+      }
+      
+      Ok(report)
+  }
+  
+  ─────────────────────────────────────────────────────────────────
+  HOMEOSTASIS: scale_and_prune()
+  ─────────────────────────────────────────────────────────────────
+  
+  pub async fn homeostasis_cycle(
+      &self,
+      hot: &mut HotStore,
+      now_tick: u64,
+  ) -> Result<HomeostasisReport> {
+      // Check if homeostasis needed
+      let total_effective_strength = hot.compute_total_effective_strength(now_tick)?;
+      
+      if total_effective_strength < HOMEOSTASIS_TRIGGER_LOAD { // 0.85 of max
+          return Ok(HomeostasisReport::not_triggered());
+      }
+      
+      // Global downscale (Tononi's synaptic homeostasis)
+      hot.db.execute_all(
+          "UPDATE memory_index SET base_strength = base_strength * ?",
+          params![HOMEOSTASIS_FACTOR], // 0.9
+      )?;
+      
+      // Prune memories that fell below MIN_STRENGTH
+      let archived = hot.db.query_where(
+          "base_strength < ? AND bypass_decay = 0",
+          params![MIN_STRENGTH], // 0.05
+      )?;
+      
+      let mut report = HomeostasisReport::new(archived.len());
+      
+      for memory in archived {
+          hot.archive_memory(memory.id, now_tick, ArchiveReason::Homeostasis)?;
+          report.archived += 1;
+      }
+      
+      Ok(report)
+  }
+```
+
+---
+
+### 4.8 Reconsolidation → Labile State + Update Window
+
+```
+BIOLOGICAL:
+  Recall → memory labile → can be updated → re-consolidation required.
+  Window: recent memories ~6h, old memories shorter.
+  During labile window: new information can be incorporated.
+
+PORT TO membrain:
+
+  MemoryState enum:
+  pub enum MemoryState {
+      Labile {
+          since_tick: u64,
+          window_ticks: u64,  // update window duration
+      },
+      Stable,
+      Consolidated,     // migrated to cold_store
+      Archived,         // below MIN_STRENGTH, soft-deleted
+  }
+  
+  Reconsolidation window formula:
+  fn reconsolidation_window(
+      age_ticks: u64,
+      base_strength: f32,
+  ) -> u64 {
+      if base_strength < LABILE_STRENGTH_MIN { // 0.2
+          return 0;  // Too weak to reconsolidate
+      }
+      
+      let base = RECONSOLIDATION_BASE_WINDOW as f32;  // 50 ticks
+      
+      // Age factor: older → shorter window
+      // age=0: factor=1.0
+      // age=BASE_WINDOW: factor=0.5
+      // age=10×BASE_WINDOW: factor≈0.09
+      let age_factor = 1.0 / (1.0 + age_ticks as f32 / (10.0 * base));
+      
+      // Strength factor: stronger → slightly longer window
+      let strength_factor = 0.5 + base_strength * 0.5;
+      
+      (base * age_factor * strength_factor) as u64
+  }
+  
+  Pending update storage:
+  pub struct PendingUpdate {
+      memory_id: Uuid,
+      new_content: Option<String>,
+      new_emotional_tag: Option<EmotionalTag>,
+      submitted_tick: u64,
+      submitter: UpdateSource,
+  }
+  
+  Reconsolidation tick:
+  pub fn reconsolidation_tick(
+      &mut self,
+      hot: &mut HotStore,
+      now_tick: u64,
+  ) -> Result<()> {
+      let labile_memories = hot.db.query_labile(now_tick)?;
+      
+      for mut memory in labile_memories {
+          let (since, window) = match memory.state {
+              MemoryState::Labile { since_tick, window_ticks } => (since_tick, window_ticks),
+              _ => continue,
+          };
+          
+          if now_tick - since <= window {
+              // Still within reconsolidation window
+              // Check for pending updates
+              if let Some(update) = hot.db.get_pending_update(memory.id)? {
+                  // Apply update (memory being reconsolidated with new info)
+                  
+                  if let Some(new_content) = update.new_content {
+                      memory.content = new_content;
+                      // Re-embed with new content
+                      let new_embedding = self.embed_cache
+                          .get_or_embed(&memory.content)
+                          .await?;
+                      memory.embedding = new_embedding;
+                      // Update HNSW index
+                      hot.hot_index.remove(memory.id.as_u64_pair().0)?;
+                      hot.hot_index.add(
+                          memory.id.as_u64_pair().0,
+                          &quantize_f16(&memory.embedding),
+                      )?;
+                      
+                      memory.last_reconsolidated_tick = now_tick;
+                  }
+                  
+                  if let Some(new_tag) = update.new_emotional_tag {
+                      memory.emotional_tag = new_tag;
+                      memory.bypass_decay = compute_bypass_decay(&new_tag);
+                  }
+                  
+                  // Reconsolidation strengthens the memory
+                  memory.base_strength = (memory.base_strength
+                      + RECONSOLIDATION_BONUS).min(MAX_STRENGTH);
+                  
+                  hot.db.delete_pending_update(memory.id)?;
+              }
+          } else {
+              // Window expired — restabilize without update
+              memory.state = MemoryState::Stable;
+              // Any pending update NOT applied (window closed)
+              hot.db.delete_pending_update(memory.id)?;
+          }
+          
+          hot.db.update_memory(&memory)?;
+      }
+      
+      Ok(())
+  }
+```
+
+---
+
+### 4.9 Active Forgetting → ForgettingEngine
+
+```
+BIOLOGICAL:
+  RAC1 GTPase actively degrades weak memories.
+  Interference between similar memories.
+  Sleep homeostasis: global synaptic downscaling.
+  Directed forgetting: PFC can suppress hippocampal retrieval.
+
+PORT TO membrain:
+
+  pub struct ForgettingEngine {
+      config: ForgettingConfig,
+  }
+  
+  pub struct ForgettingConfig {
+      interference_sim_min: f32,       // 0.70 — below this: not similar enough to interfere
+      interference_sim_max: f32,       // 0.99 — above this: duplicate, handle differently
+      retroactive_penalty: f32,        // 0.05 — strength reduction per interfering memory
+      proactive_penalty: f32,          // 0.05 — retrieval_difficulty increase
+      predictive_value_threshold: f32, // 0.001 — access_count/age below this → accelerated decay
+      predictive_decay_factor: f32,    // 0.85 — additional decay for non-predictive memories
+      prune_batch_size: usize,         // 10000 — max memories scanned per prune cycle
+      minimum_age_for_predictive: u64, // 500 ticks — don't predictively prune new memories
+  }
+  
+  impl ForgettingEngine {
+  
+      // ── COMPONENT 1: Retroactive Interference ──────────────────────────
+      // New memory B weakens old similar memories A
+      // Called during encoding of B
+      pub fn apply_retroactive_interference(
+          &self,
+          new_memory: &Memory,
+          hot: &mut HotStore,
+          now_tick: u64,
+      ) -> Result<usize> {
+          // Find memories similar to new memory but not identical
+          let similar = hot.hot_index.search_filtered(
+              &new_memory.embedding_i16,
+              100,
+              |id| id != new_memory.id.as_u64_pair().0,
+          )?;
+          
+          let mut affected = 0;
+          
+          for (old_id, similarity) in similar {
+              if similarity < self.config.interference_sim_min
+                  || similarity > self.config.interference_sim_max {
+                  continue;
+              }
+              
+              let old_uuid = hot.id_for_usearch(old_id)?;
+              let mut old_memory = hot.db.get_memory_index(old_uuid)?;
+              
+              // Only penalize if old memory is older (temporal direction)
+              if old_memory.created_tick < new_memory.created_tick {
+                  // Retroactive: new weakens old
+                  old_memory.base_strength *= 1.0 - self.config.retroactive_penalty;
+                  // Also apply lazy decay first
+                  old_memory.base_strength = effective_strength(&old_memory, now_tick)
+                      * (1.0 - self.config.retroactive_penalty);
+                  hot.db.update_strength(old_uuid, old_memory.base_strength)?;
+                  affected += 1;
+              }
+          }
+          
+          Ok(affected)
+      }
+      
+      // ── COMPONENT 2: Proactive Interference ────────────────────────────
+      // Old memory A increases retrieval_difficulty of new similar memory B
+      // Called during encoding of B
+      pub fn apply_proactive_interference(
+          &self,
+          new_memory: &mut Memory,
+          hot: &HotStore,
+      ) -> Result<()> {
+          let similar_old = hot.hot_index.search(
+              &new_memory.embedding_i16, 50
+          )?;
+          
+          let interference_count = similar_old.iter()
+              .filter(|(_, sim)| {
+                  *sim > self.config.interference_sim_min
+                  && *sim < self.config.interference_sim_max
+              })
+              .count();
+          
+          // Retrieval_difficulty increased based on number of interfering memories
+          // More competition → harder to recall this specific memory
+          new_memory.retrieval_difficulty +=
+              interference_count as f32 * self.config.proactive_penalty;
+          
+          Ok(())
+      }
+      
+      // ── COMPONENT 3: Predictive Pruning ────────────────────────────────
+      // Memories never recalled → accelerated decay
+      pub fn predictive_pruning_pass(
+          &self,
+          hot: &mut HotStore,
+          now_tick: u64,
+      ) -> Result<usize> {
+          // Find memories with very low predictive value
+          let candidates = hot.db.query_predictive_prune_candidates(
+              now_tick,
+              self.config.minimum_age_for_predictive,
+              self.config.predictive_value_threshold,
+              self.config.prune_batch_size,
+          )?;
+          
+          // SQL equivalent:
+          // SELECT id, access_count, created_tick FROM memory_index
+          // WHERE (CAST(access_count AS REAL) / (? - created_tick)) < ?
+          // AND (? - created_tick) > ?
+          // AND bypass_decay = 0
+          // LIMIT ?
+          
+          let mut pruned = 0;
+          
+          for memory in candidates {
+              // Apply accelerated decay
+              hot.db.execute(
+                  "UPDATE memory_index 
+                   SET base_strength = base_strength * ?
+                   WHERE id = ?",
+                  params![self.config.predictive_decay_factor, memory.id],
+              )?;
+              
+              // Check if now below MIN_STRENGTH
+              let new_strength = memory.base_strength * self.config.predictive_decay_factor;
+              if new_strength < MIN_STRENGTH {
+                  hot.archive_memory(memory.id, now_tick, ArchiveReason::PredictivePrune)?;
+                  pruned += 1;
+              }
+          }
+          
+          Ok(pruned)
+      }
+      
+      // ── COMPONENT 4: Capacity Management ───────────────────────────────
+      // When total count > SOFT_CAP: archive weakest memories
+      pub fn capacity_management(
+          &self,
+          hot: &mut HotStore,
+          cold: &ColdStore,
+          now_tick: u64,
+      ) -> Result<usize> {
+          let total = hot.count() + cold.count();
+          
+          if total <= SOFT_CAP {
+              return Ok(0);
+          }
+          
+          let excess = total - SOFT_CAP;
+          let to_archive = (excess as f32 * 1.1) as usize; // archive 10% more than excess
+          
+          // Archive weakest memories from hot store
+          let weakest = hot.db.query_weakest(now_tick, to_archive)?;
+          
+          let mut archived = 0;
+          for memory in weakest {
+              hot.archive_memory(memory.id, now_tick, ArchiveReason::CapacityLimit)?;
+              archived += 1;
+          }
+          
+          Ok(archived)
+      }
+  }
+```
+
+---
+
+### 4.10 Engram Formation → EngramBuilder + petgraph
+
+```
+BIOLOGICAL:
+  Related memories share active cells (engram cells).
+  Pattern of co-activation → synaptic connections form between those cells.
+  Partial activation of pattern → other engram cells recruited.
+  → Full memory reconstruction from partial cue.
+
+PORT TO membrain:
+
+  Engram data structures:
+  
+  pub struct Engram {
+      pub id: Uuid,
+      pub centroid: Vec<f32>,              // mean of all member embeddings
+      pub member_count: usize,
+      pub total_strength: f32,             // sum of effective strengths (resonance pool)
+      pub created_tick: u64,
+      pub last_activated_tick: u64,
+      pub parent_engram_id: Option<Uuid>,  // for hierarchical engrams after split
+  }
+  
+  pub struct EngramGraph {
+      graph: DiGraph<Uuid, EdgeWeight>,
+      node_index: HashMap<Uuid, NodeIndex>,  // Uuid → graph node index
+  }
+  
+  pub struct EdgeWeight {
+      pub similarity: f32,
+      pub edge_type: EdgeType,
+      pub created_tick: u64,
+      pub activation_count: u32,  // how many times this edge was traversed in BFS
+  }
+  
+  pub enum EdgeType {
+      Associative,    // semantic similarity
+      Causal,         // temporal ordering within session (A happened before B)
+      Contradictory,  // high similarity but conflicting content
+      Temporal,       // general temporal precedence
+  }
+  
+  pub struct EngramBuilder {
+      engram_index: Index,  // usearch HNSW for centroid search
+      config: EngramConfig,
+  }
+  
+  pub struct EngramConfig {
+      formation_threshold: f32,    // 0.65 — min similarity to join existing engram
+      max_soft_size: usize,        // 200 — split trigger
+      max_hard_size: usize,        // 500 — hard reject
+      centroid_update_alpha: f32,  // 0.1 — exponential moving average for centroid update
+  }
+  
+  impl EngramBuilder {
+  
+      /// Called on every encode — tries to cluster new memory
+      pub fn try_cluster(
+          &mut self,
+          new_id: Uuid,
+          new_vec: &[f32],
+          engrams: &mut HashMap<Uuid, Engram>,
+          graph: &mut EngramGraph,
+          now_tick: u64,
+      ) -> Option<Uuid> {
+          // Search centroid index for nearest engram
+          let i16_vec = quantize_f16(new_vec);
+          let candidates = self.engram_index.search(&i16_vec, 5).ok()?;
+          
+          // Find best matching engram
+          let best = candidates.iter()
+              .filter_map(|(engram_usearch_id, similarity)| {
+                  if *similarity > self.config.formation_threshold {
+                      let engram_id = self.id_for_usearch(*engram_usearch_id)?;
+                      Some((engram_id, *similarity))
+                  } else {
+                      None
+                  }
+              })
+              .max_by(|a, b| a.1.partial_cmp(&b.1).unwrap());
+          
+          match best {
+              Some((engram_id, similarity)) => {
+                  let engram = engrams.get_mut(&engram_id)?;
+                  
+                  // Check size limits
+                  if engram.member_count >= self.config.max_hard_size {
+                      // Hard limit: create sibling engram instead
+                      return self.create_new_engram(new_id, new_vec, engrams, graph, now_tick);
+                  }
+                  
+                  // Add to engram
+                  engram.member_count += 1;
+                  engram.last_activated_tick = now_tick;
+                  
+                  // Update centroid (exponential moving average)
+                  for (i, &v) in new_vec.iter().enumerate() {
+                      engram.centroid[i] = engram.centroid[i]
+                          * (1.0 - self.config.centroid_update_alpha)
+                          + v * self.config.centroid_update_alpha;
+                  }
+                  
+                  // Update engram centroid index
+                  self.engram_index.remove(engram_id.as_u64_pair().0).ok();
+                  self.engram_index.add(
+                      engram_id.as_u64_pair().0,
+                      &quantize_f16(&engram.centroid)
+                  ).ok();
+                  
+                  // Add graph node and edge
+                  let new_node = graph.graph.add_node(new_id);
+                  graph.node_index.insert(new_id, new_node);
+                  
+                  // Find most similar existing member to connect to
+                  // (this is the "neurons that fire together, wire together" edge)
+                  // For simplicity: connect to engram centroid's nearest member
+                  let nearest_member = self.find_nearest_member(
+                      new_vec, &engram_id, engrams, graph
+                  );
+                  if let Some(member_id) = nearest_member {
+                      let member_node = graph.node_index[&member_id];
+                      graph.graph.add_edge(
+                          new_node,
+                          member_node,
+                          EdgeWeight {
+                              similarity,
+                              edge_type: EdgeType::Associative,
+                              created_tick: now_tick,
+                              activation_count: 0,
+                          }
+                      );
+                  }
+                  
+                  // Trigger split if soft limit exceeded
+                  if engram.member_count > self.config.max_soft_size {
+                      self.split_engram(engram_id, engrams, graph, now_tick);
+                  }
+                  
+                  Some(engram_id)
+              }
+              None => {
+                  // No matching engram — create new one
+                  self.create_new_engram(new_id, new_vec, engrams, graph, now_tick)
+              }
+          }
+      }
+      
+      /// BFS from seed memory → collect cluster
+      pub fn bfs_cluster(
+          &mut self,
+          seed_id: Uuid,
+          graph: &EngramGraph,
+          engrams: &HashMap<Uuid, Engram>,
+          max_depth: usize,
+          max_nodes: usize,
+          min_edge_weight: f32,
+      ) -> Vec<Uuid> {
+          let seed_node = match graph.node_index.get(&seed_id) {
+              Some(n) => *n,
+              None => return vec![seed_id],
+          };
+          
+          let mut visited = HashSet::new();
+          let mut result = Vec::new();
+          // Priority queue: (weight, depth, NodeIndex)
+          // Higher weight edges processed first
+          let mut queue: BinaryHeap<(OrderedFloat<f32>, usize, NodeIndex)> = BinaryHeap::new();
+          
+          queue.push((OrderedFloat(1.0), 0, seed_node));
+          visited.insert(seed_node);
+          
+          while let Some((edge_weight, depth, node)) = queue.pop() {
+              if result.len() >= max_nodes {
+                  break;
+              }
+              
+              let memory_id = graph.graph[node];
+              result.push(memory_id);
+              
+              if depth >= max_depth {
+                  continue;
+              }
+              
+              // Explore neighbors
+              for neighbor in graph.graph.neighbors(node) {
+                  if visited.contains(&neighbor) {
+                      continue;
+                  }
+                  
+                  // Get edge weight
+                  let edge = graph.graph.find_edge(node, neighbor).unwrap();
+                  let ew = &graph.graph[edge];
+                  
+                  if ew.similarity >= min_edge_weight {
+                      visited.insert(neighbor);
+                      queue.push((OrderedFloat(ew.similarity), depth + 1, neighbor));
+                  }
+              }
+          }
+          
+          result
+      }
+      
+      /// Split an oversized engram into two sub-engrams
+      fn split_engram(
+          &mut self,
+          engram_id: Uuid,
+          engrams: &mut HashMap<Uuid, Engram>,
+          graph: &mut EngramGraph,
+          now_tick: u64,
+      ) {
+          // Get all member IDs
+          let members: Vec<Uuid> = graph.node_index.keys()
+              .filter(|id| {
+                  // Check if this node belongs to this engram
+                  // (stored in memory_index.engram_id)
+                  true // simplified — actual impl queries hot.db
+              })
+              .copied()
+              .collect();
+          
+          if members.len() < 4 {
+              return; // Too small to split
+          }
+          
+          // Simple k-means (k=2) to find two clusters
+          // For speed: use random seed points, 10 iterations
+          let (cluster_a, cluster_b) = self.kmeans_2(members, engrams);
+          
+          // Create two child engrams
+          let child_a_id = Uuid::new_v4();
+          let child_b_id = Uuid::new_v4();
+          
+          let centroid_a = compute_centroid(&cluster_a);
+          let centroid_b = compute_centroid(&cluster_b);
+          
+          engrams.insert(child_a_id, Engram {
+              id: child_a_id,
+              centroid: centroid_a.clone(),
+              member_count: cluster_a.len(),
+              parent_engram_id: Some(engram_id),
+              created_tick: now_tick,
+              last_activated_tick: now_tick,
+              total_strength: 0.0,
+          });
+          
+          engrams.insert(child_b_id, Engram {
+              id: child_b_id,
+              centroid: centroid_b.clone(),
+              member_count: cluster_b.len(),
+              parent_engram_id: Some(engram_id),
+              created_tick: now_tick,
+              last_activated_tick: now_tick,
+              total_strength: 0.0,
+          });
+          
+          // Add child centroids to engram index
+          self.engram_index.add(child_a_id.as_u64_pair().0, &quantize_f16(&centroid_a)).ok();
+          self.engram_index.add(child_b_id.as_u64_pair().0, &quantize_f16(&centroid_b)).ok();
+          
+          // Original engram becomes parent (remove from active search)
+          self.engram_index.remove(engram_id.as_u64_pair().0).ok();
+          
+          // Update memory_index.engram_id for all members
+          // cluster_a → child_a_id, cluster_b → child_b_id
+      }
+  }
+```
+
+---
+
+### 4.11 Pattern Completion → 3-Tier Retrieval Engine
+
+```
+BIOLOGICAL:
+  CA3: partial input → autoassociative completion → full pattern.
+  CA1: gates output, checks novelty.
+  Entorhinal cortex: distributes to neocortex.
+  Result: partial cue → full episodic cluster reconstructed.
+
+PORT TO membrain (complete 3-tier retrieval):
+
+  pub struct RecallQuery {
+      pub content: String,
+      pub context: Option<String>,
+      pub top_k: usize,
+      pub confidence_requirement: ConfidenceLevel,
+      pub include_kinds: Option<Vec<MemoryKind>>,
+      pub min_strength: f32,
+      pub include_decaying: bool,   // Feature: surface memories about to be lost
+  }
+  
+  pub enum ConfidenceLevel {
+      FastApprox,   // ef=10, ~85% accuracy
+      Normal,       // ef=50, ~95% accuracy  
+      High,         // ef=100, ~99% accuracy
+  }
+  
+  pub struct RecallResult {
+      pub memories: Vec<ScoredMemory>,
+      pub tier_used: RetrievalTier,
+      pub engram_expanded: bool,
+      pub tip_of_tongue: Option<Vec<MemoryFragment>>, // partial if no full match
+      pub latency_us: u64,
+  }
+  
+  pub struct ScoredMemory {
+      pub id: Uuid,
+      pub content: String,
+      pub score: f32,
+      pub effective_strength: f32,
+      pub emotional_tag: EmotionalTag,
+      pub kind: MemoryKind,
+      pub created_tick: u64,
+      pub access_count: u32,
+      pub engram_id: Option<Uuid>,
+      pub decaying_soon: bool,  // Feature: near MIN_STRENGTH warning
+  }
+  
+  pub async fn recall(
+      &mut self,
+      query: RecallQuery,
+      now_tick: u64,
+  ) -> Result<RecallResult> {
+      let start = std::time::Instant::now();
+      
+      // === STEP 1: Embed query ===
+      let query_vec = self.embed_cache.get_or_embed(&query.content).await?;
+      let context_vec = if let Some(ref ctx) = query.context {
+          Some(self.embed_cache.get_or_embed(ctx).await?)
+      } else {
+          None
+      };
+      
+      // === TIER 1: LruCache familiarity check ===
+      let content_hash = xxhash64(query.content.as_bytes());
+      if let Some(cached) = self.tier1_cache.get(&content_hash) {
+          if cached.effective_strength > TIER1_CONFIDENCE_THRESHOLD { // 0.9
+              // Cache hit with high confidence → return immediately
+              let scored = self.score_cached(cached, &query_vec, &context_vec, now_tick);
+              if scored.score > TIER1_CONFIDENCE_THRESHOLD {
+                  return Ok(RecallResult {
+                      memories: vec![scored],
+                      tier_used: RetrievalTier::Tier1,
+                      engram_expanded: false,
+                      tip_of_tongue: None,
+                      latency_us: start.elapsed().as_micros() as u64,
+                  });
+              }
+          }
+      }
+      
+      // === TIER 2: Hot HNSW search ===
+      let ef = self.adaptive_ef(&query, now_tick);
+      
+      // SQL pre-filter: reduce search space BEFORE HNSW
+      let candidate_ids = self.hot.prefilter_candidates(
+          now_tick,
+          query.min_strength,
+          PRE_FILTER_LIMIT, // 5000
+      )?;
+      
+      // HNSW search with int16 query
+      let i16_query = quantize_f16(&query_vec);
+      let raw_candidates = self.hot.hot_index.search_with_filter(
+          &i16_query,
+          100,  // top-100 candidates
+          ef,
+          |id| candidate_ids.contains(&id),  // filter to pre-filtered set
+      )?;
+      
+      // Rescore with float32
+      let rescored = self.rescore_candidates(
+          &raw_candidates,
+          &query_vec,
+          &context_vec,
+          now_tick,
+          &self.primed_contexts,
+          self.hot.get_engram_graph(),
+      ).await?;
+      
+      // Check if hot search found confident results
+      if let Some(top) = rescored.first() {
+          if top.score > TIER2_CONFIDENCE_THRESHOLD { // 0.8
+              // Hot hit — update Tier1 cache
+              self.tier1_cache.put(content_hash, CachedMemory {
+                  id: top.id,
+                  content: top.content.clone(),
+                  embedding: query_vec.clone(),
+                  effective_strength: top.effective_strength,
+                  cached_at_tick: now_tick,
+              });
+              
+              // Engram expansion
+              let expanded = self.expand_engrams(
+                  &rescored,
+                  now_tick,
+                  query.top_k,
+              ).await?;
+              
+              // on_recall for all returned memories
+              for m in &expanded {
+                  self.on_recall(m.id, now_tick).await?;
+              }
+              
+              let is_decaying_soon = self.check_decaying_soon(&expanded, now_tick);
+              
+              return Ok(RecallResult {
+                  memories: self.attach_decaying_flag(expanded, is_decaying_soon),
+                  tier_used: RetrievalTier::Tier2,
+                  engram_expanded: true,
+                  tip_of_tongue: None,
+                  latency_us: start.elapsed().as_micros() as u64,
+              });
+          }
+      }
+      
+      // === TIER 3: Cold mmap search ===
+      let i8_query = quantize_i8(&query_vec);
+      let cold_raw = self.cold.cold_index.search(&i8_query, 100)?;
+      
+      // Rescore cold candidates
+      let cold_rescored = self.rescore_cold_candidates(
+          &cold_raw,
+          &query_vec,
+          &context_vec,
+          now_tick,
+      ).await?;
+      
+      // Merge hot + cold results
+      let mut all_candidates = rescored;
+      all_candidates.extend(cold_rescored);
+      all_candidates.sort_by(|a, b| b.score.partial_cmp(&a.score).unwrap());
+      all_candidates.truncate(query.top_k * 3); // keep 3× top_k for engram expansion
+      
+      // Engram expansion from cold results too
+      let final_results = self.expand_engrams(&all_candidates, now_tick, query.top_k).await?;
+      
+      // on_recall for all returned memories
+      for m in &final_results {
+          self.on_recall(m.id, now_tick).await?;
+      }
+      
+      // Check for tip-of-tongue (no confident match found anywhere)
+      let tip_of_tongue = if final_results.is_empty()
+          || final_results[0].score < PARTIAL_RECALL_THRESHOLD // 0.4
+      {
+          Some(self.construct_fragments(&all_candidates))
+      } else {
+          None
+      };
+      
+      Ok(RecallResult {
+          memories: final_results,
+          tier_used: RetrievalTier::Tier3,
+          engram_expanded: !all_candidates.is_empty(),
+          tip_of_tongue,
+          latency_us: start.elapsed().as_micros() as u64,
+      })
+  }
+  
+  /// Unified scoring function combining all signals
+  fn score_candidate(
+      &self,
+      candidate: &MemoryRecord,
+      query_vec: &[f32],
+      context_vec: &Option<Vec<f32>>,
+      now_tick: u64,
+      primed_contexts: &[PrimedContext],
+      engram_graph: &EngramGraph,
+      resonance_scores: &HashMap<Uuid, f32>,
+  ) -> f32 {
+      // 1. Semantic similarity (primary signal)
+      let semantic_sim = cosine_sim(query_vec, &candidate.embedding_f32);
+      
+      // 2. Context boost
+      let context_boost = if let Some(ctx_vec) = context_vec {
+          CONTEXT_WEIGHT * cosine_sim(ctx_vec, &candidate.context_embedding)
+      } else {
+          0.0
+      };
+      
+      // 3. Memory strength (lazy Ebbinghaus)
+      let strength = effective_strength(&candidate.index, now_tick);
+      
+      // 4. Recency bias (recent memories slightly preferred, log-scaled)
+      let age = (now_tick - candidate.index.created_tick) as f32;
+      let recency = 1.0 + 0.1 / (1.0 + age.ln().max(0.0));
+      
+      // 5. Retrieval difficulty penalty (proactive interference)
+      let difficulty_penalty = 1.0 - candidate.index.retrieval_difficulty.min(0.5);
+      
+      // 6. Priming boost (spotlight mode)
+      let prime_boost = primed_contexts.iter()
+          .filter(|p| now_tick < p.expiry_tick)
+          .map(|p| {
+              p.boost * cosine_sim(
+                  if let Some(cv) = context_vec { cv } else { query_vec },
+                  &p.embedding
+              )
+          })
+          .fold(0.0_f32, f32::max);
+      
+      // 7. Engram resonance (from BFS traversal)
+      let resonance = resonance_scores.get(&candidate.id).copied().unwrap_or(0.0);
+      
+      // Final score
+      let base_score = (semantic_sim + context_boost) * strength * recency * difficulty_penalty;
+      base_score + prime_boost + resonance
+  }
+```
+
+---
+
+### 4.12 Encoding Specificity → context_embedding
+
+```
+BIOLOGICAL:
+  Context at encoding stored alongside content.
+  Matching context at retrieval → better recall.
+  
+PORT TO membrain:
+
+  // Every memory stores two embeddings:
+  struct Memory {
+      // ... other fields ...
+      embedding_f32: Vec<f32>,          // content embedding
+      context_embedding: Vec<f32>,       // context embedding (same dims)
+  }
+  
+  // Encoding:
+  async fn encode(
+      &mut self,
+      content: String,
+      context: Option<String>,
+      // ...
+  ) -> Result<Uuid> {
+      let content_vec = self.embed_cache.get_or_embed(&content).await?;
+      
+      // Context: either provided or constructed from current state
+      let context_str = context.unwrap_or_else(|| {
+          self.working_memory.central_executive.current_task.clone()
+      });
+      let context_vec = self.embed_cache.get_or_embed(&context_str).await?;
+      
+      // Both vectors stored — same dimensions (384)
+      // Storage overhead: 2× embeddings per memory
+      // But: cold tier int8, so 2 × 384 bytes = 768 bytes per memory (manageable)
+  }
+  
+  // Retrieval scoring:
+  fn score_with_context(
+      content_sim: f32,
+      context_sim: f32,
+  ) -> f32 {
+      CONTENT_WEIGHT * content_sim + CONTEXT_WEIGHT * context_sim
+      // = 0.7 × content_sim + 0.3 × context_sim
+  }
+  
+  // EFFECT:
+  // Agent working on auth module (context="debugging authentication JWT"):
+  //   Memory about JWT from auth session: context_sim ≈ 0.85
+  //   Memory about JWT from payments session: context_sim ≈ 0.40
+  //   
+  //   Score difference for same content:
+  //   auth-context JWT memory: 0.7 × 0.9 + 0.3 × 0.85 = 0.63 + 0.255 = 0.885
+  //   payment-context JWT memory: 0.7 × 0.9 + 0.3 × 0.40 = 0.63 + 0.12 = 0.750
+  //   
+  //   Auth-context memory scores 18% higher despite same semantic content.
+  //   Natural context-dependent retrieval — no special logic needed.
+```
+
+---
+
+### 4.13 Working Memory Capacity → 7-Slot Constraint
+
+```
+BIOLOGICAL:
+  Miller's Law: 7 ± 2 chunks.
+  When full: new items displace old items.
+  Displaced items with sufficient strength → encoded to LTM.
+  This is the mechanism for converting attended information to long-term memory.
+
+PORT TO membrain:
+
+  The 7-slot constraint creates a NATURAL ENCODING PIPELINE:
+  
+  Agent receives information:
+    → Add to WorkingMemory (slot 1-7)
+    → If slot 7+1 needed: evict lowest-attention item
+    → Evicted item: if strength > threshold → encode to hot_store
+    → If not → lost (simulates forgetting from STM)
+    
+  Effect:
+    - Information that IS focused on (high attention) → persists in WM → eventually encoded
+    - Information that ISN'T focused on (low attention) → evicted quickly → not encoded
+    - Exactly mirrors human selective encoding
+    
+  Chunking simulation:
+    Agents can "chunk" multiple pieces of information:
+    membrain encode --kind Semantic "In this codebase, auth = JWT + OAuth + session tokens"
+    This semantic chunk = one WM slot, contains 3 pieces of information.
+    Exactly how humans chunk — experts have richer chunks.
+
+  Implementation details:
+  
+  // Attention scoring for WM items
+  fn attention_score_for_item(item: &WorkingMemoryItem, executive: &TaskContext) -> f32 {
+      // Items related to current task get attention bonus
+      let task_relevance = cosine_sim(
+          &executive.task_context_embedding,
+          &item.embedding,
+      );
+      
+      // Recent items get recency bonus
+      let recency = 1.0 / (1.0 + (executive.current_tick - item.added_tick) as f32 / 10.0);
+      
+      // Items that have been explicitly focused on score higher
+      let explicit_attention = executive.attention_weights
+          .get(&item.memory_id)
+          .copied()
+          .unwrap_or(0.0);
+      
+      task_relevance * 0.5 + recency * 0.3 + explicit_attention * 0.2
+  }
+```
+
+---
+
+### 4.14 Pattern Separation → Novelty Detection
+
+```
+BIOLOGICAL:
+  Dentate Gyrus: separates similar inputs into distinct patterns.
+  Prevents interference during storage.
+  High neurogenesis rate supports this function.
+
+PORT TO membrain:
+
+  // Novelty score = complement of similarity to nearest neighbor
+  // High novelty → memories stored as "separate" from existing
+  // Low novelty → interference penalty applied
+  
+  async fn compute_novelty_score(
+      &self,
+      new_vec: &[f32],
+      hot: &HotStore,
+  ) -> f32 {
+      // Query HNSW for nearest existing memory
+      let i16_vec = quantize_f16(new_vec);
+      let nearest = hot.hot_index.search(&i16_vec, 1).await?;
+      
+      match nearest.first() {
+          Some((_, similarity)) => 1.0 - similarity,
+          None => 1.0,  // First memory: completely novel
+      }
+  }
+  
+  // Novelty → initial strength modifier (novel things remembered better)
+  fn novelty_strength_modifier(novelty_score: f32) -> f32 {
+      1.0 + novelty_score * NOVELTY_WEIGHT
+      // NOVELTY_WEIGHT = 0.3
+      // Completely novel (1.0): +30% initial strength
+      // Duplicate (0.0): +0% (baseline strength)
+  }
+  
+  // Novelty → duplicate detection
+  if novelty_score < DUPLICATE_THRESHOLD { // 0.05
+      // Very similar to existing memory → update existing instead of creating new
+      let nearest_id = get_nearest_memory_id();
+      self.reconsolidate_with_new_content(nearest_id, content, context).await?;
+      return Ok(nearest_id);
+  }
+```
+
+---
+
+## END OF PART 2
+
+**Next: Part 3 — Architecture Overview & Performance Optimization Stack**
+
+Parts list:
+- Part 1: Vision, Problem Statement, Human Brain Deep Dive ✅
+- Part 2: Gap Analysis + Full Port (mechanism → Rust code) ✅
+- Part 3: Architecture Overview + Performance
+- Part 4: Techstack + Data Schema
+- Part 5: CLI/MCP + Feature Extensions + Workspace Structure
+- Part 6: Milestones + Acceptance Checklist + Constants + Algorithm Reference
+
+
+<!-- SOURCE: PLAN_part3.md -->
+
+# membrain — PLAN.md
+# Part 3 of 6: Architecture Overview · Performance Optimization Stack
+
+---
+
+## 5. Architecture Overview
+
+### 5.1 Design Philosophy
+
+```
+THREE LAWS OF membrain ARCHITECTURE:
+
+  LAW 1: MIMIC THE BRAIN'S STRUCTURE
+    Every architectural decision maps to a biological counterpart.
+    Not metaphorically — mechanistically.
+    hippocampus = hot_store, neocortex = cold_store, amygdala = EmotionalTag.
+    If brain does X for biological reason Y, membrain does X.
+    This is not cargo-culting — evolution optimized these structures for
+    exactly the problem we are solving: efficient, scalable, associative memory.
+    
+  LAW 2: LAZY EVERYTHING
+    Compute nothing proactively if it can be computed on demand.
+    Decay: computed at recall time (lazy), not on schedule (eager).
+    Embedding: cached, computed only on cache miss.
+    Index rebuild: only on startup, not during operation.
+    Consolidation: pressure-triggered, not scheduled.
+    This ensures: O(0) overhead at idle, O(1) overhead per operation.
+    
+  LAW 3: WRITE TO ONE, READ FROM EVERYWHERE
+    Writing (encoding) hits only hot_store.
+    Reading (recall) queries tier1 → tier2 → tier3 in order.
+    Background processes (consolidation, decay) never block reads.
+    SQLite WAL ensures reader/writer don't block each other.
+    This ensures: reads are always fast regardless of write activity.
+```
+
+### 5.2 Three-Tier Storage Architecture
+
+```
+┌─────────────────────────────────────────────────────────────────────────┐
+│                         MEMBRAIN BRAIN STORE                            │
+│                                                                         │
+│  ┌──────────────────────────────────────────────────────────────────┐   │
+│  │  TIER 1 — WORKING CACHE (Prefrontal Cortex)                     │   │
+│  │  ─────────────────────────────────────────────────────────────  │   │
+│  │  Structure:  LruCache<u64, CachedMemory> (512 entries)          │   │
+│  │              LruCache<u64, Vec<f32>> (1000 entries, embeddings) │   │
+│  │  Latency:    <0.1ms (pure in-process memory)                    │   │
+│  │  Capacity:   ~10MB RAM                                          │   │
+│  │  Eviction:   LRU (least recently used)                         │   │
+│  │  Content:    Recent + frequently accessed memories              │   │
+│  │  Writes:     On every recall (cache is populated from recalls)  │   │
+│  │  Brain:      7±2 working memory + neocortex familiarity path    │   │
+│  └──────────────────────────────────────────────────────────────────┘   │
+│                              │ miss                                     │
+│                              ▼                                          │
+│  ┌──────────────────────────────────────────────────────────────────┐   │
+│  │  TIER 2 — HOT HNSW INDEX (Hippocampus)                         │   │
+│  │  ─────────────────────────────────────────────────────────────  │   │
+│  │  Structure:  usearch HNSW, float16, in-memory, 50k limit       │   │
+│  │              SQLite hot.db (WAL mode, metadata + content)       │   │
+│  │              petgraph DiGraph (engram graph, in-memory)         │   │
+│  │  Latency:    <5ms (HNSW O(log n) + float32 rescore)            │   │
+│  │  Capacity:   ~75MB RAM (50k × 384 dims × 2 bytes float16)      │   │
+│  │  Eviction:   NREM consolidation (pressure-triggered migration)  │   │
+│  │  Content:    Recent episodic, partially consolidated memories   │   │
+│  │  Brain:      Hippocampus — episodic index, pattern completion   │   │
+│  └──────────────────────────────────────────────────────────────────┘   │
+│                              │ miss                                     │
+│                              ▼                                          │
+│  ┌──────────────────────────────────────────────────────────────────┐   │
+│  │  TIER 3 — COLD MMAP INDEX (Neocortex)                          │   │
+│  │  ─────────────────────────────────────────────────────────────  │   │
+│  │  Structure:  usearch HNSW, int8, mmap disk-backed, unlimited   │   │
+│  │              SQLite cold.db (zstd-compressed content)          │   │
+│  │  Latency:    <50ms (mmap HNSW + OS page cache)                 │   │
+│  │  Capacity:   Unlimited (disk-bounded, TB-scale)                │   │
+│  │  Eviction:   None (archive only — never delete)                │   │
+│  │  Content:    Consolidated semantic memories                    │   │
+│  │  Brain:      Neocortex — vast permanent storage                │   │
+│  └──────────────────────────────────────────────────────────────────┘   │
+│                                                                         │
+│  ┌──────────────────────────────────────────────────────────────────┐   │
+│  │  PROCEDURAL STORE (Cerebellum)                                  │   │
+│  │  SQLite procedural.db — hash → action, no decay, O(1) lookup   │   │
+│  └──────────────────────────────────────────────────────────────────┘   │
+│                                                                         │
+│  ┌──────────────────────────────────────────────────────────────────┐   │
+│  │  ENGRAM GRAPH (Synaptic Network)                                │   │
+│  │  petgraph DiGraph<Uuid, EdgeWeight> — in-memory, persisted      │   │
+│  │  to hot.db/engrams + edges tables                               │   │
+│  └──────────────────────────────────────────────────────────────────┘   │
+│                                                                         │
+└─────────────────────────────────────────────────────────────────────────┘
+```
+
+### 5.3 Complete Encode + Retrieve Data Flows
+
+```
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+ENCODE PATH (Agent stores a new memory)
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+INPUT: (content, context?, attention_score, emotional_tag, source)
+  │
+  ├─ [attention_score < 0.2] ──────────────────────────→ DISCARD
+  │   Sensory filter: not attended to → not encoded
+  │
+  ▼
+[EMBEDDING CACHE CHECK]
+  content_hash = xxhash64(content)
+  if embed_cache.get(content_hash):
+      content_vec = cached (0ms)
+  else:
+      content_vec = fastembed.embed(content) (~5ms)
+      embed_cache.put(content_hash, content_vec)
+  
+  context_hash = xxhash64(context)
+  context_vec  = embed_cache.get_or_embed(context) (same pattern)
+  │
+  ▼
+[NOVELTY SCORE]
+  i16_query = quantize_f16(content_vec)
+  nearest = hot_index.search(i16_query, 1)
+  novelty_score = 1.0 - nearest[0].similarity  (or 1.0 if empty)
+  
+  if novelty_score < DUPLICATE_THRESHOLD (0.05):
+      → update existing memory instead of creating new
+      → reconsolidate with new content
+      → RETURN existing_id
+  │
+  ▼
+[INITIAL STRENGTH CALCULATION]
+  emotional_multiplier = 1.0 + (arousal × |valence| × 0.5)
+  initial_strength = BASE_STRENGTH (0.5)
+                   × (1.0 + novelty_score × 0.3)
+                   × (1.0 + attention_score × 0.4)
+                   × emotional_multiplier
+  
+  bypass_decay = arousal > 0.6 && |valence| > 0.5
+  state = MemoryState::Labile { since: now_tick, window: reconsolidation_window(0, initial_strength) }
+  │
+  ▼
+[WORKING MEMORY UPDATE]
+  working_memory.add(item, &mut hot_store)
+  if working_memory was full:
+      evicted_item → hot_store.encode(evicted) if strong enough
+  │
+  ▼
+[HOT STORE INSERT]
+  BEGIN TRANSACTION
+    id = Uuid::new_v4()
+    INSERT INTO memory_index (id, base_strength, stability, last_tick, bypass_decay, kind, ...)
+    INSERT INTO memory_content (id, content)
+    INSERT INTO memory_vectors (id, embedding_f32_blob)
+  COMMIT
+  │
+  ▼
+[HNSW HOT INDEX UPDATE]
+  hot_index.add(id.as_u64(), quantize_f16(content_vec))
+  
+  engram_builder.try_cluster(id, content_vec, now_tick)
+  → if clusters: add to engram, update centroid, add graph edge
+  → if isolated: create new engram seed
+  │
+  ▼
+[INTERFERENCE CHECK]
+  forgetting_engine.apply_retroactive(new_memory, hot, now_tick)
+  → find memories 0.7 < sim < 0.99
+  → weaken old memories: base_strength × (1 - 0.05)
+  
+  forgetting_engine.apply_proactive(new_memory, hot)
+  → new_memory.retrieval_difficulty += count_similar × 0.05
+  │
+  ▼
+[TIER1 CACHE UPDATE]
+  tier1_cache.put(content_hash, CachedMemory { id, content, embedding, ... })
+
+RESULT: Uuid of new memory
+Total latency: <1ms (cache hit) | <10ms (cache miss, 2 embeds)
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+RETRIEVE PATH (Agent recalls memories)
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+INPUT: RecallQuery { content, context?, top_k, confidence_level, ... }
+  │
+  ▼
+[EMBED QUERY]
+  query_vec    = embed_cache.get_or_embed(query.content)
+  context_vec  = embed_cache.get_or_embed(query.context) if present
+  content_hash = xxhash64(query.content)
+  │
+  ▼
+[TIER 1 — LruCache lookup] ─────────────────────── Target: <0.1ms
+  tier1_cache.get(content_hash)?
+  if hit && cached.effective_strength > 0.9:
+      score = score_candidate(cached, query_vec, context_vec, ...)
+      if score > TIER1_THRESHOLD:
+          on_recall(cached.id)   // LTP + labile
+          ──────────────────────→ RETURN (tier1 hit)
+  │ miss or low confidence
+  ▼
+[SQL PRE-FILTER] ─────────────────────────────────── Target: <0.5ms
+  SELECT id, base_strength, stability, last_tick, ...
+  FROM memory_index
+  WHERE effective_strength(base_strength, stability, now-last_tick) > MIN_STRENGTH
+    AND state NOT IN (Archived, OutOfHot)
+  LIMIT 5000
+  → candidate_ids: Vec<Uuid>  (search space reduced by 200×)
+  │
+  ▼
+[TIER 2 — HNSW Hot Search] ──────────────────────── Target: <5ms
+  ef = adaptive_ef(query.confidence_level, hot_count, tier1_hit_rate)
+  i16_query = quantize_f16(query_vec)
+  raw_hits = hot_index.search_filtered(i16_query, 100, ef,
+      |id| candidate_ids.contains(id))
+  
+  // Rescore top-100 with float32 (accuracy recovery)
+  rescored = []
+  for (hit_id, _) in raw_hits[..20]:  // only top-20 need rescore
+      embedding_f32 = hot.fetch_embedding(hit_id)?
+      score = score_candidate(hit_id, query_vec, context_vec, ...)
+      rescored.push((score, hit_id))
+  
+  rescored.sort_by_score_desc()
+  
+  if rescored[0].score > TIER2_THRESHOLD (0.8):
+      // Engram expansion
+      seed_engram = hot.get_engram_id(rescored[0].id)
+      cluster = engram_builder.bfs_cluster(
+          rescored[0].id,
+          max_depth=3, max_nodes=50, min_edge_weight=0.5
+      )
+      
+      // Merge HNSW results + engram cluster
+      all_ids = union(rescored.ids, cluster)
+      all_scored = rescore_all(all_ids, query_vec, context_vec, ...)
+      all_scored.sort_desc().truncate(top_k)
+      
+      // on_recall for results → LTP + labile + resonance
+      for m in all_scored: on_recall(m.id, now_tick)
+      
+      // Update Tier1 cache
+      tier1_cache.put(content_hash, top_result.into_cached())
+      
+      ──────────────────────────→ RETURN (tier2 hit)
+  │ miss
+  ▼
+[TIER 3 — HNSW Cold Search] ─────────────────────── Target: <50ms
+  i8_query = quantize_i8(query_vec)
+  cold_hits = cold_index.search(i8_query, 100)
+  
+  // Rescore: fetch float32 from cold.db
+  cold_rescored = rescore_cold(cold_hits, query_vec, context_vec, ...)
+  
+  // Merge hot + cold
+  all = merge_and_deduplicate(rescored_hot, cold_rescored)
+  all.sort_desc().truncate(top_k * 3)
+  
+  // Engram expansion from merged set
+  expanded = expand_engrams_from_set(all, top_k)
+  for m in expanded: on_recall(m.id, now_tick)
+  
+  // Tip-of-tongue check
+  if expanded.is_empty() || expanded[0].score < 0.4:
+      tip_of_tongue = construct_fragments(all)
+  
+  ────────────────────────────→ RETURN (tier3 hit or tip-of-tongue)
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+BACKGROUND PROCESSES (never block encode or retrieve)
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+CONSOLIDATION CYCLE (async tokio task):
+  Trigger: hot_index.len() > HOT_CAPACITY × 0.9
+        OR every CONSOLIDATION_INTERVAL interactions
+  
+  Step 1 — NREM: score hot → migrate top-N to cold
+  Step 2 — REM:  process emotional queue → desensitize + cross-link
+  Step 3 — Homeostasis: if total_strength > threshold → scale + prune
+  
+  SQLite WAL: consolidation writes (to cold.db) do NOT block reads (from hot.db).
+              Multiple readers of hot.db work simultaneously.
+  
+RECONSOLIDATION TICK (async, per interaction):
+  For each Labile memory:
+    if window not expired && has pending_update:
+        apply update, re-embed, strengthens memory
+    else if window expired:
+        → Stable state
+  
+FORGETTING ENGINE (async, periodic):
+  Trigger: every FORGETTING_ENGINE_INTERVAL interactions
+  - Retroactive interference: applied synchronously during encode
+  - Proactive interference: applied synchronously during encode
+  - Predictive pruning: async batch
+  - Capacity management: async if > SOFT_CAP
+```
+
+### 5.4 Process Model — Daemon vs Standalone
+
+```
+TWO MODES OF OPERATION:
+
+  ─────────────────────────────────────────────────────────────────
+  MODE 1: DAEMON (recommended for agents)
+  ─────────────────────────────────────────────────────────────────
+  
+  membrain daemon start
+    │
+    ▼
+  tokio::main runtime spawns:
+    ├── embed_model.load() → all-MiniLM-L6-v2 loaded ONCE (~500ms startup)
+    ├── hot_index.rebuild_from_db() → HNSW rebuilt from hot.db on start
+    ├── engram_graph.load() → petgraph loaded from hot.db
+    ├── unix_socket_server (at ~/.membrain/membrain.sock)
+    │     → JSON-RPC 2.0 handler (async, concurrent)
+    ├── background_task: consolidation_loop (tokio::spawn)
+    │     → woken by pressure channels or timer
+    ├── background_task: reconsolidation_tick_loop (tokio::spawn)
+    │     → woken by interaction counter
+    └── background_task: forgetting_engine_loop (tokio::spawn)
+          → low-priority, runs when idle
+  
+  Client connections via Unix socket:
+    - membrain CLI: connects via socket
+    - Python client: net.connect(~/.membrain/membrain.sock)
+    - Node client: net.createConnection(...)
+    - Rust: tokio::net::UnixStream
+  
+  MCP mode (within daemon):
+    membrain mcp  →  stdin/stdout JSON-RPC (stdio transport)
+    Claude Code / Cursor sees this as MCP server
+    Each MCP tool call: client → stdin → daemon → process → stdout → client
+  
+  ADVANTAGES:
+    - Embedding model loaded once (no 500ms cold start per call)
+    - HNSW index always warm
+    - Background jobs (consolidation) run continuously
+    - Multiple clients simultaneously
+    - Best performance for long-running agents
+  
+  ─────────────────────────────────────────────────────────────────
+  MODE 2: STANDALONE (CLI, scripts)
+  ─────────────────────────────────────────────────────────────────
+  
+  membrain remember "content"
+    │
+    ▼
+  Binary starts → check for daemon at ~/.membrain/membrain.sock
+    → if daemon present: forward request via socket → exit
+    → if no daemon: run standalone mode
+    
+  Standalone mode:
+    - Load embedding model (500ms first call, cached thereafter)
+    - Open SQLite hot.db (WAL: safe for multiple processes)
+    - Execute operation
+    - Exit
+    
+  TRADEOFFS:
+    + Simple: no daemon management
+    + Works in scripts, CI, one-off calls
+    - Cold start latency (~500ms first call per process)
+    - No background consolidation (only on explicit call)
+    - No warm HNSW cache (rebuilt per process if needed — expensive for large stores)
+    
+  USE STANDALONE FOR:
+    - scripts: echo "content" | membrain remember
+    - testing
+    - single queries where daemon overhead not worth it
+    
+  USE DAEMON FOR:
+    - Long-running Claude Code sessions
+    - Production agent deployments
+    - Any scenario with multiple queries per minute
+
+  ─────────────────────────────────────────────────────────────────
+  GRACEFUL FALLBACK
+  ─────────────────────────────────────────────────────────────────
+  
+  Daemon down or crashed:
+    → CLI automatically falls back to standalone mode
+    → No data loss (SQLite WAL ensures durability)
+    → Slightly slower (no warm HNSW), but correct
+    
+  Implementation:
+  fn get_connection(config: &Config) -> Connection {
+      // Try daemon first
+      if let Ok(sock) = UnixStream::connect(&config.socket_path) {
+          return Connection::Daemon(sock);
+      }
+      // Fallback to direct
+      Connection::Standalone(open_stores(config))
+  }
+```
+
+### 5.5 File Layout
+
+```
+~/.membrain/
+├── config.toml          # User configuration
+├── hot.db               # SQLite WAL — hot memories + metadata + engrams
+├── cold.db              # SQLite WAL — consolidated semantic memories
+├── hot.usearch          # usearch HNSW hot index (float16, rebuilt on daemon start)
+├── cold.usearch         # usearch HNSW cold index (int8, mmap persistent)
+├── membrain.sock        # Unix socket (daemon mode only)
+├── membrain.pid         # PID file (daemon mode only)
+├── membrain.log         # Log file (daemon mode)
+└── archive/
+    └── archive.db       # Archived memories (soft-deleted, recoverable)
+
+NOTE on hot.usearch:
+  The hot HNSW index is REBUILT from hot.db on every daemon start.
+  It is NOT persisted between restarts (float16, 50k entries, ~75MB RAM).
+  Rebuild time: ~2 seconds for 50k entries.
+  Why: usearch mmap is for cold only. Hot index fits in RAM and rebuilds fast.
+  
+NOTE on cold.usearch:
+  The cold HNSW index IS persisted (mmap disk-backed).
+  It is NOT rebuilt on startup — just remapped.
+  This is the unlimited-scale persistent index.
+```
+
+---
+
+## 6. Performance — Bottlenecks & Optimization Stack
+
+### 6.1 Bottleneck Analysis
+
+```
+The five critical performance bottlenecks in a memory system at scale,
+and how membrain addresses each:
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+BOTTLENECK 1: EMBEDDING COST
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+Problem:
+  Every encode requires 2 embedding calls (content + context).
+  fastembed-rs: ~5ms per embedding × 2 = 10ms per encode.
+  At 100 encodes/sec: 1000ms in embedding alone — completely blocks.
+  
+Naive solution: run embeddings synchronously in request path.
+Result: 10ms encode latency regardless of other optimizations.
+
+membrain solution: LruCache<u64, Vec<f32>> (embedding cache)
+  key   = xxhash64(text_bytes)
+  value = Vec<f32> (384 floats)
+  capacity = 1000 entries (~1.5MB RAM)
+  
+  Cache hit rate in practice:
+    - Agent recalls same memory content many times → high hit rate
+    - Context strings often repeat ("working on auth module")
+    - Estimated steady-state hit rate: >80%
+    
+  Result:
+    Cache hit:  0ms (pure HashMap lookup)
+    Cache miss: ~5ms (one fastembed call)
+    
+  Additional optimization: BATCH embedding during consolidation
+    Instead of: for m in candidates { embed(m.content) }  // O(n × 5ms)
+    Use:        fastembed.embed_batch(all_contents)        // O(1 × 5ms × n/batch_size)
+    Speedup: 3-5× for consolidation cycles
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+BOTTLENECK 2: KNN SEARCH COMPLEXITY AT SCALE
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+Problem:
+  With 1M memories and 384 dimensions:
+  Brute force: 1M × 384 float multiply-accumulates per query
+  = 384M FMAs per query
+  At 4 GFLOPS (conservative): ~96ms per query — unacceptable
+  
+sqlite-vec (the naive choice):
+  Uses brute-force KNN.
+  Benchmarks: 10k vectors → 10ms, 100k → 100ms, 1M → 1000ms.
+  UNUSABLE at scale.
+  
+membrain solution: usearch HNSW
+  Hierarchical Navigable Small World (HNSW) algorithm:
+  
+  HOW HNSW WORKS:
+  ┌──────────────────────────────────────────────────────────────────┐
+  │  HNSW builds a multi-layer graph:                               │
+  │                                                                   │
+  │  Layer 2 (top):  Very sparse graph, long-range connections       │
+  │  Layer 1 (mid):  Denser graph, medium-range connections          │
+  │  Layer 0 (base): Full graph, all nodes, short-range connections  │
+  │                                                                   │
+  │  Search:                                                          │
+  │  1. Start at entry point in top layer                            │
+  │  2. Greedy search: move to nearest neighbor                      │
+  │  3. Drop down to lower layer at current position                 │
+  │  4. Repeat until Layer 0                                         │
+  │  5. At Layer 0: local beam search (ef candidates)               │
+  │                                                                   │
+  │  Complexity: O(log n) average                                    │
+  │  Recall accuracy: ~95% at ef=50 (vs 100% brute force)          │
+  │  But: 5% miss compensated by float32 rescore                    │
+  └──────────────────────────────────────────────────────────────────┘
+  
+  Benchmarks (usearch, M=16, ef_construction=200):
+    10k vectors:   ~0.5ms
+    100k vectors:  ~1ms
+    1M vectors:    ~3-5ms (with ef=50)
+    100M vectors:  ~10ms (with ef=50)
+    
+  Improvement over brute force:
+    10k:  10ms → 0.5ms  (20×)
+    100k: 100ms → 1ms   (100×)
+    1M:   1000ms → 5ms  (200×)
+    
+  usearch specific advantages:
+    - AVX2/AVX-512/NEON SIMD: auto-detected at compile time (target-cpu=native)
+    - int8/float16/binary quantization: native, zero extra code
+    - mmap: disk-backed index, unlimited scale, OS manages paging
+    - Multi-threaded search: parallelism for large result sets
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+BOTTLENECK 3: DECAY ITERATION
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+Problem:
+  "Decay tick" that iterates all memories is catastrophic at scale.
+  50k memories × EXP computation × 100 ticks/sec:
+  = 50k × 5ns (EXP op) × 100 = 25ms overhead per second
+  This background noise would degrade system performance continuously.
+  
+Naive solution: decay_tick() iterates all memories periodically.
+Result: O(n) operation every K interactions. Blocking. Unacceptable.
+
+membrain solution: LAZY DECAY — computed on demand
+  
+  core formula: effective_strength(m, now_tick) = m.base_strength × e^(-Δtick/m.stability)
+  
+  This formula is O(1) — one EXP per memory accessed.
+  It is computed:
+    1. During recall (score the candidate)
+    2. During SQL pre-filter (WHERE clause)
+    3. During consolidation (score for migration)
+    4. NEVER during idle or background ticks
+    
+  Mathematical proof of correctness:
+    Eager: update every tick T, current strength after N ticks:
+      s_N = s_0 × Π(e^(-1/S)) = s_0 × e^(-N/S)
+    Lazy: compute once after N ticks:
+      s_N = s_0 × e^(-N/S)
+    IDENTICAL. Lazy is mathematically equivalent to eager.
+    
+  Performance impact:
+    Idle CPU overhead: ZERO
+    Per-recall overhead: 1 EXP + 1 multiply = ~5ns
+    Pre-filter overhead: ~5ns × 5000 candidates = 25μs
+    Total added latency from decay computation: <1ms
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+BOTTLENECK 4: COLD START EMBEDDING MODEL LOAD
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+Problem:
+  all-MiniLM-L6-v2 model: 80MB ONNX weights.
+  First load: ~500ms (parse model, allocate tensors, warm ONNX runtime).
+  
+Naive: load model per process invocation.
+Result: every CLI call has 500ms latency.
+
+membrain solution: daemon mode — load ONCE
+  Daemon startup:
+    1. embed_model.load() → 500ms (one time)
+    2. All subsequent calls: model warm → ~5ms per embed
+    
+  Standalone fallback:
+    Process-level caching: model loaded once per process lifecycle.
+    For scripts calling membrain in loop: 500ms first call, 5ms all subsequent.
+    For one-off CLI calls: 500ms is acceptable.
+    
+  Alternative (future): precompute embeddings for common content patterns.
+  The embedding cache already handles this for repeated content.
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+BOTTLENECK 5: CONSOLIDATION BLOCKING RETRIEVAL
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+Problem:
+  Consolidation (NREM/REM/Homeostasis) involves:
+    - Re-embedding many memories
+    - Writing to cold.db
+    - Updating engram centroids
+  Could take seconds for large migration batches.
+  If synchronous: retrieval blocked during consolidation.
+  
+membrain solution: async tokio + SQLite WAL
+  Consolidation runs as a background tokio task (async).
+  SQLite WAL: reads and writes don't block each other.
+    - Consolidation writing to cold.db: non-blocking for hot.db reads
+    - Engram graph updates: done with tokio::RwLock<EngramGraph>
+      → readers can access graph during consolidation
+      → writer lock only held during centroid updates (microseconds)
+  
+  Net impact on retrieval: 0ms
+```
+
+### 6.2 Optimization Stack — Seven Layers
+
+```
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+OPT 1: TIERED INDEX ARCHITECTURE
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+Three tiers matching brain's three access speeds:
+
+  Tier 1: LruCache (in-process RAM)
+    Technology: lru crate, LruCache<u64, CachedMemory>
+    Size: 512 entries (configurable)
+    Hit rate target: >60%
+    Latency: <0.1ms (pure HashMap get + cosine sim)
+    Use: familiarity check, recently accessed memories
+    
+  Tier 2: usearch HNSW float16 (in-memory)
+    Technology: usearch, float16 quantization, 50k limit
+    Size: ~75MB RAM (50k × 384 × 2 bytes)
+    Hit rate target: >90% of non-Tier1 queries
+    Latency: <5ms (HNSW O(log n) + SQL pre-filter + float32 rescore)
+    Use: episodic memories, recent consolidations
+    
+  Tier 3: usearch HNSW int8 mmap (disk)
+    Technology: usearch mmap, int8 quantization, unlimited
+    Size: ~384MB per 1M memories (384 × 1 byte)
+    Hit rate: 100% of remaining queries (catch-all)
+    Latency: <50ms (mmap HNSW + OS page cache)
+    Use: deep semantic memories, historical knowledge
+
+COMBINED PERFORMANCE MODEL:
+  Assume: 60% Tier1 hit, 35% Tier2 hit, 5% Tier3
+  
+  avg_latency = 0.60 × 0.1ms + 0.35 × 5ms + 0.05 × 50ms
+              = 0.06ms + 1.75ms + 2.5ms
+              = ~4.3ms average
+              
+  vs naive (all Tier3 brute force): 50-1000ms
+  Improvement: 10-230×
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+OPT 2: INT8/FLOAT16 QUANTIZATION + FLOAT32 RESCORE
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+The Problem: float32 vectors are large and slow to compare.
+384 dims × float32 = 1536 bytes per vector
+SIMD processes 8 floats per AVX2 operation = 48 AVX2 ops per distance
+At 100 queries × 5000 candidates: 24M AVX2 ops per second — feasible but tight.
+
+Quantization solution:
+
+  float16 (hot tier):
+    Range: ±65504 (same numerical range as float32 for typical embeddings)
+    Size:  384 × 2 = 768 bytes per vector (50% reduction)
+    Speed: 2 floats processed per byte → same AVX2 ops, 2× data bandwidth
+    Accuracy: 0.1-0.3% degradation in cosine similarity
+    Use: Tier 2 hot HNSW search
+    
+  int8 (cold tier):
+    Range: -128 to 127 (requires normalization of embedding range)
+    Size:  384 × 1 = 384 bytes per vector (75% reduction)
+    Speed: 4× smaller → 4× more vectors fit in CPU cache → 2-4× faster
+    Accuracy: 1-2% degradation in cosine similarity
+    Use: Tier 3 cold HNSW search
+    
+  float32 rescore (final ranking):
+    After HNSW returns top-100 candidates (int8/float16 search):
+    Fetch float32 embeddings from SQLite for top-20 only
+    Compute exact cosine similarity with query (float32)
+    Re-rank based on exact similarity
+    
+    This compensates for quantization error:
+    "Coarse search" (quantized) finds the right neighborhood.
+    "Fine search" (float32) ranks the neighborhood accurately.
+    
+    Net accuracy: ~99% vs pure float32 search (within 1% of optimal ranking)
+    Net speedup: 4× (int8) vs float32 with <1% quality loss
+
+QUANTIZATION IMPLEMENTATION:
+
+  // Float32 → Float16
+  fn quantize_f16(v: &[f32]) -> Vec<f16> {
+      v.iter().map(|&x| f16::from_f32(x)).collect()
+  }
+  
+  // Float32 → Int8 (with normalization)
+  fn quantize_i8(v: &[f32]) -> Vec<i8> {
+      let max_abs = v.iter().map(|x| x.abs()).fold(0.0_f32, f32::max);
+      let scale = 127.0 / max_abs.max(1e-8);
+      v.iter().map(|&x| (x * scale).round().clamp(-128.0, 127.0) as i8).collect()
+  }
+  
+  // Int8 → approximate Float32 (for rescore, keep scale factor)
+  fn dequantize_i8(v: &[i8], scale: f32) -> Vec<f32> {
+      v.iter().map(|&x| x as f32 / scale).collect()
+  }
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+OPT 3: SIMD DISTANCE COMPUTATION
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+usearch auto-detects and uses SIMD:
+  x86_64:  AVX-512 (16 floats/op) > AVX2 (8 floats/op) > SSE4.2 (4 floats/op)
+  ARM64:   NEON (4 floats/op) > SVE (variable)
+  
+  Enable with: RUSTFLAGS="-C target-cpu=native" cargo build --release
+  
+  Speedup from AVX2 vs scalar:
+    Scalar:  384 multiply-accumulates per distance = 384 ops
+    AVX2:    384 / 8 = 48 SIMD ops per distance
+    AVX-512: 384 / 16 = 24 SIMD ops per distance
+    
+    For 5000 pre-filtered candidates:
+    Scalar:  5000 × 384 ops = 1.92M ops
+    AVX2:    5000 × 48 ops  = 240K ops (8× faster)
+    AVX-512: 5000 × 24 ops  = 120K ops (16× faster)
+    
+  This is why usearch dramatically outperforms naive Rust implementations.
+  Zero code changes needed — all happens inside usearch library.
+  Just compile with target-cpu=native.
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+OPT 4: SQL PRE-FILTER BEFORE HNSW
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+Without pre-filter:
+  HNSW searches ALL 50k hot memories for every query.
+  Many are too weak to be useful. All are searched.
+  
+With pre-filter:
+  SQL WHERE clause computes effective_strength first.
+  Only memories above MIN_STRENGTH threshold → candidate list.
+  HNSW searches ONLY the candidate list.
+  
+Typical distribution of effective strengths:
+  > 0.5 (strong):     ~10% of memories = 5,000 at 50k store
+  0.1-0.5 (moderate): ~30% of memories = 15,000
+  0.05-0.1 (weak):    ~20% of memories = 10,000
+  < 0.05 (archive):   ~40% of memories = 20,000 (never searched)
+  
+With MIN_STRENGTH = 0.1 pre-filter:
+  HNSW search space: ~20,000 (40% of store)
+  With LIMIT 5000: further reduced to 5,000
+  
+Reduction ratio: 50k → 5k = 10× reduction in search space
+HNSW complexity savings: O(log 5000) vs O(log 50000) = small benefit
+But: main benefit is HNSW ef reduction (fewer candidates to explore)
+
+SQL INDEX for pre-filter:
+  CREATE INDEX idx_memory_strength_filter
+  ON memory_index(state, bypass_decay, base_strength DESC, stability, last_tick);
+  
+  This index allows SQLite to:
+  1. Filter state != Archived quickly (index prefix)
+  2. Sort by effective_strength in index order (approximately)
+  3. LIMIT early-stop without scanning all rows
+  
+  Performance: 50k rows → <1ms for pre-filter with index.
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+OPT 5: ADAPTIVE ef_search
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+HNSW ef_search is the single biggest lever for speed vs accuracy:
+  ef=10:  fastest (~85% recall accuracy, 0.5ms at 50k)
+  ef=50:  balanced (~95% accuracy, 2ms at 50k)
+  ef=100: accurate (~99% accuracy, 4ms at 50k)
+  ef=200: most accurate (~99.9%, 8ms at 50k)
+  
+Adaptive ef strategy:
+
+  fn adaptive_ef(
+      query: &RecallQuery,
+      hot_count: usize,
+      tier1_hit_rate: f32,
+  ) -> usize {
+      // Base ef from confidence requirement
+      let base_ef = match query.confidence_requirement {
+          ConfidenceLevel::FastApprox => 10,
+          ConfidenceLevel::Normal     => 50,
+          ConfidenceLevel::High       => 100,
+      };
+      
+      // Size scaling: small stores don't need high ef
+      // (few nodes → easy navigation regardless of ef)
+      let size_factor = (hot_count as f32 / 50_000.0).sqrt().min(1.0);
+      
+      // If Tier1 hit rate is high, most queries are served from cache
+      // → lower ef acceptable for Tier2 (it's a fallback for harder queries)
+      let cache_factor = if tier1_hit_rate > 0.7 { 0.8 } else { 1.0 };
+      
+      let ef = (base_ef as f32 * size_factor * cache_factor) as usize;
+      ef.max(10).min(200)  // clamp to reasonable range
+  }
+  
+  In practice:
+    Small store (5k memories): ef ≈ 10-20 (fast, graph well-connected)
+    Medium store (20k): ef ≈ 25-50
+    Large store (50k): ef ≈ 40-80
+    
+  Average reduction from adaptive vs fixed ef=50:
+    ~2-3× faster for small/medium stores with no accuracy loss.
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+OPT 6: VERTICAL TABLE PARTITION
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+Problem: Pre-filter SQL scan accesses memory_index.
+  If memory_index row is fat (contains content, embeddings, etc.):
+    SQLite must load many bytes per row just to check effective_strength.
+    50k rows × 2KB per row = 100MB of I/O for a full scan. Terrible.
+    
+Solution: Split table into hot-path columns vs cold-path columns.
+
+  memory_index table (scan-optimized):
+    Row size: ~64 bytes
+    Columns: id(16) + base_strength(4) + stability(4) + last_tick(8)
+             + bypass_decay(1) + kind(1) + state(1) + engram_id(16)
+             + access_count(4) + retrieval_difficulty(4) + emotional_arousal(4)
+             + padding(1) = ~64 bytes
+    
+    At 50k memories: 50k × 64 = ~3.2MB
+    SQLite page size 4096 bytes: 64 rows per page
+    50k / 64 = 781 pages
+    Full scan: 781 page reads = ~3.1MB I/O
+    With OS cache: fits entirely in memory → microsecond scans
+    
+  memory_content table (fetch-on-demand):
+    Row size: variable (content text, can be 100B to 10KB)
+    Accessed ONLY for final top-K results (not during scan)
+    
+  memory_vectors table (rescore-on-demand):
+    Row size: 384 × 4 = 1536 bytes (float32 blob)
+    Accessed ONLY for float32 rescore of top-20 candidates
+    
+  Effect: pre-filter scan reads 3.2MB instead of potentially 50-100MB.
+  Speedup for pre-filter: ~10-30× vs fat table design.
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+OPT 7: SQLITE WAL + PRAGMA TUNING
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+Default SQLite is optimized for safety over performance.
+With WAL mode and tuning, we can 3-5× SQLite performance.
+
+  PRAGMA journal_mode = WAL;
+    → Write-Ahead Logging: readers never blocked by writers
+    → Multiple concurrent readers (smart-grep, Claude Code, CLI)
+    → Single writer doesn't block any readers
+    
+  PRAGMA synchronous = NORMAL;
+    → fsync only on WAL checkpoint, not every write transaction
+    → Risk: power failure during WAL write → lose last transaction
+    → Acceptable: SQLite WAL is crash-safe (WAL checkpoints are atomic)
+    → Speedup: 3× vs synchronous=FULL for write-heavy workloads
+    
+  PRAGMA cache_size = -131072;  (128MB page cache)
+    → hot.db fits mostly in page cache → effectively in-memory
+    → Negative value = KB; positive = pages
+    → 128MB is generous — tunable based on available RAM
+    
+  PRAGMA mmap_size = 4294967296;  (4GB mmap)
+    → Memory-map the database file
+    → OS manages page faulting — frequently accessed pages stay hot
+    → For hot.db: might not be needed (already fits in cache)
+    → For cold.db: critical (TB-scale file, OS page cache needed)
+    
+  PRAGMA temp_store = MEMORY;
+    → Temporary tables in RAM (not temp file)
+    → Used for intermediate query results
+    
+  PRAGMA optimize;  (run at startup)
+    → Updates query planner statistics
+    → Ensures optimal query plan selection
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+PROGRESSIVE QUANTIZATION LADDER (future optimization, post-M10)
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+Not implemented in initial milestones, but the architecture supports it.
+
+Memory lifecycle → quantization ladder:
+  New (hot):         float32 in SQLite (ground truth), float16 in HNSW
+  Active (hot):      float16 in HNSW, float32 in SQLite
+  Consolidated:      int8 in cold HNSW, float32 in cold.db (for rescore)
+  Aging (cold):      int8 in HNSW, float32 still in cold.db
+  Very old (archive): Binary (1-bit) in archive HNSW, float32 optionally discarded
+
+  Product Quantization for archive tier:
+    384 dims → 48 subspaces × 8 dims each
+    Each subspace: 256 centroids (8-bit codebook)
+    Storage: 48 bytes per vector (vs 1536 float32 = 32× compression)
+    Accuracy: ~90-95% (acceptable for archive tier)
+    
+  When to implement: when cold store exceeds 10M memories.
+  Until then: int8 (384 bytes/vector) is sufficient and much simpler.
+```
+
+### 6.3 Benchmark Targets
+
+```
+┌─────────────────────────────────────────────────────────────────────┐
+│ OPERATION                  │ TARGET    │ METHOD                      │
+│────────────────────────────│───────────│─────────────────────────── │
+│ Recall (Tier 1 hit)        │ <0.1ms    │ LruCache get + cosine sim  │
+│ Recall (Tier 2, 50k store) │ <5ms      │ HNSW + pre-filter + rescore│
+│ Recall (Tier 3, 1M store)  │ <50ms     │ mmap HNSW int8 + rescore   │
+│ Recall (Tier 3, 10M store) │ <100ms    │ mmap HNSW int8 + rescore   │
+│ Encode (embed cache hit)   │ <1ms      │ LruCache get + SQL insert  │
+│ Encode (embed cache miss)  │ <10ms     │ fastembed + SQL + HNSW add │
+│ Consolidation cycle        │ 0ms       │ async background, non-block│
+│ Decay computation (idle)   │ 0ms       │ lazy — no idle computation │
+│ Pre-filter (50k memories)  │ <0.5ms    │ SQL index scan             │
+│ Engram BFS (depth=3)       │ <1ms      │ petgraph BFS               │
+│ Working memory add         │ <0.01ms   │ VecDeque + HashMap         │
+└─────────────────────────────────────────────────────────────────────┘
+
+SCALE TARGETS:
+┌────────────────────────────────────────────────────────────────────┐
+│ SCALE               │ HOT RSS   │ COLD DISK │ RECALL P99           │
+│─────────────────────│───────────│───────────│───────────────────── │
+│ 10k hot memories    │ ~15MB     │ N/A       │ <1ms (all Tier2)     │
+│ 50k hot memories    │ ~75MB     │ N/A       │ <5ms (Tier2)         │
+│ 50k hot + 500k cold │ ~75MB     │ ~200MB    │ <10ms (Tier2+3 mix)  │
+│ 50k hot + 5M cold   │ ~75MB     │ ~2GB      │ <50ms (Tier3)        │
+│ 50k hot + 50M cold  │ ~75MB     │ ~20GB     │ <100ms (Tier3)       │
+└────────────────────────────────────────────────────────────────────┘
+
+RAM BUDGET BREAKDOWN (at 50k hot memories):
+  usearch HNSW hot_index (float16):  50k × 768 bytes = ~38MB
+  usearch HNSW overhead (graph):     50k × M=16 × 8 bytes = ~6MB
+  SQLite hot.db page cache:          ~128MB (configured)
+  Tier1 LruCache:                    512 × ~2KB = ~1MB
+  Embedding cache:                   1000 × 384 × 4 = ~1.5MB
+  Engram graph (petgraph):           ~10k engrams × ~200B = ~2MB
+  Working memory:                    7 × ~2KB = ~14KB
+  Total active RSS:                  ~180MB
+  
+  Well within typical agent RAM budget of 4-16GB.
+```
+
+### 6.4 Memory Resonance — Collective Strength Algorithm
+
+```
+BIOLOGICAL BASIS:
+  CA3 autoassociative network: recalling one engram member
+  → partial activation of all connected engram cells
+  → small LTP boost to all connected cells
+  Result: densely connected engrams (expert knowledge) are more stable
+          than isolated facts.
+
+ALGORITHM:
+
+  When memory M is recalled:
+  1. Compute standard LTP: M.base_strength += LTP_DELTA (0.1)
+  2. Get M's engram and neighboring nodes (BFS depth=1)
+  3. For each neighbor N:
+     resonance_ltp = LTP_DELTA × RESONANCE_FACTOR / neighbor_count
+     N.base_strength += resonance_ltp (async, non-blocking)
+  
+  RESONANCE_FACTOR = 0.3:
+    If M has 10 neighbors: each gets 0.1 × 0.3 / 10 = 0.003 LTP boost
+    Small individually, but cumulative:
+    A 200-member engram where each member is recalled once per 100 ticks:
+      = 200 recalls × 0.003 resonance per recall
+      = 200 × 200 × 0.003 = 120 units of total resonance LTP distributed
+      → Significantly stronger than isolated memories with same recall count
+
+EMERGENT BEHAVIOR:
+  Expert knowledge (large, dense engram) → very stable
+  Isolated facts (no engram) → decay normally
+  
+  Agent using membrain for 10,000 ticks:
+    Core concepts in agent's domain: recalled frequently → large engrams → very stable
+    Peripheral facts: rarely recalled → no engrams → decay → forgotten
+    = Exactly the right behavior for a domain expert agent
+
+IMPLEMENTATION:
+
+  fn apply_resonance(
+      memory_id: Uuid,
+      engram_graph: &EngramGraph,
+      hot: &mut HotStore,
+      now_tick: u64,
+  ) {
+      let neighbors: Vec<Uuid> = engram_graph
+          .graph
+          .neighbors(engram_graph.node_index[&memory_id])
+          .map(|ni| engram_graph.graph[ni])
+          .collect();
+      
+      if neighbors.is_empty() {
+          return;  // isolated memory, no resonance
+      }
+      
+      let resonance_delta = LTP_DELTA * RESONANCE_FACTOR / neighbors.len() as f32;
+      
+      // Batch update to avoid N individual SQL writes:
+      hot.db.batch_apply_ltp_delta(&neighbors, resonance_delta, now_tick)?;
+      
+      // SQL: UPDATE memory_index 
+      //      SET base_strength = MIN(base_strength + ?, 1.0)
+      //      WHERE id IN (?, ?, ...)
+  }
+```
+
+### 6.5 Prospective Memory — Future-Triggered Recall
+
+```
+BIOLOGICAL BASIS:
+  "Prospective memory": remembering to do something in the future.
+  "When I get to the grocery store, I need to buy milk."
+  Encoded as a context-trigger + action pair.
+  When context matches → memory fires.
+
+ALGORITHM:
+
+  Data structure:
+  pub struct ProspectiveTrigger {
+      id: Uuid,
+      trigger_embedding: Vec<f32>,  // context to match against
+      memory_id: Uuid,              // memory to surface when triggered
+      trigger_threshold: f32,       // 0.8 by default
+      fire_count: u32,              // how many times it has fired
+      max_fires: Option<u32>,       // None = unlimited
+      created_tick: u64,
+      expires_tick: Option<u64>,
+  }
+  
+  Stored in: hot.db/prospective_triggers table
+  
+  Trigger check: called on every ENCODE (not just recall):
+  
+  fn check_prospective_triggers(
+      current_context: &[f32],
+      triggers: &[ProspectiveTrigger],
+      now_tick: u64,
+  ) -> Vec<Uuid> {
+      triggers.iter()
+          .filter(|t| {
+              // Not expired
+              t.expires_tick.map_or(true, |e| now_tick < e)
+              // Not exhausted
+              && t.max_fires.map_or(true, |m| t.fire_count < m)
+              // Context matches
+              && cosine_sim(current_context, &t.trigger_embedding) > t.trigger_threshold
+          })
+          .map(|t| t.memory_id)
+          .collect()
+  }
+  
+  Usage:
+  // Agent sets up reminder:
+  membrain remind --when "context matches 'deploy to production'" \
+                  --memory-id abc123 \
+                  --max-fires 3
+  
+  // Or: create and trigger simultaneously
+  membrain remind --when "context matches 'payments module'" \
+                  --then "Stripe rate limit: 100 req/sec. Always check x-rate-limit headers."
+  
+  Effect: automatically surfaces critical procedural knowledge
+          when relevant context is detected — without requiring
+          explicit recall from the agent.
+```
+
+### 6.6 Spotlight / Priming Mode
+
+```
+BIOLOGICAL BASIS:
+  "Mental preparation": before a difficult task, you mentally review
+  relevant knowledge. This pre-activates relevant engrams → faster recall.
+  Athletes, surgeons, musicians all use this technique.
+
+ALGORITHM:
+
+  pub struct PrimedContext {
+      embedding: Vec<f32>,         // what was primed
+      boost_factor: f32,           // 0.0 to 0.5
+      created_tick: u64,
+      expiry_tick: u64,
+      source_description: String,  // "working on auth module"
+  }
+  
+  When priming:
+  1. membrain prime --context "debugging JWT authentication"
+  2. Compute embedding: primed_vec = embed("debugging JWT authentication")
+  3. Query Tier2 HNSW with primed_vec, top=100 (broad, low threshold)
+  4. For top-100 results: pre-load into Tier1 LruCache
+  5. Store PrimedContext for score boosting during retrieval
+  
+  Score boost during retrieval:
+  fn priming_boost(
+      candidate: &Memory,
+      primed_contexts: &[PrimedContext],
+      context_vec: &[f32],
+      now_tick: u64,
+  ) -> f32 {
+      primed_contexts.iter()
+          .filter(|p| now_tick < p.expiry_tick)
+          .map(|p| {
+              let ctx_match = cosine_sim(context_vec, &p.embedding);
+              p.boost_factor * ctx_match
+          })
+          .fold(0.0_f32, f32::max)
+  }
+  
+  Effect:
+    Pre-warms Tier1 cache: subsequent recalls for primed content → <0.1ms
+    Score boost: primed memories rank higher in results
+    Duration: configurable expiry (default 1000 interactions)
+    
+  CLI usage:
+    membrain prime "fixing the database migration issue"
+    membrain recall "database schema" --context "migration"
+    → returns migration-related memories at higher priority
+    → if any were Tier3 cold, now pre-loaded into Tier1 → 500× faster
+```
+
+---
+
+## END OF PART 3
+
+**Next: Part 4 — Techstack Analysis & Data Schema**
+
+Parts list:
+- Part 1: Vision, Problem Statement, Human Brain Deep Dive ✅
+- Part 2: Gap Analysis + Full Port (mechanism → Rust code) ✅
+- Part 3: Architecture Overview + Performance ✅
+- Part 4: Techstack + Data Schema
+- Part 5: CLI/MCP + Feature Extensions + Workspace Structure
+- Part 6: Milestones + Acceptance Checklist + Constants + Algorithm Reference
+
+
+<!-- SOURCE: PLAN_part4.md -->
+
+# membrain — PLAN.md
+# Part 4 of 6: Techstack Analysis · Data Schema
+
+---
+
+## 7. Techstack — Analysis & Rationale
+
+### 7.1 Core Language: Rust
+
+```
+WHY RUST SPECIFICALLY (not Python, not Go, not C++):
+
+  vs PYTHON:
+    Python has the best AI/ML ecosystem (PyTorch, transformers, LangChain).
+    But: Python has GIL — background consolidation + foreground recall would
+    fight each other. asyncio has no true parallelism for CPU-bound work.
+    GC pauses: Python's GC can pause 10-100ms unpredictably.
+    membrain requires: <0.1ms Tier1 latency. Python cannot guarantee this.
+
+  vs GO:
+    Go has excellent concurrency (goroutines, channels).
+    But: Go's GC pauses (1-10ms) are unacceptable for <0.1ms Tier1.
+    No SIMD in standard library — would require CGo.
+    No equivalent of usearch/fastembed-rs/petgraph native bindings.
+
+  vs C++:
+    C++ is fastest, has all libraries.
+    But: memory safety critical for a memory store.
+         (ironic: memory bugs in a memory store)
+    Build system: Rust cargo >> CMake complexity.
+    Interop: all key crates (usearch, fastembed-rs, petgraph, rusqlite)
+             are native Rust — zero FFI overhead.
+
+  RUST ADVANTAGES FOR membrain:
+
+  1. ZERO GC PAUSES
+     No garbage collector → no pause times.
+     Memory: compile-time borrow checker manages lifetimes.
+     Result: <0.1ms Tier1 latency is consistent, not just average.
+     P99 latency ≈ P50 latency — no GC spikes.
+
+  2. COMPILE-TIME SIMD SPECIALIZATION
+     RUSTFLAGS="-C target-cpu=native" → AVX2/AVX-512 auto-enabled.
+     usearch + fastembed-rs use these automatically.
+     Zero code changes — just a compile flag.
+
+  3. FEARLESS CONCURRENCY
+     tokio async runtime: non-blocking Unix socket server.
+     tokio::spawn: background tasks (consolidation, forgetting engine).
+     Arc<RwLock<EngramGraph>>: shared graph without data races.
+     Compiler enforces: no data races — won't compile if unsafe.
+
+  4. SINGLE BINARY DEPLOYMENT
+     cargo build --release → one binary, ~20-40MB.
+     Zero runtime dependencies (fastembed model downloaded on first use).
+     Works everywhere: Linux, macOS, WSL.
+
+  5. ECOSYSTEM FIT
+     usearch:     Rust-first vector index library (Unum Cloud)
+     fastembed-rs: Rust port of fastembed, ONNX inference
+     petgraph:    Most mature Rust graph library
+     rusqlite:    SQLite bindings, feature-rich, well-maintained
+     rmcp:        Official Rust MCP SDK (stdio transport)
+     lru:         LruCache, zero-cost, well-tested
+     tokio:       Industry-standard async runtime
+     clap:        Best-in-class CLI argument parsing
+     serde/serde_json: Standard serialization
+     thiserror:   Idiomatic error types
+     anyhow:      Error propagation in application code
+     
+  6. STACK CONSISTENCY
+     Same stack as linehash (hash-anchored editing) and smart-grep
+     (semantic code search). Shared embed cache warm-up, shared
+     usearch knowledge, shared CI/CD pipeline.
+     Developer context switching cost: zero.
+```
+
+### 7.2 Async Runtime: Tokio
+
+```
+WHY TOKIO:
+
+  membrain daemon needs to do multiple things simultaneously:
+    - Serve Unix socket connections (JSON-RPC 2.0)
+    - Run consolidation cycle in background
+    - Run reconsolidation tick periodically
+    - Run forgetting engine periodically
+    - Respond to MCP tool calls (stdio)
+
+  tokio provides:
+    tokio::net::UnixListener   → async Unix socket server
+    tokio::spawn               → spawn background tasks
+    tokio::sync::RwLock        → async read-write lock for engram graph
+    tokio::sync::mpsc          → channels for consolidation pressure signals
+    tokio::time::interval      → periodic background tasks
+
+  TASK ARCHITECTURE:
+
+  #[tokio::main]
+  async fn main() {
+      let brain = Arc::new(BrainStore::open(config).await?);
+
+      // Background task: consolidation (woken by pressure channel)
+      let brain_c = brain.clone();
+      tokio::spawn(async move {
+          let mut interval = tokio::time::interval(Duration::from_secs(60));
+          loop {
+              interval.tick().await;
+              if brain_c.needs_consolidation().await {
+                  brain_c.consolidation_cycle().await.ok();
+              }
+          }
+      });
+
+      // Background task: reconsolidation tick (per-interaction wake)
+      let brain_r = brain.clone();
+      tokio::spawn(async move {
+          let mut rx = brain_r.interaction_rx();
+          while let Some(tick) = rx.recv().await {
+              brain_r.reconsolidation_tick(tick).await.ok();
+          }
+      });
+
+      // Background task: forgetting engine (low priority, periodic)
+      let brain_f = brain.clone();
+      tokio::spawn(async move {
+          let mut interval = tokio::time::interval(Duration::from_secs(300));
+          loop {
+              interval.tick().await;
+              brain_f.forgetting_engine_pass().await.ok();
+          }
+      });
+
+      // Foreground: Unix socket server (concurrent JSON-RPC)
+      let listener = UnixListener::bind(&config.socket_path)?;
+      loop {
+          let (stream, _) = listener.accept().await?;
+          let brain_s = brain.clone();
+          tokio::spawn(async move {
+              handle_jsonrpc_connection(stream, brain_s).await.ok();
+          });
+      }
+  }
+
+  KEY DESIGN: brain: Arc<BrainStore> shared across ALL tasks.
+  SQLite WAL: multiple tasks reading/writing simultaneously — safe.
+  RwLock on engram graph: readers don't block each other.
+  Channels: foreground signals background (pressure notifications).
+```
+
+### 7.3 Vector Index: usearch
+
+```
+WHY usearch OVER ALTERNATIVES:
+
+  sqlite-vec (naive choice):
+    ✅ Embedded in SQLite — simple
+    ❌ Brute-force KNN — O(n×d) — unusable at 100k+
+    ❌ No HNSW
+    ❌ No quantization
+    ❌ No mmap
+    ❌ Benchmarks: 10k=10ms, 100k=100ms, 1M=1000ms → DEAD
+
+  Qdrant (popular vector DB):
+    ✅ Fast HNSW, good ecosystem
+    ❌ Requires separate server (Docker/binary)
+    ❌ HTTP overhead for every call
+    ❌ Not embeddable in process
+    ❌ Complex deployment for a CLI tool
+
+  Faiss (Facebook):
+    ✅ Extremely fast, battle-tested
+    ❌ C++ library — requires Python or CGo bridge
+    ❌ No native Rust bindings (unofficial only)
+    ❌ Not mmap-native
+
+  Annoy (Spotify):
+    ✅ Simple, mmap-based
+    ❌ Tree-based, not graph-based (lower accuracy)
+    ❌ Build time O(n log n) — slow for large stores
+    ❌ No quantization
+
+  usearch:
+    ✅ HNSW — O(log n) ANN search
+    ✅ int8 / float16 / float32 / binary quantization native
+    ✅ SIMD: AVX2, AVX-512, NEON auto-detection
+    ✅ mmap: disk-backed unlimited scale
+    ✅ Embeddable: library, not server
+    ✅ Native Rust API
+    ✅ Already used in smart-grep (proven in this ecosystem)
+    ✅ MIT license
+    ✅ Active development (Unum Cloud)
+    ✅ Multi-threaded search
+
+usearch CONFIGURATION:
+
+  Hot index (Tier 2):
+    index = Index::new(&IndexOptions {
+        dimensions: 384,
+        metric: MetricKind::Cos,       // cosine similarity
+        quantization: ScalarKind::F16, // float16
+        connectivity: 16,              // M parameter (edges per node)
+        expansion_add: 200,            // ef_construction (build quality)
+        expansion_search: 50,          // ef_search (query quality, adaptive)
+        multi: false,
+    })?;
+    // In-memory: ~75MB at 50k vectors
+    // Rebuilt from hot.db on daemon start
+
+  Cold index (Tier 3):
+    cold_index = Index::new(&IndexOptions {
+        dimensions: 384,
+        metric: MetricKind::Cos,
+        quantization: ScalarKind::I8,  // int8 — 4× smaller than f32
+        connectivity: 8,               // fewer connections — saves RAM for mmap
+        expansion_add: 200,
+        expansion_search: 50,
+        multi: false,
+    })?;
+    cold_index.save("~/.membrain/cold.usearch")?;  // persist to disk
+    // On startup: cold_index.load("~/.membrain/cold.usearch")?;
+    // mmap: OS manages page faulting, unlimited scale
+
+usearch API (key operations):
+
+  // Add
+  index.add(external_id: u64, vector: &[ScalarType])?;
+
+  // Search (returns Iterator<(external_id, distance)>)
+  let results = index.search(query_vector, top_k)?;
+
+  // Remove (marks deleted, does not compact)
+  index.remove(external_id)?;
+
+  // Capacity management
+  if index.size() > SOFT_LIMIT {
+      index.reserve(NEW_CAPACITY)?;
+  }
+
+  // Persistence
+  index.save(path)?;
+  index.load(path)?;  // or load_from_memory for mmap
+
+EXTERNAL ID STRATEGY:
+  usearch uses u64 as external ID.
+  membrain uses Uuid (128-bit).
+  Mapping: store Uuid → u64 in SQLite table (uuid_to_usearch).
+  Use: uuid.as_u64_pair().0 as primary key (first 64 bits).
+  Collision probability: negligible for <10M memories.
+```
+
+### 7.4 Embedding: fastembed-rs
+
+```
+WHY fastembed-rs:
+
+  Alternatives considered:
+    OpenAI text-embedding-3-small:
+      ✅ High quality
+      ❌ API call: ~100ms latency + $0.02/1M tokens cost
+      ❌ Requires internet + API key
+      ❌ Privacy: content sent to external server
+      ❌ Rate limits
+
+    sentence-transformers (Python):
+      ✅ Excellent quality, many models
+      ❌ Python subprocess: IPC overhead
+      ❌ Memory: ~200MB Python + model overhead
+      ❌ GIL for inference
+
+    candle (Hugging Face Rust):
+      ✅ Pure Rust, no Python
+      ❌ More complex: requires writing inference code
+      ❌ Less mature embedding support
+
+    fastembed-rs:
+      ✅ Local, offline — zero API calls
+      ✅ ONNX inference — optimized, cross-platform
+      ✅ Multiple model support
+      ✅ Batch mode: embed_batch() → 3-5× throughput
+      ✅ Already used in smart-grep (proven)
+      ✅ ~5ms per single embed, <1ms/item in batch
+      ✅ 80MB model download (once, cached)
+      ✅ MIT license
+
+WHY NOT AN LLM:
+  CRITICAL CLARIFICATION — all-MiniLM-L6-v2 is NOT an LLM.
+
+  all-MiniLM-L6-v2:
+    Type:   Embedding model (encoder-only transformer)
+    Size:   80MB (ONNX weights)
+    Output: 384-dimensional float vector
+    Speed:  ~5ms per text
+    Use:    Convert text → semantic vector (for similarity search)
+    Cost:   Zero (runs locally, no API)
+    Privacy: Zero data leaves machine
+
+  GPT-4 / Claude:
+    Type:   Large Language Model (decoder transformer)
+    Size:   Hundreds of GB
+    Output: Text tokens
+    Speed:  500ms-5s per response
+    Use:    Generate text, reason, answer questions
+    Cost:   $$$
+
+  membrain uses embedding model ONLY in the memory pipeline.
+  Zero LLM calls in encode/recall path.
+  This is the key performance advantage over Mem0/LangMem.
+
+MODEL CHOICES:
+
+  DEFAULT: all-MiniLM-L6-v2
+    Dimensions: 384
+    Model size: 80MB
+    Speed: ~5ms single, ~1ms/item batch
+    Quality: Good for semantic similarity tasks
+    Use: Default for all embeddings
+    Config: model = "all-MiniLM-L6-v2"
+
+  HIGH QUALITY: nomic-embed-text-v1.5
+    Dimensions: 768
+    Model size: 274MB
+    Speed: ~15ms single, ~3ms/item batch
+    Quality: Significantly better semantic understanding
+    Use: When quality matters more than speed
+    Config: model = "nomic-embed-text-v1.5"
+    Note: requires updating dimensions = 768 in config
+
+  MULTILINGUAL: paraphrase-multilingual-MiniLM-L12-v2
+    Dimensions: 384
+    Model size: 420MB
+    Speed: ~8ms single
+    Quality: Good for non-English content
+    Use: If agent works in multiple languages
+    Config: model = "paraphrase-multilingual-MiniLM-L12-v2"
+
+fastembed-rs API:
+
+  use fastembed::{TextEmbedding, InitOptions, EmbeddingModel};
+
+  // Initialize (once at startup)
+  let model = TextEmbedding::try_new(
+      InitOptions::new(EmbeddingModel::AllMiniLML6V2)
+          .with_show_download_progress(true)
+  )?;
+
+  // Single embed (~5ms)
+  let embeddings = model.embed(vec!["content here"], None)?;
+  let vec: Vec<f32> = embeddings[0].clone();
+
+  // Batch embed (3-5× faster than individual)
+  let texts = vec!["content 1", "content 2", ..., "content N"];
+  let batch_embeddings = model.embed(texts, Some(256))?; // batch_size=256
+  // Returns Vec<Vec<f32>>
+
+EMBEDDING CACHE IMPLEMENTATION:
+
+  pub struct EmbedCache {
+      cache: LruCache<u64, Arc<Vec<f32>>>,  // Arc for cheap cloning
+      model: TextEmbedding,
+      hits: AtomicU64,
+      misses: AtomicU64,
+  }
+
+  impl EmbedCache {
+      pub async fn get_or_embed(&mut self, text: &str) -> Result<Arc<Vec<f32>>> {
+          let key = xxhash64(text.as_bytes());
+
+          if let Some(cached) = self.cache.get(&key) {
+              self.hits.fetch_add(1, Ordering::Relaxed);
+              return Ok(Arc::clone(cached));
+          }
+
+          self.misses.fetch_add(1, Ordering::Relaxed);
+          let embeddings = self.model.embed(vec![text], None)?;
+          let vec = Arc::new(embeddings.into_iter().next().unwrap());
+          self.cache.put(key, Arc::clone(&vec));
+          Ok(vec)
+      }
+
+      pub fn hit_rate(&self) -> f32 {
+          let hits = self.hits.load(Ordering::Relaxed) as f32;
+          let total = hits + self.misses.load(Ordering::Relaxed) as f32;
+          if total == 0.0 { 0.0 } else { hits / total }
+      }
+  }
+```
+
+### 7.5 Graph: petgraph
+
+```
+WHY petgraph:
+
+  The engram graph is a directed weighted graph:
+    - Nodes: Uuid (memory IDs)
+    - Edges: EdgeWeight (similarity, type, activation count)
+    - Operations: add_node, add_edge, neighbors, BFS, DFS
+
+  Alternatives:
+    Custom adjacency list: would need to reimplement BFS, serialization, etc.
+    Neo4j: separate server, overkill, not embeddable.
+    DGraph: same issues.
+
+  petgraph:
+    ✅ Most mature Rust graph library
+    ✅ DiGraph, UnGraph, StableGraph variants
+    ✅ BFS, DFS built-in (petgraph::visit::Bfs, Dfs)
+    ✅ Serde support (feature = "serde-1")
+    ✅ Used in scope tool (this ecosystem)
+    ✅ Dijkstra, bellman-ford, tarjan for future use
+    ✅ MIT/Apache license
+
+GRAPH MODEL:
+
+  // DiGraph: directed (A→B does not imply B→A)
+  // But: we add edges in both directions for undirected behavior
+  type MemoryGraph = DiGraph<Uuid, EdgeWeight>;
+
+  pub struct EngramGraph {
+      graph: MemoryGraph,
+      node_index: HashMap<Uuid, NodeIndex>,    // Uuid → NodeIndex fast lookup
+      reverse_index: HashMap<NodeIndex, Uuid>, // NodeIndex → Uuid
+  }
+
+  impl EngramGraph {
+      pub fn add_memory(&mut self, id: Uuid) -> NodeIndex {
+          let ni = self.graph.add_node(id);
+          self.node_index.insert(id, ni);
+          self.reverse_index.insert(ni, id);
+          ni
+      }
+
+      pub fn link(&mut self, from: Uuid, to: Uuid, weight: EdgeWeight) {
+          let from_ni = self.node_index[&from];
+          let to_ni = self.node_index[&to];
+          // Bidirectional
+          self.graph.add_edge(from_ni, to_ni, weight.clone());
+          self.graph.add_edge(to_ni, from_ni, weight);
+      }
+
+      pub fn bfs_neighbors(
+          &self,
+          seed: Uuid,
+          max_depth: usize,
+          max_nodes: usize,
+          min_weight: f32,
+      ) -> Vec<Uuid> {
+          use petgraph::visit::{Bfs, Walker};
+
+          let seed_ni = match self.node_index.get(&seed) {
+              Some(ni) => *ni,
+              None => return vec![],
+          };
+
+          // Priority-aware BFS using BinaryHeap
+          let mut heap: BinaryHeap<(OrderedFloat<f32>, usize, NodeIndex)> = BinaryHeap::new();
+          let mut visited = HashSet::new();
+          let mut result = Vec::new();
+
+          heap.push((OrderedFloat(1.0f32), 0, seed_ni));
+          visited.insert(seed_ni);
+
+          while let Some((weight, depth, node)) = heap.pop() {
+              result.push(self.reverse_index[&node]);
+              if result.len() >= max_nodes { break; }
+              if depth >= max_depth { continue; }
+
+              for neighbor in self.graph.neighbors(node) {
+                  if visited.contains(&neighbor) { continue; }
+                  let edge = self.graph.find_edge(node, neighbor).unwrap();
+                  let ew = &self.graph[edge];
+                  if ew.similarity >= min_weight {
+                      visited.insert(neighbor);
+                      heap.push((OrderedFloat(ew.similarity), depth + 1, neighbor));
+                  }
+              }
+          }
+
+          result
+      }
+  }
+
+PERSISTENCE:
+  petgraph + serde → serialize entire graph to JSON/bincode.
+  Stored in hot.db as a BLOB (small overhead, easy backup).
+
+  // Serialize
+  let graph_bytes = bincode::serialize(&engram_graph)?;
+  db.execute("UPDATE brain_state SET engram_graph = ?", [&graph_bytes])?;
+
+  // Deserialize
+  let bytes: Vec<u8> = db.query_row(
+      "SELECT engram_graph FROM brain_state", [], |r| r.get(0)
+  )?;
+  let engram_graph: EngramGraph = bincode::deserialize(&bytes)?;
+
+  At 10k engrams × ~200 bytes each: ~2MB — tiny.
+```
+
+### 7.6 IPC: Unix Socket + JSON-RPC 2.0
+
+```
+WHY UNIX SOCKET:
+
+  Alternatives:
+    HTTP (TCP):
+      ✅ Universal, well-understood
+      ❌ TCP overhead: SYN/ACK roundtrip even on localhost
+      ❌ HTTP framing overhead: headers, encoding
+      ❌ ~1ms minimum latency even local
+      ❌ Requires port management
+
+    gRPC:
+      ✅ Efficient binary protocol, streaming
+      ❌ Complex: proto file, codegen, runtime
+      ❌ Overkill for local IPC
+
+    Unix Domain Sockets:
+      ✅ Zero-copy kernel-level IPC
+      ✅ Fastest possible local communication (~0.01ms)
+      ✅ File-permission based access control
+      ✅ No port conflicts
+      ✅ Standard on Linux/macOS/WSL
+      ✅ tokio::net::UnixListener native support
+
+  membrain uses: Unix Domain Socket + JSON-RPC 2.0
+
+WHY JSON-RPC 2.0:
+
+  Alternatives:
+    Custom binary protocol: fastest but no libraries, hard to debug.
+    MessagePack-RPC: binary, compact, but less tooling.
+    JSON-RPC 2.0:
+      ✅ Standard spec (https://www.jsonrpc.org/specification)
+      ✅ Libraries in every language (Python, Node, Rust)
+      ✅ Human-readable: easy to debug with cat/nc
+      ✅ Request/response + notification support
+      ✅ Error codes standardized
+      ✅ Batch requests supported
+
+JSON-RPC 2.0 WIRE FORMAT:
+
+  Request:
+  {
+    "jsonrpc": "2.0",
+    "id": 1,
+    "method": "remember",
+    "params": {
+      "content": "JWT tokens expire after 1 hour in this codebase",
+      "context": "debugging auth module",
+      "attention_score": 0.8,
+      "emotional_valence": -0.3,
+      "emotional_arousal": 0.5,
+      "kind": "Semantic",
+      "source": "mcp"
+    }
+  }
+
+  Response:
+  {
+    "jsonrpc": "2.0",
+    "id": 1,
+    "result": {
+      "id": "550e8400-e29b-41d4-a716-446655440000",
+      "initial_strength": 0.72,
+      "novelty_score": 0.85,
+      "engram_id": "7b1c3e42-...",
+      "tick": 1042
+    }
+  }
+
+  Error:
+  {
+    "jsonrpc": "2.0",
+    "id": 1,
+    "error": {
+      "code": -32603,
+      "message": "Internal error",
+      "data": "embedding model not loaded"
+    }
+  }
+
+PYTHON CLIENT (complete, 1 file):
+
+  # membrain_client.py
+  import socket, json, os
+
+  SOCKET_PATH = os.path.expanduser("~/.membrain/membrain.sock")
+
+  class MembrainClient:
+      def __init__(self, socket_path=SOCKET_PATH):
+          self.sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+          self.sock.connect(socket_path)
+          self._id = 0
+
+      def _call(self, method, **params):
+          self._id += 1
+          req = json.dumps({
+              "jsonrpc": "2.0",
+              "id": self._id,
+              "method": method,
+              "params": params
+          }) + "\n"
+          self.sock.sendall(req.encode())
+          resp = b""
+          while not resp.endswith(b"\n"):
+              resp += self.sock.recv(4096)
+          result = json.loads(resp)
+          if "error" in result:
+              raise RuntimeError(result["error"]["message"])
+          return result["result"]
+
+      def remember(self, content, context=None, attention=0.7,
+                   valence=0.0, arousal=0.0, kind="Episodic"):
+          return self._call("remember", content=content, context=context,
+                            attention_score=attention,
+                            emotional_valence=valence,
+                            emotional_arousal=arousal, kind=kind)
+
+      def recall(self, query, context=None, top_k=5):
+          return self._call("recall", content=query,
+                            context=context, top_k=top_k)
+
+      def forget(self, memory_id):
+          return self._call("forget", id=memory_id)
+
+      def strengthen(self, memory_id):
+          return self._call("strengthen", id=memory_id)
+
+      def stats(self):
+          return self._call("stats")
+
+      def close(self):
+          self.sock.close()
+
+  # Usage:
+  # brain = MembrainClient()
+  # brain.remember("auth token expires in 1h", context="debugging", valence=-0.2)
+  # results = brain.recall("JWT token")
+
+NODE CLIENT (complete, 1 file):
+
+  // membrain_client.js
+  const net = require('net');
+  const readline = require('readline');
+
+  class MembrainClient {
+    constructor(socketPath = `${process.env.HOME}/.membrain/membrain.sock`) {
+      this.sock = net.createConnection(socketPath);
+      this.pending = new Map();
+      this._id = 0;
+      const rl = readline.createInterface({ input: this.sock });
+      rl.on('line', line => {
+        const resp = JSON.parse(line);
+        const cb = this.pending.get(resp.id);
+        if (cb) {
+          this.pending.delete(resp.id);
+          if (resp.error) cb[1](new Error(resp.error.message));
+          else cb[0](resp.result);
+        }
+      });
+    }
+
+    _call(method, params) {
+      return new Promise((resolve, reject) => {
+        const id = ++this._id;
+        this.pending.set(id, [resolve, reject]);
+        const req = JSON.stringify({ jsonrpc: '2.0', id, method, params }) + '\n';
+        this.sock.write(req);
+      });
+    }
+
+    remember(content, context, attention = 0.7, valence = 0.0, arousal = 0.0) {
+      return this._call('remember', { content, context, attention_score: attention,
+        emotional_valence: valence, emotional_arousal: arousal });
+    }
+
+    recall(query, context, top_k = 5) {
+      return this._call('recall', { content: query, context, top_k });
+    }
+
+    stats() { return this._call('stats', {}); }
+
+    close() { this.sock.destroy(); }
+  }
+
+  module.exports = { MembrainClient };
+```
+
+### 7.7 MCP: rmcp
+
+```
+WHY MCP:
+  Model Context Protocol = standard interface for LLM tool use.
+  Claude Code, Cursor, and other AI coding tools support MCP.
+  membrain as MCP server → every Claude Code session has memory.
+
+WHY rmcp:
+  Official Rust MCP SDK from Anthropic.
+  stdio transport: Claude Code spawns membrain process, talks via stdin/stdout.
+  Zero network overhead: IPC via stdio pipes.
+
+MCP TOOLS DEFINITION:
+
+  Tool: remember
+    Description: Store a new memory in the brain
+    Input:
+      content:            string (required) — what to remember
+      context:            string (optional) — current context/task
+      attention_score:    float (optional, 0.0-1.0, default 0.7)
+      emotional_valence:  float (optional, -1.0 to 1.0, default 0.0)
+      emotional_arousal:  float (optional, 0.0-1.0, default 0.0)
+      kind:               string (optional: Episodic|Semantic|Procedural, default Episodic)
+    Output:
+      id:               string (UUID of new memory)
+      initial_strength: float
+      novelty_score:    float
+      engram_id:        string | null
+
+  Tool: recall
+    Description: Retrieve memories relevant to a query
+    Input:
+      query:    string (required) — what to search for
+      context:  string (optional) — current context for better matching
+      top_k:    integer (optional, default 5)
+      kind:     string (optional) — filter by memory kind
+    Output:
+      memories: array of:
+        id:               string
+        content:          string
+        score:            float
+        strength:         float
+        kind:             string
+        access_count:     integer
+        decaying_soon:    boolean
+        engram_id:        string | null
+
+  Tool: forget
+    Description: Archive (soft-delete) a specific memory
+    Input:
+      id: string (UUID)
+    Output:
+      archived: boolean
+
+  Tool: strengthen
+    Description: Manually apply LTP to a specific memory (simulate recall)
+    Input:
+      id: string (UUID)
+    Output:
+      new_strength: float
+      new_stability: float
+
+  Tool: stats
+    Description: Get brain health statistics
+    Input: none
+    Output:
+      hot_count:            integer
+      cold_count:           integer
+      total_count:          integer
+      avg_strength:         float
+      tier1_hit_rate:       float
+      embed_cache_hit_rate: float
+      n_engrams:            integer
+      interaction_tick:     integer
+      last_consolidation:   integer | null
+      decaying_count:       integer
+
+  Tool: consolidate
+    Description: Manually trigger consolidation cycle (NREM+REM+Homeostasis)
+    Input: none
+    Output:
+      migrated:    integer
+      archived:    integer
+      duration_ms: integer
+
+  Tool: prime
+    Description: Prime working memory with context (spotlight mode)
+    Input:
+      context: string (required) — task description to prime for
+      duration: integer (optional, default 1000 interactions)
+    Output:
+      primed_count:  integer (memories pre-loaded into Tier1)
+      expires_tick:  integer
+
+  Tool: remind
+    Description: Set a prospective memory trigger
+    Input:
+      when:      string (required) — context description to trigger on
+      content:   string (required) — memory content to surface when triggered
+      max_fires: integer (optional) — how many times to fire
+    Output:
+      trigger_id: string
+
+MCP SERVER IMPLEMENTATION (rmcp):
+
+  use rmcp::{ServerHandler, tool, McpServer};
+
+  struct MembrainMcpHandler {
+      brain: Arc<BrainStore>,
+  }
+
+  #[rmcp::tool_handler]
+  impl MembrainMcpHandler {
+      #[tool(description = "Store a new memory in the brain")]
+      async fn remember(
+          &self,
+          content: String,
+          context: Option<String>,
+          attention_score: Option<f32>,
+          emotional_valence: Option<f32>,
+          emotional_arousal: Option<f32>,
+          kind: Option<String>,
+      ) -> Result<RememberResult> {
+          let now_tick = self.brain.tick();
+          let result = self.brain.encode(EncodeRequest {
+              content,
+              context: context.unwrap_or_default(),
+              attention_score: attention_score.unwrap_or(0.7),
+              emotional_tag: EmotionalTag {
+                  valence: emotional_valence.unwrap_or(0.0),
+                  arousal: emotional_arousal.unwrap_or(0.0),
+              },
+              kind: kind.and_then(|k| k.parse().ok()).unwrap_or(MemoryKind::Episodic),
+              source: MemorySource::Mcp,
+          }, now_tick).await?;
+          Ok(result.into())
+      }
+
+      #[tool(description = "Retrieve memories relevant to a query")]
+      async fn recall(
+          &self,
+          query: String,
+          context: Option<String>,
+          top_k: Option<usize>,
+      ) -> Result<RecallMcpResult> {
+          let now_tick = self.brain.tick();
+          let result = self.brain.recall(RecallQuery {
+              content: query,
+              context,
+              top_k: top_k.unwrap_or(5),
+              confidence_requirement: ConfidenceLevel::Normal,
+              min_strength: MIN_STRENGTH,
+              include_decaying: true,
+          }, now_tick).await?;
+          Ok(result.into())
+      }
+  }
+
+  // In main: spawn MCP stdio server
+  pub async fn run_mcp(config: Config) -> Result<()> {
+      let brain = Arc::new(BrainStore::open(&config).await?);
+      let handler = MembrainMcpHandler { brain };
+      McpServer::new()
+          .with_name("membrain")
+          .with_version(env!("CARGO_PKG_VERSION"))
+          .serve_stdio(handler)
+          .await
+  }
+```
+
+### 7.8 Complete Dependency List
+
+```toml
+[workspace]
+resolver = "2"
+members = [
+    "crates/membrain-core",
+    "crates/membrain-cli",
+]
+
+# ──────────────────────────────────────────────────────────────────
+# membrain-core: all brain logic, no CLI concerns
+# ──────────────────────────────────────────────────────────────────
+[package]
+name = "membrain-core"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+# Storage — SQLite with WAL
+rusqlite = { version = "0.31", features = ["bundled"] }
+# bundled: statically links SQLite — no system SQLite dependency
+
+# Vector index — HNSW, int8/float16, SIMD, mmap
+usearch = "2"
+# Compile with RUSTFLAGS="-C target-cpu=native" for AVX2/AVX-512
+
+# Embedding — local ONNX inference
+fastembed = "3"
+
+# Graph — engram network
+petgraph = { version = "0.6", features = ["serde-1"] }
+
+# Async runtime
+tokio = { version = "1", features = ["full"] }
+
+# Caching
+lru = "0.12"
+
+# Hashing (embedding cache key)
+xxhash-rust = { version = "0.8", features = ["xxh64"] }
+
+# Serialization
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+bincode = "1"  # for petgraph serialization
+
+# UUIDs
+uuid = { version = "1", features = ["v4", "serde"] }
+
+# Compression (content in cold tier)
+zstd = "0.13"
+
+# Error handling
+thiserror = "1"
+anyhow = "1"
+
+# Float comparison utilities (for priority queues)
+ordered-float = "4"
+
+# Atomic reference counting (shared brain state)
+# (std::sync::Arc — no extra crate needed)
+
+# float16 support
+half = { version = "2", features = ["bytemuck"] }
+
+# Safe casting for vector byte operations
+bytemuck = { version = "1", features = ["derive"] }
+
+[dev-dependencies]
+tempfile = "3"       # temporary DB files for tests
+criterion = "0.5"   # benchmarks
+proptest = "1"       # property-based testing
+
+# ──────────────────────────────────────────────────────────────────
+# membrain-cli: CLI + daemon + MCP
+# ──────────────────────────────────────────────────────────────────
+[package]
+name = "membrain-cli"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+membrain-core = { path = "../membrain-core" }
+
+# CLI parsing
+clap = { version = "4", features = ["derive", "color", "suggestions"] }
+
+# MCP server (stdio transport for Claude Code / Cursor)
+rmcp = { version = "0.1", features = ["server", "transport-stdio"] }
+
+# Async runtime (same as core)
+tokio = { version = "1", features = ["full"] }
+
+# Unix socket IPC
+# (tokio::net::UnixListener — included in tokio)
+
+# Config file
+toml = "0.8"
+dirs = "5"  # platform-appropriate config directory (~/.membrain)
+
+# Serialization for IPC
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+
+# Terminal output
+colored = "2"
+indicatif = "0.17"   # progress bars for consolidation
+
+# Error handling
+anyhow = "1"
+
+# ──────────────────────────────────────────────────────────────────
+# Build profile
+# ──────────────────────────────────────────────────────────────────
+[profile.release]
+opt-level     = 3          # maximum optimization
+lto           = true       # link-time optimization (smaller binary, faster)
+codegen-units = 1          # single codegen unit (enables more optimization)
+panic         = "abort"    # no unwinding (smaller, faster)
+strip         = "symbols"  # strip debug symbols from release binary
+
+# Build command for maximum performance:
+# RUSTFLAGS="-C target-cpu=native" cargo build --release
+# This enables: AVX2/AVX-512 (usearch SIMD), native cache line sizes
+
+# ──────────────────────────────────────────────────────────────────
+# Techstack comparison table
+# ──────────────────────────────────────────────────────────────────
+# COMPONENT          BEFORE         AFTER           IMPROVEMENT
+# ──────────────────────────────────────────────────────────────────
+# Vector index       sqlite-vec     usearch HNSW    100-1000× faster
+#                    O(n×d) BF      O(log n) ANN    at 1M memories
+# Quantization       float32 only   f16 hot / i8    2-4× faster search
+#                                   cold + f32       4× less storage
+#                                   rescore
+# Decay              eager O(n)     lazy O(1)       ∞ at idle
+#                    iteration      on demand        0ms overhead
+# Embedding          per-call       LruCache +       0ms cache hit
+#                    every time     batch mode       3-5× batch speed
+# Search space       full scan      SQL pre-filter   200× reduction
+#                                   LIMIT 5000       before HNSW
+# Fast path          none           LruCache Tier1   <0.1ms hit
+# Cold storage       sqlite-vec     usearch mmap     unlimited scale
+#                    RAM-bounded    disk-bounded      OS page cache
+# Content compress   none           zstd level 3     3-4× smaller
+```
+
+---
+
+## 8. Data Schema — Full SQL + Rust Structs
+
+### 8.1 hot.db Schema
+
+```sql
+-- ═══════════════════════════════════════════════════════════════════
+-- hot.db — SQLite WAL, primary brain store
+-- Equivalent to hippocampal index + recent episodic memories
+-- ═══════════════════════════════════════════════════════════════════
+
+PRAGMA journal_mode = WAL;
+PRAGMA synchronous = NORMAL;
+PRAGMA cache_size = -131072;   -- 128MB page cache
+PRAGMA mmap_size = 4294967296; -- 4GB mmap
+PRAGMA temp_store = MEMORY;
+PRAGMA foreign_keys = ON;
+PRAGMA optimize;
+
+-- ───────────────────────────────────────────────────────────────────
+-- memory_index: hot-path columns only
+-- Designed for fast pre-filter scans (narrow rows = more rows per page)
+-- ───────────────────────────────────────────────────────────────────
+CREATE TABLE IF NOT EXISTS memory_index (
+    -- Identity
+    id                  BLOB NOT NULL PRIMARY KEY,  -- UUID (16 bytes)
+    usearch_id          INTEGER NOT NULL UNIQUE,     -- u64 for usearch
+
+    -- Lazy decay parameters (ALL needed for effective_strength() in SQL)
+    base_strength       REAL NOT NULL DEFAULT 0.5,  -- current base (resets on recall)
+    stability           REAL NOT NULL DEFAULT 50.0, -- Ebbinghaus S parameter
+    last_accessed_tick  INTEGER NOT NULL,            -- decay clock reference point
+    bypass_decay        INTEGER NOT NULL DEFAULT 0, -- 0=normal, 1=emotional bypass
+
+    -- Classification
+    kind                INTEGER NOT NULL DEFAULT 0,
+    -- 0=Episodic, 1=Semantic, 2=Procedural, 3=Emotional
+
+    -- State machine
+    state               INTEGER NOT NULL DEFAULT 0,
+    -- 0=Labile, 1=Stable, 2=Consolidated, 3=Archived
+
+    -- Labile window tracking (for reconsolidation)
+    labile_since_tick   INTEGER,                    -- NULL when Stable
+    labile_window       INTEGER,                    -- NULL when Stable
+
+    -- Access tracking (for predictive pruning + consolidation scoring)
+    access_count        INTEGER NOT NULL DEFAULT 0,
+    created_tick        INTEGER NOT NULL,
+
+    -- Associative structure
+    engram_id           BLOB,                       -- UUID, NULL if no engram yet
+
+    -- Interference tracking
+    retrieval_difficulty REAL NOT NULL DEFAULT 0.0, -- increased by proactive interference
+
+    -- Emotional dimensions (for pre-filter and bypass_decay computation)
+    emotional_valence   REAL NOT NULL DEFAULT 0.0,  -- -1.0 to 1.0
+    emotional_arousal   REAL NOT NULL DEFAULT 0.0,  -- 0.0 to 1.0
+    emotional_processed INTEGER NOT NULL DEFAULT 0, -- 0=unprocessed, 1=REM-processed
+
+    -- Source tracking
+    source              INTEGER NOT NULL DEFAULT 0,
+    -- 0=CLI, 1=MCP, 2=RustEmbed, 3=Working memory eviction
+
+    -- Reconsolidation tracking
+    last_reconsolidated_tick INTEGER,               -- NULL if never reconsolidated
+    pending_update_tick      INTEGER,               -- tick when update was submitted
+    reconsolidation_bonus    REAL NOT NULL DEFAULT 0.0 -- accumulated bonus strength
+) STRICT;
+
+-- Indexes for pre-filter performance
+CREATE INDEX IF NOT EXISTS idx_memory_prefilter
+    ON memory_index(state, bypass_decay, base_strength DESC);
+
+CREATE INDEX IF NOT EXISTS idx_memory_kind
+    ON memory_index(kind, state);
+
+CREATE INDEX IF NOT EXISTS idx_memory_engram
+    ON memory_index(engram_id) WHERE engram_id IS NOT NULL;
+
+CREATE INDEX IF NOT EXISTS idx_memory_labile
+    ON memory_index(state, labile_since_tick)
+    WHERE state = 0;  -- Labile only
+
+CREATE INDEX IF NOT EXISTS idx_memory_emotional
+    ON memory_index(bypass_decay, emotional_processed)
+    WHERE bypass_decay = 1;
+
+CREATE INDEX IF NOT EXISTS idx_memory_predictive_prune
+    ON memory_index(access_count, created_tick, state)
+    WHERE bypass_decay = 0 AND state NOT IN (2, 3);
+
+-- ───────────────────────────────────────────────────────────────────
+-- memory_content: actual text (fetched only for final top-K results)
+-- Separate table = pre-filter scans don't touch content bytes
+-- ───────────────────────────────────────────────────────────────────
+CREATE TABLE IF NOT EXISTS memory_content (
+    id      BLOB NOT NULL PRIMARY KEY REFERENCES memory_index(id),
+    content TEXT NOT NULL,  -- original text content (uncompressed in hot tier)
+
+    -- Context stored as text (embedding stored in memory_vectors)
+    context TEXT NOT NULL DEFAULT ''
+) STRICT;
+
+-- ───────────────────────────────────────────────────────────────────
+-- memory_vectors: float32 embeddings for rescore
+-- Fetched only for top-20 candidates during rescore phase
+-- ───────────────────────────────────────────────────────────────────
+CREATE TABLE IF NOT EXISTS memory_vectors (
+    id                  BLOB NOT NULL PRIMARY KEY REFERENCES memory_index(id),
+    embedding_f32       BLOB NOT NULL,  -- Vec<f32> as raw bytes (384 × 4 = 1536 bytes)
+    context_embedding   BLOB NOT NULL,  -- context vector (384 × 4 = 1536 bytes)
+    embedding_norm      REAL NOT NULL   -- pre-computed L2 norm (for fast cosine)
+) STRICT;
+
+-- ───────────────────────────────────────────────────────────────────
+-- engrams: cluster metadata
+-- ───────────────────────────────────────────────────────────────────
+CREATE TABLE IF NOT EXISTS engrams (
+    id                  BLOB NOT NULL PRIMARY KEY,  -- UUID
+    usearch_id          INTEGER NOT NULL UNIQUE,    -- for centroid HNSW index
+    centroid            BLOB NOT NULL,              -- Vec<f32> centroid vector
+    member_count        INTEGER NOT NULL DEFAULT 1,
+    total_strength      REAL NOT NULL DEFAULT 0.0,  -- sum of effective strengths
+    created_tick        INTEGER NOT NULL,
+    last_activated_tick INTEGER NOT NULL,
+    parent_engram_id    BLOB,                       -- NULL for root engrams
+    split_tick          INTEGER                     -- NULL if never split
+) STRICT;
+
+CREATE INDEX IF NOT EXISTS idx_engrams_parent
+    ON engrams(parent_engram_id) WHERE parent_engram_id IS NOT NULL;
+
+-- ───────────────────────────────────────────────────────────────────
+-- engram_edges: persistent graph edges (petgraph in-memory is primary)
+-- This table allows graph reconstruction after restart
+-- ───────────────────────────────────────────────────────────────────
+CREATE TABLE IF NOT EXISTS engram_edges (
+    from_id          BLOB NOT NULL REFERENCES memory_index(id),
+    to_id            BLOB NOT NULL REFERENCES memory_index(id),
+    similarity       REAL NOT NULL,
+    edge_type        INTEGER NOT NULL DEFAULT 0,
+    -- 0=Associative, 1=Causal, 2=Contradictory, 3=Temporal
+    created_tick     INTEGER NOT NULL,
+    activation_count INTEGER NOT NULL DEFAULT 0,  -- traversal count
+    PRIMARY KEY (from_id, to_id)
+) STRICT;
+
+CREATE INDEX IF NOT EXISTS idx_engram_edges_from
+    ON engram_edges(from_id, similarity DESC);
+
+CREATE INDEX IF NOT EXISTS idx_engram_edges_to
+    ON engram_edges(to_id, similarity DESC);
+
+-- ───────────────────────────────────────────────────────────────────
+-- prospective_triggers: future-triggered recall
+-- ───────────────────────────────────────────────────────────────────
+CREATE TABLE IF NOT EXISTS prospective_triggers (
+    id                   BLOB NOT NULL PRIMARY KEY,
+    trigger_context_text TEXT NOT NULL,      -- original trigger description
+    trigger_embedding    BLOB NOT NULL,      -- Vec<f32> (384 × 4 bytes)
+    memory_id            BLOB NOT NULL REFERENCES memory_index(id),
+    trigger_threshold    REAL NOT NULL DEFAULT 0.8,
+    fire_count           INTEGER NOT NULL DEFAULT 0,
+    max_fires            INTEGER,            -- NULL = unlimited
+    created_tick         INTEGER NOT NULL,
+    expires_tick         INTEGER             -- NULL = never expires
+) STRICT;
+
+-- ───────────────────────────────────────────────────────────────────
+-- primed_contexts: active spotlight/priming sessions
+-- ───────────────────────────────────────────────────────────────────
+CREATE TABLE IF NOT EXISTS primed_contexts (
+    id                   BLOB NOT NULL PRIMARY KEY,
+    context_text         TEXT NOT NULL,
+    context_embedding    BLOB NOT NULL,   -- Vec<f32>
+    boost_factor         REAL NOT NULL DEFAULT 0.3,
+    created_tick         INTEGER NOT NULL,
+    expiry_tick          INTEGER NOT NULL
+) STRICT;
+
+-- ───────────────────────────────────────────────────────────────────
+-- brain_state: singleton row, global brain metadata
+-- ───────────────────────────────────────────────────────────────────
+CREATE TABLE IF NOT EXISTS brain_state (
+    id                        INTEGER NOT NULL PRIMARY KEY DEFAULT 1,
+    interaction_tick          INTEGER NOT NULL DEFAULT 0,
+    last_consolidation_tick   INTEGER,
+    last_forgetting_tick      INTEGER,
+    total_encoded             INTEGER NOT NULL DEFAULT 0,
+    total_recalled            INTEGER NOT NULL DEFAULT 0,
+    total_archived            INTEGER NOT NULL DEFAULT 0,
+    hot_count                 INTEGER NOT NULL DEFAULT 0,  -- cached count
+    config_hash               TEXT,                        -- detect config changes
+    schema_version            INTEGER NOT NULL DEFAULT 1,
+    created_at                TEXT NOT NULL DEFAULT (datetime('now')),
+    CHECK (id = 1)  -- only one row
+) STRICT;
+
+INSERT OR IGNORE INTO brain_state (id) VALUES (1);
+
+-- ───────────────────────────────────────────────────────────────────
+-- uuid_usearch_map: Uuid ↔ u64 mapping for usearch external IDs
+-- ───────────────────────────────────────────────────────────────────
+CREATE TABLE IF NOT EXISTS uuid_usearch_map (
+    uuid_bytes  BLOB NOT NULL PRIMARY KEY,  -- 16 bytes UUID
+    usearch_id  INTEGER NOT NULL UNIQUE     -- u64 (first 64 bits of UUID)
+) STRICT;
+
+-- ───────────────────────────────────────────────────────────────────
+-- working_memory: persistent working memory state
+-- ───────────────────────────────────────────────────────────────────
+CREATE TABLE IF NOT EXISTS working_memory (
+    slot_index        INTEGER NOT NULL PRIMARY KEY,  -- 0 to 6
+    memory_id         BLOB REFERENCES memory_index(id),
+    attention_weight  REAL NOT NULL DEFAULT 0.0,
+    added_tick        INTEGER NOT NULL DEFAULT 0,
+    source            INTEGER NOT NULL DEFAULT 0     -- WorkingMemorySource enum
+) STRICT;
+
+-- Initialize 7 slots
+INSERT OR IGNORE INTO working_memory (slot_index, added_tick)
+    VALUES (0,0),(1,0),(2,0),(3,0),(4,0),(5,0),(6,0);
+```
+
+### 8.2 cold.db Schema
+
+```sql
+-- ═══════════════════════════════════════════════════════════════════
+-- cold.db — SQLite WAL, consolidated semantic memory
+-- Equivalent to neocortical long-term storage
+-- ═══════════════════════════════════════════════════════════════════
+
+PRAGMA journal_mode = WAL;
+PRAGMA synchronous = OFF;     -- cold DB: writes rare, durability less critical
+PRAGMA cache_size = -32768;   -- 32MB (less than hot — accessed less often)
+PRAGMA mmap_size = 17179869184; -- 16GB mmap (cold DB can be huge)
+PRAGMA temp_store = MEMORY;
+
+-- ───────────────────────────────────────────────────────────────────
+-- cold_memories: consolidated semantic memories
+-- All content is zstd-compressed (3-4× size reduction)
+-- ───────────────────────────────────────────────────────────────────
+CREATE TABLE IF NOT EXISTS cold_memories (
+    id                  BLOB NOT NULL PRIMARY KEY,  -- UUID (same as hot_store id)
+    usearch_id          INTEGER NOT NULL UNIQUE,    -- for cold HNSW index
+
+    -- Compressed content
+    content_compressed  BLOB NOT NULL,  -- zstd::encode(content, level=3)
+    context_compressed  BLOB NOT NULL,  -- zstd::encode(context, level=3)
+
+    -- Float32 vectors (ground truth for rescore — not compressed)
+    embedding_f32       BLOB NOT NULL,  -- 384 × 4 = 1536 bytes
+    context_embedding   BLOB NOT NULL,  -- 384 × 4 = 1536 bytes
+    embedding_norm      REAL NOT NULL,  -- pre-computed for fast cosine
+
+    -- Preserved metadata from hot tier
+    base_strength       REAL NOT NULL,
+    stability           REAL NOT NULL,
+    kind                INTEGER NOT NULL,
+    emotional_valence   REAL NOT NULL DEFAULT 0.0,
+    emotional_arousal   REAL NOT NULL DEFAULT 0.0,
+    access_count        INTEGER NOT NULL DEFAULT 0,
+    source              INTEGER NOT NULL DEFAULT 0,
+    engram_id           BLOB,
+
+    -- Timestamps
+    created_tick        INTEGER NOT NULL,   -- when originally encoded
+    consolidated_tick   INTEGER NOT NULL,   -- when migrated to cold
+    last_accessed_tick  INTEGER NOT NULL    -- updated on cold recall
+) STRICT;
+
+CREATE INDEX IF NOT EXISTS idx_cold_engram
+    ON cold_memories(engram_id) WHERE engram_id IS NOT NULL;
+
+CREATE INDEX IF NOT EXISTS idx_cold_kind
+    ON cold_memories(kind);
+
+CREATE INDEX IF NOT EXISTS idx_cold_strength
+    ON cold_memories(base_strength DESC);
+
+-- ───────────────────────────────────────────────────────────────────
+-- archive: soft-deleted memories (never hard-deleted)
+-- Recovered via: membrain archive restore <id>
+-- ───────────────────────────────────────────────────────────────────
+CREATE TABLE IF NOT EXISTS archive (
+    id                  BLOB NOT NULL PRIMARY KEY,
+    content_compressed  BLOB NOT NULL,
+    base_strength_at_archive REAL NOT NULL,
+    archived_tick       INTEGER NOT NULL,
+    archive_reason      INTEGER NOT NULL,
+    -- 0=Decay, 1=Homeostasis, 2=PredictivePrune, 3=CapacityLimit, 4=Manual
+    original_created_tick INTEGER NOT NULL,
+    original_kind       INTEGER NOT NULL
+) STRICT;
+```
+
+### 8.3 procedural.db Schema
+
+```sql
+-- ═══════════════════════════════════════════════════════════════════
+-- procedural.db — Habit and skill storage
+-- No decay, no HNSW, O(1) lookup by pattern hash
+-- ═══════════════════════════════════════════════════════════════════
+
+PRAGMA journal_mode = WAL;
+PRAGMA synchronous = NORMAL;
+
+CREATE TABLE IF NOT EXISTS procedural_memories (
+    id              BLOB NOT NULL PRIMARY KEY,  -- UUID
+    pattern_hash    BLOB NOT NULL UNIQUE,       -- xxhash128(pattern)
+    pattern         TEXT NOT NULL,              -- trigger pattern description
+    action          TEXT NOT NULL,              -- what to do when pattern matches
+    pattern_embedding BLOB NOT NULL,            -- Vec<f32> for fuzzy matching
+    fire_count      INTEGER NOT NULL DEFAULT 0,
+    created_tick    INTEGER NOT NULL,
+    last_fired_tick INTEGER,
+    confidence      REAL NOT NULL DEFAULT 1.0  -- 0.0 to 1.0
+) STRICT;
+
+CREATE INDEX IF NOT EXISTS idx_procedural_hash
+    ON procedural_memories(pattern_hash);
+
+-- Procedural HNSW index: separate small usearch index for fuzzy pattern matching
+-- (~1k entries max — procedural memories are few and highly stable)
+```
+
+### 8.4 Rust Structs
+
+```rust
+// ═══════════════════════════════════════════════════════════════════
+// Core Memory Types
+// ═══════════════════════════════════════════════════════════════════
+
+use uuid::Uuid;
+use serde::{Serialize, Deserialize};
+
+// ─── Memory Kind ──────────────────────────────────────────────────
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[repr(u8)]
+pub enum MemoryKind {
+    Episodic    = 0,  // Specific events with temporal/contextual tags
+    Semantic    = 1,  // General knowledge, facts, concepts
+    Procedural  = 2,  // Habits, patterns → actions (in procedural_store)
+    Emotional   = 3,  // High-salience emotional memories
+}
+
+impl std::str::FromStr for MemoryKind {
+    type Err = anyhow::Error;
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        match s.to_lowercase().as_str() {
+            "episodic"   => Ok(MemoryKind::Episodic),
+            "semantic"   => Ok(MemoryKind::Semantic),
+            "procedural" => Ok(MemoryKind::Procedural),
+            "emotional"  => Ok(MemoryKind::Emotional),
+            _ => Err(anyhow::anyhow!("Unknown MemoryKind: {}", s)),
+        }
+    }
+}
+
+// ─── Memory State ─────────────────────────────────────────────────
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[repr(u8)]
+pub enum MemoryState {
+    Labile {
+        since_tick:   u64,
+        window_ticks: u64,
+    },
+    Stable       = 1,
+    Consolidated = 2,  // migrated to cold_store
+    Archived     = 3,  // below MIN_STRENGTH, soft-deleted
+}
+
+// ─── Emotional Tag ────────────────────────────────────────────────
+#[derive(Debug, Clone, Copy, Default, Serialize, Deserialize)]
+pub struct EmotionalTag {
+    pub valence: f32,  // -1.0 (negative) to 1.0 (positive)
+    pub arousal: f32,  // 0.0 (calm) to 1.0 (highly excited)
+}
+
+impl EmotionalTag {
+    pub fn strength_multiplier(&self) -> f32 {
+        let intensity = self.arousal * self.valence.abs();
+        1.0 + (intensity * EMOTIONAL_WEIGHT)
+    }
+
+    pub fn should_bypass_decay(&self) -> bool {
+        self.arousal > AROUSAL_THRESHOLD && self.valence.abs() > VALENCE_THRESHOLD
+    }
+
+    pub fn is_neutral(&self) -> bool {
+        self.arousal < 0.1 && self.valence.abs() < 0.1
+    }
+}
+
+// ─── Memory Source ────────────────────────────────────────────────
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[repr(u8)]
+pub enum MemorySource {
+    Cli         = 0,
+    Mcp         = 1,
+    RustEmbed   = 2,  // Rust code embedding directly via membrain-core API
+    WmEviction  = 3,  // Evicted from working memory
+    Consolidate = 4,  // Created during consolidation (auto-abstraction)
+}
+
+// ─── Archive Reason ───────────────────────────────────────────────
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[repr(u8)]
+pub enum ArchiveReason {
+    Decay           = 0,
+    Homeostasis     = 1,
+    PredictivePrune = 2,
+    CapacityLimit   = 3,
+    Manual          = 4,
+}
+
+// ─── Edge Type ────────────────────────────────────────────────────
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[repr(u8)]
+pub enum EdgeType {
+    Associative  = 0,  // semantic similarity
+    Causal       = 1,  // A preceded B in same session, semantically related
+    Contradictory = 2, // high semantic similarity but conflicting content
+    Temporal     = 3,  // simple temporal precedence
+}
+
+// ─── Edge Weight ─────────────────────────────────────────────────
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct EdgeWeight {
+    pub similarity:       f32,
+    pub edge_type:        EdgeType,
+    pub created_tick:     u64,
+    pub activation_count: u32,
+}
+
+// ─── Memory Index (hot-path struct, matches memory_index table) ────
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct MemoryIndex {
+    pub id:                      Uuid,
+    pub usearch_id:              u64,
+    pub base_strength:           f32,
+    pub stability:               f32,
+    pub last_accessed_tick:      u64,
+    pub bypass_decay:            bool,
+    pub kind:                    MemoryKind,
+    pub state:                   MemoryState,
+    pub access_count:            u32,
+    pub created_tick:            u64,
+    pub engram_id:               Option<Uuid>,
+    pub retrieval_difficulty:    f32,
+    pub emotional_valence:       f32,
+    pub emotional_arousal:       f32,
+    pub emotional_processed:     bool,
+    pub source:                  MemorySource,
+    pub last_reconsolidated_tick: Option<u64>,
+}
+
+impl MemoryIndex {
+    /// Lazy Ebbinghaus — O(1), no DB write
+    #[inline]
+    pub fn effective_strength(&self, now_tick: u64) -> f32 {
+        if self.bypass_decay {
+            return self.base_strength;
+        }
+        let elapsed = now_tick.saturating_sub(self.last_accessed_tick) as f32;
+        let retention = (-elapsed / self.stability).exp();
+        (self.base_strength * retention).max(0.0)
+    }
+
+    pub fn is_decaying_soon(&self, now_tick: u64) -> bool {
+        !self.bypass_decay
+            && self.effective_strength(now_tick) < (MIN_STRENGTH * 2.0)
+    }
+
+    pub fn age_ticks(&self, now_tick: u64) -> u64 {
+        now_tick.saturating_sub(self.created_tick)
+    }
+
+    pub fn emotional_tag(&self) -> EmotionalTag {
+        EmotionalTag {
+            valence: self.emotional_valence,
+            arousal: self.emotional_arousal,
+        }
+    }
+}
+
+// ─── Full Memory Record (index + content + vectors) ───────────────
+#[derive(Debug, Clone)]
+pub struct MemoryRecord {
+    pub index:            MemoryIndex,
+    pub content:          String,
+    pub context:          String,
+    pub embedding_f32:    Vec<f32>,
+    pub context_embedding: Vec<f32>,
+}
+
+// ─── Scored Memory (recall result) ────────────────────────────────
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ScoredMemory {
+    pub id:               Uuid,
+    pub content:          String,
+    pub context:          String,
+    pub score:            f32,
+    pub effective_strength: f32,
+    pub kind:             MemoryKind,
+    pub emotional_tag:    EmotionalTag,
+    pub access_count:     u32,
+    pub created_tick:     u64,
+    pub engram_id:        Option<Uuid>,
+    pub decaying_soon:    bool,
+    pub tier_found:       RetrievalTier,
+}
+
+// ─── Memory Fragment (tip-of-tongue partial recall) ───────────────
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct MemoryFragment {
+    pub partial_content: String,   // first N chars or summarized
+    pub confidence:      f32,      // how confident we are
+    pub kind_hint:       MemoryKind,
+    pub engram_id:       Option<Uuid>,
+}
+
+// ─── Recall Result ────────────────────────────────────────────────
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct RecallResult {
+    pub memories:       Vec<ScoredMemory>,
+    pub tier_used:      RetrievalTier,
+    pub engram_expanded: bool,
+    pub tip_of_tongue:  Option<Vec<MemoryFragment>>,
+    pub latency_us:     u64,
+    pub total_searched: usize,  // how many candidates were evaluated
+}
+
+// ─── Retrieval Tier ───────────────────────────────────────────────
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum RetrievalTier {
+    Tier1,  // LruCache hit
+    Tier2,  // HNSW hot index
+    Tier3,  // HNSW cold mmap index
+}
+
+// ─── Encode Request ───────────────────────────────────────────────
+#[derive(Debug, Clone)]
+pub struct EncodeRequest {
+    pub content:          String,
+    pub context:          String,
+    pub attention_score:  f32,
+    pub emotional_tag:    EmotionalTag,
+    pub kind:             MemoryKind,
+    pub source:           MemorySource,
+}
+
+// ─── Encode Result ────────────────────────────────────────────────
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct EncodeResult {
+    pub id:               Uuid,
+    pub initial_strength: f32,
+    pub novelty_score:    f32,
+    pub engram_id:        Option<Uuid>,
+    pub tick:             u64,
+    pub was_duplicate:    bool,  // true if very similar to existing → updated existing
+}
+
+// ─── Engram ───────────────────────────────────────────────────────
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct Engram {
+    pub id:                  Uuid,
+    pub usearch_id:          u64,
+    pub centroid:            Vec<f32>,
+    pub member_count:        usize,
+    pub total_strength:      f32,
+    pub created_tick:        u64,
+    pub last_activated_tick: u64,
+    pub parent_engram_id:    Option<Uuid>,
+}
+
+// ─── Brain Stats ──────────────────────────────────────────────────
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct BrainStats {
+    pub hot_count:             usize,
+    pub cold_count:            usize,
+    pub archive_count:         usize,
+    pub total_count:           usize,
+    pub avg_hot_strength:      f32,
+    pub avg_cold_strength:     f32,
+    pub n_engrams:             usize,
+    pub avg_engram_size:       f32,
+    pub interaction_tick:      u64,
+    pub tier1_hit_rate:        f32,
+    pub embed_cache_hit_rate:  f32,
+    pub last_consolidation:    Option<u64>,
+    pub decaying_soon_count:   usize,  // memories near MIN_STRENGTH
+    pub emotional_count:       usize,  // bypass_decay = true
+    pub labile_count:          usize,  // state = Labile
+    pub pending_updates:       usize,
+}
+
+// ─── Consolidation Report ─────────────────────────────────────────
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct ConsolidationReport {
+    pub nrem_migrated:    usize,
+    pub rem_processed:    usize,
+    pub homeostasis_archived: usize,
+    pub duration_ms:      u64,
+    pub trigger:          ConsolidationTrigger,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub enum ConsolidationTrigger {
+    #[default]
+    Manual,
+    Pressure,
+    Periodic,
+}
+
+// ─── Recall Query ─────────────────────────────────────────────────
+#[derive(Debug, Clone)]
+pub struct RecallQuery {
+    pub content:               String,
+    pub context:               Option<String>,
+    pub top_k:                 usize,
+    pub confidence_requirement: ConfidenceLevel,
+    pub min_strength:          f32,
+    pub include_kinds:         Option<Vec<MemoryKind>>,
+    pub include_decaying:      bool,
+    pub as_of_tick:            Option<u64>,  // time-travel recall
+}
+
+#[derive(Debug, Clone, Copy)]
+pub enum ConfidenceLevel {
+    FastApprox,  // ef=10
+    Normal,      // ef=50 (default)
+    High,        // ef=100
+}
+
+// ─── Working Memory Item ─────────────────────────────────────────
+#[derive(Debug, Clone)]
+pub struct WorkingMemoryItem {
+    pub memory_id:  Uuid,
+    pub content:    String,
+    pub embedding:  Vec<f32>,
+    pub added_tick: u64,
+    pub source:     WorkingMemorySource,
+}
+
+#[derive(Debug, Clone, Copy)]
+pub enum WorkingMemorySource {
+    External,      // new information from outside
+    FromLtm,       // recalled from long-term memory
+    JustEncoded,   // just encoded to hot_store, still in WM
+}
+
+// ─── Prospective Trigger ──────────────────────────────────────────
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ProspectiveTrigger {
+    pub id:                 Uuid,
+    pub trigger_context:    String,
+    pub trigger_embedding:  Vec<f32>,
+    pub memory_id:          Uuid,
+    pub trigger_threshold:  f32,
+    pub fire_count:         u32,
+    pub max_fires:          Option<u32>,
+    pub created_tick:       u64,
+    pub expires_tick:       Option<u64>,
+}
+
+// ─── Primed Context ───────────────────────────────────────────────
+#[derive(Debug, Clone)]
+pub struct PrimedContext {
+    pub id:               Uuid,
+    pub context_text:     String,
+    pub embedding:        Vec<f32>,
+    pub boost_factor:     f32,
+    pub created_tick:     u64,
+    pub expiry_tick:      u64,
+}
+
+// ─── BrainStore (top-level) ───────────────────────────────────────
+pub struct BrainStore {
+    pub hot:              HotStore,
+    pub cold:             ColdStore,
+    pub procedural:       ProceduralStore,
+    pub engram_graph:     tokio::sync::RwLock<EngramGraph>,
+    pub engram_builder:   EngramBuilder,
+    pub working_memory:   WorkingMemory,
+    pub embed_cache:      EmbedCache,
+    pub tier1_cache:      LruCache<u64, CachedMemory>,
+    pub forgetting_engine: ForgettingEngine,
+    pub config:           Config,
+    pub interaction_tick: Arc<AtomicU64>,
+    pub primed_contexts:  Vec<PrimedContext>,
+    // Channel to wake consolidation task
+    pub consolidation_tx: tokio::sync::mpsc::Sender<ConsolidationTrigger>,
+}
+
+impl BrainStore {
+    pub fn tick(&self) -> u64 {
+        self.interaction_tick.fetch_add(1, std::sync::atomic::Ordering::SeqCst)
+    }
+
+    pub fn needs_consolidation(&self) -> bool {
+        self.hot.len() > (self.config.hot_capacity as f32 * 0.9) as usize
+    }
+}
+```
+
+### 8.5 Config Schema
+
+```toml
+# ~/.membrain/config.toml
+# All values shown are defaults
+
+[brain]
+model             = "all-MiniLM-L6-v2"   # embedding model
+hot_capacity      = 50_000               # max memories in hot HNSW index
+soft_cap          = 1_000_000            # archive bottom % when total > this
+embedding_cache   = 1_000               # LruCache entries for embeddings
+tier1_cache       = 512                 # LruCache entries for Tier1
+
+[vector]
+dimensions        = 384                  # must match model output
+hot_quantization  = "f16"               # f16 | f32
+cold_quantization = "i8"                # i8 | f16
+rescore_top_k     = 20                  # float32 rescore top-N candidates
+pre_filter_limit  = 5_000              # max candidates from SQL pre-filter
+hnsw_m            = 16                  # HNSW connectivity (hot)
+hnsw_m_cold       = 8                   # HNSW connectivity (cold, saves RAM)
+hnsw_ef_construct = 200                 # build quality
+hnsw_ef_default   = 50                  # default search quality (adaptive)
+
+[ltp_ltd]
+ltp_delta              = 0.1            # LTP boost per recall
+stability_increment    = 0.2            # stability growth rate (fraction of current)
+max_strength           = 1.0            # strength ceiling
+min_strength           = 0.05           # archival threshold
+max_stability          = 10_000.0       # stability ceiling
+
+[emotional]
+emotional_weight           = 0.5        # how much emotion boosts initial strength
+arousal_threshold          = 0.6        # above this: bypass_decay candidate
+valence_threshold          = 0.5        # above this (absolute): bypass_decay
+desensitization_factor     = 0.95       # arousal reduction per REM cycle
+emotional_processed_thresh = 0.3        # arousal below this: mark processed
+
+[consolidation]
+nrem_threshold             = 0.4        # min consolidation score to migrate
+migration_fraction         = 0.2        # fraction of hot to migrate per cycle
+homeostasis_factor         = 0.9        # global scale factor
+homeostasis_trigger        = 0.85       # fraction of max load to trigger
+consolidation_interval     = 1_000      # interactions between periodic cycles
+
+[reconsolidation]
+base_window        = 50                 # ticks for fresh memory reconsolidation window
+old_memory_thresh  = 500                # ticks to halve reconsolidation window
+labile_min_strength = 0.2              # below this: no reconsolidation window
+reconsolidation_bonus = 0.05           # strength bonus on successful update
+
+[interference]
+sim_min                  = 0.70         # min similarity to trigger interference
+sim_max                  = 0.99         # above this: duplicate (not interference)
+retroactive_penalty      = 0.05         # strength reduction for old similar memories
+proactive_penalty        = 0.05         # retrieval_difficulty increase for new memory
+predictive_value_thresh  = 0.001        # access/age below this: accelerated decay
+predictive_decay_factor  = 0.85         # extra decay for non-predictive memories
+minimum_prune_age        = 500          # don't predictively prune memories younger than this
+
+[retrieval]
+tier1_confidence    = 0.90              # score threshold for Tier1 early return
+tier2_confidence    = 0.80              # score threshold for Tier2 early return
+partial_threshold   = 0.40              # below this: tip-of-tongue mode
+content_weight      = 0.70              # weight for content similarity in score
+context_weight      = 0.30              # weight for context similarity in score
+cluster_max_depth   = 3                 # BFS max depth in engram graph
+cluster_max_nodes   = 50               # BFS max nodes collected
+cluster_min_edge    = 0.50              # min edge similarity for BFS traversal
+duplicate_threshold = 0.05              # novelty below this: update existing
+
+[engram]
+formation_threshold     = 0.65          # min similarity to join existing engram
+soft_limit              = 200           # member count to trigger split
+hard_limit              = 500           # member count to reject additions
+centroid_alpha          = 0.10          # EMA alpha for centroid update
+resonance_factor        = 0.30          # fraction of LTP that spreads to neighbors
+
+[forgetting]
+prune_interval          = 500           # interactions between pruning passes
+prune_batch_size        = 10_000        # max memories scanned per prune pass
+archive_fraction        = 0.10          # fraction to archive when > soft_cap
+
+[daemon]
+socket_path             = "~/.membrain/membrain.sock"
+log_path                = "~/.membrain/membrain.log"
+pid_path                = "~/.membrain/membrain.pid"
+log_level               = "info"        # error | warn | info | debug | trace
+```
+
+---
+
+## END OF PART 4
+
+**Next: Part 5 — CLI Commands, MCP Tools, Feature Extensions, Workspace Structure**
+
+Parts list:
+- Part 1: Vision, Problem Statement, Human Brain Deep Dive ✅
+- Part 2: Gap Analysis + Full Port (mechanism → Rust code) ✅
+- Part 3: Architecture Overview + Performance ✅
+- Part 4: Techstack + Data Schema ✅
+- Part 5: CLI/MCP + Feature Extensions + Workspace Structure
+- Part 6: Milestones + Acceptance Checklist + Constants + Algorithm Reference
+
+
+<!-- SOURCE: PLAN_part5.md -->
+
+# membrain — PLAN.md
+# Part 5 of 6: CLI Commands · MCP Tools · Feature Extensions · Workspace Structure
+
+---
+
+## 9. CLI Commands & MCP Tools
+
+### 9.1 CLI Overview
+
+```
+membrain <COMMAND> [OPTIONS]
+
+COMMANDS:
+  remember      Store a new memory
+  recall        Retrieve relevant memories
+  forget        Archive (soft-delete) a memory
+  strengthen    Manually apply LTP to a memory
+  update        Submit a pending update during reconsolidation window
+  stats         Brain health statistics
+  list          List memories (filterable)
+  show          Show full details of a specific memory
+  diff          Show how memories changed between two ticks
+  consolidate   Manually trigger NREM+REM+Homeostasis cycle
+  prime         Pre-warm working memory with context (spotlight mode)
+  remind        Set a prospective trigger
+  watch         Watch for memories approaching decay threshold
+  export        Export memories to JSON/NDJSON
+  import        Import memories from JSON/NDJSON
+  daemon        Daemon management (start|stop|status|restart)
+  mcp           Start MCP stdio server
+  config        Show/edit configuration
+  doctor        Diagnose brain health issues
+
+Global options:
+  --json          Output as JSON (all commands support this)
+  --quiet, -q     Suppress informational output
+  --verbose, -v   Show extra details
+  --db-path       Override default database location
+  --tick          Show tick numbers in output
+
+Usage style:
+  # Pipe-friendly
+  echo "JWT tokens expire after 1h" | membrain remember
+  membrain recall "auth" | jq '.memories[0].content'
+  membrain stats --json | jq '.hot_count'
+```
+
+### 9.2 Command: remember
+
+```
+USAGE:
+  membrain remember [CONTENT] [OPTIONS]
+  echo "content" | membrain remember [OPTIONS]
+
+DESCRIPTION:
+  Encode a new memory into the brain's hot store.
+  Automatically computes embedding, novelty, and initial strength.
+  Applies attention gating, emotional tagging, engram clustering.
+  Returns the memory ID and encoding metadata.
+
+OPTIONS:
+  --context, -c <TEXT>       Current task/context (enhances retrieval later)
+  --attention, -a <0.0-1.0>  Attention level (default: 0.7)
+                             Below 0.2: memory discarded (not attended to)
+  --valence, -V <-1.0-1.0>  Emotional valence (default: 0.0)
+                             -1=very negative, 0=neutral, +1=very positive
+  --arousal, -A <0.0-1.0>   Emotional arousal (default: 0.0)
+                             0=calm, 1=highly excited
+  --kind, -k <KIND>          Memory kind: episodic|semantic|procedural
+                             (default: episodic)
+  --source <SOURCE>          Source tag: cli|mcp|api (default: cli)
+  --json                     Output JSON
+
+EXAMPLES:
+  # Basic
+  membrain remember "Fixed the JWT expiry bug — was using utc() not now()"
+
+  # With context
+  membrain remember "Rate limit is 100 req/s for Stripe API" \
+    --context "integrating payments" \
+    --kind semantic
+
+  # Emotional (production incident)
+  membrain remember "Deploy to prod caused 30-min downtime — missing migration" \
+    --valence -0.8 --arousal 0.8 \
+    --context "deployment"
+
+  # Low attention (background information, weak encoding)
+  membrain remember "The office WiFi password changed" --attention 0.2
+
+  # From stdin
+  git log --oneline -5 | membrain remember --context "recent commits" --kind semantic
+
+  # JSON output
+  membrain remember "Rust lifetimes are the borrow checker's time tracking" \
+    --json
+
+OUTPUT (default):
+  ✅ Remembered [id: 550e8400...] strength=0.72 novelty=0.85 engram=7b1c3e42
+
+OUTPUT (--json):
+  {
+    "id": "550e8400-e29b-41d4-a716-446655440000",
+    "initial_strength": 0.720,
+    "novelty_score": 0.850,
+    "engram_id": "7b1c3e42-...",
+    "tick": 1042,
+    "was_duplicate": false,
+    "kind": "Episodic",
+    "bypass_decay": false
+  }
+
+IMPLEMENTATION NOTES:
+  // Check if daemon is running — if yes, forward via socket
+  // If no daemon: standalone mode (500ms cold start for embed model)
+  
+  let request = EncodeRequest {
+      content: args.content,
+      context: args.context.unwrap_or_default(),
+      attention_score: args.attention.unwrap_or(DEFAULT_ATTENTION),
+      emotional_tag: EmotionalTag {
+          valence: args.valence.unwrap_or(0.0),
+          arousal: args.arousal.unwrap_or(0.0),
+      },
+      kind: args.kind.unwrap_or(MemoryKind::Episodic),
+      source: MemorySource::Cli,
+  };
+  
+  let result = brain.encode(request, now_tick).await?;
+  
+  // Trigger consolidation check (non-blocking)
+  if brain.needs_consolidation() {
+      brain.consolidation_tx.send(ConsolidationTrigger::Pressure).await.ok();
+  }
+```
+
+### 9.3 Command: recall
+
+```
+USAGE:
+  membrain recall <QUERY> [OPTIONS]
+
+DESCRIPTION:
+  Retrieve memories relevant to the query using 3-tier search.
+  Applies: embedding → Tier1 cache → SQL pre-filter → HNSW search →
+           float32 rescore → engram BFS expansion → unified scoring.
+  Returns ranked list of memories with scores and metadata.
+
+OPTIONS:
+  --context, -c <TEXT>   Current context (boosts contextually relevant memories)
+  --top, -n <N>          Number of results to return (default: 5)
+  --kind, -k <KIND>      Filter by kind: episodic|semantic|procedural
+  --min-strength <F>     Minimum effective strength (default: from config)
+  --confidence <LEVEL>   Search confidence: fast|normal|high (default: normal)
+  --show-decaying        Include memories close to decay threshold
+  --no-engram            Disable engram expansion (pure HNSW results only)
+  --as-of <TICK>         Time-travel: reconstruct knowledge state at tick N
+  --json                 Output JSON
+
+EXAMPLES:
+  # Basic
+  membrain recall "JWT authentication"
+
+  # With context (improves relevance for current task)
+  membrain recall "database connection" --context "fixing performance issue"
+
+  # More results with high confidence
+  membrain recall "Rust async" --top 10 --confidence high
+
+  # Filter to semantic only
+  membrain recall "Python" --kind semantic
+
+  # Surface memories about to be forgotten
+  membrain recall "anything" --show-decaying
+
+  # Time-travel recall
+  membrain recall "what did I know about auth" --as-of 5000
+
+  # Pipe to fzf for interactive selection
+  membrain recall "deployment" --json | jq -r '.memories[].content' | fzf
+
+OUTPUT (default):
+  Found 5 memories (Tier2, 3ms, engram expanded)
+  
+  [1] score=0.94 strength=0.81 ◆engram:7b1c3e42
+      JWT tokens in this codebase expire after 1 hour — use utc() not now()
+      kind=Semantic  accessed=12×  tick=847
+
+  [2] score=0.87 strength=0.63
+      Fixed the JWT expiry bug — was calling time::now() in wrong timezone
+      kind=Episodic  accessed=3×  tick=923  ⚠️ decaying
+
+  [3] score=0.82 strength=0.71 ◆engram:7b1c3e42
+      Auth middleware validates JWT on every request — check expiry first
+      kind=Semantic  accessed=8×  tick=756
+
+OUTPUT (--json):
+  {
+    "memories": [
+      {
+        "id": "...",
+        "content": "JWT tokens in this codebase...",
+        "context": "debugging auth",
+        "score": 0.94,
+        "effective_strength": 0.81,
+        "kind": "Semantic",
+        "emotional_tag": { "valence": 0.0, "arousal": 0.0 },
+        "access_count": 12,
+        "created_tick": 847,
+        "engram_id": "7b1c3e42-...",
+        "decaying_soon": false
+      },
+      ...
+    ],
+    "tier_used": "Tier2",
+    "latency_us": 3124,
+    "engram_expanded": true,
+    "total_searched": 847,
+    "tip_of_tongue": null
+  }
+
+IMPLEMENTATION NOTES:
+  // Adaptive ef based on confidence level and store size
+  let ef = adaptive_ef(&query, hot_count, tier1_hit_rate);
+  
+  // Run full 3-tier pipeline
+  let result = brain.recall(query, now_tick).await?;
+  
+  // Apply on_recall to all returned memories (LTP + labile)
+  for m in &result.memories {
+      brain.on_recall(m.id, now_tick).await?;
+  }
+  
+  // Surface decaying memories if requested
+  if args.show_decaying {
+      let decaying = brain.find_decaying_soon(now_tick)?;
+      // ... merge into results
+  }
+```
+
+### 9.4 Command: forget
+
+```
+USAGE:
+  membrain forget <ID> [OPTIONS]
+
+DESCRIPTION:
+  Archive (soft-delete) a specific memory.
+  Memory is moved to archive table — not hard-deleted.
+  Can be recovered with: membrain archive restore <ID>
+  Removes from HNSW index and Tier1 cache.
+
+OPTIONS:
+  --reason <TEXT>   Optional note for why forgotten
+  --json            Output JSON
+
+EXAMPLES:
+  membrain forget 550e8400-e29b-41d4-a716-446655440000
+  membrain forget 550e8400 --reason "outdated, API changed"
+
+OUTPUT:
+  🗑️ Archived memory 550e8400... (was strength=0.42)
+
+IMPLEMENTATION:
+  brain.archive_memory(id, now_tick, ArchiveReason::Manual)?;
+  // Also removes from HNSW: hot_index.remove(usearch_id)
+  // Also removes from Tier1: tier1_cache.pop(content_hash)
+```
+
+### 9.5 Command: strengthen
+
+```
+USAGE:
+  membrain strengthen <ID> [OPTIONS]
+
+DESCRIPTION:
+  Manually apply LTP to a specific memory.
+  Simulates an explicit recall event.
+  Increases base_strength by LTP_DELTA.
+  Increases stability (memory will decay slower).
+  Sets state to Labile (opens reconsolidation window).
+
+OPTIONS:
+  --json   Output JSON
+
+EXAMPLES:
+  membrain strengthen 550e8400
+  # Use case: you just used this knowledge — reinforce it
+
+OUTPUT:
+  ⚡ Strengthened [550e8400...]
+     strength: 0.62 → 0.72 (+0.10)
+     stability: 150.2 → 180.2 (+30.0)
+     reconsolidation window: 48 ticks
+
+IMPLEMENTATION:
+  brain.on_recall(id, now_tick).await?;
+```
+
+### 9.6 Command: update
+
+```
+USAGE:
+  membrain update <ID> <NEW_CONTENT> [OPTIONS]
+
+DESCRIPTION:
+  Submit a content update for a memory during its reconsolidation window.
+  The memory must be in Labile state (recently recalled).
+  Update is applied during the next reconsolidation_tick cycle.
+  If the reconsolidation window expires before processing: update discarded.
+
+OPTIONS:
+  --force    Apply update even if not in Labile state (force Labile)
+  --json     Output JSON
+
+EXAMPLES:
+  # First recall to open labile window:
+  membrain recall "stripe rate limit"
+  # Then update with corrected information:
+  membrain update <ID> "Stripe rate limit is 200 req/s for paid plans, 100 for free"
+
+OUTPUT:
+  📝 Update queued for [550e8400...]
+     Window: 47 ticks remaining
+     Will apply at next reconsolidation tick
+
+  # If window expired:
+  ❌ Reconsolidation window closed — recall first to reopen
+```
+
+### 9.7 Command: stats
+
+```
+USAGE:
+  membrain stats [OPTIONS]
+
+DESCRIPTION:
+  Show comprehensive brain health statistics.
+  Includes store sizes, performance metrics, memory distribution.
+
+OPTIONS:
+  --json      Output JSON
+  --watch     Refresh every 5 seconds (live monitoring)
+
+OUTPUT (default):
+  ╔═══════════════════════════════════════════════════════╗
+  ║              membrain brain stats                     ║
+  ╠═══════════════════════════════════════════════════════╣
+  ║ Storage                                               ║
+  ║   Hot (hippocampus):   12,847 memories               ║
+  ║   Cold (neocortex):    48,231 memories               ║
+  ║   Archive:             3,241 memories                 ║
+  ║   Total:               64,319 memories               ║
+  ║                                                       ║
+  ║ Strengths                                             ║
+  ║   Avg hot strength:    0.612                          ║
+  ║   Avg cold strength:   0.841                          ║
+  ║   Decaying soon:       234 (< 2× MIN_STRENGTH)        ║
+  ║   Emotional bypass:    89 (bypass_decay=true)         ║
+  ║   Labile:              42 (reconsolidation open)      ║
+  ║                                                       ║
+  ║ Engram Graph                                          ║
+  ║   Total engrams:       1,847                          ║
+  ║   Avg engram size:     6.9 memories                   ║
+  ║   Largest engram:      187 members                    ║
+  ║                                                       ║
+  ║ Performance (last 1000 recalls)                       ║
+  ║   Tier1 hit rate:      63.2%   (<0.1ms)              ║
+  ║   Tier2 hit rate:      31.4%   (<5ms)                ║
+  ║   Tier3 hit rate:      5.4%    (<50ms)               ║
+  ║   Avg recall latency:  2.1ms                          ║
+  ║   Embed cache hit:     84.7%                          ║
+  ║                                                       ║
+  ║ System                                                ║
+  ║   Interaction tick:    14,823                         ║
+  ║   Last consolidation:  tick 14,100 (723 ticks ago)   ║
+  ║   Next consolidation:  ~177 ticks                    ║
+  ║   Daemon:              running (pid 18342)            ║
+  ╚═══════════════════════════════════════════════════════╝
+```
+
+### 9.8 Command: list
+
+```
+USAGE:
+  membrain list [OPTIONS]
+
+DESCRIPTION:
+  List memories with optional filters.
+  Useful for exploring what's in the brain.
+
+OPTIONS:
+  --kind, -k <KIND>      Filter by kind
+  --min-strength <F>     Minimum effective strength
+  --max-strength <F>     Maximum effective strength
+  --since <TICK>         Created after tick N
+  --engram <ID>          All members of a specific engram
+  --decaying             Only memories near decay threshold
+  --emotional            Only memories with bypass_decay=true
+  --labile               Only memories in Labile state
+  --sort <FIELD>         Sort by: strength|created|accessed|score
+  --limit, -n <N>        Max results (default: 20)
+  --json                 Output JSON
+
+EXAMPLES:
+  membrain list --kind semantic --sort strength --limit 10
+  membrain list --decaying
+  membrain list --engram 7b1c3e42 --json
+  membrain list --since 10000 --sort created
+```
+
+### 9.9 Command: show
+
+```
+USAGE:
+  membrain show <ID> [OPTIONS]
+
+DESCRIPTION:
+  Show complete details for a specific memory.
+  Includes all metadata, current effective strength, engram membership,
+  reconsolidation window status, and related memories.
+
+OPTIONS:
+  --related, -r   Show related memories (engram neighbors)
+  --json          Output JSON
+
+EXAMPLES:
+  membrain show 550e8400
+  membrain show 550e8400 --related --json
+
+OUTPUT (default):
+  ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+  Memory: 550e8400-e29b-41d4-a716-446655440000
+  ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+  Content:
+    JWT tokens in this codebase expire after 1 hour.
+    Use utc() not now() when comparing expiry timestamps.
+
+  Context:  debugging authentication module
+
+  Kind:     Semantic
+  State:    Labile (32 ticks remaining in reconsolidation window)
+
+  Strength:
+    Base:      0.720
+    Effective: 0.681 (5.4% decayed since last access)
+    Stability: 180.2 (decays slowly)
+    Bypass:    No
+
+  Emotional:
+    Valence:  -0.30 (slightly negative)
+    Arousal:   0.50 (moderate)
+
+  Timing:
+    Created:      tick 847
+    Last accessed: tick 14,791 (32 ticks ago)
+    Access count:  12
+
+  Engram:   7b1c3e42-... (auth cluster, 23 members)
+
+  Source:   MCP
+  ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+  Related memories:
+    [0.91] Auth middleware validates JWT on every request
+    [0.88] OAuth2 flow for Google login uses PKCE
+    [0.82] Refresh tokens stored in httpOnly cookies
+```
+
+### 9.10 Command: diff
+
+```
+USAGE:
+  membrain diff --from <TICK> --to <TICK> [OPTIONS]
+
+DESCRIPTION:
+  Show how the brain's knowledge changed between two interaction ticks.
+  Compares: what was added, what decayed significantly, what was forgotten,
+  what engrams formed/split.
+  
+  Feature extension #6 from the brainstormed top-10.
+  Low implementation cost: pure SQL queries on timestamps.
+
+OPTIONS:
+  --from <TICK>    Start tick (required)
+  --to <TICK>      End tick (default: current)
+  --kind <KIND>    Filter by kind
+  --json           Output JSON
+
+EXAMPLES:
+  membrain diff --from 10000
+  membrain diff --from 5000 --to 10000 --json
+
+OUTPUT:
+  Brain diff: tick 10000 → 14823
+  ─────────────────────────────────
+  NEW memories (+847):
+    + [t=10234] "Migrated payments to Stripe v3 API" [Semantic]
+    + [t=10891] "Redis cluster failover during high load" [Episodic]
+    ... (845 more)
+
+  FORGOTTEN (archived, -312):
+    - "The old AWS Lambda cold start workaround" [Semantic, was 0.07]
+    - "Temp debug code in user controller" [Episodic, was 0.06]
+    ... (310 more)
+
+  SIGNIFICANTLY DECAYED (strength dropped >30%, 89 memories):
+    ↓ "Local dev uses port 3001 for frontend" 0.81→0.51 (-37%)
+    ↓ "Prisma migration naming convention" 0.74→0.49 (-34%)
+    ... (87 more)
+
+  ENGRAMS changed:
+    + New engram: "Stripe integration cluster" (12 members)
+    + Split: "deployment" → "prod deployment" + "staging deployment"
+    ~ Grew: "auth" cluster 15→23 members
+```
+
+### 9.11 Command: consolidate
+
+```
+USAGE:
+  membrain consolidate [OPTIONS]
+
+DESCRIPTION:
+  Manually trigger the consolidation cycle (NREM + REM + Homeostasis).
+  Normally runs automatically based on pressure.
+  Useful for explicit maintenance or before long agent sessions.
+
+OPTIONS:
+  --nrem-only    Only run NREM migration (skip REM and homeostasis)
+  --rem-only     Only run REM emotional processing
+  --homeostasis  Only run homeostasis scaling
+  --dry-run      Show what WOULD be consolidated without doing it
+  --json         Output JSON
+
+EXAMPLES:
+  membrain consolidate
+  membrain consolidate --dry-run
+  membrain consolidate --nrem-only
+
+OUTPUT:
+  🧠 Running consolidation cycle...
+     NREM: migrated 1,247 memories to cold store (3.2s)
+     REM: processed 23 emotional memories (0.1s)
+     Homeostasis: scaled down 0 memories (total load: 0.62, below threshold)
+  ✅ Consolidation complete in 3.3s
+```
+
+### 9.12 Command: prime
+
+```
+USAGE:
+  membrain prime <CONTEXT> [OPTIONS]
+
+DESCRIPTION:
+  Pre-warm Tier1 cache with memories relevant to the given context.
+  Simulates mental preparation / spotlight attention.
+  Boosts score of matching memories during subsequent recalls.
+  
+  Feature extension #3 from top-10 list.
+
+OPTIONS:
+  --boost <0.0-0.5>    Score boost factor (default: 0.3)
+  --duration <N>       How many interactions the priming lasts (default: 1000)
+  --json               Output JSON
+
+EXAMPLES:
+  membrain prime "debugging the authentication service"
+  membrain prime "deploying to production" --boost 0.4 --duration 500
+
+OUTPUT:
+  🔦 Primed with "debugging authentication service"
+     Pre-loaded 47 relevant memories into Tier1 cache
+     Score boost: +0.30 for contextually matching memories
+     Expires: tick 15,823 (1000 interactions)
+```
+
+### 9.13 Command: remind
+
+```
+USAGE:
+  membrain remind --when <CONTEXT> --then <CONTENT> [OPTIONS]
+
+DESCRIPTION:
+  Set a prospective memory trigger.
+  When the agent's context matches --when, the --then memory surfaces automatically.
+  Simulates human prospective memory ("remember to do X when Y").
+  
+  Feature extension #5 from top-10 list.
+
+OPTIONS:
+  --when <TEXT>      Context description that triggers the reminder (required)
+  --then <TEXT>      Memory content to surface when triggered (required)
+  --id <UUID>        Surface an existing memory instead of creating new
+  --max-fires <N>    How many times to fire (default: unlimited)
+  --expires <TICK>   Expiry tick (default: never)
+  --threshold <F>    Similarity threshold to trigger (default: 0.8)
+  --json             Output JSON
+
+EXAMPLES:
+  # New content triggered by context
+  membrain remind \
+    --when "working on payments or Stripe" \
+    --then "Stripe webhook: always verify signature with STRIPE_WEBHOOK_SECRET"
+
+  # Existing memory triggered
+  membrain remind \
+    --when "deploying to production" \
+    --id 550e8400 \
+    --max-fires 5
+
+OUTPUT:
+  ⏰ Reminder set [trigger_id: abc123...]
+     When: "working on payments or Stripe"
+     Then: "Stripe webhook: always verify signature..."
+     Fires: unlimited
+     Threshold: 0.80
+
+AUTOMATIC TRIGGERING:
+  Every encode() call checks all active triggers against current context.
+  When context embedding similarity > threshold:
+  → memory surfaces in next recall results automatically
+  → fire_count incremented
+  → if fire_count >= max_fires: trigger deactivated
+```
+
+### 9.14 Command: watch
+
+```
+USAGE:
+  membrain watch [OPTIONS]
+
+DESCRIPTION:
+  Watch for memories approaching the decay threshold (decaying_soon).
+  Surfaces memories at risk of being archived before they're used.
+  Feature extension #10: "Forgetting-as-signal".
+
+OPTIONS:
+  --threshold <F>   Strength threshold to flag (default: 2× MIN_STRENGTH)
+  --kind <KIND>     Filter by kind
+  --interval <N>    Check every N interactions (default: 100)
+  --json            Output JSON
+
+EXAMPLES:
+  membrain watch
+  membrain watch --threshold 0.15 --kind semantic
+
+OUTPUT:
+  👁️  Watching for decaying memories...
+  
+  ⚠️  Memory approaching archive threshold (strength=0.11):
+      "Local Redis uses port 6380 (not 6379) in Docker Compose setup"
+      kind=Semantic  created=tick:4821  last_accessed=tick:10234
+      Hint: membrain strengthen <id> to preserve it
+  
+  ⚠️  Memory approaching archive threshold (strength=0.09):
+      "GraphQL schema requires N+1 protection on all list fields"
+      kind=Semantic  created=tick:3102  last_accessed=tick:9891
+```
+
+### 9.15 Command: export / import
+
+```
+USAGE:
+  membrain export [OPTIONS] > memories.ndjson
+  membrain import < memories.ndjson [OPTIONS]
+
+DESCRIPTION:
+  Export: dumps all non-archived memories as NDJSON (one JSON per line).
+  Import: reads NDJSON and encodes each memory (re-embeds, re-clusters).
+  
+  Use cases:
+    - Backup before experiments
+    - Transfer memories between machines
+    - Share domain knowledge between agent instances
+    - Restore after database corruption
+
+OPTIONS (export):
+  --kind <KIND>      Filter by kind
+  --min-strength <F> Minimum strength to include
+  --include-cold     Include cold store memories (default: hot only)
+  --include-archive  Include archived memories
+  --format <FMT>     json|ndjson|csv (default: ndjson)
+
+OPTIONS (import):
+  --merge            Merge with existing (default: reject duplicates)
+  --kind <KIND>      Override kind for all imported memories
+  --source <SRC>     Tag source (default: import)
+  --dry-run          Count without importing
+
+EXAMPLES:
+  membrain export > backup.ndjson
+  membrain export --include-cold --kind semantic > semantic_knowledge.ndjson
+  membrain import < backup.ndjson --merge
+  membrain import < semantic_knowledge.ndjson --dry-run
+
+NDJSON FORMAT:
+  Each line is one complete memory JSON:
+  {"content":"JWT tokens expire..","context":"auth","kind":"Semantic","strength":0.72,"tick":847,"emotional":{"valence":0,"arousal":0}}
+  {"content":"Stripe rate limit is 200..","context":"payments","kind":"Semantic","strength":0.81,"tick":1023,"emotional":{"valence":0,"arousal":0}}
+```
+
+### 9.16 Command: daemon
+
+```
+USAGE:
+  membrain daemon <SUBCOMMAND>
+
+SUBCOMMANDS:
+  start     Start daemon in background
+  stop      Stop running daemon
+  restart   Restart daemon
+  status    Show daemon status
+
+EXAMPLES:
+  membrain daemon start
+  membrain daemon status
+  membrain daemon stop
+
+OUTPUT (status):
+  🟢 Daemon running (pid 18342)
+     Socket: ~/.membrain/membrain.sock
+     Uptime: 3h 42m 17s
+     Interactions served: 14,823
+     Memory RSS: 187MB
+     Last consolidation: 723 ticks ago
+
+IMPLEMENTATION:
+  membrain daemon start:
+    Fork process (daemonize)
+    Write PID to ~/.membrain/membrain.pid
+    Redirect stdout/stderr to ~/.membrain/membrain.log
+    Start tokio runtime with all tasks
+
+  membrain daemon stop:
+    Read PID from membrain.pid
+    Send SIGTERM → graceful shutdown:
+      1. Stop accepting new connections
+      2. Finish in-flight requests (5s timeout)
+      3. Flush SQLite WAL checkpoint
+      4. Remove membrain.pid and membrain.sock
+      5. Exit 0
+```
+
+### 9.17 Command: doctor
+
+```
+USAGE:
+  membrain doctor [OPTIONS]
+
+DESCRIPTION:
+  Diagnose brain health and performance issues.
+  Checks: database integrity, index consistency, memory distribution,
+  engram health, embedding cache performance, config validity.
+
+OPTIONS:
+  --fix     Attempt to fix detected issues automatically
+  --json    Output JSON
+
+OUTPUT:
+  🏥 membrain doctor — brain health check
+  ─────────────────────────────────────────
+  ✅ hot.db integrity:          OK (SQLite PRAGMA integrity_check)
+  ✅ cold.db integrity:         OK
+  ✅ hot.usearch index:         OK (50k entries, no corruption)
+  ✅ cold.usearch index:        OK (48,231 entries, mmap consistent)
+  ✅ engram graph consistency:  OK (all member IDs resolve in hot.db)
+  ⚠️  Embedding model:          NOT LOADED (daemon not running)
+  ✅ Config file:               OK (all values in valid range)
+  ⚠️  High archive rate:        312 memories archived in last 1000 ticks
+      Suggestion: consider raising min_strength threshold or
+                  increasing stability_increment
+  ✅ Tier1 hit rate:            63.2% (target: >60%) ✅
+  ✅ Embed cache hit rate:      84.7% (target: >80%) ✅
+  ─────────────────────────────────────────
+  Overall: 2 warnings, 0 errors
+```
+
+---
+
+## 10. Top 10 Feature Extensions
+
+Each feature includes: biological basis, implementation cost, API design, and Rust pseudocode.
+
+### 10.1 Feature 1: Temporal Time-Travel Recall
+
+```
+BIOLOGICAL BASIS:
+  Humans can mentally "time travel" — reconstruct their knowledge state
+  at a past point in time. "What did I know before I learned X?"
+  This is supported by hippocampal temporal indexing (place cells + time cells).
+
+IMPLEMENTATION COST: LOW
+  Pure SQL: parameterize effective_strength formula with historical tick.
+  No new data structures needed.
+
+API:
+  membrain recall "authentication" --as-of 5000
+  membrain recall "what I knew about JWT" --as-of 2000
+
+HOW IT WORKS:
+  fn effective_strength_at(memory: &MemoryIndex, at_tick: u64) -> f32 {
+      // Use historical last_accessed_tick as reference
+      // For memories accessed after at_tick: use at_tick as ceiling
+      let reference_tick = memory.last_accessed_tick.min(at_tick);
+      let elapsed = at_tick.saturating_sub(reference_tick) as f32;
+      let retention = (-elapsed / memory.stability).exp();
+      memory.base_strength_at_tick(at_tick) * retention
+      // base_strength_at_tick: would require storing strength history
+      // SIMPLIFICATION: use current base_strength as approximation
+      // Good enough for most time-travel use cases
+  }
+  
+  // SQL pre-filter with historical tick
+  WHERE created_tick <= ?  -- only memories that existed at that tick
+  AND (base_strength * EXP(-(?-last_tick)/stability)) > ?  -- effective strength at that tick
+
+USE CASE:
+  Agent encountered a new API breaking change.
+  "What did I think about this API before I saw the changelog?"
+  → time-travel to before the changelog tick → shows pre-update beliefs
+  → identify which memories need to be reconsolidated with new info
+
+IMPLEMENTATION:
+  // Minimal change: RecallQuery already has as_of_tick: Option<u64>
+  // In recall pipeline:
+  let now = query.as_of_tick.unwrap_or(brain.tick());
+  // Use `now` as the time reference throughout the recall pipeline
+  // SQL pre-filter adds: AND created_tick <= ?  with as_of_tick as param
+```
+
+### 10.2 Feature 2: Contrastive Anti-Query
+
+```
+BIOLOGICAL BASIS:
+  Humans can think contrastively: "What contradicts what I believe?"
+  The PFC can explicitly suppress activation of certain memory patterns
+  and amplify competing patterns.
+  Directed forgetting research: PFC suppresses hippocampal retrieval.
+
+IMPLEMENTATION COST: MEDIUM
+  Requires: EdgeType::Contradictory edges in engram graph.
+  During encoding: detect high-similarity but conflicting content.
+  New CLI flag + recall pipeline branch.
+
+API:
+  membrain recall "JWT is stateless" --contradicts
+  membrain recall "Stripe works well" --contradicts
+
+HOW IT WORKS:
+  // During encoding: detect contradictions
+  // Heuristic: high similarity (>0.7) but contains negation markers
+  fn detect_contradiction(new_content: &str, existing_content: &str, similarity: f32) -> bool {
+      if similarity < 0.7 || similarity > 0.99 { return false; }
+      let negation_markers = ["not", "never", "wrong", "incorrect", "opposite",
+                               "but", "however", "actually", "mistake", "error"];
+      let combined = format!("{} {}", new_content, existing_content);
+      negation_markers.iter().any(|m| combined.contains(m))
+  }
+  
+  // If contradiction detected: add EdgeType::Contradictory edge
+  
+  // Anti-query retrieval:
+  fn recall_contradicting(query: &str, brain: &BrainStore) -> Vec<ScoredMemory> {
+      // 1. Find memories most similar to query
+      let query_vec = embed(query);
+      let similar = brain.recall(query, top_k=50);
+      
+      // 2. Find memories connected with EdgeType::Contradictory edges
+      let contradictions = similar.iter()
+          .flat_map(|m| {
+              brain.engram_graph
+                  .edges_with_type(m.id, EdgeType::Contradictory)
+                  .map(|(target_id, _)| target_id)
+          })
+          .collect::<Vec<_>>();
+      
+      // 3. Return the contradicting memories
+      brain.fetch_and_score(contradictions, query_vec)
+  }
+
+USE CASE:
+  Agent believes "Python is slow for this workload."
+  membrain recall "Python is slow" --contradicts
+  → Returns memories like "PyPy achieves C-level speed for numeric loops"
+  → Enables more nuanced reasoning from the agent
+```
+
+### 10.3 Feature 3: Memory Priming / Spotlight Mode
+
+```
+(Already fully documented in Section 9.12 and Performance section)
+
+BIOLOGICAL BASIS:
+  Mental preparation activates relevant engrams in advance.
+  Pre-activation lowers retrieval threshold for those memories.
+  Athletes, surgeons use this before high-performance tasks.
+
+SUMMARY:
+  membrain prime "context description"
+  → embeds context → queries Tier2 broadly → pre-loads into Tier1
+  → PrimedContext stored with boost_factor and expiry_tick
+  → all subsequent recalls: score += priming_boost × context_match
+  → dramatically reduces first-recall latency for primed topics
+```
+
+### 10.4 Feature 4: Auto-Abstraction
+
+```
+BIOLOGICAL BASIS:
+  Episodic memories decay → semantic knowledge remains.
+  "I don't remember the Tuesday I learned cycling, but I know how to cycle."
+  NREM sleep: repeated replay → extract semantic essence → abstract memory.
+  
+IMPLEMENTATION COST: MEDIUM-HIGH
+  Requires: LLM call OR heuristic rule extraction during NREM.
+  LLM version: call during consolidation to generate semantic summary.
+  Heuristic version: find common patterns across engram members.
+
+API:
+  membrain consolidate --auto-abstract
+  # Or: triggered automatically when engram has N decaying episodic members
+
+HOW IT WORKS (heuristic, no LLM):
+  fn try_auto_abstract(engram: &Engram, members: &[MemoryRecord]) -> Option<String> {
+      // Find members that are:
+      //   1. Episodic kind
+      //   2. Effective strength below ABSTRACT_THRESHOLD
+      //   3. Access count > MIN_ACCESS (has been recalled at least once)
+      let candidates: Vec<_> = members.iter()
+          .filter(|m| {
+              m.index.kind == MemoryKind::Episodic
+              && effective_strength(&m.index, now_tick) < ABSTRACT_THRESHOLD
+              && m.index.access_count >= MIN_ACCESS_FOR_ABSTRACT
+          })
+          .collect();
+      
+      if candidates.len() < MIN_ABSTRACT_COUNT { // e.g., 5
+          return None;
+      }
+      
+      // Heuristic: find longest common substring across candidate contents
+      // Or: extract most frequent n-grams
+      // Or: use first sentence of highest-strength member as abstract
+      
+      // This is the "poor man's abstraction" — LLM version much better
+      Some(extract_common_theme(candidates))
+  }
+  
+HOW IT WORKS (with LLM — optional, expensive):
+  // During NREM consolidation, after migrating decaying episodic memories:
+  if has_decaying_episodics_in_engram {
+      let episodes = collect_episode_contents(&decaying_members);
+      let abstract = llm_call(
+          "Synthesize the key semantic knowledge from these episodes: {episodes}"
+      ).await?;
+      
+      // Create new Semantic memory with the abstract
+      brain.encode(EncodeRequest {
+          content: abstract,
+          kind: MemoryKind::Semantic,
+          source: MemorySource::Consolidate,
+          // Higher strength (distilled knowledge)
+          // Inherits engram from episodic members
+      }).await?;
+      
+      // Archive the source episodics (their essence is now preserved)
+      for m in decaying_members {
+          brain.archive_memory(m.id, now_tick, ArchiveReason::Abstracted);
+      }
+  }
+
+USE CASE:
+  Agent has 20 episodic memories about fixing auth bugs over 1000 ticks.
+  Each is decaying (rarely recalled individually).
+  Auto-abstraction: "Auth bugs in this codebase often stem from timezone
+  handling — always use UTC, never local time for token expiry."
+  → One semantic memory preserves the lesson from 20 fading episodes.
+```
+
+### 10.5 Feature 5: Prospective Memory / Triggers
+
+```
+(Already fully documented in Section 9.13 and 4.15)
+
+BIOLOGICAL BASIS:
+  "Remember to buy milk when you pass the supermarket."
+  Context-triggered future recall.
+  Medial prefrontal cortex stores intention + trigger context.
+
+SUMMARY:
+  membrain remind --when "context" --then "content"
+  → embeds trigger context
+  → on every encode(): check all active triggers vs current_context_embedding
+  → when similarity > threshold: surface the linked memory in next recall
+  → fire_count incremented, deactivated at max_fires
+```
+
+### 10.6 Feature 6: Memory Diff
+
+```
+(Already documented in Section 9.10)
+
+BIOLOGICAL BASIS:
+  Humans have metamemory: awareness of what we know and how it changed.
+  "I know more about X than I did last month."
+  Supported by PFC monitoring of retrieval success/failure patterns.
+
+SUMMARY:
+  membrain diff --from 5000 --to 10000
+  Pure SQL: compare created_tick, effective_strength at two points.
+  Shows: added, forgotten, significantly decayed, engrams changed.
+  Implementation cost: very low — no new data structures.
+```
+
+### 10.7 Feature 7: Source Provenance Graph
+
+```
+BIOLOGICAL BASIS:
+  Humans track where their knowledge came from (source monitoring).
+  "I read this in the docs" vs "I heard this from a colleague."
+  Source monitoring errors: remembering a fact but forgetting the source.
+  Source credibility affects memory strength in humans.
+
+IMPLEMENTATION COST: MEDIUM
+  Requires: provenance JSON field + source graph edges.
+
+API:
+  membrain remember "content" --source-url "https://docs.example.com/api"
+  membrain show <ID> --provenance
+  membrain invalidate-source "https://docs.example.com/api"  # marks all sourced memories for update
+
+DATA MODEL ADDITION:
+  // In memory_index:
+  provenance: Option<serde_json::Value>
+  // Example:
+  {
+    "source_url": "https://stripe.com/docs/api/rate-limits",
+    "source_type": "documentation",
+    "fetched_tick": 1247,
+    "confidence": 0.9
+  }
+
+  // New table:
+  CREATE TABLE source_nodes (
+      id          BLOB PRIMARY KEY,
+      url         TEXT UNIQUE,
+      source_type TEXT,
+      first_seen  INTEGER,
+      last_seen   INTEGER,
+      credibility REAL DEFAULT 1.0
+  );
+
+  CREATE TABLE memory_sources (
+      memory_id   BLOB REFERENCES memory_index(id),
+      source_id   BLOB REFERENCES source_nodes(id),
+      PRIMARY KEY (memory_id, source_id)
+  );
+
+  // Invalidation:
+  fn invalidate_source(url: &str, brain: &mut BrainStore) {
+      // Find all memories sourced from this URL
+      // Mark them with reduced credibility / set to Labile
+      // Surface them for human review
+  }
+
+USE CASE:
+  Agent learned about an API from version 2 documentation.
+  Version 3 is released: membrain invalidate-source "https://docs.api.com/v2"
+  → All memories sourced from v2 docs flagged for review
+  → Agent knows which beliefs may be outdated
+```
+
+### 10.8 Feature 8: Memory Resonance
+
+```
+(Already implemented in core architecture — see Section 4.9 on_recall and Section 4.10 engram BFS)
+
+BIOLOGICAL BASIS:
+  When one engram cell fires, connected cells receive subthreshold activation.
+  Dense, well-connected engrams → highly stable (resonance pool).
+  Sparse engrams → individual members decay faster.
+
+SUMMARY:
+  Part of on_recall() pipeline:
+  LTP applied to recalled memory → RESONANCE_FACTOR × LTP spread to engram neighbors.
+  Result: expert knowledge (dense engrams) is collectively very stable.
+  No explicit feature flag needed — built into core recall path.
+  
+  Additional explicit API:
+  membrain strengthen --engram <ENGRAM_ID>
+  → Apply LTP to all members of the engram (simulate engram reactivation)
+```
+
+### 10.9 Feature 9: Context-Injected Prompt Builder
+
+```
+BIOLOGICAL BASIS:
+  "Working memory loading": before starting a complex task, humans
+  mentally review relevant knowledge to prime their working memory.
+  This is precisely what a context-for-LLM operation should do.
+
+IMPLEMENTATION COST: LOW-MEDIUM
+  New CLI command + simple recall pipeline variant.
+  Token budget management (count tokens in recalled content).
+
+API:
+  membrain context-for "implement Stripe webhook handler"
+  membrain context-for "debug the failing test" --max-tokens 2000 --format markdown
+
+HOW IT WORKS:
+  pub async fn build_context_prompt(
+      task_description: &str,
+      max_tokens: usize,
+      brain: &BrainStore,
+      now_tick: u64,
+  ) -> Result<String> {
+      // 1. Recall top-20 most relevant memories
+      let result = brain.recall(RecallQuery {
+          content: task_description.to_string(),
+          top_k: 20,
+          confidence_requirement: ConfidenceLevel::High,
+          ..Default::default()
+      }, now_tick).await?;
+      
+      // 2. Build prompt prefix within token budget
+      let mut prompt = String::new();
+      let mut token_count = 0;
+      
+      prompt.push_str("# Relevant Context from Memory\n\n");
+      
+      for memory in result.memories {
+          let entry = format!(
+              "- [{}] {}\n",
+              match memory.kind {
+                  MemoryKind::Semantic => "KNOW",
+                  MemoryKind::Episodic => "REMEMBER",
+                  MemoryKind::Procedural => "DO",
+                  _ => "NOTE",
+              },
+              memory.content
+          );
+          
+          let entry_tokens = estimate_tokens(&entry);
+          if token_count + entry_tokens > max_tokens {
+              break;
+          }
+          
+          prompt.push_str(&entry);
+          token_count += entry_tokens;
+      }
+      
+      // 3. Surface any triggered prospective memories
+      let triggers = brain.check_prospective_triggers(
+          &result.memories[0].embedding,
+          now_tick
+      ).await?;
+      
+      if !triggers.is_empty() {
+          prompt.push_str("\n# Active Reminders\n\n");
+          for trigger_memory in triggers {
+              prompt.push_str(&format!("⚠️ REMINDER: {}\n", trigger_memory.content));
+          }
+      }
+      
+      Ok(prompt)
+  }
+
+OUTPUT:
+  # Relevant Context from Memory
+
+  - [KNOW] Stripe webhook handlers must verify the signature using STRIPE_WEBHOOK_SECRET
+  - [KNOW] Stripe sends webhook retries for up to 72 hours — make handlers idempotent
+  - [REMEMBER] Production webhook failure: handler was not idempotent, caused duplicate charges (tick:8341)
+  - [KNOW] Our Stripe webhook endpoint is at /api/webhooks/stripe
+  - [KNOW] Stripe rate limit: 200 req/s for paid plans
+
+  # Active Reminders
+
+  ⚠️ REMINDER: Always check X-Stripe-Signature header before processing webhook
+
+  ---
+  (token count: 287)
+```
+
+### 10.10 Feature 10: Forgetting-as-Signal
+
+```
+BIOLOGICAL BASIS:
+  Metacognition: awareness of what you're forgetting.
+  "I haven't thought about X in a long time — I should review it."
+  The brain's tip-of-tongue state signals incomplete retrieval.
+  Spaced repetition systems exploit this: surface before forgotten.
+
+IMPLEMENTATION COST: VERY LOW
+  Just a threshold check in effective_strength.
+  Combine with watch command (already documented).
+
+API:
+  membrain watch                        # continuous monitoring
+  membrain list --decaying              # snapshot
+  membrain recall --include-decaying    # see what's almost gone
+  membrain stats (shows decaying_count) # in stats output
+
+HOW IT WORKS:
+  fn is_decaying_soon(memory: &MemoryIndex, now_tick: u64) -> bool {
+      !memory.bypass_decay
+      && memory.effective_strength(now_tick) < (MIN_STRENGTH * DECAY_WARNING_FACTOR)
+      // DECAY_WARNING_FACTOR = 2.0 (warn when at 2× the archive threshold)
+  }
+  
+  // Returned in ScoredMemory:
+  pub decaying_soon: bool
+  
+  // In recall output:
+  // [2] score=0.87 strength=0.11 ⚠️ DECAYING SOON
+  //     "PostgreSQL EXPLAIN ANALYZE: look for Seq Scan on large tables"
+  //     Consider: membrain strengthen <id>  OR  membrain recall it to reinforce
+  
+  // In watch mode: poll brain every N interactions
+  // Surface DECAYING_SOON memories proactively
+  // Useful for: agent to self-review important knowledge before it fades
+
+USE CASE:
+  Production engineer agent has rarely-accessed but critical knowledge:
+  "Emergency Postgres failover procedure: connect to replica, promote to primary."
+  It hasn't been recalled in 5000 ticks → strength = 0.08 → DECAYING SOON.
+  watch surfaces it → agent strengthens it → critical knowledge preserved.
+  
+  Without this feature: it silently archives. Next production incident: agent forgot.
+  With this feature: agent is notified and can proactively rehearse critical knowledge.
+```
+
+---
+
+## 11. Workspace Structure
+
+### 11.1 Full Directory Tree
+
+```
+membrain/
+│
+├── Cargo.toml                  # workspace root
+├── Cargo.lock
+├── README.md
+├── PLAN.md                     # this document (assembled from 6 parts)
+├── AGENTS.md                   # context for AI coding assistants
+├── .github/
+│   └── workflows/
+│       ├── ci.yml              # test + clippy + fmt on push
+│       └── release.yml         # build binaries on tag + publish to crates.io
+│
+├── crates/
+│   │
+│   ├── membrain-core/          # all brain logic, no CLI/daemon concerns
+│   │   ├── Cargo.toml
+│   │   ├── src/
+│   │   │   ├── lib.rs          # public API surface
+│   │   │   ├── brain_store.rs  # BrainStore: top-level coordinator
+│   │   │   ├── types.rs        # all shared types (MemoryIndex, EmotionalTag, etc.)
+│   │   │   ├── constants.rs    # all tunable constants
+│   │   │   ├── config.rs       # Config struct + TOML parsing
+│   │   │   │
+│   │   │   ├── store/
+│   │   │   │   ├── mod.rs
+│   │   │   │   ├── hot.rs      # HotStore: hot.db + usearch hot_index
+│   │   │   │   ├── cold.rs     # ColdStore: cold.db + usearch cold_index (mmap)
+│   │   │   │   ├── procedural.rs # ProceduralStore: procedural.db + hash lookup
+│   │   │   │   └── archive.rs  # ArchiveStore: archive.db access
+│   │   │   │
+│   │   │   ├── engine/
+│   │   │   │   ├── mod.rs
+│   │   │   │   ├── encode.rs        # encode() pipeline
+│   │   │   │   ├── recall.rs        # recall() pipeline (3-tier)
+│   │   │   │   ├── on_recall.rs     # LTP + labile + resonance
+│   │   │   │   ├── consolidation.rs # NREM + REM + Homeostasis
+│   │   │   │   ├── reconsolidation.rs # labile state management + updates
+│   │   │   │   ├── forgetting.rs    # ForgettingEngine: interference + predictive
+│   │   │   │   └── working_memory.rs # WorkingMemory: 7-slot buffer
+│   │   │   │
+│   │   │   ├── embed/
+│   │   │   │   ├── mod.rs
+│   │   │   │   ├── cache.rs    # EmbedCache: LruCache<u64, Vec<f32>>
+│   │   │   │   └── model.rs    # TextEmbedding wrapper (fastembed-rs)
+│   │   │   │
+│   │   │   ├── graph/
+│   │   │   │   ├── mod.rs
+│   │   │   │   ├── engram_graph.rs  # EngramGraph: petgraph DiGraph + BFS
+│   │   │   │   └── engram_builder.rs # EngramBuilder: formation + split + centroid
+│   │   │   │
+│   │   │   ├── scoring.rs       # unified score function + context re-rank
+│   │   │   ├── quantize.rs      # f32↔f16↔i8 conversion utilities
+│   │   │   └── migrate.rs       # SQL migration runner (schema versioning)
+│   │   │
+│   │   ├── benches/
+│   │   │   ├── encode_bench.rs   # criterion benchmark: encode throughput
+│   │   │   ├── recall_bench.rs   # criterion benchmark: recall latency
+│   │   │   └── hnsw_bench.rs     # criterion benchmark: HNSW vs brute force
+│   │   │
+│   │   └── tests/
+│   │       ├── integration/
+│   │       │   ├── test_encode_recall.rs
+│   │       │   ├── test_decay.rs
+│   │       │   ├── test_consolidation.rs
+│   │       │   ├── test_reconsolidation.rs
+│   │       │   ├── test_interference.rs
+│   │       │   ├── test_engrams.rs
+│   │       │   ├── test_emotional.rs
+│   │       │   ├── test_working_memory.rs
+│   │       │   └── test_tier3_cold.rs
+│   │       └── unit/
+│   │           ├── test_lazy_decay.rs
+│   │           ├── test_scoring.rs
+│   │           └── test_quantize.rs
+│   │
+│   └── membrain-cli/            # CLI binary + daemon + MCP server
+│       ├── Cargo.toml
+│       └── src/
+│           ├── main.rs           # clap CLI entry point
+│           ├── cli/
+│           │   ├── mod.rs
+│           │   ├── remember.rs   # `membrain remember` handler
+│           │   ├── recall.rs     # `membrain recall` handler
+│           │   ├── forget.rs     # `membrain forget` handler
+│           │   ├── strengthen.rs
+│           │   ├── update.rs
+│           │   ├── stats.rs
+│           │   ├── list.rs
+│           │   ├── show.rs
+│           │   ├── diff.rs
+│           │   ├── consolidate.rs
+│           │   ├── prime.rs
+│           │   ├── remind.rs
+│           │   ├── watch.rs
+│           │   ├── export.rs
+│           │   ├── import.rs
+│           │   ├── doctor.rs
+│           │   └── config_cmd.rs
+│           │
+│           ├── daemon/
+│           │   ├── mod.rs
+│           │   ├── server.rs     # tokio Unix socket server + JSON-RPC 2.0
+│           │   ├── handler.rs    # JSON-RPC method dispatch
+│           │   └── lifecycle.rs  # start/stop/status daemon management
+│           │
+│           ├── mcp/
+│           │   ├── mod.rs
+│           │   └── server.rs     # rmcp stdio server + tool definitions
+│           │
+│           ├── ipc/
+│           │   ├── mod.rs
+│           │   ├── client.rs     # Unix socket client (CLI → daemon)
+│           │   └── protocol.rs   # JSON-RPC message types
+│           │
+│           └── output/
+│               ├── mod.rs
+│               ├── text.rs       # colored text output
+│               └── json.rs       # JSON serialization for CLI
+│
+├── clients/
+│   ├── python/
+│   │   ├── membrain.py           # Python client (stdlib only, zero deps)
+│   │   ├── __init__.py
+│   │   └── README.md
+│   └── node/
+│       ├── membrain.js           # Node.js client (stdlib only, zero deps)
+│       ├── package.json
+│       └── README.md
+│
+└── scripts/
+    ├── install.sh               # one-line installer
+    ├── bench.sh                 # run all benchmarks
+    └── test-all.sh              # run full test suite with coverage
+```
+
+### 11.2 Key Module Responsibilities
+
+```
+brain_store.rs:
+  The orchestrator. Holds all sub-components.
+  Provides the primary API: encode(), recall(), on_recall(), consolidation_cycle().
+  Manages shared state (interaction_tick, primed_contexts).
+  Routes between standalone and daemon modes.
+
+store/hot.rs:
+  SQLite hot.db connection + PRAGMA setup.
+  3 tables: memory_index, memory_content, memory_vectors.
+  HNSW hot_index (usearch, float16, in-memory).
+  Methods: insert(), prefilter_candidates(), fetch_record(),
+           update_memory(), archive_memory(), mark_consolidated().
+
+store/cold.rs:
+  SQLite cold.db connection.
+  HNSW cold_index (usearch, int8, mmap-backed).
+  Methods: consolidate_from_hot(), search(), fetch_record().
+
+engine/encode.rs:
+  The full encoding pipeline (Section 5.3 encode path).
+  attention_gate → embed → novelty → initial_strength →
+  working_memory_update → hot_insert → hnsw_add →
+  engram_cluster → interference_check → tier1_update.
+
+engine/recall.rs:
+  The full 3-tier retrieval pipeline (Section 5.3 retrieve path).
+  tier1_check → prefilter → tier2_hnsw → rescore →
+  engram_expand → merge_sort → tier3_if_needed → on_recall.
+
+engine/consolidation.rs:
+  nrem_cycle(): score hot → migrate to cold.
+  rem_cycle(): desensitize emotional memories + cross-link.
+  homeostasis_cycle(): global scale + prune.
+  Runs as background tokio task.
+
+engine/reconsolidation.rs:
+  Manages Labile state for all memories.
+  reconsolidation_tick(): check windows, apply pending updates.
+  pending_update_api(): external submission of updates.
+
+engine/forgetting.rs:
+  ForgettingEngine: all active forgetting mechanisms.
+  apply_retroactive_interference() — on encode.
+  apply_proactive_interference() — on encode.
+  predictive_pruning_pass() — background periodic.
+  capacity_management() — when > SOFT_CAP.
+
+graph/engram_graph.rs:
+  EngramGraph: petgraph DiGraph<Uuid, EdgeWeight>.
+  node_index HashMap for O(1) Uuid → NodeIndex lookup.
+  bfs_neighbors(): priority-weighted BFS with depth/node limits.
+
+graph/engram_builder.rs:
+  EngramBuilder: maintains centroid HNSW index.
+  try_cluster(): assign new memory to existing engram or create new.
+  split_engram(): K-means (k=2) when soft_limit exceeded.
+  update_centroid(): EMA update on each new member.
+
+scoring.rs:
+  score_candidate(): unified score function.
+  semantic_sim + context_boost * strength * recency * difficulty_penalty
+  + prime_boost + resonance.
+  All scoring logic in one place for easy tuning.
+
+daemon/server.rs:
+  tokio::net::UnixListener.
+  Accepts connections, spawns per-connection tasks.
+  Reads newline-delimited JSON-RPC requests.
+  Dispatches to handler.rs, writes responses.
+
+mcp/server.rs:
+  rmcp stdio server.
+  Defines: remember, recall, forget, strengthen, stats, consolidate,
+           prime, remind tool handlers.
+  Each tool: validate params → call brain_store → serialize result.
+```
+
+### 11.3 AGENTS.md Template
+
+```markdown
+# membrain — AGENTS.md
+# Context for AI coding assistants (Claude Code, Cursor, etc.)
+
+## Project
+membrain: Rust memory system porting human brain mechanisms to AI agents.
+Stack: Rust + Tokio + usearch HNSW + SQLite WAL + fastembed-rs + petgraph + rmcp
+
+## Workspace Layout
+- crates/membrain-core/  — all brain logic (no CLI/daemon concerns)
+- crates/membrain-cli/   — CLI + daemon + MCP server
+- clients/python/        — Python Unix socket client
+- clients/node/          — Node.js Unix socket client
+
+## Key Architecture Decisions
+- 3-tier storage: Tier1 LruCache (<0.1ms) → Tier2 HNSW hot (<5ms) → Tier3 mmap cold (<50ms)
+- Lazy decay: effective_strength computed on access (never iterated eagerly)
+- Vertical SQL partition: memory_index (scan) / memory_content / memory_vectors (fetch)
+- Engrams: petgraph DiGraph with centroid HNSW for O(log E) cluster routing
+- No daemons in tests: BrainStore::open_temp() creates isolated tempdir DB
+
+## Critical Constants (in crates/membrain-core/src/constants.rs)
+- HOT_CAPACITY: 50_000
+- LTP_DELTA: 0.1
+- STABILITY_INCREMENT: 0.2
+- MIN_STRENGTH: 0.05
+- EMOTIONAL_WEIGHT: 0.5
+- AROUSAL_THRESHOLD: 0.6
+- PRE_FILTER_LIMIT: 5_000
+- ENGRAM_FORMATION_THRESHOLD: 0.65
+- RESONANCE_FACTOR: 0.3
+
+## Test Strategy
+- Unit tests: deterministic, no fastembed (use fixed vectors)
+  - test_lazy_decay.rs: verify effective_strength formula correctness
+  - test_scoring.rs: verify score function with fixed inputs
+- Integration tests: use tempdir DBs + real fastembed
+  - test_encode_recall.rs: encode → recall round trip
+  - test_decay.rs: encode → tick forward → verify decay
+- Benchmarks: criterion, requires --release build
+  cargo bench --bench recall_bench
+
+## Running
+  cargo build --release  (or with RUSTFLAGS="-C target-cpu=native" for SIMD)
+  ./target/release/membrain daemon start
+  ./target/release/membrain remember "test content"
+  ./target/release/membrain recall "test"
+
+## Common Gotchas
+- usearch ID: uses u64 (first 64 bits of Uuid), not full Uuid
+- float16 in hot HNSW, int8 in cold HNSW — always quantize before add/search
+- effective_strength() in SQL: must use (? - last_tick) not (NOW() - last_tick)
+  because SQLite doesn't know about interaction_tick
+- WAL: hot.db and cold.db are separate files — don't open same Connection across threads
+  (use rusqlite connection pool or per-task connections)
+- petgraph NodeIndex is not stable across serialization — always use Uuid as primary key
+```
+
+### 11.4 GitHub Actions CI/CD
+
+```yaml
+# .github/workflows/ci.yml
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+env:
+  CARGO_TERM_COLOR: always
+  RUSTFLAGS: ""  # No target-cpu=native in CI (generic runner)
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy, rustfmt
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Format check
+        run: cargo fmt --all -- --check
+
+      - name: Clippy
+        run: cargo clippy --all-targets --all-features -- -D warnings
+
+      - name: Tests (unit — no fastembed)
+        run: cargo test --lib --all
+
+      - name: Tests (integration — requires model download)
+        run: cargo test --test '*' --all
+        env:
+          MEMBRAIN_TEST_MODEL: "all-MiniLM-L6-v2"
+
+  release:
+    if: startsWith(github.ref, 'refs/tags/v')
+    needs: test
+    strategy:
+      matrix:
+        include:
+          - os: ubuntu-latest
+            target: x86_64-unknown-linux-gnu
+            artifact: membrain-linux-x86_64
+          - os: macos-latest
+            target: x86_64-apple-darwin
+            artifact: membrain-macos-x86_64
+          - os: macos-latest
+            target: aarch64-apple-darwin
+            artifact: membrain-macos-aarch64
+          - os: windows-latest
+            target: x86_64-pc-windows-msvc
+            artifact: membrain-windows-x86_64.exe
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Build release
+        run: |
+          cargo build --release --target ${{ matrix.target }} \
+            -p membrain-cli
+
+      - name: Upload binary
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.artifact }}
+          path: target/${{ matrix.target }}/release/membrain*
+
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v1
+        with:
+          files: target/${{ matrix.target }}/release/membrain*
+```
+
+---
+
+## END OF PART 5
+
+**Next: Part 6 — Implementation Milestones, Acceptance Checklist, Constants, Algorithm Reference**
+
+Parts list:
+- Part 1: Vision, Problem Statement, Human Brain Deep Dive ✅
+- Part 2: Gap Analysis + Full Port (mechanism → Rust code) ✅
+- Part 3: Architecture Overview + Performance ✅
+- Part 4: Techstack + Data Schema ✅
+- Part 5: CLI/MCP + Feature Extensions + Workspace Structure ✅
+- Part 6: Milestones + Acceptance Checklist + Constants + Algorithm Reference
+
+
+<!-- SOURCE: PLAN_part6.md -->
+
+# membrain — PLAN.md
+# Part 6 of 6: Implementation Milestones · Acceptance Checklist · Constants · Algorithm Reference
+
+---
+
+## 12. Implementation Milestones
+
+Each milestone is independently shippable. Later milestones build on earlier ones.
+Each milestone includes: goal, deliverables, key files, test coverage, and acceptance criteria.
+
+---
+
+### Milestone 1 — Foundation + Lazy Decay
+
+```
+GOAL:
+  Working binary that can encode and recall memories.
+  Lazy Ebbinghaus decay implemented and verified.
+  3-table vertical partition schema in place.
+  usearch HNSW hot index functional.
+  fastembed-rs embedding with LruCache.
+  
+DELIVERABLES:
+  - Workspace setup (Cargo.toml, crates/membrain-core, crates/membrain-cli)
+  - hot.db schema: memory_index + memory_content + memory_vectors
+  - brain_state singleton row
+  - interaction_tick: Arc<AtomicU64>
+  - effective_strength() lazy formula: base × e^(-Δtick/stability)
+  - EmbedCache: LruCache<u64, Vec<f32>> with xxhash64 keys
+  - HotStore: rusqlite connection + WAL PRAGMA
+  - usearch HNSW hot_index (float16, in-memory)
+  - Basic encode(): attention_gate → embed → insert → hnsw_add
+  - Basic recall(): embed → sql_prefilter → hnsw_search → sort → return
+  - Tier1 LruCache (512 entries, basic)
+  - `membrain remember` and `membrain recall` CLI commands (no daemon)
+  - `membrain stats` (basic counts)
+  - Config file parsing (config.toml)
+
+KEY FILES:
+  crates/membrain-core/src/
+    constants.rs       — all tunable constants (HOT_CAPACITY, LTP_DELTA, etc.)
+    types.rs           — MemoryIndex, MemoryKind, EmotionalTag, MemoryState
+    config.rs          — Config struct + toml loading
+    brain_store.rs     — BrainStore struct + open() + tick()
+    store/hot.rs       — HotStore: DB + HNSW + PRAGMA setup
+    embed/cache.rs     — EmbedCache
+    embed/model.rs     — TextEmbedding wrapper
+    engine/encode.rs   — encode() stub (attention → embed → insert → hnsw)
+    engine/recall.rs   — recall() stub (embed → prefilter → hnsw → sort)
+    scoring.rs         — effective_strength() + basic score_candidate()
+    quantize.rs        — f32↔f16 conversion
+  crates/membrain-cli/src/
+    main.rs            — clap CLI entry point
+    cli/remember.rs
+    cli/recall.rs
+    cli/stats.rs
+
+TESTS:
+  tests/unit/test_lazy_decay.rs:
+    - verify effective_strength(base=1.0, stability=100, elapsed=0) == 1.0
+    - verify effective_strength(base=1.0, stability=100, elapsed=100) ≈ 0.368
+    - verify bypass_decay=true: effective_strength always returns base_strength
+    - verify elapsed=∞: returns ≈ 0.0
+    - verify elapsed < 0 (saturating_sub): returns base_strength unchanged
+    
+  tests/unit/test_scoring.rs:
+    - verify score with fixed float32 vectors
+    - verify context_weight = 0.3 applied correctly
+    
+  tests/integration/test_encode_recall.rs:
+    - encode one memory → recall it → assert top result matches
+
+ACCEPTANCE CRITERIA:
+  ✅ `membrain remember "test content"` returns valid UUID
+  ✅ `membrain recall "test"` returns the stored memory
+  ✅ effective_strength(memory, tick=0) == initial_strength
+  ✅ effective_strength(memory, tick=1000) < initial_strength (decay happened)
+  ✅ bypass_decay memories return full base_strength regardless of tick
+  ✅ embedding cache: second embed of same content is instant (xxhash hit)
+  ✅ WAL mode confirmed (PRAGMA journal_mode returns 'wal')
+  ✅ usearch index: add 100 vectors → search top-5 → results in <5ms
+  ✅ SQLite vertical partition: prefilter query touches only memory_index
+```
+
+---
+
+### Milestone 2 — Full Encode Pipeline
+
+```
+GOAL:
+  Complete biological encoding pipeline.
+  Novelty scoring, emotional tagging, initial strength calculation.
+  Working memory (7-slot buffer).
+  Source tagging.
+  Interference (proactive + retroactive) on encode.
+
+DELIVERABLES:
+  - novelty_score = 1.0 - max_cosine_sim(new_vec, top_1_neighbor)
+  - duplicate detection (novelty < DUPLICATE_THRESHOLD → update existing)
+  - initial_strength formula: BASE × novelty_mod × attention_mod × emotional_mod
+  - EmotionalTag: strength_multiplier() + should_bypass_decay()
+  - Working memory: WorkingMemory struct, 7 slots, VecDeque, attention scoring
+  - Working memory eviction → hot_store encode if strong enough
+  - ForgettingEngine: apply_retroactive() + apply_proactive() (on encode)
+  - MemorySource enum + CLI --source flag
+  - Engram formation stub: engram_builder.try_cluster() (without split)
+  - hot.db: engrams table + engram_edges table schema
+  - `membrain remember --valence --arousal --attention --context` flags
+
+KEY FILES:
+  engine/encode.rs        — full pipeline
+  engine/working_memory.rs — WorkingMemory impl
+  engine/forgetting.rs    — retroactive + proactive interference
+  graph/engram_builder.rs — try_cluster() (formation only, no split yet)
+
+TESTS:
+  tests/integration/test_encode_pipeline.rs:
+    - high attention → higher initial strength than low attention
+    - high emotional arousal → bypass_decay = true
+    - high similarity to existing → duplicate detection → update existing
+    - two similar memories: second causes retroactive penalty to first
+    - working memory: add 8 memories → first is evicted → encoded to hot_store
+    
+ACCEPTANCE CRITERIA:
+  ✅ attention_score=0.0 → memory discarded (below ATTENTION_THRESHOLD)
+  ✅ attention_score=1.0 → maximum initial strength
+  ✅ emotional_arousal=0.9, emotional_valence=-0.9 → bypass_decay=true
+  ✅ emotional_arousal=0.3, emotional_valence=0.3 → bypass_decay=false
+  ✅ novelty < 0.05 → memory updates existing (not creates new)
+  ✅ working memory full (7 items) → evicts lowest attention → encodes to hot
+  ✅ encode memory B → similar memory A has lower base_strength (retroactive)
+  ✅ encode memory B → B has higher retrieval_difficulty (proactive)
+  ✅ new engram created for first memory in a cluster
+  ✅ second similar memory joins existing engram (centroid updated)
+```
+
+---
+
+### Milestone 3 — LTP/LTD + on_recall()
+
+```
+GOAL:
+  on_recall() pipeline: LTP + stability increase + labile state + engram resonance.
+  Decay persisted on recall (clock reset).
+  Full recall pipeline using on_recall for every returned memory.
+
+DELIVERABLES:
+  - on_recall(): persist_decay() + LTP_DELTA + stability_increment + labile_state
+  - reconsolidation_window() formula
+  - engram resonance: spread partial LTP to depth-1 engram neighbors
+  - access_count increment on recall
+  - Tier1 cache update on every recall (cache recent results)
+  - labile_memories table tracking
+  - MemoryState::Labile { since_tick, window_ticks } persisted
+  - SQL: effective_strength in WHERE clause (lazy pre-filter)
+  - `membrain strengthen <ID>` CLI command
+
+KEY FILES:
+  engine/on_recall.rs    — complete on_recall() implementation
+  engine/recall.rs       — on_recall() called for all returned memories
+  graph/engram_graph.rs  — resonance spread to neighbors
+
+TESTS:
+  tests/integration/test_ltp_ltd.rs:
+    - encode memory → tick forward 100 → recall → effective_strength increased vs pre-recall
+    - recall increases stability: subsequent decay is slower
+    - recalled memory → state = Labile
+    - engram resonance: recall memory → engram neighbors gain small LTP boost
+    - memory with bypass_decay: strength not reduced by decay formula
+    
+  tests/unit/test_lazy_decay.rs (extended):
+    - encode memory → don't recall → effective_strength at t=100 < at t=0
+    - encode memory → recall at t=50 → effective_strength at t=100 > un-recalled memory
+    - stability doubles after ~3.8 recalls (exponential growth)
+
+ACCEPTANCE CRITERIA:
+  ✅ on_recall() increases base_strength by LTP_DELTA (bounded at MAX_STRENGTH)
+  ✅ on_recall() increases stability by STABILITY_INCREMENT × stability
+  ✅ on_recall() resets decay clock (last_accessed_tick = now_tick)
+  ✅ on_recall() sets state = Labile with correct window
+  ✅ after recall, memory decays slower (stability increased)
+  ✅ engram neighbors receive resonance_ltp = LTP_DELTA × RESONANCE_FACTOR / n
+  ✅ Tier1 cache updated with recalled memory
+  ✅ access_count incremented on every recall
+  ✅ `membrain strengthen <id>` applies identical effects to on_recall()
+```
+
+---
+
+### Milestone 4 — 3-Tier Retrieval Engine
+
+```
+GOAL:
+  Complete 3-tier retrieval: Tier1 → Tier2 → Tier3.
+  Unified scoring function with context re-ranking.
+  Engram BFS expansion.
+  Tip-of-tongue mode.
+  Adaptive ef_search.
+  cold_store (cold.db + cold.usearch mmap) — read path.
+
+DELIVERABLES:
+  - ColdStore: cold.db schema + cold.usearch mmap index read path
+  - Complete 3-tier pipeline (Tier1 fast return → Tier2 → Tier3)
+  - adaptive_ef() function
+  - Unified score_candidate() with all signals:
+    semantic_sim + context_boost + strength + recency + difficulty_penalty + prime_boost + resonance
+  - EngramGraph BFS expansion from top recall hits
+  - MemoryFragment + tip_of_tongue mode (when max_score < PARTIAL_THRESHOLD)
+  - RecallResult struct with tier_used, latency_us, engram_expanded fields
+  - `membrain recall --confidence fast|normal|high`
+  - `membrain recall --no-engram` flag
+
+KEY FILES:
+  store/cold.rs             — ColdStore read path
+  engine/recall.rs          — complete 3-tier pipeline
+  graph/engram_graph.rs     — bfs_neighbors() with priority queue
+  scoring.rs                — unified score_candidate() (complete)
+  crates/membrain-cli/src/cli/recall.rs — full CLI output
+
+TESTS:
+  tests/integration/test_recall_pipeline.rs:
+    - encode 10 memories → recall → Tier1 hit for recently encoded
+    - encode 600 memories (> Tier1 capacity) → recall → Tier2 hit
+    - encode + consolidate to cold → recall → Tier3 hit
+    - engram expansion: recall seed → also returns engram cluster members
+    - tip-of-tongue: no close match → returns fragments not full memories
+    - context boost: memory encoded with context A scores higher when recalled with context A
+    - adaptive ef: high confidence → more ef → higher recall accuracy
+    
+ACCEPTANCE CRITERIA:
+  ✅ Tier1 hit: latency < 0.1ms for 1000 consecutive identical queries
+  ✅ Tier2 search: 50k vectors → top-5 result in < 5ms (release build, native CPU)
+  ✅ Tier3 search: cold mmap index → top-5 result in < 50ms
+  ✅ Engram expansion: top hit in engram → recall returns related cluster members
+  ✅ Context re-ranking: memory encoded in context A scores 20%+ higher when recalled in context A vs context B
+  ✅ Tip-of-tongue: when no memory above PARTIAL_THRESHOLD, returns fragments
+  ✅ RecallResult.tier_used correctly reports which tier was used
+  ✅ RecallResult.latency_us measured accurately
+```
+
+---
+
+### Milestone 5 — Reconsolidation Engine
+
+```
+GOAL:
+  Full reconsolidation lifecycle: Labile state management, pending updates,
+  window expiry, re-embedding, strength bonus.
+
+DELIVERABLES:
+  - pending_updates table in hot.db
+  - reconsolidation_tick() async task: check all Labile memories
+  - apply_update(): re-embed + update hot.db + update HNSW + Stable/Labile
+  - reconsolidation_window() formula (age-dependent, strength-dependent)
+  - `membrain update <ID> <NEW_CONTENT>` CLI command
+  - `membrain show <ID>` shows Labile state + window remaining
+  - RECONSOLIDATION_BONUS applied on successful update
+
+KEY FILES:
+  engine/reconsolidation.rs — complete reconsolidation cycle
+  hot.rs — pending_updates table + labile_memories queries
+  cli/update.rs
+  cli/show.rs (extended with Labile state display)
+
+TESTS:
+  tests/integration/test_reconsolidation.rs:
+    - encode memory → recall → state = Labile
+    - submit update during window → reconsolidation_tick → content updated
+    - submit update after window expired → NOT applied (window closed)
+    - very old memory → shorter reconsolidation window
+    - successful update → base_strength += RECONSOLIDATION_BONUS
+    - updated memory → HNSW index reflects new embedding
+    - updated memory → Tier1 cache invalidated
+
+ACCEPTANCE CRITERIA:
+  ✅ Fresh memory (age=0): reconsolidation window = BASE_WINDOW ticks
+  ✅ Old memory (age >> BASE_WINDOW): reconsolidation window ≈ 0-5 ticks
+  ✅ Update submitted during window → applied at next reconsolidation_tick
+  ✅ Update submitted after window expired → discarded (not applied)
+  ✅ Applied update → memory content changed in DB
+  ✅ Applied update → HNSW search now returns updated embedding
+  ✅ Applied update → base_strength += RECONSOLIDATION_BONUS
+  ✅ `membrain update` with no prior recall → rejected (not Labile)
+  ✅ `membrain update --force` → forces Labile state before update
+```
+
+---
+
+### Milestone 6 — Consolidation Engine (NREM + REM + Homeostasis)
+
+```
+GOAL:
+  Complete consolidation cycle running as async background task.
+  ColdStore write path.
+  Pressure-triggered consolidation.
+  REM emotional processing.
+  Homeostasis scaling.
+
+DELIVERABLES:
+  - ColdStore: cold.db write path + cold.usearch mmap write
+  - nrem_cycle(): score hot → migrate top-N to cold → update engrams
+  - rem_cycle(): desensitize emotional memories + cross-link
+  - homeostasis_cycle(): global scale + prune below MIN_STRENGTH
+  - Tokio background task: consolidation_loop (woken by channel)
+  - Pressure signal: when hot_index.len() > 90% HOT_CAPACITY → send to channel
+  - ConsolidationReport struct
+  - `membrain consolidate` CLI command (manual trigger)
+  - `membrain consolidate --dry-run`
+
+KEY FILES:
+  store/cold.rs          — write path: consolidate_from_hot()
+  engine/consolidation.rs — nrem_cycle + rem_cycle + homeostasis_cycle
+  daemon/server.rs       — background task spawn
+
+TESTS:
+  tests/integration/test_consolidation.rs:
+    - encode HOT_CAPACITY + 100 memories → nrem_cycle → cold_count > 0
+    - migrated memories: cold.db has record, hot.db memory_index state=Consolidated
+    - migrated memories: hot_index.len() reduced
+    - migrated memories: cold_index can find them
+    - rem_cycle: emotional memory arousal reduced by DESENSITIZATION_FACTOR
+    - rem_cycle: after enough cycles, emotional_processed = true, bypass_decay = false
+    - homeostasis: if total_load > trigger → all base_strengths × 0.9
+    - homeostasis: memories below MIN_STRENGTH after scaling → archived
+    - dry-run: no changes to DB
+
+ACCEPTANCE CRITERIA:
+  ✅ nrem_cycle migrates memories from hot to cold without data loss
+  ✅ migrated memory: content retrievable from cold.db (decompressed correctly)
+  ✅ migrated memory: cold HNSW returns it for semantic query
+  ✅ hot_index.len() reduced after nrem_cycle (HNSW entries removed)
+  ✅ rem_cycle reduces arousal by DESENSITIZATION_FACTOR each cycle
+  ✅ rem_cycle sets emotional_processed=true when arousal < PROCESSED_THRESHOLD
+  ✅ rem_cycle sets bypass_decay=false when processed
+  ✅ homeostasis scales ALL hot memories by HOMEOSTASIS_FACTOR
+  ✅ background consolidation task: runs without blocking encode/recall
+  ✅ WAL: consolidation writes to cold.db don't block reads from hot.db
+```
+
+---
+
+### Milestone 7 — Engram Graph (Formation + BFS + Split)
+
+```
+GOAL:
+  Full engram system: formation, BFS traversal, split on overflow,
+  centroid HNSW index, resonance, serialization/deserialization.
+
+DELIVERABLES:
+  - EngramGraph: petgraph DiGraph + node_index HashMap
+  - EngramBuilder: centroid HNSW (usearch, float16, unlimited)
+  - try_cluster(): formation threshold → join or create
+  - update_centroid(): EMA α=0.1 on new member
+  - split_engram(): K-means (k=2) when member_count > SOFT_LIMIT
+  - bfs_neighbors(): priority-weighted BFS with depth/node limits
+  - engram_graph serialization: bincode → brain_state blob in hot.db
+  - graph load on daemon startup from hot.db
+  - edge activation_count++ on BFS traversal
+  - `membrain show <ID> --related` shows BFS results
+  - Engram stats in `membrain stats` output
+
+KEY FILES:
+  graph/engram_graph.rs    — complete with bfs_neighbors
+  graph/engram_builder.rs  — complete with split_engram
+
+TESTS:
+  tests/integration/test_engrams.rs:
+    - encode 5 similar memories → all in same engram (centroid formed)
+    - encode 1 dissimilar memory → new engram created
+    - encode SOFT_LIMIT + 1 similar memories → engram splits into 2
+    - bfs: seed → returns up to max_nodes depth-first expansion
+    - centroid: mean of all member embeddings (verified numerically)
+    - serialization: serialize → deserialize → same graph structure
+    - edge activation_count: BFS traversal increments count
+    - engram centroid HNSW: find nearest engram by centroid similarity
+
+ACCEPTANCE CRITERIA:
+  ✅ 5 similar memories → same engram_id in memory_index
+  ✅ 5 dissimilar memories → 5 different engrams
+  ✅ Engram centroid ≈ mean of member embeddings (< 0.01 cosine distance)
+  ✅ SOFT_LIMIT + 1 members → split → 2 child engrams with parent_engram_id set
+  ✅ BFS max_nodes=50 enforced (never returns more than 50 nodes)
+  ✅ BFS max_depth=3 enforced
+  ✅ BFS priority: high-similarity edges traversed before low-similarity edges
+  ✅ engram graph survives daemon restart (serialized to hot.db)
+  ✅ recall returns engram members alongside HNSW top hits
+```
+
+---
+
+### Milestone 8 — Active Forgetting + Interference Engine
+
+```
+GOAL:
+  Complete ForgettingEngine: all four components operational.
+  Predictive pruning batch pass.
+  Capacity management.
+  `membrain watch` command.
+  `membrain list --decaying`.
+
+DELIVERABLES:
+  - ForgettingEngine: apply_retroactive + apply_proactive (M2 already done)
+  - predictive_pruning_pass(): batch accelerated decay for non-predictive memories
+  - capacity_management(): archive weakest when > SOFT_CAP
+  - Background forgetting task (low priority tokio task, periodic)
+  - is_decaying_soon() fn exposed in MemoryIndex
+  - decaying_soon: bool field in ScoredMemory
+  - `membrain watch` command (continuous decaying-soon monitor)
+  - `membrain list --decaying` filter
+  - ArchiveReason enum + archive.db write path
+  - `membrain archive restore <ID>` (reads archive.db → re-encodes to hot)
+
+KEY FILES:
+  engine/forgetting.rs     — complete ForgettingEngine
+  store/hot.rs             — archive_memory() implementation
+  store/archive.rs         — ArchiveStore (archive.db)
+  cli/watch.rs
+  cli/list.rs (extended with --decaying filter)
+
+TESTS:
+  tests/integration/test_forgetting.rs:
+    - predictive prune: encode old never-recalled memory → prune pass → archived
+    - capacity management: encode > SOFT_CAP → weakest memories archived
+    - retroactive interference: encode B → A (similar) has lower strength
+    - proactive interference: encode B → B has higher retrieval_difficulty
+    - archive restore: archived memory → archive restore → back in hot_store
+    - watch: decaying memories surface before reaching MIN_STRENGTH
+    - is_decaying_soon: returns true when strength < 2 × MIN_STRENGTH
+
+ACCEPTANCE CRITERIA:
+  ✅ Predictive prune: memory with access_count=0 and age=MINIMUM_PRUNE_AGE → archived
+  ✅ Capacity management: encode 200k memories → weakest archived to stay ≤ SOFT_CAP
+  ✅ Retroactive interference: old memory base_strength reduced after encoding similar new
+  ✅ Proactive: new memory retrieval_difficulty > 0 when similar old memories exist
+  ✅ archive.db: archived memories stored with reason and tick
+  ✅ archive restore: memory re-encoded into hot_store with original content
+  ✅ `membrain watch` prints memories when effective_strength < 2 × MIN_STRENGTH
+  ✅ `membrain list --decaying` returns only decaying memories
+```
+
+---
+
+### Milestone 9 — Daemon + IPC + MCP Server
+
+```
+GOAL:
+  Full daemon mode with Unix socket JSON-RPC 2.0 server.
+  MCP stdio server via rmcp.
+  Python + Node clients functional.
+  CLI transparently forwards to daemon if running.
+
+DELIVERABLES:
+  - tokio Unix socket server: accept → spawn per-connection task → handle JSON-RPC
+  - JSON-RPC 2.0 dispatcher: method → brain_store call → response
+  - All methods: remember, recall, forget, strengthen, update, stats,
+                 consolidate, prime, remind, watch, export, import
+  - Daemon lifecycle: start (daemonize) + stop (SIGTERM graceful) + status
+  - PID file + socket file management
+  - CLI: detect daemon socket → forward vs standalone fallback
+  - rmcp MCP server: stdio transport with all tools defined
+  - Python client: membrain.py (zero deps, socket + json)
+  - Node client: membrain.js (zero deps, net + readline)
+  - `membrain daemon start|stop|status` CLI subcommand
+  - `membrain mcp` CLI subcommand (starts stdio MCP server)
+
+KEY FILES:
+  crates/membrain-cli/src/
+    daemon/server.rs    — tokio Unix socket server
+    daemon/handler.rs   — JSON-RPC dispatch
+    daemon/lifecycle.rs — start/stop/status
+    mcp/server.rs       — rmcp stdio server
+    ipc/client.rs       — CLI → daemon forwarding
+  clients/python/membrain.py
+  clients/node/membrain.js
+
+TESTS:
+  tests/integration/test_daemon.rs:
+    - start daemon → socket exists at expected path
+    - Python client: remember → recall round trip via socket
+    - Node client: remember → recall round trip via socket
+    - Concurrent clients: 10 simultaneous connections → all served correctly
+    - Daemon stop: SIGTERM → graceful shutdown → socket removed
+    - CLI fallback: no daemon → standalone mode → same results
+    - MCP: spawn `membrain mcp` → send tool call JSON → receive result
+    
+ACCEPTANCE CRITERIA:
+  ✅ `membrain daemon start` → daemon running, PID file written
+  ✅ `membrain daemon status` → shows PID, uptime, memory RSS
+  ✅ `membrain daemon stop` → clean shutdown, PID + socket removed
+  ✅ Python client: MembrainClient().remember()/recall() → correct results
+  ✅ Node client: MembrainClient().remember/recall → correct results
+  ✅ 10 concurrent Python client connections → all succeed without errors
+  ✅ MCP tool `remember` → JSON response with valid UUID
+  ✅ MCP tool `recall` → JSON array of memories
+  ✅ CLI without daemon → falls back to standalone mode automatically
+  ✅ Daemon warm: embedding model loaded once at startup
+  ✅ recall latency with daemon: Tier1 < 0.5ms, Tier2 < 10ms (IPC overhead included)
+```
+
+---
+
+### Milestone 10 — CLI Polish + Production Readiness
+
+```
+GOAL:
+  All CLI commands complete and polished.
+  Benchmark suite meeting all targets.
+  Export/import working.
+  Doctor command.
+  Diff command.
+  README complete.
+  Release CI/CD pipeline.
+
+DELIVERABLES:
+  - All CLI commands: diff, export, import, doctor, config, archive, context-for
+  - `--json` flag for every command
+  - `membrain prime` + `membrain remind` (Features 3 and 5)
+  - `membrain watch` (Feature 10)
+  - `membrain diff --from --to` (Feature 6)
+  - `membrain context-for "task"` (Feature 9)
+  - Benchmark suite (criterion): encode, recall (Tier1/2/3), consolidation
+  - All benchmark targets verified:
+    Tier1 <0.1ms, Tier2 <5ms, Tier3 <50ms, encode <10ms
+  - README.md: installation, usage, configuration, MCP setup
+  - AGENTS.md: context for AI coding assistants
+  - GitHub Actions: CI (test + clippy + fmt) + Release (multi-platform binaries)
+  - `scripts/install.sh`: one-line installer
+
+KEY FILES:
+  crates/membrain-cli/src/cli/ — all remaining command handlers
+  benches/ — complete benchmark suite
+  README.md
+  AGENTS.md
+  .github/workflows/ci.yml
+  .github/workflows/release.yml
+
+ACCEPTANCE CRITERIA (all must pass):
+  ✅ All 17 CLI commands functional and return correct JSON with --json flag
+  ✅ Benchmark: encode with cache hit < 1ms (p99)
+  ✅ Benchmark: encode with cache miss < 10ms (p99)
+  ✅ Benchmark: recall Tier1 < 0.1ms (p99)
+  ✅ Benchmark: recall Tier2 at 50k memories < 5ms (p99)
+  ✅ Benchmark: recall Tier3 at 500k cold memories < 50ms (p99)
+  ✅ Export: dumps all memories as valid NDJSON
+  ✅ Import: reads NDJSON → re-encodes → memories retrievable
+  ✅ Doctor: detects DB corruption, index inconsistency, config errors
+  ✅ Diff: shows correct added/forgotten/decayed counts
+  ✅ context-for: returns token-budget-aware prompt prefix
+  ✅ Release binary: single statically-linked binary < 50MB
+  ✅ CI: green on push (test + clippy + fmt)
+  ✅ Multi-platform release: linux-x86_64, macos-x86_64, macos-aarch64
+```
+
+---
+
+## 13. Acceptance Checklist
+
+Complete project acceptance: all items must pass before v1.0.0 tag.
+
+### 13.1 Biological Mechanism Coverage
+
+```
+MECHANISM                   IMPLEMENTED   TESTED   VERIFIED
+─────────────────────────────────────────────────────────
+LTP (on_recall strength++)      ☐           ☐        ☐
+LTD (Ebbinghaus lazy decay)     ☐           ☐        ☐
+Emotional bypass_decay          ☐           ☐        ☐
+REM desensitization             ☐           ☐        ☐
+NREM migration (hot→cold)       ☐           ☐        ☐
+Synaptic homeostasis            ☐           ☐        ☐
+Engram formation                ☐           ☐        ☐
+Engram BFS expansion            ☐           ☐        ☐
+Engram split (k-means)          ☐           ☐        ☐
+Engram resonance                ☐           ☐        ☐
+Reconsolidation (labile)        ☐           ☐        ☐
+Reconsolidation (update)        ☐           ☐        ☐
+Active forgetting (predictive)  ☐           ☐        ☐
+Retroactive interference        ☐           ☐        ☐
+Proactive interference          ☐           ☐        ☐
+Pattern completion (BFS)        ☐           ☐        ☐
+Working memory 7-slot           ☐           ☐        ☐
+Attention gating                ☐           ☐        ☐
+Encoding specificity (context)  ☐           ☐        ☐
+Novelty detection               ☐           ☐        ☐
+Duplicate detection             ☐           ☐        ☐
+Tip-of-tongue mode              ☐           ☐        ☐
+Prospective triggers            ☐           ☐        ☐
+Spotlight priming               ☐           ☐        ☐
+```
+
+### 13.2 Performance Benchmarks
+
+```
+BENCHMARK                           TARGET    MEASURED   PASS
+──────────────────────────────────────────────────────────
+Tier1 recall (cache hit)            <0.1ms      ___ms     ☐
+Tier2 recall (50k hot)              <5ms        ___ms     ☐
+Tier3 recall (500k cold)            <50ms       ___ms     ☐
+Encode (embed cache hit)            <1ms        ___ms     ☐
+Encode (embed cache miss)           <10ms       ___ms     ☐
+SQL pre-filter (50k memories)       <0.5ms      ___ms     ☐
+Engram BFS (depth=3, max=50)        <1ms        ___ms     ☐
+Consolidation (1k migration)        non-block   pass/fail  ☐
+Decay idle overhead                 0ms         ___ms     ☐
+Embed cache hit rate (steady state) >80%        ___%      ☐
+Tier1 hit rate (steady state)       >60%        ___%      ☐
+```
+
+### 13.3 Correctness
+
+```
+CORRECTNESS ITEM                               PASS
+──────────────────────────────────────────────────
+effective_strength formula matches Ebbinghaus   ☐
+bypass_decay ignores elapsed tick entirely      ☐
+LTP bounded at MAX_STRENGTH                     ☐
+stability bounded at MAX_STABILITY              ☐
+reconsolidation window correct for age=0        ☐
+reconsolidation window shorter for old memories ☐
+update discarded after window expiry            ☐
+engram centroid = mean of member embeddings     ☐
+engram split produces 2 children                ☐
+BFS never returns > max_nodes results           ☐
+SQL effective_strength matches Rust formula     ☐
+float32 rescore improves on int8/f16 ranking    ☐
+context weight = 0.3 applied consistently       ☐
+```
+
+### 13.4 API Completeness
+
+```
+CLI COMMAND             WORKS   --JSON   DAEMON   STANDALONE
+──────────────────────────────────────────────────────────
+membrain remember         ☐       ☐        ☐         ☐
+membrain recall           ☐       ☐        ☐         ☐
+membrain forget           ☐       ☐        ☐         ☐
+membrain strengthen       ☐       ☐        ☐         ☐
+membrain update           ☐       ☐        ☐         ☐
+membrain stats            ☐       ☐        ☐         ☐
+membrain list             ☐       ☐        ☐         ☐
+membrain show             ☐       ☐        ☐         ☐
+membrain diff             ☐       ☐        ☐         ☐
+membrain consolidate      ☐       ☐        ☐         ☐
+membrain prime            ☐       ☐        ☐         ☐
+membrain remind           ☐       ☐        ☐         ☐
+membrain watch            ☐       ☐        ☐         ☐
+membrain export           ☐       ☐        ☐         ☐
+membrain import           ☐       ☐        ☐         ☐
+membrain daemon start     ☐       ☐        n/a       n/a
+membrain daemon stop      ☐       ☐        n/a       n/a
+membrain daemon status    ☐       ☐        n/a       n/a
+membrain mcp              ☐       n/a      ☐         ☐
+membrain doctor           ☐       ☐        ☐         ☐
+membrain context-for      ☐       ☐        ☐         ☐
+
+MCP TOOL                WORKS   CORRECT OUTPUT
+──────────────────────────────────────────────
+remember                  ☐       ☐
+recall                    ☐       ☐
+forget                    ☐       ☐
+strengthen                ☐       ☐
+stats                     ☐       ☐
+consolidate               ☐       ☐
+prime                     ☐       ☐
+remind                    ☐       ☐
+```
+
+---
+
+## 14. Tunable Constants
+
+All constants live in `crates/membrain-core/src/constants.rs`.
+All are overridable via `~/.membrain/config.toml`.
+
+```rust
+// crates/membrain-core/src/constants.rs
+
+// ── Storage ──────────────────────────────────────────────────────────
+/// Maximum memories in hot HNSW index (usearch float16, in-memory)
+pub const HOT_CAPACITY: usize = 50_000;
+
+/// Tier1 LruCache entries
+pub const TIER1_CACHE_CAPACITY: usize = 512;
+
+/// Embedding LruCache entries (~1.5MB at 384 dims × f32)
+pub const EMBED_CACHE_CAPACITY: usize = 1_000;
+
+/// Archive when total memory count exceeds this
+pub const SOFT_CAP: usize = 1_000_000;
+
+// ── LTP / LTD ─────────────────────────────────────────────────────────
+/// Strength boost per recall (simulates AMPA receptor insertion)
+pub const LTP_DELTA: f32 = 0.1;
+
+/// Stability growth per recall (fraction of current stability)
+pub const STABILITY_INCREMENT: f32 = 0.2;
+
+/// Initial stability for new memories (Ebbinghaus S parameter)
+pub const BASE_STABILITY: f32 = 50.0;
+
+/// Maximum allowed stability (prevents infinite stability)
+pub const MAX_STABILITY: f32 = 10_000.0;
+
+/// Maximum allowed strength
+pub const MAX_STRENGTH: f32 = 1.0;
+
+/// Below this: memory archived (soft-deleted)
+pub const MIN_STRENGTH: f32 = 0.05;
+
+/// Initial base_strength for new memories
+pub const BASE_STRENGTH: f32 = 0.5;
+
+// ── Emotional Memory ──────────────────────────────────────────────────
+/// How much emotion multiplies initial strength
+/// Formula: 1.0 + (arousal × |valence| × EMOTIONAL_WEIGHT)
+pub const EMOTIONAL_WEIGHT: f32 = 0.5;
+
+/// Arousal above this: bypass_decay candidate
+pub const AROUSAL_THRESHOLD: f32 = 0.6;
+
+/// Absolute valence above this: bypass_decay candidate
+pub const VALENCE_THRESHOLD: f32 = 0.5;
+
+/// Arousal reduction per REM cycle (simulates NE suppression)
+pub const DESENSITIZATION_FACTOR: f32 = 0.95;
+
+/// Arousal below this: mark emotional_processed = true
+pub const EMOTIONAL_PROCESSED_THRESHOLD: f32 = 0.3;
+
+// ── Attention / Encoding ──────────────────────────────────────────────
+/// Below this: memory discarded (not attended to)
+pub const ATTENTION_THRESHOLD: f32 = 0.2;
+
+/// Default attention if not specified
+pub const DEFAULT_ATTENTION: f32 = 0.7;
+
+/// How much attention modifies initial strength
+pub const ATTENTION_WEIGHT: f32 = 0.4;
+
+/// How much novelty modifies initial strength
+pub const NOVELTY_WEIGHT: f32 = 0.3;
+
+/// Below this novelty: update existing instead of creating new
+pub const DUPLICATE_THRESHOLD: f32 = 0.05;
+
+// ── Retrieval / Scoring ───────────────────────────────────────────────
+/// Score weight for content similarity
+pub const CONTENT_WEIGHT: f32 = 0.7;
+
+/// Score weight for context similarity  
+pub const CONTEXT_WEIGHT: f32 = 0.3;
+
+/// Above this: Tier1 early return (confident cache hit)
+pub const TIER1_CONFIDENCE_THRESHOLD: f32 = 0.90;
+
+/// Above this: Tier2 early return (confident HNSW hit)
+pub const TIER2_CONFIDENCE_THRESHOLD: f32 = 0.80;
+
+/// Below this: tip-of-tongue mode (partial recall only)
+pub const PARTIAL_RECALL_THRESHOLD: f32 = 0.40;
+
+/// Decay warning at 2× MIN_STRENGTH
+pub const DECAY_WARNING_FACTOR: f32 = 2.0;
+
+/// SQL pre-filter: max candidates to fetch before HNSW search
+pub const PRE_FILTER_LIMIT: usize = 5_000;
+
+/// float32 rescore: how many HNSW candidates to rescore
+pub const RESCORE_TOP_K: usize = 20;
+
+// ── Engrams ───────────────────────────────────────────────────────────
+/// Min cosine similarity to join existing engram
+pub const ENGRAM_FORMATION_THRESHOLD: f32 = 0.65;
+
+/// Member count: trigger k-means split
+pub const ENGRAM_SOFT_LIMIT: usize = 200;
+
+/// Member count: hard reject new members (create sibling instead)
+pub const ENGRAM_HARD_LIMIT: usize = 500;
+
+/// Exponential moving average alpha for centroid update
+pub const ENGRAM_CENTROID_ALPHA: f32 = 0.10;
+
+/// Fraction of LTP that spreads to engram neighbors
+pub const RESONANCE_FACTOR: f32 = 0.30;
+
+/// BFS maximum depth
+pub const ENGRAM_BFS_MAX_DEPTH: usize = 3;
+
+/// BFS maximum nodes collected
+pub const ENGRAM_BFS_MAX_NODES: usize = 50;
+
+/// Minimum edge similarity to traverse in BFS
+pub const ENGRAM_BFS_MIN_EDGE: f32 = 0.50;
+
+// ── Consolidation ─────────────────────────────────────────────────────
+/// Minimum consolidation score to migrate to cold
+pub const CONSOLIDATION_THRESHOLD: f32 = 0.4;
+
+/// Fraction of hot memories to migrate per nrem_cycle
+pub const MIGRATION_FRACTION: f32 = 0.2;
+
+/// Global scaling factor during homeostasis
+pub const HOMEOSTASIS_FACTOR: f32 = 0.9;
+
+/// Total load fraction to trigger homeostasis
+pub const HOMEOSTASIS_TRIGGER: f32 = 0.85;
+
+/// Interactions between periodic consolidation cycles
+pub const CONSOLIDATION_INTERVAL: u64 = 1_000;
+
+// ── Reconsolidation ───────────────────────────────────────────────────
+/// Reconsolidation window for freshly encoded memory (age=0)
+pub const RECONSOLIDATION_BASE_WINDOW: u64 = 50;
+
+/// Age at which window halves (inverse-linear formula)
+pub const OLD_MEMORY_THRESHOLD: f32 = 500.0;
+
+/// Below this strength: no reconsolidation window
+pub const LABILE_STRENGTH_MIN: f32 = 0.2;
+
+/// Strength bonus on successful reconsolidation update
+pub const RECONSOLIDATION_BONUS: f32 = 0.05;
+
+// ── Interference ──────────────────────────────────────────────────────
+/// Min cosine similarity to trigger interference
+pub const INTERFERENCE_SIM_MIN: f32 = 0.70;
+
+/// Above this: duplicate (not interference candidate)
+pub const INTERFERENCE_SIM_MAX: f32 = 0.99;
+
+/// Strength reduction for old memories (retroactive)
+pub const RETROACTIVE_PENALTY: f32 = 0.05;
+
+/// Retrieval_difficulty increase for new memories (proactive)
+pub const PROACTIVE_PENALTY: f32 = 0.05;
+
+// ── Active Forgetting ─────────────────────────────────────────────────
+/// access_count/age below this: accelerated decay
+pub const PREDICTIVE_VALUE_THRESHOLD: f32 = 0.001;
+
+/// Extra decay multiplier for non-predictive memories
+pub const PREDICTIVE_DECAY_FACTOR: f32 = 0.85;
+
+/// Don't predictively prune memories younger than this
+pub const MINIMUM_PRUNE_AGE: u64 = 500;
+
+/// Max memories scanned per forgetting engine pass
+pub const PRUNE_BATCH_SIZE: usize = 10_000;
+
+/// Interactions between forgetting engine passes
+pub const FORGETTING_ENGINE_INTERVAL: u64 = 500;
+
+/// Archive bottom fraction when total > SOFT_CAP
+pub const ARCHIVE_FRACTION: f32 = 0.10;
+
+// ── Prospective Triggers ─────────────────────────────────────────────
+/// Default context match threshold to fire a trigger
+pub const PROSPECTIVE_TRIGGER_THRESHOLD: f32 = 0.80;
+
+/// Default priming boost factor
+pub const PRIMING_BOOST_DEFAULT: f32 = 0.30;
+
+/// Default priming expiry duration (interactions)
+pub const PRIMING_DEFAULT_DURATION: u64 = 1_000;
+
+// ── HNSW Configuration ────────────────────────────────────────────────
+/// HNSW connectivity parameter M (hot index)
+pub const HNSW_M_HOT: usize = 16;
+
+/// HNSW connectivity parameter M (cold index — lower to save disk)
+pub const HNSW_M_COLD: usize = 8;
+
+/// HNSW build quality parameter
+pub const HNSW_EF_CONSTRUCTION: usize = 200;
+
+/// HNSW default search quality (adaptive, this is the base)
+pub const HNSW_EF_DEFAULT: usize = 50;
+
+/// Embedding dimension (must match model)
+pub const EMBEDDING_DIMS: usize = 384;
+
+// ── zstd Compression ─────────────────────────────────────────────────
+/// Compression level for cold content (3=fast, good ratio)
+pub const ZSTD_LEVEL_COLD: i32 = 3;
+
+/// Compression level for archive content (9=slow, best ratio)
+pub const ZSTD_LEVEL_ARCHIVE: i32 = 9;
+```
+
+---
+
+## 15. Algorithm Reference
+
+### 15.1 Lazy Ebbinghaus Decay
+
+```
+FORMULA:
+  effective_strength(m, t) = m.base_strength × exp(-Δt / m.stability)
+  
+  Where:
+    Δt = now_tick - m.last_accessed_tick
+    m.stability = initialized at BASE_STABILITY, grows with each recall
+    m.base_strength = reset to effective_strength on each recall (clock resets)
+  
+PROPERTIES:
+  - O(1) computation (no iteration)
+  - Mathematically equivalent to eager per-tick update
+  - Decay rate = -1/stability (larger stability → slower decay)
+  - At Δt = stability: retention = e^(-1) ≈ 36.8% (Ebbinghaus landmark)
+  
+STABILITY GROWTH:
+  on_recall(): stability += STABILITY_INCREMENT × stability
+  Effect: stability grows exponentially with recall count
+  After n recalls: stability ≈ BASE_STABILITY × (1 + STABILITY_INCREMENT)^n
+  
+FULL RECALL CYCLE:
+  1. Read: eff = base × exp(-(now-last)/stability)
+  2. LTP:  base = eff + LTP_DELTA (reset + boost)
+           stability += STABILITY_INCREMENT × stability
+           last_accessed_tick = now_tick
+  3. Write: persist new base, stability, last_tick to DB
+  
+SQL EXPRESSION (for pre-filter):
+  (base_strength * EXP(-(? - last_accessed_tick) / CAST(stability AS REAL)))
+  Parameter: ? = now_tick (f64, avoid integer division)
+```
+
+### 15.2 Unified Scoring Function
+
+```
+FORMULA:
+  score = (semantic_sim + context_boost)
+          × effective_strength
+          × recency_bias
+          × difficulty_penalty
+          + prime_boost
+          + resonance
+
+WHERE:
+  semantic_sim = cosine_sim(query_vec, memory_content_vec)
+  
+  context_boost = CONTEXT_WEIGHT × cosine_sim(current_context_vec, memory_context_vec)
+                = 0.3 × cosine_sim(...)
+  
+  effective_strength = base × exp(-Δt/stability) [see 15.1]
+  
+  recency_bias = 1.0 + 0.1 / (1.0 + ln(age).max(0))
+    age = now_tick - memory.created_tick
+    Effect: recent memories score 10% higher for age=0, approaches 1.0 for old
+  
+  difficulty_penalty = 1.0 - memory.retrieval_difficulty.min(0.5)
+    retrieval_difficulty increased by proactive interference
+    Max penalty: 50% score reduction
+  
+  prime_boost = max(active_primed_contexts
+    .filter(|p| now_tick < p.expiry_tick)
+    .map(|p| p.boost_factor × cosine_sim(context_vec, p.embedding)))
+    Range: 0.0 to PRIMING_BOOST_DEFAULT (0.3)
+  
+  resonance = resonance_scores.get(memory_id).unwrap_or(0.0)
+    Set by engram BFS: neighbors of strongly recalled memories
+    Range: 0.0 to ~0.1 (small boost, emergent from engram structure)
+
+RANGE: 0.0 to ~2.0 (in practice 0.0-1.5)
+RANKING: sort DESC, top_k returned
+```
+
+### 15.3 Reconsolidation Window Formula
+
+```
+FORMULA:
+  window(age, strength) = BASE_WINDOW × age_factor × strength_factor
+  
+  age_factor = 1.0 / (1.0 + age / (10 × BASE_WINDOW))
+    age=0:               factor = 1.0       window = 50 ticks
+    age=BASE_WINDOW:     factor = 0.5       window = 25 ticks
+    age=10×BASE_WINDOW:  factor ≈ 0.09      window ≈ 4.5 ticks
+    age=100×BASE_WINDOW: factor ≈ 0.0099    window ≈ 0.5 ticks → rounds to 0
+  
+  strength_factor = 0.5 + strength × 0.5
+    strength=0.0:   factor = 0.5  (very weak → shorter window)
+    strength=0.5:   factor = 0.75
+    strength=1.0:   factor = 1.0  (very strong → full window)
+  
+  If effective_strength < LABILE_STRENGTH_MIN (0.2): window = 0 (no reconsolidation)
+  
+INTERPRETATION:
+  Fresh, strong memory: full window = 50 ticks
+  Old, weak memory: tiny window → effectively not reconsolidatable
+  This matches: well-consolidated memories are hard to update (biological LTM)
+```
+
+### 15.4 Engram Centroid Update
+
+```
+FORMULA: Exponential Moving Average (EMA)
+  new_centroid[i] = old_centroid[i] × (1 - α) + new_member_vec[i] × α
+  α = ENGRAM_CENTROID_ALPHA (0.1)
+  
+PROPERTIES:
+  - O(D) per update (D = dimensions = 384)
+  - Recent members have more influence than old members
+  - Does not require storing all member vectors
+  - Centroid naturally drifts toward newer semantic content
+  - After n updates: old_vec weight ≈ (1-α)^n (decays exponentially)
+  
+APPROXIMATE CENTROID vs TRUE CENTROID:
+  EMA centroid ≠ exact mean of all members
+  But: close enough for engram routing (O(log E) centroid HNSW search)
+  True mean would require storing all member vectors → expensive
+  EMA is O(1) storage, O(D) update → practical choice
+  
+CENTROID HNSW:
+  Separate usearch index: one vector per engram (centroid)
+  On new memory encode: search centroid index → find nearest engram
+  If sim > ENGRAM_FORMATION_THRESHOLD: join that engram
+  Else: create new engram, add its centroid to centroid index
+```
+
+### 15.5 Engram K-Means Split (k=2)
+
+```
+TRIGGER: engram.member_count > ENGRAM_SOFT_LIMIT (200)
+ALGORITHM: Mini-batch k-means (k=2, 10 iterations, 50-sample batches)
+
+STEPS:
+  1. Collect all member embeddings (from memory_vectors table)
+  2. Random seed selection: pick 2 random members as initial centroids
+  3. Iterate 10 times:
+     a. Assign each member to nearest centroid
+     b. Recompute centroids as mean of assigned members
+  4. Create child_a engram: members assigned to centroid_a
+     Create child_b engram: members assigned to centroid_b
+  5. Add child centroids to centroid HNSW
+  6. Remove parent centroid from HNSW
+  7. Update memory_index.engram_id for all affected memories
+
+PERFORMANCE:
+  200 members × 384 dims × 10 iterations × 2 centroids:
+  = 200 × 384 × 10 × 2 = 1.5M float ops
+  At 4 GFLOPS: ~0.4ms
+  Acceptable: split is rare (only when engram exceeds 200 members)
+  
+POST-SPLIT:
+  Original engram entry preserved in DB with split_tick set
+  Two new child engrams created with parent_engram_id = original
+  Engram hierarchy queryable for analysis/visualization
+```
+
+### 15.6 Adaptive ef_search Algorithm
+
+```
+INPUTS:
+  query.confidence_requirement: ConfidenceLevel (FastApprox | Normal | High)
+  hot_count: usize (current hot store size)
+  tier1_hit_rate: f32 (rolling average of last 1000 queries)
+
+ALGORITHM:
+  // Base ef from confidence level
+  base_ef = match confidence_level {
+      FastApprox => 10,
+      Normal     => 50,
+      High       => 100,
+  };
+  
+  // Size scaling: small stores need less ef (graph well-navigated)
+  // At 1k memories: sqrt(0.02) ≈ 0.14 → tiny ef
+  // At 50k memories: sqrt(1.0) = 1.0 → full ef
+  size_factor = (hot_count as f32 / HOT_CAPACITY as f32).sqrt().min(1.0);
+  
+  // Cache factor: if Tier1 is serving most queries, Tier2 is the hard cases
+  // Hard cases need more ef; if Tier1 is low, queries are routine
+  cache_factor = if tier1_hit_rate > 0.7 { 0.8 } else { 1.0 };
+  
+  ef = (base_ef as f32 × size_factor × cache_factor) as usize;
+  ef = ef.max(10).min(200);
+
+INTUITION:
+  - Small store: fewer nodes → graph easily navigated → low ef sufficient
+  - Large store: more nodes → higher ef needed for accuracy
+  - High Tier1 rate: Tier2 only handles "hard" non-cached queries → boost ef for accuracy
+  - FastApprox: if you just want "something close, quickly" → ef=10
+  
+EXAMPLE VALUES:
+  5k store, normal, 80% Tier1:   ef = 50 × 0.32 × 0.8 ≈ 12
+  50k store, normal, 60% Tier1:  ef = 50 × 1.0 × 1.0 = 50
+  50k store, high, 60% Tier1:    ef = 100 × 1.0 × 1.0 = 100
+  50k store, fast, 90% Tier1:    ef = 10 × 1.0 × 0.8 = 8 → clamped to 10
+```
+
+### 15.7 Interference Detection Algorithm
+
+```
+RETROACTIVE INTERFERENCE (applied during encode of new memory B):
+
+  1. Get embedding of new memory B: vec_B
+  2. HNSW search: top-100 nearest to vec_B (excluding B itself)
+  3. For each candidate A with similarity ∈ (SIM_MIN, SIM_MAX) = (0.70, 0.99):
+     if A.created_tick < B.created_tick:  // A is older than B
+         A.base_strength = effective_strength(A, now) × (1 - RETROACTIVE_PENALTY)
+         // persist to DB
+  
+  RATIONALE:
+    - 0.70 threshold: only sufficiently similar memories interfere
+    - 0.99 threshold: near-duplicates handled differently (update, not interfere)
+    - Temporal direction: new information interferes backward with old
+    - Only old memories weakened (retroactive = backward in time)
+    
+PROACTIVE INTERFERENCE (applied during encode of new memory B):
+
+  1. Same HNSW search as above
+  2. Count memories A with similarity ∈ (SIM_MIN, SIM_MAX) = (0.70, 0.99)
+  3. new_memory_B.retrieval_difficulty += count × PROACTIVE_PENALTY
+  
+  RATIONALE:
+    - Many similar old memories → new memory harder to recall specifically
+    - Retrieval_difficulty acts as divisor in scoring: harder to retrieve
+    - Forward in time: old memories make new ones harder to recall (proactive = forward)
+
+COMBINED EFFECT:
+  When B is encoded in a crowded semantic neighborhood:
+    A (old, similar): base_strength reduced (retroactive)
+    B (new): retrieval_difficulty increased (proactive)
+    
+  Over time:
+    A decays faster (already weakened + continued Ebbinghaus)
+    B harder to recall but has novelty boost (balances out)
+    Gradually: A fades, B becomes the dominant memory in that neighborhood
+    = Natural disambiguation: newer information wins over time
+```
+
+### 15.8 Consolidation Scoring Algorithm
+
+```
+PURPOSE: Rank hot memories for NREM migration to cold store.
+HIGH SCORE → migrated first; LOW SCORE → stays in hot.
+
+FORMULA:
+  consolidation_score = effective_strength(m, now)
+                      × access_frequency_factor
+                      × recency_weight
+                      × emotional_bonus
+
+WHERE:
+  effective_strength(m, now):
+    current strength (accounts for decay)
+    strong memories → more stable → should be preserved in cold
+  
+  access_frequency_factor = ln(access_count + 1) + 1.0
+    access_count=0:  factor = 1.0
+    access_count=1:  factor = 1.69
+    access_count=10: factor = 3.40
+    access_count=100: factor = 5.61
+    Logarithmic: prevents runaway for heavily accessed memories
+    
+  recency_weight = 1.0 / (1.0 + (now - last_accessed_tick) / 1000.0)
+    last_tick=now:    weight = 1.0
+    last_tick=now-500: weight = 0.67
+    last_tick=now-1000: weight = 0.50
+    Recently accessed → higher weight (brain prioritizes recent)
+    
+  emotional_bonus = 1.0 + emotional_arousal × 0.5
+    neutral:  bonus = 1.0
+    arousal=0.5: bonus = 1.25
+    arousal=1.0: bonus = 1.5
+    Emotional memories → migrate faster (brain consolidates emotional faster)
+
+RESULT:
+  Memories are ranked by this score.
+  Top MIGRATION_FRACTION (20%) of hot_count are migrated.
+  Those below CONSOLIDATION_THRESHOLD (0.4) are never migrated (too weak).
+  
+INTUITION:
+  A memory that's STRONG, FREQUENTLY ACCESSED, RECENTLY RECALLED, and EMOTIONAL
+  scores highest → it's "ripe" for consolidation → becomes long-term semantic knowledge.
+  
+  A memory that's WEAK, NEVER RECALLED, OLD, and NEUTRAL
+  scores lowest → stays in hot tier until it decays to MIN_STRENGTH → archived.
+  This is Tononi's insight: sleep consolidates what matters, discards noise.
+```
+
+---
+
+## END OF PART 6 (Final Part)
+
+---
+
+## Document Summary
+
+This PLAN.md spans 6 parts covering:
+
+```
+Part 1: Vision, Problem Statement, Human Brain Deep Dive
+  - Full analysis of all 16 brain mechanisms ported to membrain
+  - All 7 major brain regions documented with membrain port details
+  - Memory types taxonomy (episodic, semantic, procedural, emotional)
+  - LTP/LTD molecular mechanisms → Rust implementation
+  - Ebbinghaus forgetting curve → lazy decay formula
+  - Consolidation phases → NREM/REM/Homeostasis
+  - Sleep architecture → async background tasks
+  - Reconsolidation discovery → Labile state management
+  - Active forgetting → ForgettingEngine
+  - Engrams → petgraph DiGraph
+  - Working memory 7±2 → WorkingMemory + Tier1 LruCache
+  - Emotional memory → EmotionalTag + bypass_decay
+  - Interference → retroactive + proactive engines
+  - Pattern completion → 3-tier HNSW + BFS
+  - Encoding specificity → context_embedding
+
+Part 2: Gap Analysis + Full Port
+  - Feature matrix comparing 6 AI memory systems
+  - Detailed gap analysis per system (MemGPT, Mem0, LangMem, etc.)
+  - Complete mechanism-by-mechanism port with Rust code
+  - 14 mechanisms fully implemented with function signatures
+
+Part 3: Architecture + Performance
+  - 3-tier storage diagram (Tier1/2/3 with latency targets)
+  - Complete encode + retrieve data flow pseudocode
+  - Daemon vs standalone process model
+  - File layout (~/.membrain/)
+  - 7 performance optimization layers
+  - Benchmark targets + scale targets
+  - Memory resonance algorithm
+  - Prospective memory algorithm
+  - Spotlight/priming algorithm
+
+Part 4: Techstack + Data Schema
+  - Full rationale for Rust, Tokio, usearch, fastembed-rs, petgraph
+  - usearch HNSW configuration (hot/cold)
+  - fastembed-rs model options + EmbedCache implementation
+  - Complete Cargo.toml with all dependencies
+  - hot.db schema (6 tables, all indexes)
+  - cold.db schema (3 tables)
+  - procedural.db schema
+  - All Rust structs (20+ types)
+  - config.toml with all defaults
+
+Part 5: CLI + MCP + Features + Workspace
+  - 17 CLI commands with full usage docs
+  - 8 MCP tools with complete input/output schemas
+  - JSON-RPC 2.0 wire format + Python/Node client code
+  - Top 10 feature extensions with Rust pseudocode
+  - Full workspace directory tree
+  - AGENTS.md template
+  - GitHub Actions CI/CD
+
+Part 6: Milestones + Checklist + Constants + Algorithms
+  - 10 implementation milestones with acceptance criteria
+  - Complete acceptance checklist (mechanism/perf/correctness/API)
+  - All constants with formulas and rationale
+  - 8 algorithm references with formulas and pseudocode
+```
+
+**Total: ~18,000+ lines across 6 parts.**
+**Assemble: cat PLAN_part1.md PLAN_part2.md PLAN_part3.md PLAN_part4.md PLAN_part5.md PLAN_part6.md > PLAN.md**
