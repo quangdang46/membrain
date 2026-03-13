@@ -10016,7 +10016,16 @@ Each section below is written in English and focuses on **how to build the featu
 
 ## 11. Workspace Structure
 
-### 11.1 Full Directory Tree
+### 11.1 Design Principles
+
+1. **Domain-based grouping** — modules cluster by cognitive domain, not by file count
+2. **Feature-ready from day one** — 20 features have clear placement without restructuring
+3. **No god modules** — engine/, CLI, and MCP are all domain-split
+4. **CLI calls core, never reimplements** — thin handler → brain_store method
+5. **Policy is first-class** — not scattered across unrelated modules
+6. **Extension point** — adding Feature 21+ means one new file in the right domain
+
+### 11.2 Full Directory Tree
 
 ```
 membrain/
@@ -10024,7 +10033,6 @@ membrain/
 ├── Cargo.toml                  # workspace root
 ├── Cargo.lock
 ├── README.md
-├── PLAN.md                     # this document (assembled from 6 parts)
 ├── AGENTS.md                   # context for AI coding assistants
 ├── .github/
 │   └── workflows/
@@ -10033,100 +10041,151 @@ membrain/
 │
 ├── crates/
 │   │
-│   ├── membrain-core/          # all brain logic, no CLI/daemon concerns
+│   ├── membrain-core/          # all brain logic — no CLI/daemon concerns
 │   │   ├── Cargo.toml
 │   │   ├── src/
 │   │   │   ├── lib.rs          # public API surface
 │   │   │   ├── brain_store.rs  # BrainStore: top-level coordinator
-│   │   │   ├── types.rs        # all shared types (MemoryIndex, EmotionalTag, etc.)
+│   │   │   ├── types.rs        # MemoryIndex, EmotionalTag, MemoryState, all enums
 │   │   │   ├── constants.rs    # all tunable constants
 │   │   │   ├── config.rs       # Config struct + TOML parsing
 │   │   │   │
-│   │   │   ├── store/
-│   │   │   │   ├── mod.rs
-│   │   │   │   ├── hot.rs      # HotStore: hot.db + usearch hot_index
-│   │   │   │   ├── cold.rs     # ColdStore: cold.db + usearch cold_index (mmap)
-│   │   │   │   ├── procedural.rs # ProceduralStore: procedural.db + hash lookup
-│   │   │   │   └── archive.rs  # ArchiveStore: archive.db access
+│   │   │   ├── store/          # === STORAGE LAYER ===
+│   │   │   │   ├── mod.rs      # Store trait + shared helpers
+│   │   │   │   ├── hot.rs      # HotStore: hot.db + usearch HNSW (float16, in-RAM)
+│   │   │   │   ├── cold.rs     # ColdStore: cold.db + usearch HNSW (int8, mmap)
+│   │   │   │   ├── archive.rs  # ArchiveStore: archived/soft-deleted access
+│   │   │   │   └── migrate.rs  # SQL migration runner (schema versioning)
 │   │   │   │
-│   │   │   ├── engine/
+│   │   │   ├── embed/          # === VECTOR OPERATIONS ===
 │   │   │   │   ├── mod.rs
-│   │   │   │   ├── encode.rs        # encode() pipeline
-│   │   │   │   ├── recall.rs        # recall() pipeline (3-tier)
-│   │   │   │   ├── on_recall.rs     # LTP + labile + resonance
-│   │   │   │   ├── consolidation.rs # NREM + REM + Homeostasis
-│   │   │   │   ├── reconsolidation.rs # labile state management + updates
-│   │   │   │   ├── forgetting.rs    # ForgettingEngine: interference + predictive
-│   │   │   │   └── working_memory.rs # WorkingMemory: 7-slot buffer
+│   │   │   │   ├── cache.rs    # EmbedCache: LruCache<u64, Vec<f32>> with xxhash
+│   │   │   │   ├── model.rs    # TextEmbedding wrapper (fastembed-rs)
+│   │   │   │   └── quantize.rs # f32↔f16↔i8 conversion
 │   │   │   │
-│   │   │   ├── embed/
+│   │   │   ├── graph/          # === ENGRAM SYSTEM ===
 │   │   │   │   ├── mod.rs
-│   │   │   │   ├── cache.rs    # EmbedCache: LruCache<u64, Vec<f32>>
-│   │   │   │   └── model.rs    # TextEmbedding wrapper (fastembed-rs)
+│   │   │   │   ├── engram_graph.rs   # petgraph DiGraph + priority BFS
+│   │   │   │   └── engram_builder.rs # formation + split + centroid EMA
 │   │   │   │
-│   │   │   ├── graph/
+│   │   │   ├── engine/         # === CORE ENCODE/RECALL PIPELINE ===
 │   │   │   │   ├── mod.rs
-│   │   │   │   ├── engram_graph.rs  # EngramGraph: petgraph DiGraph + BFS
-│   │   │   │   └── engram_builder.rs # EngramBuilder: formation + split + centroid
+│   │   │   │   ├── encode.rs         # full encode pipeline (attention → embed → insert → cluster)
+│   │   │   │   ├── recall.rs         # 3-tier retrieval (Tier1 → Tier2 → Tier3)
+│   │   │   │   ├── on_recall.rs      # LTP + stability + labile + engram resonance
+│   │   │   │   ├── scoring.rs        # unified score function + context re-rank
+│   │   │   │   └── working_memory.rs # 7-slot buffer with attention eviction
 │   │   │   │
-│   │   │   ├── scoring.rs       # unified score function + context re-rank
-│   │   │   ├── quantize.rs      # f32↔f16↔i8 conversion utilities
-│   │   │   └── migrate.rs       # SQL migration runner (schema versioning)
+│   │   │   ├── lifecycle/      # === CONSOLIDATION + FORGETTING + SYNTHESIS ===
+│   │   │   │   ├── mod.rs
+│   │   │   │   ├── consolidation.rs   # NREM + REM + homeostasis cycles
+│   │   │   │   ├── reconsolidation.rs # labile state management + pending updates
+│   │   │   │   ├── forgetting.rs      # interference + predictive + capacity pruning
+│   │   │   │   ├── dream.rs           # F1: offline synthesis (idle cross-link)
+│   │   │   │   └── compression.rs     # F17: schema compression (cross-engram patterns)
+│   │   │   │
+│   │   │   ├── knowledge/      # === BELIEF + CAUSALITY + SKILLS ===
+│   │   │   │   ├── mod.rs
+│   │   │   │   ├── conflict.rs    # F2: contradiction detection + belief versioning
+│   │   │   │   ├── confidence.rs  # F7: confidence intervals + corroboration
+│   │   │   │   ├── causal.rs      # F11: causal chain tracking + invalidation cascade
+│   │   │   │   └── skill.rs       # F8: TF-IDF skill extraction from episodic clusters
+│   │   │   │
+│   │   │   ├── temporal/       # === TIME + EMOTION AWARENESS ===
+│   │   │   │   ├── mod.rs
+│   │   │   │   ├── landmark.rs    # F5: temporal landmarks + era management
+│   │   │   │   ├── snapshot.rs    # F12: named snapshots + time-travel recall
+│   │   │   │   └── emotional.rs   # F18: mood tracking + congruent retrieval boost
+│   │   │   │
+│   │   │   ├── intake/         # === PASSIVE INGESTION + QUERY ROUTING ===
+│   │   │   │   ├── mod.rs
+│   │   │   │   ├── observe.rs     # F6: stdin/file/directory observation + topic segmentation
+│   │   │   │   └── intent.rs      # F20: query intent classification + auto-routing
+│   │   │   │
+│   │   │   ├── sharing/        # === MULTI-AGENT + NAMESPACES ===
+│   │   │   │   ├── mod.rs
+│   │   │   │   ├── namespace.rs   # F9: namespace_id + agent_id + visibility filters
+│   │   │   │   └── fork.rs        # F15: fork + merge brain states
+│   │   │   │
+│   │   │   ├── observability/  # === DIAGNOSTICS + AUDIT ===
+│   │   │   │   ├── mod.rs
+│   │   │   │   ├── audit.rs       # F19: write-ahead mutation log (append-only, capped)
+│   │   │   │   ├── heatmap.rs     # F13: recall_log + hot_path_cache + prewarm
+│   │   │   │   ├── predictive.rs  # F16: recall sequence learning + speculative pre-load
+│   │   │   │   ├── health.rs      # F10: BrainHealthReport + ASCII dashboard
+│   │   │   │   └── diff.rs        # F14: semantic diff between ticks/snapshots
+│   │   │   │
+│   │   │   └── policy/         # === GOVERNANCE + RETENTION ===
+│   │   │       ├── mod.rs
+│   │   │       ├── retention.rs   # retention classes (volatile/normal/durable/pinned)
+│   │   │       └── governance.rs  # namespace ACL, policy checks, audit events
 │   │   │
 │   │   ├── benches/
-│   │   │   ├── encode_bench.rs   # criterion benchmark: encode throughput
-│   │   │   ├── recall_bench.rs   # criterion benchmark: recall latency
-│   │   │   └── hnsw_bench.rs     # criterion benchmark: HNSW vs brute force
+│   │   │   ├── encode_bench.rs   # criterion: encode throughput
+│   │   │   ├── recall_bench.rs   # criterion: recall latency by tier
+│   │   │   └── hnsw_bench.rs     # criterion: HNSW vs brute-force at scale
 │   │   │
 │   │   └── tests/
 │   │       ├── integration/
-│   │       │   ├── test_encode_recall.rs
-│   │       │   ├── test_decay.rs
-│   │       │   ├── test_consolidation.rs
-│   │       │   ├── test_reconsolidation.rs
-│   │       │   ├── test_interference.rs
-│   │       │   ├── test_engrams.rs
-│   │       │   ├── test_emotional.rs
-│   │       │   ├── test_working_memory.rs
-│   │       │   └── test_tier3_cold.rs
+│   │       │   ├── test_encode_recall.rs    # M1: basic round-trip
+│   │       │   ├── test_decay.rs            # M1: lazy Ebbinghaus
+│   │       │   ├── test_ltp_ltd.rs          # M3: on_recall + stability
+│   │       │   ├── test_consolidation.rs    # M6: NREM + REM + homeostasis
+│   │       │   ├── test_reconsolidation.rs  # M5: labile window + update
+│   │       │   ├── test_interference.rs     # M2: proactive + retroactive
+│   │       │   ├── test_engrams.rs          # M7: formation + BFS + split
+│   │       │   ├── test_working_memory.rs   # M2: 7-slot eviction
+│   │       │   ├── test_tier3_cold.rs       # M4: cold store + mmap
+│   │       │   ├── test_beliefs.rs          # F2+F7: contradiction + confidence
+│   │       │   ├── test_dream.rs            # F1: idle synthesis
+│   │       │   ├── test_observation.rs      # F6: topic segmentation
+│   │       │   └── test_sharing.rs          # F9: namespace + visibility
 │   │       └── unit/
 │   │           ├── test_lazy_decay.rs
 │   │           ├── test_scoring.rs
-│   │           └── test_quantize.rs
+│   │           ├── test_quantize.rs
+│   │           ├── test_confidence.rs       # F7: confidence update rules
+│   │           ├── test_intent.rs           # F20: pattern matching accuracy
+│   │           └── test_causal.rs           # F11: cascade penalty formula
 │   │
 │   └── membrain-cli/            # CLI binary + daemon + MCP server
 │       ├── Cargo.toml
 │       └── src/
-│           ├── main.rs           # clap CLI entry point
-│           ├── cli/
+│           ├── main.rs           # clap CLI entry point + subcommand dispatch
+│           │
+│           ├── cmd/              # CLI commands — grouped by domain
+│           │   ├── mod.rs        # re-exports all submodules
+│           │   ├── memory.rs     # remember, recall, forget, strengthen, update, inspect, show
+│           │   ├── query.rs      # ask (F20), budget (F4), recall-patterns
+│           │   ├── knowledge.rs  # beliefs (F2), why (F11), invalidate, skills (F8), schemas (F17)
+│           │   ├── observe.rs    # observe (F6) — pipe + watch
+│           │   ├── lifecycle.rs  # consolidate, compress (F17), dream (F1)
+│           │   ├── temporal.rs   # timeline (F5), landmark, snapshot (F12), diff (F14), mood (F18)
+│           │   ├── sharing.rs    # namespace (F9), share, unshare, fork (F15), merge
+│           │   ├── diagnostics.rs # health (F10), stats, doctor, audit (F19),
+│           │   │                  # hot-paths (F13), dead-zones, uncertain (F7)
+│           │   ├── data.rs       # export, import, list
+│           │   └── system.rs     # daemon, mcp, config, benchmark
+│           │
+│           ├── mcp/              # MCP tools — grouped by domain (mirrors cmd/)
 │           │   ├── mod.rs
-│           │   ├── remember.rs   # `membrain remember` handler
-│           │   ├── recall.rs     # `membrain recall` handler
-│           │   ├── forget.rs     # `membrain forget` handler
-│           │   ├── strengthen.rs
-│           │   ├── update.rs
-│           │   ├── stats.rs
-│           │   ├── list.rs
-│           │   ├── show.rs
-│           │   ├── diff.rs
-│           │   ├── consolidate.rs
-│           │   ├── prime.rs
-│           │   ├── remind.rs
-│           │   ├── watch.rs
-│           │   ├── export.rs
-│           │   ├── import.rs
-│           │   ├── doctor.rs
-│           │   └── config_cmd.rs
+│           │   ├── server.rs      # rmcp stdio server + dispatch router
+│           │   ├── memory.rs      # memory_put, memory_get, memory_search, memory_recall,
+│           │   │                   # memory_link, memory_pin, memory_forget
+│           │   ├── knowledge.rs   # belief_history, why, invalidate, skills, extract_skills
+│           │   ├── intake.rs      # ask (F20), observe (F6), context_budget (F4)
+│           │   ├── lifecycle.rs   # consolidate, dream (F1), compress (F17), schemas
+│           │   ├── temporal.rs    # timeline (F5), snapshot (F12), list_snapshots, diff (F14),
+│           │   │                   # mood_history (F18)
+│           │   ├── sharing.rs     # share (F9), fork (F15), merge_fork
+│           │   └── diagnostics.rs # health (F10), inspect, explain, repair, audit (F19),
+│           │                       # hot_paths (F13), dead_zones, uncertain (F7)
 │           │
 │           ├── daemon/
 │           │   ├── mod.rs
 │           │   ├── server.rs     # tokio Unix socket server + JSON-RPC 2.0
-│           │   ├── handler.rs    # JSON-RPC method dispatch
+│           │   ├── handler.rs    # JSON-RPC method dispatch → brain_store
 │           │   └── lifecycle.rs  # start/stop/status daemon management
-│           │
-│           ├── mcp/
-│           │   ├── mod.rs
-│           │   └── server.rs     # rmcp stdio server + tool definitions
 │           │
 │           ├── ipc/
 │           │   ├── mod.rs
@@ -10135,8 +10194,8 @@ membrain/
 │           │
 │           └── output/
 │               ├── mod.rs
-│               ├── text.rs       # colored text output
-│               └── json.rs       # JSON serialization for CLI
+│               ├── text.rs       # ANSI colored text + dashboard rendering
+│               └── json.rs       # JSON serialization for --json flag
 │
 ├── clients/
 │   ├── python/
@@ -10148,93 +10207,135 @@ membrain/
 │       ├── package.json
 │       └── README.md
 │
+├── docs/                         # all documentation
+│   ├── PLAN.md                   # canonical mega-plan
+│   ├── INDEX.md                  # doc pointer
+│   ├── CLI.md                    # CLI command reference
+│   ├── MCP_API.md                # MCP tool contract
+│   ├── MEMORY_MODEL.md           # memory types, fields, lifecycle
+│   ├── NEURO_MAPPING.md          # brain → code mapping
+│   ├── OPERATIONS.md             # production runbooks
+│   └── CONTRIBUTING.md           # contributor workflow
+│
 └── scripts/
     ├── install.sh               # one-line installer
     ├── bench.sh                 # run all benchmarks
     └── test-all.sh              # run full test suite with coverage
 ```
 
-### 11.2 Key Module Responsibilities
+### 11.3 Core Module Responsibilities
 
 ```
-brain_store.rs:
-  The orchestrator. Holds all sub-components.
-  Provides the primary API: encode(), recall(), on_recall(), consolidation_cycle().
+brain_store.rs — THE ORCHESTRATOR
+  Holds all sub-components. Provides the primary API:
+  encode(), recall(), on_recall(), consolidation_cycle(), dream_cycle(), etc.
   Manages shared state (interaction_tick, primed_contexts).
   Routes between standalone and daemon modes.
+  All other modules are called through BrainStore — no cross-module imports.
 
-store/hot.rs:
-  SQLite hot.db connection + PRAGMA setup.
-  3 tables: memory_index, memory_content, memory_vectors.
-  HNSW hot_index (usearch, float16, in-memory).
-  Methods: insert(), prefilter_candidates(), fetch_record(),
-           update_memory(), archive_memory(), mark_consolidated().
+store/ — STORAGE LAYER
+  hot.rs:    SQLite WAL + HNSW hot_index (float16, in-RAM). 3-table vertical partition.
+  cold.rs:   SQLite + HNSW cold_index (int8, mmap). Unlimited disk scale.
+  archive.rs: Read-only access to archived/soft-deleted memories.
+  migrate.rs: Schema version tracking + migration runner.
 
-store/cold.rs:
-  SQLite cold.db connection.
-  HNSW cold_index (usearch, int8, mmap-backed).
-  Methods: consolidate_from_hot(), search(), fetch_record().
+embed/ — VECTOR OPERATIONS
+  cache.rs:    LruCache<u64, Vec<f32>> with xxhash64 keys. Second embed of same content is free.
+  model.rs:    TextEmbedding wrapper (fastembed-rs). Loads model once, shared across threads.
+  quantize.rs: f32↔f16↔i8 conversion. Hot uses f16, cold uses i8.
 
-engine/encode.rs:
-  The full encoding pipeline (Section 5.3 encode path).
-  attention_gate → embed → novelty → initial_strength →
-  working_memory_update → hot_insert → hnsw_add →
-  engram_cluster → interference_check → tier1_update.
+graph/ — ENGRAM SYSTEM
+  engram_graph.rs:   petgraph DiGraph, O(1) UUID→NodeIndex lookup, priority BFS with caps.
+  engram_builder.rs: try_cluster(), split_engram(k=2), centroid EMA update.
 
-engine/recall.rs:
-  The full 3-tier retrieval pipeline (Section 5.3 retrieve path).
-  tier1_check → prefilter → tier2_hnsw → rescore →
-  engram_expand → merge_sort → tier3_if_needed → on_recall.
+engine/ — CORE ENCODE/RECALL (hot path — must stay bounded)
+  encode.rs:         attention_gate → embed → novelty → initial_strength → insert → cluster → interference.
+  recall.rs:         tier1 → prefilter → tier2_hnsw → rescore → engram_expand → tier3_if_needed → on_recall.
+  on_recall.rs:      LTP + stability_increment + labile_state + engram_resonance + cache_update.
+  scoring.rs:        score_candidate() — all ranking signals in one place for tuning.
+  working_memory.rs: 7-slot VecDeque, attention-weighted eviction → encode to hot_store.
 
-engine/consolidation.rs:
-  nrem_cycle(): score hot → migrate to cold.
-  rem_cycle(): desensitize emotional memories + cross-link.
-  homeostasis_cycle(): global scale + prune.
-  Runs as background tokio task.
+lifecycle/ — BACKGROUND PROCESSING (runs in daemon, never on hot path)
+  consolidation.rs:   NREM (migrate hot→cold) + REM (desensitize + cross-link) + homeostasis.
+  reconsolidation.rs: Labile window tracking, pending_update merge, re-embed.
+  forgetting.rs:      Retroactive/proactive interference, predictive pruning, capacity management.
+  dream.rs:           F1 — idle scan for high-sim but unlinked memories → create dream_links.
+  compression.rs:     F17 — TF-IDF across episodic clusters → synthesize Schema memories.
 
-engine/reconsolidation.rs:
-  Manages Labile state for all memories.
-  reconsolidation_tick(): check windows, apply pending updates.
-  pending_update_api(): external submission of updates.
+knowledge/ — BELIEF + CAUSALITY + SKILLS (reasoning about what the brain knows)
+  conflict.rs:   F2 — detect contradiction on encode, create belief_conflicts, supersede old.
+  confidence.rs: F7 — confidence update on reconsolidate/corroborate/conflict. Filter by min_confidence.
+  causal.rs:     F11 — link_causal(), trace_causality() BFS, invalidate_causal_chain() cascade.
+  skill.rs:      F8 — evaluate mature engrams, TF-IDF keyword extraction → Procedural memory.
 
-engine/forgetting.rs:
-  ForgettingEngine: all active forgetting mechanisms.
-  apply_retroactive_interference() — on encode.
-  apply_proactive_interference() — on encode.
-  predictive_pruning_pass() — background periodic.
-  capacity_management() — when > SOFT_CAP.
+temporal/ — TIME + EMOTION (when/how memories relate to timeline and mood)
+  landmark.rs:  F5 — auto-detect high-arousal+novelty → landmark, open/close eras, era filtering.
+  snapshot.rs:  F12 — create_snapshot() (zero-copy metadata), recall_at_snapshot(), time-travel.
+  emotional.rs: F18 — mood timeline, MoodSnapshot, mood-congruent retrieval boost.
 
-graph/engram_graph.rs:
-  EngramGraph: petgraph DiGraph<Uuid, EdgeWeight>.
-  node_index HashMap for O(1) Uuid → NodeIndex lookup.
-  bfs_neighbors(): priority-weighted BFS with depth/node limits.
+intake/ — PASSIVE INGESTION + QUERY ROUTING (getting data in and queries out)
+  observe.rs: F6 — stdin/file/directory observation, topic shift detection, auto-encode chunks.
+  intent.rs:  F20 — classify query intent from keywords → auto-route to optimal RecallQuery config.
 
-graph/engram_builder.rs:
-  EngramBuilder: maintains centroid HNSW index.
-  try_cluster(): assign new memory to existing engram or create new.
-  split_engram(): K-means (k=2) when soft_limit exceeded.
-  update_centroid(): EMA update on each new member.
+sharing/ — MULTI-AGENT (collaboration between agents)
+  namespace.rs: F9 — namespace_id + agent_id + visibility (private/shared/public) filters on all queries.
+  fork.rs:      F15 — fork brain state (inherit by reference), merge with conflict strategy.
 
-scoring.rs:
-  score_candidate(): unified score function.
-  semantic_sim + context_boost * strength * recency * difficulty_penalty
-  + prime_boost + resonance.
-  All scoring logic in one place for easy tuning.
+observability/ — DIAGNOSTICS + AUDIT (understanding what the brain is doing)
+  audit.rs:      F19 — append-only mutation log, capped at 200k rows. Every encode/recall/archive logged.
+  heatmap.rs:    F13 — recall_log + hot_path_cache + dead_zones + Tier1 prewarm on daemon start.
+  predictive.rs: F16 — recall sequence A→B learning, speculative Tier1 pre-load. Branch prediction for memory.
+  health.rs:     F10 — BrainHealthReport struct, ASCII dashboard, --watch mode.
+  diff.rs:       F14 — tick-range diff across all categories (new/strengthened/archived/conflicts/engrams).
 
-daemon/server.rs:
-  tokio::net::UnixListener.
-  Accepts connections, spawns per-connection tasks.
-  Reads newline-delimited JSON-RPC requests.
-  Dispatches to handler.rs, writes responses.
-
-mcp/server.rs:
-  rmcp stdio server.
-  Defines: remember, recall, forget, strengthen, stats, consolidate,
-           prime, remind tool handlers.
-  Each tool: validate params → call brain_store → serialize result.
+policy/ — GOVERNANCE + RETENTION (rules the brain must follow)
+  retention.rs:  Retention classes (volatile/normal/durable/pinned), lease policies, freshness checks.
+  governance.rs: Namespace ACL, agent ACL, session visibility, policy precedence, audit events.
 ```
 
-### 11.3 AGENTS.md Template
+### 11.4 CLI + MCP Domain Grouping
+
+```
+cmd/ and mcp/ mirror each other by domain — same 8 groups, same naming.
+CLI handler is always: parse args → call brain_store method → format output.
+MCP handler is always: validate params → call brain_store method → serialize JSON.
+
+Domain          │ CLI (cmd/)         │ MCP (mcp/)          │ Core module(s)
+────────────────┼────────────────────┼─────────────────────┼──────────────────
+Memory ops      │ memory.rs          │ memory.rs           │ engine/
+Queries         │ query.rs           │ intake.rs           │ intake/, engine/
+Knowledge       │ knowledge.rs       │ knowledge.rs        │ knowledge/
+Observation     │ observe.rs         │ (in intake.rs)      │ intake/
+Lifecycle       │ lifecycle.rs       │ lifecycle.rs        │ lifecycle/
+Temporal        │ temporal.rs        │ temporal.rs         │ temporal/
+Sharing         │ sharing.rs         │ sharing.rs          │ sharing/
+Diagnostics     │ diagnostics.rs     │ diagnostics.rs      │ observability/
+Data I/O        │ data.rs            │ —                   │ store/
+System          │ system.rs          │ —                   │ daemon/
+
+Adding a new feature:
+  1. Create core logic in the right domain module (e.g. knowledge/new_feature.rs)
+  2. Add BrainStore method in brain_store.rs
+  3. Add CLI handler in the matching cmd/ domain file
+  4. Add MCP handler in the matching mcp/ domain file
+  5. Add integration test in tests/integration/
+```
+
+### 11.5 Boundary Rules
+
+```
+1. engine/ is HOT PATH — no unbounded work, no background jobs, no I/O beyond store
+2. lifecycle/ is BACKGROUND — runs in daemon tokio tasks, never called from recall/encode
+3. policy/ is CHECKED FIRST — namespace/ACL validated before store or engine is touched
+4. knowledge/ is CALLED FROM engine/ — conflict detection runs inside encode, not standalone
+5. observability/ is NON-BLOCKING — audit.log() is sync single-INSERT; heatmap/predictive are async
+6. CLI calls brain_store only — never imports engine/ or store/ directly
+7. store/ never decides product semantics — it persists what brain_store tells it to
+8. graph/ is optional in retrieval — if budget exhausted, skip BFS expansion
+9. Each domain module exposes a trait or struct — brain_store composes them, no cross-domain imports
+```
+
+### 11.6 AGENTS.md Template
 
 ```markdown
 # membrain — AGENTS.md
@@ -10294,7 +10395,7 @@ Stack: Rust + Tokio + SQLite WAL + FTS5 + USearch + fastembed + local reranker +
 - petgraph NodeIndex is not stable across serialization — always use Uuid as primary key
 ```
 
-### 11.4 GitHub Actions CI/CD
+### 11.7 GitHub Actions CI/CD
 
 ```yaml
 # .github/workflows/ci.yml
