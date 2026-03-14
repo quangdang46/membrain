@@ -256,7 +256,16 @@ br sync --flush-only  # Export to JSONL (NO git operations)
 2. **Claim**: Use `br update <id> --status=in_progress`
 3. **Work**: Implement the task
 4. **Complete**: Use `br close <id>`
-5. **Sync**: Run `br sync --flush-only` then manually commit
+5. **Sync + Commit + Push (MANDATORY after EVERY task):**
+   ```bash
+   git status              # Check what changed
+   git add <files>         # Stage code changes
+   br sync --flush-only    # Export beads to JSONL
+   git add .beads/         # Stage beads changes
+   git commit -m "..."     # Commit everything together
+   git push                       # Push immediately
+   ```
+   **Every completed bead gets its own commit+push. No batching.**
 
 ### Key Concepts
 
@@ -284,7 +293,7 @@ git push                # Push to remote
 - Update status as you work (in_progress → closed)
 - Create new issues with `br create` when you discover tasks
 - Use descriptive titles and set appropriate priority/type
-- Always `br sync --flush-only && git add .beads/` before ending session
+- Always `br sync --flush-only && git add -A && git commit && git push` after every completed task and before ending session
 
 <!-- end-bv-agent-instructions -->
 

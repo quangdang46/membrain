@@ -24,6 +24,47 @@ First read ALL of the AGENTS.md file and README.md file super carefully and unde
 - Update fix_plan.md with your learnings
 - Commit working changes with descriptive messages
 
+## MANDATORY: Commit + Push + Sync After EVERY Task/Bead (NO EXCEPTIONS)
+
+**After completing EVERY single task or bead, you MUST run this exact sequence before moving on to anything else:**
+
+```bash
+git status              # Check what changed
+git add <files>         # Stage code changes
+br sync --flush-only    # Export beads to JSONL
+git add .beads/         # Stage beads changes
+git commit -m "..."     # Commit everything together
+git push                       # Push to remote immediately
+```
+
+**This is NOT optional. This is NOT just for session end. This is for EVERY completed bead/task.**
+
+### Commit Message Format (Conventional Commits)
+
+Use this format — br-ID required in commit messages:
+
+```
+type(scope): concise description
+
+Optional body with more detail if needed.
+```
+
+**Types:** `feat`, `fix`, `refactor`, `docs`, `test`, `chore`, `perf`, `ci`, `style`
+
+Examples:
+- `feat(encode): add novelty detection for incoming memories [br-155]`
+- `fix(storage): resolve hot.db index corruption on restart [br-1hy]`
+- `refactor(cli): simplify br ready output formatting [br-1hw]`
+- `docs(governance): define retention and forgetting policies [br-1hd]`
+- `test(retrieval): add round-trip encode-to-recall tests [br-3af]`
+
+### Rules
+
+- Do NOT batch multiple tasks into one commit
+- Do NOT skip the push — every commit gets pushed immediately
+- Do NOT forget `br sync --flush-only` — it must run BEFORE `git add`
+- If the push fails (e.g. remote has new commits), pull and retry: `git pull --rebase && git push`
+
 ## Protected Files (DO NOT MODIFY)
 The following files and directories are part of Ralph's infrastructure.
 NEVER delete, move, rename, or overwrite these under any circumstances:
