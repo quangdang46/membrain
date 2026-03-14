@@ -11,7 +11,7 @@
 - [ ] [mb-155.6] Encode: define duplicate detection, interference checks, and fast-path observability
 - [ ] [mb-155.6.1] Encode subtask: define duplicate-family handling and fast-path observability contract
 - [ ] [mb-1ga] Canonical architecture invariants and execution order
-- [ ] [mb-1ga.1] Contracts: freeze core design invariants and canonical thesis
+- [x] [mb-1ga.1] Contracts: freeze core design invariants and canonical thesis
 - [ ] [mb-1ga.2] Contracts: freeze non-negotiable foreground, storage, and research restrictions
 - [ ] [mb-1ga.3] Contracts: freeze performance budgets and benchmark contracts
 - [ ] [mb-1ga.3.1] Contracts subtask: define stage-by-stage benchmark and stage-gate expectations

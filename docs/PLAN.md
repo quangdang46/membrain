@@ -77,7 +77,19 @@ The merged source below contains older snapshot text. The following rules supers
    - Use “brain-inspired cognitive runtime” or “brain-inspired memory operating system”
    - avoid implying literal biological equivalence
 
+## Canonical Design Thesis
 
+The system is brain-inspired, but the production contract is narrower than literal brain emulation. The canonical thesis is:
+
+1. **Foreground work stays bounded and measurable** — request paths succeed because work is structurally capped, not because unbounded work is hidden elsewhere.
+2. **Provenance and lineage are first-class** — every durable or derived memory must remain traceable to source evidence.
+3. **Explainability is a product requirement** — routing, retrieval, ranking, filtering, and packaging must be inspectable after the fact.
+4. **Repairability outranks convenience** — indexes, graph state, summaries, and other derived artifacts must remain rebuildable from durable truth.
+5. **Contradictions are represented, not erased** — the system may rank competing evidence, but it must not hide disagreement by overwrite.
+6. **Policy and namespace checks are execution constraints** — governance is applied before expensive work, not bolted on as a wrapper convenience.
+7. **Brain-inspired mechanisms stay canonical only when they remain bounded, explainable, and benchmarkable** — otherwise they belong in optional research tracks, not core contracts.
+
+This thesis interprets the rest of the plan. If older merged-snapshot prose conflicts with it, this thesis and the canonical invariants below win.
 
 ---
 
@@ -12384,7 +12396,7 @@ That gives you a mega-plan that still feels like your own plan, not a replacemen
 
 ## 12. Canonical Architecture Invariants
 
-These invariants are elevated from the supporting design docs into non-negotiable system rules.
+These invariants are elevated from the supporting design docs into non-negotiable system rules. They operationalize the canonical thesis above and act as PR-review, implementation, and redesign guardrails.
 
 ### 12.1 Request-path invariants
 

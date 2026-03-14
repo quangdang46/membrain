@@ -24,7 +24,18 @@ optional tier3 fallback -> graph expansion -> ranking -> packaging -> reinforcem
 - Forgetter
 - Observability and governance layer
 
-## 3. Design invariants
+## 3. Canonical thesis
+The production contract is a brain-inspired cognitive runtime, not a claim of literal biological equivalence.
+
+1. Foreground work stays bounded and measurable.
+2. Provenance and lineage are first-class.
+3. Explainability is required for routing, retrieval, ranking, and filtering.
+4. Repairability outranks convenience for derived state.
+5. Contradictions are represented, not erased.
+6. Governance applies before expensive work.
+7. Brain-inspired mechanisms become canonical only when they remain bounded, explainable, and benchmarked.
+
+## 4. Design invariants
 1. Hot path must stay bounded.
 2. Every memory item must have provenance.
 3. No hard delete without policy approval or retention expiry.

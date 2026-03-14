@@ -1,6 +1,6 @@
 # membrain — Contributing Guide
 
-> Canonical source: PLAN.md Section 42 (Contributor Workflow and PR Acceptance).
+> Canonical sources: `PLAN.md` Sections 3, 12, and 42.
 
 ## Principles
 
@@ -9,6 +9,18 @@
 3. **Write repairable code** — indexes and graph must be rebuildable from durable evidence
 4. **Prefer explicit invariants over hidden behavior** — no silent overwrites, no hidden state
 5. **Benchmark before and after performance-sensitive changes** — no regression without evidence
+
+## Canonical Design Thesis
+
+`PLAN.md` is authoritative. The repository-wide thesis is a **brain-inspired cognitive runtime** whose production contract is:
+
+- bounded and measurable foreground work
+- provenance-preserving storage and derivation
+- explainable retrieval, ranking, routing, and filtering
+- repairable derived state rebuilt from durable evidence
+- explicit contradiction representation instead of silent overwrite
+- policy and namespace enforcement before expensive work
+- research mechanisms promoted to core behavior only when they remain bounded, explainable, and benchmarked
 
 ## Architecture Invariants (Non-Negotiable)
 
@@ -23,6 +35,31 @@ These rules cannot be violated by any PR:
 - Retrieval results must be explainable (score components, sources, policy filters)
 - Background jobs must not violate latency budgets for online recall
 - Namespace isolation is checked before expensive retrieval work
+
+## Restriction Contract
+
+These restrictions translate `PLAN.md` into contributor-facing checks that must hold across CLI, daemon, MCP, IPC, tests, and documentation.
+
+### Foreground and request-path restrictions
+
+- No LLM or remote API calls in encode, recall, `on_recall`, reconsolidation-apply, or forgetting-eligibility paths
+- No full-store `O(n)` scans on any request path; every retrieval mode must run within a declared candidate budget
+- No cold-payload decompression or large payload fetch before the final candidate cut
+- No graph traversal without hard depth and node caps, including inspect and explain paths
+- No policy bypass in CLI, daemon, MCP, or IPC wrappers; wrappers preserve namespace and policy checks instead of skipping them for convenience
+
+### Storage and lifecycle restrictions
+
+- Tier1 stores handles and hot metadata, not giant payloads
+- Tier2 keeps metadata and filtering state separate from large content so prefilters stay bounded
+- Tier3, indexes, and graph structures must remain rebuildable from durable records
+- Archive and forgetting flows stay reversible by default unless explicit policy or compliance rules require irreversible deletion
+
+### Benchmark and research restrictions
+
+- Never publish or cite a benchmark without dataset cardinality, machine profile, build mode, and warm/cold declaration
+- Do not present p95 or p99 claims from microbench-sized sample counts as production facts; label them exploratory until representative
+- If a brain-inspired mechanism lacks measured benefit under benchmark and ablation, treat it as optional rather than canonical
 
 ## Required for Major PRs
 
