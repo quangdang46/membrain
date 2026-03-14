@@ -135,6 +135,13 @@ Run or schedule repair: indexes, graph, lineage, summaries, shards.
 
 **Rules**: durable evidence wins over derived state; output what was fixed/rebuilt/unresolved; partial-fidelity repair records explicit loss
 
+**Should return**:
+- repaired surface kind (`index`, `graph`, `lineage`, `cache`, `summary`, `shard`)
+- authoritative input set used for rebuild
+- namespace or shard scope touched
+- unresolved items still queued for repair
+- explicit loss records when only degraded fidelity could be restored
+
 ---
 
 ## Feature-Specific Tools

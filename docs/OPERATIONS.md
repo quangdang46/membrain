@@ -146,6 +146,84 @@ membrain benchmark tier2 --json | jq '.p99_us'
 
 ---
 
+## 5.1 Canonical rebuild flow matrix
+
+| Surface | Authoritative input | Repair command shape | Post-run proof |
+|---|---|---|---|
+| indexes / ANN / lexical projections | durable records + canonical embeddings + policy-bearing metadata | `membrain repair index ...` | candidate counts match durable truth; latency returns to budget |
+| graph edges / neighborhoods / materialized clusters | normalized SQLite relation tables + lineage | `membrain repair graph ...` | graph counts match canonical edge tables; bounded traversal resumes |
+| lineage chains / ancestry views | durable lineage records + supersession/conflict records | `membrain repair lineage ...` | no broken chains; explain surfaces resolve ancestry |
+| caches / sidecars / planner accelerators | durable records + policy/namespace filters | `membrain repair cache ...` or drop-and-rewarm | caches repopulate without becoming sole truth |
+
+### Flow requirements
+- Run doctor and a dry run before mutating repair when available.
+- Use namespace-scoped repair first; widen scope only when divergence is proven cross-namespace.
+- Durable truth wins whenever rebuilt output disagrees with a derived surface.
+- If full fidelity cannot be restored, emit an irreversible-loss record and leave the degraded surface visible to operators.
+
+---
+
+## 5.2 Graph and lineage repair
+
+### Preconditions
+- Canonical edge tables and lineage records are readable.
+- Conflicting background compaction or migration jobs are paused.
+
+### Command Sequence
+```bash
+membrain doctor run
+membrain repair graph --dry-run
+membrain repair graph --namespace default
+membrain repair lineage --dry-run
+membrain repair lineage --namespace default
+```
+
+### Metrics to Watch
+- Canonical edge count vs rebuilt materialized edge count
+- Broken-lineage count before/after
+- Repair queue depth for follow-on unresolved items
+- Any explicit loss records emitted during repair
+
+### Rollback Conditions
+- Repaired graph output diverges further from canonical edge tables
+- Broken-lineage count increases after mutation
+- Online retrieval latency breaches budget during the repair window
+
+### Post-run Validation
+- `memory_explain` can traverse lineage and graph ancestry again
+- No unresolved orphan nodes or broken ancestry chains remain without queued follow-up repair
+
+---
+
+## 5.3 Cache and sidecar rebuild
+
+### Preconditions
+- Operators have confirmed caches and sidecars are not being treated as sole truth.
+- The namespace or shard can tolerate temporary cold-start latency.
+
+### Command Sequence
+```bash
+membrain doctor run
+membrain repair cache --dry-run
+membrain repair cache --namespace default
+membrain health --brief
+```
+
+### Metrics to Watch
+- Cache hit rate dip and recovery curve
+- Candidate count parity against durable truth
+- Namespace isolation and policy-filter integrity during warmup
+
+### Rollback Conditions
+- Warmed caches surface items blocked by namespace or policy filters
+- Rewarmed candidate counts continue to diverge from durable truth
+
+### Post-run Validation
+- Cache repopulation completes without new policy or lineage drift
+- Retrieval behavior is slower temporarily, but semantically unchanged
+
+---
+
 ## 6. Retention Enforcement
 
 ### Command Sequence

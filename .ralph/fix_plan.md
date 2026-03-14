@@ -20,7 +20,7 @@
 - [ ] [mb-1hd] Governance, repairability, operations, and observability
 - [ ] [mb-1hd.1] Governance: define policy model for retention, forgetting, archiving, and deletion
 - [ ] [mb-1hd.2] Governance: define namespace enforcement and cross-namespace isolation rules
-- [ ] [mb-1hd.3] Operations: define repair and rebuild flows for indexes, graph, lineage, and caches
+- [x] [mb-1hd.3] Operations: define repair and rebuild flows for indexes, graph, lineage, and caches
 - [ ] [mb-1hd.4] Operations: define compaction constraints, maintenance windows, and snapshot surfaces
 - [ ] [mb-1hd.5] Operations: define failure modes, incident response, and rollback conditions
 - [ ] [mb-1hd.6] Operations: define observability hooks and required notes for major changes

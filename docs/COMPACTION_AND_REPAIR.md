@@ -65,6 +65,10 @@ Lineage pruning should run in background windows with bounded foreground interfe
 ### Operation
 Index rebuild should run in background windows with bounded foreground interference.
 
+### Repair inputs and outputs
+- authoritative inputs: durable records, canonical embeddings, namespace/policy-bearing metadata
+- rebuilt outputs: lexical projections, ANN structures, auxiliary lookup tables
+
 ### Safety invariants
 - do not lose authoritative evidence
 - preserve lineage or record irreversible loss
@@ -76,6 +80,7 @@ Index rebuild should run in background windows with bounded foreground interfere
 - affected item count
 - error count
 - rebuild duration
+- durable count vs rebuilt count
 
 ## 5. Graph repair
 
