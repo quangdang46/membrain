@@ -12484,6 +12484,7 @@ Every stored item should carry, directly or derivably, the following attributes:
 - `source_ref`
 - `authoritativeness`
 - `content_ref`
+- `payload_ref`
 - `compact_text`
 - `fingerprint`
 - `tier`
@@ -12500,6 +12501,26 @@ Every stored item should carry, directly or derivably, the following attributes:
 - `tags`
 - `entity_refs`
 - `relation_refs`
+
+### 13.2.0 Identity and version contract
+
+A memory's canonical identity is the tuple of `namespace` + `id`.
+
+- `id` must be globally unique within the applicable namespace policy boundary.
+- `memory_type` classifies the item but does not participate in identity; type migrations should preserve identity unless policy requires a replacement record.
+- `compact_text` is the human-readable working identity for recall, review, and debugging, but it is not a durable key.
+- `fingerprint` is a duplicate-family and collision-detection hint, never an authorization token or canonical identifier.
+- `content_ref` and `payload_ref` are storage handles; changing them does not mint a new identity.
+- If a payload is detached, redacted, or compacted, the memory keeps the same `id` so long as lineage and policy semantics remain continuous.
+
+`version` tracks accepted mutation of one canonical memory record.
+
+- `version` starts at `1` on first persistence and increments only when a mutation is accepted.
+- Rejected writes, policy-denied updates, and no-op repair passes do not increment `version`.
+- `created_at` is immutable after first persistence; accepted mutation updates `updated_at` so `created_at <= updated_at` always holds.
+- Mutations that preserve identity may update content, metadata, decay state, tier, or policy-carrying fields, but they must preserve lineage and auditability.
+- Changes that replace meaning rather than revise it must create a new record linked by lineage or supersession rather than reusing the old version counter.
+- Contradictory or superseding facts create a new memory identity and connect it with `superseded_by`, `belief_version`, `belief_chain_id`, or a `ConflictRecord`; they do not silently overwrite an existing record in place.
 
 ### 13.2.1 Context metadata contract
 

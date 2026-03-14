@@ -62,9 +62,10 @@ Every memory item carries these attributes (directly or derivably):
 | `source_kind` | Option | How it was created (cli, mcp, api, observe) |
 | `source_ref` | Option | Reference to source |
 | `authoritativeness` | f32 | Source reliability score |
-| `content_ref` | Option | Reference to content storage |
-| `compact_text` | String | Human-readable text summary |
-| `fingerprint` | u64 | xxhash64 for duplicate detection |
+| `content_ref` | Option | Reference to canonical content storage |
+| `payload_ref` | Option | Reference to detachable full payload when content is stored out-of-line |
+| `compact_text` | String | Human-readable summary that preserves the item's working identity |
+| `fingerprint` | u64 | Duplicate-family hint, never a substitute for canonical identity |
 | `tier` | enum | Tier1, Tier2, or Tier3 |
 | `salience` | f32 | Current importance score |
 | `confidence` | f32 | Reliability/certainty score (Feature 7) |
@@ -100,6 +101,38 @@ Every memory item carries these attributes (directly or derivably):
 | `encoding_valence` | Option | F18 Emotional | Mood at encoding time |
 | `encoding_arousal` | Option | F18 | Arousal at encoding time |
 | `observation_source` | Option | F6 Observation | Source: stdin, file, watch |
+
+## Identity and Version Rules
+
+### Canonical identity contract
+
+A memory's canonical identity is the tuple of `namespace` + `id`.
+
+- `id` must be globally unique within the applicable namespace policy boundary.
+- `memory_type` classifies the item but does not participate in identity; type migrations must preserve identity unless policy requires a replacement record.
+- `compact_text` is the human-readable working identity for recall, review, and debugging, but it is not a durable key.
+- `fingerprint` is a duplicate-family and collision-detection hint, never an authorization token or canonical identifier.
+- `content_ref` and `payload_ref` are storage handles; changing them does not mint a new identity.
+- If a payload is detached, redacted, or compacted, the memory keeps the same `id` so long as lineage and policy semantics remain continuous.
+
+### Canonical version contract
+
+`version` tracks accepted mutation of one canonical memory record.
+
+- `version` starts at `1` on first persistence and increments only when a mutation is accepted.
+- Rejected writes, policy-denied updates, and no-op repair passes do not increment `version`.
+- `created_at` is immutable after first persistence; accepted mutation updates `updated_at` so `created_at <= updated_at` always holds.
+- Mutations that preserve identity may update content, metadata, decay state, tier, or policy-carrying fields, but they must preserve lineage and auditability.
+- Changes that replace meaning rather than revise it must create a new record linked by lineage or supersession rather than reusing the old version counter.
+
+### Replacement, supersession, and duplicate-family rules
+
+Identity/version rules must keep revision, replacement, and collision handling separate.
+
+- Contradictory or superseding facts create a new memory identity and connect it with `superseded_by`, `belief_version`, `belief_chain_id`, or a `ConflictRecord`; they do not silently overwrite an existing record in place.
+- Summaries, extracts, repairs, and consolidations usually create new records with their own identities while preserving parent lineage.
+- Duplicate-family collapse may merge retrieval treatment or maintenance state, but canonical IDs remain stable until an explicit merge artifact records the transformation.
+- `payload_ref` / `content_ref` must be stable, resolvable, or explicitly tombstoned so identity survives storage relocation.
 
 ## Metadata Families and Contracts
 
