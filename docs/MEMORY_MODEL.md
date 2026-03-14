@@ -101,6 +101,52 @@ Every memory item carries these attributes (directly or derivably):
 | `encoding_arousal` | Option | F18 | Arousal at encoding time |
 | `observation_source` | Option | F6 Observation | Source: stdin, file, watch |
 
+## Metadata Families and Contracts
+
+### Context Metadata
+
+`workspace_id`, `agent_id`, `session_id`, and `task_id` capture the execution scope around a memory without replacing `namespace`.
+
+- `workspace_id` scopes memories to a workspace or repo-like boundary for isolation, replay, and retrieval filtering.
+- `agent_id` identifies the actor that created the record or emitted a derived artifact; it is provenance, not an authorization shortcut.
+- `session_id` groups memories from one live interaction window for episodic replay, handoff, and consolidation.
+- `task_id` ties the memory to an explicit unit of work such as a goal, issue, or bead when one exists.
+- Missing context fields mean `unknown` or `not applicable`, not `global`.
+- Derived memories may add fresh context of their own, but they must keep lineage back to source memories instead of replacing older context.
+
+### Provenance Metadata
+
+`source_kind`, `source_ref`, `authoritativeness`, `content_ref`, timestamps, and `lineage` form the provenance envelope.
+
+- `source_kind` identifies the producing path (`cli`, `mcp`, `api`, `observe`, `import`, `repair`, `consolidation`, or an equivalent bounded extension).
+- `source_ref` is a stable pointer to the originating request, file/span, tool call, message, or imported artifact.
+- `authoritativeness` scores source reliability, not belief truth or recall priority.
+- `content_ref` points at the canonical stored content handle used for redaction, repair, and lazy fetch.
+- `lineage` records parent memory IDs and is mandatory for summarize, merge, extract, repair, contradiction, and consolidation outputs.
+- A stored memory is only canonical if it can be traced either directly to a source reference or indirectly through lineage to durable evidence.
+
+### Utility, Retention, and Recall Metadata
+
+`salience`, `confidence`, `utility_estimate`, `recall_count`, `last_access_at`, `retention_class`, `decay_state`, and `policy_flags` describe how the system should treat the memory over time.
+
+- `salience` is the immediate routing and ranking signal for current importance.
+- `confidence` captures reliability and corroboration state; it is separate from strength and source authoritativeness.
+- `utility_estimate` predicts future usefulness for ranking, promotion, demotion, and context-budget packing.
+- `recall_count` and `last_access_at` track successful surfaced reuse, not merely candidate generation.
+- `retention_class` expresses intended durability (`volatile`, `normal`, `durable`, `pinned`) independently from current tier.
+- `decay_state` stores the parameters needed for lazy decay and reinforcement updates without eager whole-store rewrites.
+- `policy_flags` carry governance-critical markers such as legal hold, compliance lock, redaction state, and shareability constraints.
+- Utility or salience may tune ranking and maintenance, but they must never override policy flags, pins, or namespace checks.
+
+### Linkage and Classification Metadata
+
+`tags`, `entity_refs`, and `relation_refs` enrich retrieval without becoming hidden truth.
+
+- `tags` are advisory labels supplied by users, agents, or background jobs.
+- `entity_refs` point to canonical entities for entity-centric recall and repairable graph links.
+- `relation_refs` point to explicit relation records or resolvable tombstones.
+- Summaries, facts, skills, and repaired artifacts must preserve enough tags/entity/relation linkage to remain explainable after compaction or consolidation.
+
 ## Memory States (Lifecycle)
 
 ```

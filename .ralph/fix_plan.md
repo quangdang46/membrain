@@ -62,7 +62,7 @@
 - [ ] [mb-1zv] Memory model and lifecycle semantics
 - [ ] [mb-1zv.1] Memory model: define canonical memory taxonomy and kind inventory
 - [ ] [mb-1zv.2] Memory model: define required base fields and identity/version rules
-- [ ] [mb-1zv.3] Memory model: define provenance, context, and utility metadata fields
+- [x] [mb-1zv.3] Memory model: define provenance, context, and utility metadata fields
 - [ ] [mb-1zv.3.1] Memory model subtask: define workspace, agent, session, and task context fields
 - [ ] [mb-1zv.3.2] Memory model subtask: define retention, decay, utility, and recall metadata
 - [ ] [mb-1zv.4] Memory model: define extension fields and reserved schema surface for advanced features
