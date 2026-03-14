@@ -11,6 +11,8 @@
 4. Distinguish user error, policy denial, and internal failure
 5. Preserve idempotency where practical
 6. Expose stable machine-readable outputs for automation
+7. Keep request-path work bounded and measurable rather than hiding unbounded work behind tool wrappers
+8. Treat provenance, lineage, and policy context as required execution inputs, not optional diagnostics
 
 ## Common Request Envelope
 

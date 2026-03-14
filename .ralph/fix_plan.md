@@ -1,0 +1,168 @@
+# Ralph Fix Plan
+
+## High Priority
+- [ ] [mb-155] Encode path and write-side memory formation
+- [ ] [mb-155.1] Encode: normalize raw inputs into canonical memory objects
+- [ ] [mb-155.2] Encode: define attention gating, novelty detection, and pattern separation
+- [ ] [mb-155.2.1] Encode subtask: define write-time novelty and pattern-separation rules
+- [ ] [mb-155.3] Encode: define embedding generation, local-model constraints, and caching boundaries
+- [ ] [mb-155.4] Encode: define contextual, emotional, and salience tagging plus provenance capture
+- [ ] [mb-155.5] Encode: define tier routing, working-memory admission, and promotion or demotion triggers
+- [ ] [mb-155.6] Encode: define duplicate detection, interference checks, and fast-path observability
+- [ ] [mb-155.6.1] Encode subtask: define duplicate-family handling and fast-path observability contract
+- [ ] [mb-1ga] Canonical architecture invariants and execution order
+- [x] [mb-1ga.1] Contracts: freeze core design invariants and canonical thesis
+- [ ] [mb-1ga.2] Contracts: freeze non-negotiable foreground, storage, and research restrictions
+- [ ] [mb-1ga.3] Contracts: freeze performance budgets and benchmark contracts
+- [ ] [mb-1ga.3.1] Contracts subtask: define stage-by-stage benchmark and stage-gate expectations
+- [ ] [mb-1ga.4] Contracts: freeze documentation hierarchy, contributor workflow, and PR rejection rules
+- [ ] [mb-1ga.5] Contracts: freeze final execution order and milestone sequencing
+- [ ] [mb-1hd] Governance, repairability, operations, and observability
+- [ ] [mb-1hd.1] Governance: define policy model for retention, forgetting, archiving, and deletion
+- [ ] [mb-1hd.2] Governance: define namespace enforcement and cross-namespace isolation rules
+- [ ] [mb-1hd.3] Operations: define repair and rebuild flows for indexes, graph, lineage, and caches
+- [ ] [mb-1hd.4] Operations: define compaction constraints, maintenance windows, and snapshot surfaces
+- [ ] [mb-1hd.5] Operations: define failure modes, incident response, and rollback conditions
+- [ ] [mb-1hd.6] Operations: define observability hooks and required notes for major changes
+- [ ] [mb-1hd.7] Governance: define dry-run, preview, and destructive-action safeguard contract
+- [ ] [mb-1hd.7.1] Governance subtask: define safe preflight and blocked-action contract
+- [ ] [mb-1hw] Interfaces: CLI, daemon, JSON-RPC, and MCP
+- [ ] [mb-1hw.1] Interfaces: define CLI command surface and output modes
+- [ ] [mb-1hw.2] Interfaces: define daemon lifecycle and standalone-versus-daemon semantics
+- [ ] [mb-1hw.3] Interfaces: define JSON-RPC envelopes and core procedure contract
+- [ ] [mb-1hw.4] Interfaces: define MCP core tools and shared request-context envelope
+- [ ] [mb-1hw.5] Interfaces: define feature-specific MCP tools and maturity gating
+- [ ] [mb-1hw.6] Interfaces: define inspect, doctor, admin, import/export, and machine-readable parity expectations
+- [ ] [mb-1hw.7] Interfaces: define canonical recall query contract and request model
+- [ ] [mb-1hw.8] Interfaces: define canonical retrieval result envelope and payload policy
+- [ ] [mb-1hw.8.1] Interfaces subtask: define dual evidence-and-action answer packaging contract
+- [ ] [mb-1hw.9] Interfaces: define error taxonomy, remediation hints, and degraded-mode user experience
+- [ ] [mb-1hy] Storage, schema, and indexing substrate
+- [ ] [mb-1hy.1] Storage: define hot.db schema, metadata layout, and hot-path indexes
+- [ ] [mb-1hy.2] Storage: define cold.db schema, payload layout, and archive behavior
+- [ ] [mb-1hy.3] Storage: define procedural and derived-state persistence surfaces
+- [ ] [mb-1hy.4] Storage: define migration, versioning, and rollback protocol
+- [ ] [mb-1hy.5] Storage: define durable-versus-derived state boundaries and rebuildability rules
+- [ ] [mb-1hy.6] Storage: define hot and cold vector indexing contracts
+- [ ] [mb-1hy.6.1] Storage subtask: define hot in-memory ANN/HNSW contract
+- [ ] [mb-1hy.6.2] Storage subtask: define cold mmap/disk-backed index contract
+- [ ] [mb-1hy.7] Storage: define compaction, repair, and rebuild expectations for persistent state
+- [ ] [mb-1uu] Dynamic memory behavior
+- [ ] [mb-1uu.1] Dynamics: define on-recall strengthening and stability-growth semantics
+- [ ] [mb-1uu.2] Dynamics: define lazy decay contract and interaction-tick time model
+- [ ] [mb-1uu.3] Dynamics: define reconsolidation window and update-application semantics
+- [ ] [mb-1uu.4] Dynamics: define contradiction-aware mutation, versioning, and supersession flows
+- [ ] [mb-1uu.5] Dynamics: define consolidation pipelines for NREM migration, REM-style linking, and homeostasis
+- [ ] [mb-1uu.5.1] Dynamics subtask: define NREM-style migration and hot-to-cold transfer rules
+- [ ] [mb-1uu.5.2] Dynamics subtask: define REM-style cross-linking and synthesis constraints
+- [ ] [mb-1uu.5.3] Dynamics subtask: define homeostasis safety constraints and protected-evidence rules
+- [ ] [mb-1uu.6] Dynamics: define forgetting, demotion, interference, and emotional-bypass behavior
+- [ ] [mb-1uu.6.1] Dynamics subtask: define forgetting and archive-reversibility contract
+- [ ] [mb-1uu.6.2] Dynamics subtask: define interference and emotional-bypass behavior boundaries
+- [ ] [mb-1zv] Memory model and lifecycle semantics
+- [ ] [mb-1zv.1] Memory model: define canonical memory taxonomy and kind inventory
+- [x] [mb-1zv.2] Memory model: define required base fields and identity/version rules
+- [x] [mb-1zv.3] Memory model: define provenance, context, and utility metadata fields
+- [ ] [mb-1zv.3.1] Memory model subtask: define workspace, agent, session, and task context fields
+- [ ] [mb-1zv.3.2] Memory model subtask: define retention, decay, utility, and recall metadata
+- [ ] [mb-1zv.4] Memory model: define extension fields and reserved schema surface for advanced features
+- [ ] [mb-1zv.5] Memory model: define lifecycle states and transition rules
+- [ ] [mb-1zv.5.1] Lifecycle subtask: define transition guards, failure semantics, and repair-task handoff
+- [ ] [mb-1zv.5.1.1] Lifecycle state-machine subtask: define object-level transition guard matrix
+- [ ] [mb-1zv.5.1.2] Lifecycle state-machine subtask: define failed-transition eventing and prior-state preservation
+- [ ] [mb-1zv.5.1.3] Lifecycle state-machine subtask: define repair-queue handoff and retry boundaries
+- [ ] [mb-1zv.6] Memory model: define contradiction, supersession, and conflict-record semantics
+- [ ] [mb-1zv.7] Memory model: define strength, decay, confidence, and tiering contracts
+- [ ] [mb-1zv.8] Memory model: define entity and relation canonicalization contract
+- [ ] [mb-341] Workflow bootstrap and canonical execution discipline
+- [ ] [mb-341.1] Workflow: adopt existing Beads workspace and prefix conventions
+- [ ] [mb-341.2] Workflow: codify documentation precedence and conflict-resolution rules
+- [ ] [mb-341.2.1] Workflow subtask: define unresolved doc-conflict escalation and bead-update path
+- [ ] [mb-341.3] Workflow: codify linehash anchor-first targeted edit workflow
+- [ ] [mb-341.4] Workflow: codify Agent Mail identity, reservation, and handoff protocol
+- [ ] [mb-341.4.1] Workflow subtask: define reservation hygiene and edit-surface minimization
+- [ ] [mb-341.5] Workflow: codify Beads and bv execution discipline
+- [ ] [mb-341.5.1] Workflow subtask: codify br ready/claim/close/sync lifecycle
+- [ ] [mb-341.5.2] Workflow subtask: codify robot-only bv triage usage
+- [ ] [mb-341.5.3] Workflow subtask: codify deprecated bd to br/bv translation rules
+- [ ] [mb-341.6] Workflow: codify UBS changed-file scanning and cass reuse workflow
+- [ ] [mb-341.7] Workflow: codify session completion, TODO exception, and concurrent-edit non-interference rules
+- [ ] [mb-341.7.1] Workflow subtask: define handoff package and session-close payload contract
+- [ ] [mb-341.8] Workflow: define contributor golden path, onboarding, and troubleshooting guideposts
+- [ ] [mb-3af] Benchmarks, tests, and contributor quality gates
+- [ ] [mb-3af.1] Testing: define benchmark harness and reproducibility requirements
+- [ ] [mb-3af.2] Testing: define stage-by-stage benchmark contracts and evidence artifacts
+- [ ] [mb-3af.3] Testing: define unit and property tests for formulas, invariants, and state transitions
+- [ ] [mb-3af.4] Testing: define integration tests for encode-to-recall round-trips and retrieval packaging
+- [ ] [mb-3af.5] Testing: define latency, load, chaos, rebuild, migration, policy, and isolation suites
+- [ ] [mb-3af.5.1] Testing subtask: define recall-quality, policy, and cross-namespace isolation verification
+- [ ] [mb-3af.5.2] Testing subtask: define restart, rebuild, and recovery verification
+- [ ] [mb-3af.6] Testing: define deterministic no-wall-clock rules and PR acceptance gates
+- [ ] [mb-3af.6.1] Testing subtask: define change-type-to-evidence matrix and rejection triggers
+- [ ] [mb-3af.7] Testing: define local-versus-CI-versus-release validation loop and fixture strategy
+- [ ] [mb-3af.7.1] Testing subtask: define doc-example parity and interface-drift checks
+- [ ] [mb-3w4] Retrieval, ranking, and explainable recall
+- [ ] [mb-3w4.1] Retrieval: define Tier1 exact and recent retrieval contract
+- [ ] [mb-3w4.2] Retrieval: define Tier2 indexed retrieval contract
+- [ ] [mb-3w4.3] Retrieval: define Tier3 cold fallback and deferred payload-fetch rules
+- [ ] [mb-3w4.4] Retrieval: define ranking baseline, reranking, and score decomposition
+- [ ] [mb-3w4.4.1] Retrieval subtask: define baseline score components and weight families
+- [ ] [mb-3w4.4.2] Retrieval subtask: define context, task, and entity-aware reranking behavior
+- [ ] [mb-3w4.5] Retrieval: define inspect, explain, and routing-trace surfaces
+- [ ] [mb-3w4.6] Retrieval: define pattern-completion behavior and regression checks
+- [ ] [mb-3w4.7] Retrieval: define cache, invalidation, and prefetch contract
+- [ ] [mb-3w4.7.1] Retrieval cache subtask: define cache families, namespace-aware keys, and version invalidation
+- [ ] [mb-3w4.7.2] Retrieval cache subtask: define prefetch hints, session warmup, and cold-start mitigation guardrails
+- [ ] [mb-3w4.7.3] Retrieval cache subtask: define cache observability, stale-result visibility, and explain integration
+- [ ] [mb-vp8] Engram graph and associative memory
+- [ ] [mb-vp8.1] Graph: define graph entities, edge taxonomy, and persistence identifiers
+- [ ] [mb-vp8.2] Graph: define engram formation, clustering, and centroid maturity rules
+- [ ] [mb-vp8.3] Graph: define bounded BFS and graph-expansion constraints
+- [ ] [mb-vp8.4] Graph: define graph participation in ranking and recall packaging
+- [ ] [mb-vp8.5] Graph: define serialization, restart integrity, repair, and observability expectations
+- [ ] [mb-z0i] Advanced feature batches and later-stage expansion
+- [ ] [mb-z0i.1] Advanced features: batch 1 feature family and dependency framing
+- [ ] [mb-z0i.1.1] Feature batch 1: Dream Mode offline synthesis engine
+- [ ] [mb-z0i.1.10] Feature batch 1: Health Dashboard and operational visibility
+- [ ] [mb-z0i.1.2] Feature batch 1: Belief Versioning and history surfaces
+- [ ] [mb-z0i.1.3] Feature batch 1: Query-by-Example retrieval
+- [ ] [mb-z0i.1.4] Feature batch 1: Context Budget API
+- [ ] [mb-z0i.1.5] Feature batch 1: Temporal Landmarks and era labeling
+- [ ] [mb-z0i.1.6] Feature batch 1: Passive Observation ingestion
+- [ ] [mb-z0i.1.7] Feature batch 1: Confidence Intervals and uncertainty surfaces
+- [ ] [mb-z0i.1.8] Feature batch 1: Skill Extraction from repeated success
+- [ ] [mb-z0i.1.9] Feature batch 1: Cross-Agent Sharing and visibility controls
+- [ ] [mb-z0i.2] Advanced features: batch 2 feature family and dependency framing
+- [ ] [mb-z0i.2.1] Feature batch 2: Causal Chain Tracking and invalidation
+- [ ] [mb-z0i.2.10] Feature batch 2: Query Intent Routing and ask-mode planning
+- [ ] [mb-z0i.2.2] Feature batch 2: Snapshots and time-travel inspection
+- [ ] [mb-z0i.2.3] Feature batch 2: Attention Heatmap and dead-zone analysis
+- [ ] [mb-z0i.2.4] Feature batch 2: Semantic Diff across memory states
+- [ ] [mb-z0i.2.5] Feature batch 2: Fork and Merge for namespace evolution
+- [ ] [mb-z0i.2.6] Feature batch 2: Predictive Pre-recall and prospective triggers
+- [ ] [mb-z0i.2.7] Feature batch 2: Schema Compression and abstract pattern memories
+- [ ] [mb-z0i.2.8] Feature batch 2: Emotional Trajectory and mood history surfaces
+- [ ] [mb-z0i.2.9] Feature batch 2: Audit Log and operation history surfaces
+- [ ] [mb-z0i.3] Advanced features: later-stage distribution, advanced operations, and quality-loop follow-ons
+- [ ] [mb-z0i.3.1] Phase 4 follow-on: introduce sharding and distribution only after measured demand
+- [ ] [mb-z0i.3.2] Phase 4 follow-on: harden advanced operations and operational ergonomics
+- [ ] [mb-z0i.3.3] Phase 4 follow-on: expand quality loop and skill-memory follow-ons
+- [ ] [mb-z0i.3.4] Phase 4 follow-on: define measured-demand readiness gate for sharding and distribution
+- [ ] [mb-z0i.4] Advanced features: define sequencing and non-blocking rules for later-stage work
+- [ ] [mb-z0i.5] Advanced features: define trust and historical introspection cluster
+- [ ] [mb-z0i.6] Advanced features: Cognitive Blackboard and active working-state surfaces
+- [ ] [mb-z0i.7] Advanced features: Resumable goal stack and checkpoint contract
+
+## Medium Priority
+
+
+## Low Priority
+
+
+## Completed
+- [x] Project enabled for Ralph
+
+## Notes
+- Ensure follow the docs/*.md and follow restrict AGENTS.md in root folder 
+- Ensure each feature is properly tested
+- Update this file after each major milestone

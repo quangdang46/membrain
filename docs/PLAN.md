@@ -77,7 +77,19 @@ The merged source below contains older snapshot text. The following rules supers
    - Use “brain-inspired cognitive runtime” or “brain-inspired memory operating system”
    - avoid implying literal biological equivalence
 
+## Canonical Design Thesis
 
+The system is brain-inspired, but the production contract is narrower than literal brain emulation. The canonical thesis is:
+
+1. **Foreground work stays bounded and measurable** — request paths succeed because work is structurally capped, not because unbounded work is hidden elsewhere.
+2. **Provenance and lineage are first-class** — every durable or derived memory must remain traceable to source evidence.
+3. **Explainability is a product requirement** — routing, retrieval, ranking, filtering, and packaging must be inspectable after the fact.
+4. **Repairability outranks convenience** — indexes, graph state, summaries, and other derived artifacts must remain rebuildable from durable truth.
+5. **Contradictions are represented, not erased** — the system may rank competing evidence, but it must not hide disagreement by overwrite.
+6. **Policy and namespace checks are execution constraints** — governance is applied before expensive work, not bolted on as a wrapper convenience.
+7. **Brain-inspired mechanisms stay canonical only when they remain bounded, explainable, and benchmarkable** — otherwise they belong in optional research tracks, not core contracts.
+
+This thesis interprets the rest of the plan. If older merged-snapshot prose conflicts with it, this thesis and the canonical invariants below win.
 
 ---
 
@@ -12384,7 +12396,7 @@ That gives you a mega-plan that still feels like your own plan, not a replacemen
 
 ## 12. Canonical Architecture Invariants
 
-These invariants are elevated from the supporting design docs into non-negotiable system rules.
+These invariants are elevated from the supporting design docs into non-negotiable system rules. They operationalize the canonical thesis above and act as PR-review, implementation, and redesign guardrails.
 
 ### 12.1 Request-path invariants
 
@@ -12472,6 +12484,7 @@ Every stored item should carry, directly or derivably, the following attributes:
 - `source_ref`
 - `authoritativeness`
 - `content_ref`
+- `payload_ref`
 - `compact_text`
 - `fingerprint`
 - `tier`
@@ -12488,6 +12501,70 @@ Every stored item should carry, directly or derivably, the following attributes:
 - `tags`
 - `entity_refs`
 - `relation_refs`
+
+### 13.2.0 Identity and version contract
+
+A memory's canonical identity is the tuple of `namespace` + `id`.
+
+- `id` must be globally unique within the applicable namespace policy boundary.
+- `memory_type` classifies the item but does not participate in identity; type migrations should preserve identity unless policy requires a replacement record.
+- `compact_text` is the human-readable working identity for recall, review, and debugging, but it is not a durable key.
+- `fingerprint` is a duplicate-family and collision-detection hint, never an authorization token or canonical identifier.
+- `content_ref` and `payload_ref` are storage handles; changing them does not mint a new identity.
+- If a payload is detached, redacted, or compacted, the memory keeps the same `id` so long as lineage and policy semantics remain continuous.
+
+`version` tracks accepted mutation of one canonical memory record.
+
+- `version` starts at `1` on first persistence and increments only when a mutation is accepted.
+- Rejected writes, policy-denied updates, and no-op repair passes do not increment `version`.
+- `created_at` is immutable after first persistence; accepted mutation updates `updated_at` so `created_at <= updated_at` always holds.
+- Mutations that preserve identity may update content, metadata, decay state, tier, or policy-carrying fields, but they must preserve lineage and auditability.
+- Changes that replace meaning rather than revise it must create a new record linked by lineage or supersession rather than reusing the old version counter.
+- Contradictory or superseding facts create a new memory identity and connect it with `superseded_by`, `belief_version`, `belief_chain_id`, or a `ConflictRecord`; they do not silently overwrite an existing record in place.
+
+### 13.2.1 Context metadata contract
+
+`workspace_id`, `agent_id`, `session_id`, and `task_id` capture execution scope around a memory without replacing `namespace`.
+
+- `workspace_id` scopes memories to a workspace or repo-like boundary for isolation, replay, and retrieval filtering.
+- `agent_id` identifies the actor that created the record or emitted a derived artifact; it is provenance, not an authorization shortcut.
+- `session_id` groups memories from one live interaction window for episodic replay, handoff, and consolidation.
+- `task_id` ties the memory to an explicit unit of work such as a goal, issue, or bead when one exists.
+- Missing context fields mean `unknown` or `not applicable`, not `global`.
+- Derived memories may add fresh context of their own, but they must preserve lineage back to source memories instead of replacing older context.
+
+### 13.2.2 Provenance metadata contract
+
+`source_kind`, `source_ref`, `authoritativeness`, `content_ref`, timestamps, and `lineage` form the provenance envelope.
+
+- `source_kind` identifies the producing path (`cli`, `mcp`, `api`, `observe`, `import`, `repair`, `consolidation`, or an equivalent bounded extension).
+- `source_ref` is a stable pointer to the originating request, file/span, tool call, message, or imported artifact.
+- `authoritativeness` scores source reliability, not belief truth or recall priority.
+- `content_ref` points at the canonical stored content handle used for redaction, repair, and lazy fetch.
+- `lineage` records parent memory IDs and is mandatory for summarize, merge, extract, repair, contradiction, and consolidation outputs.
+- A stored memory is only canonical if it can be traced either directly to a source reference or indirectly through lineage to durable evidence.
+
+### 13.2.3 Utility, retention, and recall metadata contract
+
+`salience`, `confidence`, `utility_estimate`, `recall_count`, `last_access_at`, `retention_class`, `decay_state`, and `policy_flags` define how the system should treat the memory over time.
+
+- `salience` is the immediate routing and ranking signal for current importance.
+- `confidence` captures reliability and corroboration state; it is separate from strength and source authoritativeness.
+- `utility_estimate` predicts future usefulness for ranking, promotion, demotion, and context-budget packing.
+- `recall_count` and `last_access_at` track successful surfaced reuse, not merely candidate generation.
+- `retention_class` expresses intended durability (`volatile`, `normal`, `durable`, `pinned`) independently from current tier.
+- `decay_state` stores the parameters needed for lazy decay and reinforcement updates without eager whole-store rewrites.
+- `policy_flags` carry governance-critical markers such as legal hold, compliance lock, redaction state, and shareability constraints.
+- Utility or salience may tune ranking and maintenance, but they must never override policy flags, pins, or namespace checks.
+
+### 13.2.4 Linkage and classification metadata contract
+
+`tags`, `entity_refs`, and `relation_refs` enrich retrieval without becoming hidden truth.
+
+- `tags` are advisory labels supplied by users, agents, or background jobs.
+- `entity_refs` point to canonical entities for entity-centric recall and repairable graph links.
+- `relation_refs` point to explicit relation records or resolvable tombstones.
+- Summaries, facts, skills, and repaired artifacts must preserve enough tags/entity/relation linkage to remain explainable after compaction or consolidation.
 
 ### 13.3 Schema rules
 
