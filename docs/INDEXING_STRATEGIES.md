@@ -2,6 +2,14 @@
 
 This document defines recommended indexes and when to use them.
 
+## Index authority rule
+
+Indexes are derived projections for retrieval speed, not canonical truth.
+
+- An index may be persisted across restarts and still remain derived state.
+- Durable records, lineage, and policy-bearing metadata remain authoritative when index output diverges.
+- Every index family must be rebuildable from authoritative durable evidence with explicit telemetry and repair commands.
+
 ## 1. Primary id index
 
 ### Why this index exists

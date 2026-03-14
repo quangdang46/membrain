@@ -42,7 +42,7 @@
 - [ ] [mb-1hy.2] Storage: define cold.db schema, payload layout, and archive behavior
 - [ ] [mb-1hy.3] Storage: define procedural and derived-state persistence surfaces
 - [ ] [mb-1hy.4] Storage: define migration, versioning, and rollback protocol
-- [ ] [mb-1hy.5] Storage: define durable-versus-derived state boundaries and rebuildability rules
+- [x] [mb-1hy.5] Storage: define durable-versus-derived state boundaries and rebuildability rules
 - [ ] [mb-1hy.6] Storage: define hot and cold vector indexing contracts
 - [ ] [mb-1hy.6.1] Storage subtask: define hot in-memory ANN/HNSW contract
 - [ ] [mb-1hy.6.2] Storage subtask: define cold mmap/disk-backed index contract

@@ -2,6 +2,13 @@
 
 Compaction reduces cost while repair preserves correctness after crashes, drift, or partial failures.
 
+## Durable-versus-derived repair contract
+
+- Repair rebuilds derived state from authoritative durable evidence.
+- Compaction may replace convenience artifacts, but it must not remove the last authoritative evidence unless policy explicitly allows it.
+- Persisted summaries, checkpoints, and sidecars remain derived artifacts unless explicitly promoted by policy.
+- If a repair or compaction pass cannot recover full fidelity, it must emit an explicit irreversible-loss record instead of inventing missing truth.
+
 ## 1. Segment compaction
 
 ### Operation

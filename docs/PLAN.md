@@ -12434,6 +12434,33 @@ These invariants are elevated from the supporting design docs into non-negotiabl
 4. Indexes and graph structures must be rebuildable from durable evidence.
 5. Every destructive or semi-destructive maintenance task must emit before/after telemetry.
 
+### 12.2.1 Durable-versus-derived storage contract
+
+1. **Authoritative durable state defines truth**
+   - Memory existence, identity, provenance, lineage, lifecycle state, policy state, contradiction state, retention state, canonical relation edges, canonical content handles, and authoritative float embeddings live in authoritative durable storage.
+   - Losing this state is truth loss, not merely a performance regression.
+
+2. **Derived artifacts may persist, but they remain derived**
+   - Summaries, extracted facts, skills, checkpoints, shard-placement metadata, and compaction artifacts may be stored durably for utility.
+   - Their durability does not make them the sole source of truth.
+   - They must retain lineage or source references back to authoritative durable evidence.
+
+3. **Acceleration state is rebuildable, not authoritative**
+   - ANN indexes, FTS projections, graph materializations, caches, bloom filters, prefix indexes, and other search accelerators are derived state even when persisted on disk.
+   - They may be discarded and rebuilt from authoritative durable state.
+
+4. **Truth-precedence on divergence**
+   - When authoritative durable state and any derived artifact disagree, authoritative durable state wins.
+   - Repair flows must rebuild downward from authoritative state rather than silently promoting derived outputs into truth.
+
+5. **Rebuildability requirements**
+   - Each derived structure must have a declared rebuild source, rebuild procedure, and telemetry surface.
+   - Rebuild must not invent missing truth.
+   - If only partial fidelity can be recovered, the system must emit an explicit loss record.
+
+6. **Sole-source prohibitions**
+   - No summary, extracted fact, index, checkpoint, shard descriptor, or graph dump may become the only surviving record of memory existence, lineage, policy, or contradiction semantics unless an explicit policy path authorizes that promotion.
+
 ### 12.3 Governance invariants
 
 1. Namespace isolation is checked before expensive retrieval work.
