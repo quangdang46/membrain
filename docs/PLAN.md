@@ -618,16 +618,20 @@ membrain encode(input, context, attention, emotional):
   2. compute embedding = fastembed(input)
   3. compute context_embedding = fastembed(context)
   4. novelty_score = 1.0 - max_cosine_similarity(embedding, existing)
-  5. emotional_tag = { valence, arousal } (caller-provided or LLM-scored)
-  6. initial_strength = BASE
+  5. bind context from explicit input, trusted envelope, or lineage
+  6. provenance_envelope = { source_kind, source_ref, authoritativeness, content_ref/payload_ref }
+  7. emotional_tag = { valence, arousal } (caller-provided or bounded locally derived)
+     → persist as { encoding_valence, encoding_arousal }
+  8. initial_salience = f(attention_score, novelty_score, task_relevance, emotional_tag)
+  9. initial_strength = BASE
                       * (1 + novelty_score * NOVELTY_WEIGHT)
                       * (1 + attention_score * ATTENTION_WEIGHT)
                       * emotional_tag.strength_multiplier()
-  7. bypass_decay = arousal > AROUSAL_THRESHOLD && |valence| > VALENCE_THRESHOLD
-  8. state = Labile
-  9. INSERT into hot_store
-  10. interference_check → weaken similar older memories
-  11. engram_builder.try_cluster(new_memory)
+  10. bypass_decay = arousal > AROUSAL_THRESHOLD && |valence| > VALENCE_THRESHOLD
+  11. state = Labile
+  12. INSERT into hot_store with context/provenance/salience metadata
+  13. interference_check → weaken similar older memories
+  14. engram_builder.try_cluster(new_memory)
 ```
 
 ### 4.5 Consolidation Micro-Cycles
@@ -846,17 +850,21 @@ WORKING MEMORY (7 slots, LruCache)
   ├─[overflow / encode trigger]
   ▼
 ENCODING PIPELINE
-  ├── embedding_cache.get_or_embed(content)   → content_vec (0ms cache / 5ms miss)
-  ├── embedding_cache.get_or_embed(context)   → context_vec
+  ├── embedding_cache.get_or_embed(content, generation+purpose key) → content_vec (0ms hit / ~5ms local miss)
+  ├── embedding_cache.get_or_embed(context, generation+purpose key) → context_vec
+  ├── local-only embedder on cache miss; no remote fallback on encode fast path
   ├── novelty_score = 1 - sim(content_vec, tier2_nearest)
-  ├── emotional_tag {valence, arousal}
+  ├── bind context from explicit input, trusted envelope, or lineage before insert
+  ├── provenance_envelope {source_kind, source_ref, authoritativeness, content_ref/payload_ref}
+  ├── emotional_tag {valence, arousal} → persist as {encoding_valence, encoding_arousal}
+  ├── initial_salience = f(attention, novelty, task relevance, emotion)
   ├── initial_strength = f(novelty, attention, emotion)
   ├── state = Labile
   └── bypass_decay = arousal > θ && |valence| > θ
   │
   ▼
 HOT STORE (SQLite WAL + usearch hot index)
-  ├── SQL INSERT with lazy_base_strength + tick snapshot
+  ├── SQL INSERT with lazy_base_strength + tick snapshot + context/provenance/salience metadata
   ├── usearch hot_index.add(id, int8(content_vec))
   ├── interference_check: SQL similar → weaken older (retroactive)
   ├── engram_builder.try_cluster(id, content_vec)
@@ -1169,8 +1177,11 @@ Why:
 
 Embedding defaults:
   - model family chosen by benchmarked quality/speed trade-off
-  - caching via LruCache or equivalent
-  - batch embedding in consolidation / import flows
+  - encode fast path uses only a local embedder; remote API fallback is not part of the canonical write path
+  - authoritative stored embeddings are float32; hot/cold quantized search vectors are derived projections
+  - cache keys bind normalized input bytes to embedder generation and embedding purpose (for example content vs context)
+  - caching via LruCache or equivalent, with invalidation on model, dimension, or normalization-generation change
+  - batch embedding in consolidation / import flows, not as hidden request-path retry logic
 
 Local reranker:
   - mandatory on production-quality recall paths where top-K precision matters
@@ -1585,9 +1596,10 @@ Acceptance: INSERT memory → usearch.add → Tier1 cache → verify 3-tier look
 
 ### Milestone 2 — Encoding Pipeline + Optimizations
 ```
-□ embedding_cache.get_or_embed() with LruCache + xxhash64
-□ embed(content) → content_vec via fastembed-rs
-□ embed(context) → context_vec
+□ embedding_cache.get_or_embed() with generation-aware keys (model/version + purpose + xxhash64(normalized bytes))
+□ embed(content) → content_vec via local embedder
+□ embed(context) → context_vec via local embedder
+□ encode fast path refuses remote fallback; batch embedding is reserved for consolidation/import
 □ novelty_score = 1 - max_cosine_sim(content_vec, tier2_nearest)
 □ attention_score gating (< threshold → discard)
 □ emotional_tag: {valence, arousal} → bypass_decay, strength_multiplier
@@ -1598,7 +1610,9 @@ Acceptance: INSERT memory → usearch.add → Tier1 cache → verify 3-tier look
 □ Working memory: LruCache<7> + attention + eviction to hot_store
 □ Source tagging (CLI, MCP, Rust embed)
 
-Acceptance: 1000 encodes → verify embedding cache hit rate >80% → verify strength distribution
+Acceptance: 1000 encodes → verify embedding cache hit rate >80% in steady state → verify strength distribution
+           → verify cache invalidates on model/version/normalization-generation change
+           → verify encode refuses remote fallback when local embedder is unavailable
            → pre-filter returns <5000 candidates from 100k memories
 ```
 
@@ -1792,7 +1806,7 @@ Acceptance: full integration test suite → all benchmarks pass → README compl
 model = "all-MiniLM-L6-v2" # or "nomic-embed-text-v1.5"
 hot_capacity      = 50_000               # max memories in hot HNSW index
 soft_cap = 1_000_000 # trigger archive bottom % when overtaking
-embedding_cache   = 1_000               # LruCache entries cho embedding
+embedding_cache   = 1_000               # generation-aware LruCache entries for local embeddings
 tier1_cache       = 512                 # LruCache entries Tier1 fast path
 
 [vector]
@@ -6110,15 +6124,18 @@ INPUT: (content, context?, attention_score, emotional_tag, source)
   │
   ▼
 [EMBEDDING CACHE CHECK]
-  content_hash = xxhash64(content)
-  if embed_cache.get(content_hash):
+  content_key = (embedder_generation, Content, xxhash64(normalize(content)))
+  if embed_cache.get(content_key):
       content_vec = cached (0ms)
   else:
-      content_vec = fastembed.embed(content) (~5ms)
-      embed_cache.put(content_hash, content_vec)
+      content_vec = local_embedder.embed(content) (~5ms)
+      embed_cache.put(content_key, content_vec)
 
-  context_hash = xxhash64(context)
-  context_vec  = embed_cache.get_or_embed(context) (same pattern)
+  context_key = (embedder_generation, Context, xxhash64(normalize(context)))
+  context_vec = embed_cache.get_or_embed(context_key, context) (same pattern)
+
+  if local_embedder unavailable:
+      fail explicitly (no remote fallback on encode fast path)
   │
   ▼
 [NOVELTY SCORE]
@@ -12605,6 +12622,37 @@ All write paths must normalize raw intake into one canonical memory object envel
 - Distilled `Fact`, `Summary`, `Relation`, `Skill`, `Constraint`, or `Hypothesis` records should normally arise from typed ingestion or later extraction and consolidation, not speculative promotion of raw text during first-write normalization.
 - Normalization may derive structured metadata only from explicit input, request envelope, authenticated context, stable source mappings, or bounded derivation rules that preserve lineage; it must not infer scope or entity/relation links purely from free-form text.
 - If normalization cannot bind namespace, traceable provenance, or a valid canonical type, the write is a validation failure.
+
+### 13.2.6 Encode attention, novelty, and pattern-separation contract
+
+Attention gating, novelty detection, and pattern separation are related write-side decisions, but they are not the same decision. The contract keeps them separate so later implementation can tune admission, duplicate routing, and interference behavior without collapsing them into one opaque score.
+
+- Attention gating decides whether normalized intake deserves canonical persistence at all. A candidate that fails the gate may remain only in bounded controller or sensory state and must not mint a durable memory id, durable lineage, or tier assignment.
+- `attention_score` is the admission signal for this gate. The system may accept a caller-provided score or a bounded local derivation, but the effective score and gate outcome must remain inspectable.
+- Attention gating runs before durable insert, before engram formation, and before interference updates. It must stay on the encode fast path with no full scans, remote calls, or hidden retries.
+- Novelty detection is a bounded nearest-neighbor comparison against existing hot memories. Its canonical form is `novelty_score = 1.0 - max_cosine_similarity(new_vec, top_1_neighbor)` or an equivalent bounded top-k reduction that preserves the same inspectable meaning.
+- Novelty measures distance from existing memory content; it does not by itself decide whether the candidate is admitted, merged, or kept separate. That separation of concerns is part of the contract.
+- If `novelty_score < DUPLICATE_THRESHOLD`, the write follows duplicate routing and updates or reconsolidates the nearest existing memory instead of creating a fresh canonical memory identity.
+- If the candidate is similar but remains above duplicate threshold, pattern separation applies: the write creates a new memory identity and preserves distinct context, provenance, and temporal boundaries instead of collapsing semantically nearby experiences too early.
+- Pattern separation must win whenever two items are meaningfully separate episodes, observations, or actions even if they occupy the same local embedding neighborhood. Similarity alone is not permission to overwrite, merge, or erase context.
+- Pattern separation and interference are distinct stages. Separation chooses identity at write time; interference may later weaken, penalize, cluster, or relate nearby memories under bounded rules without retroactively pretending they were the same memory.
+- Explain and inspect surfaces for encode must expose at least the effective attention score, gate outcome, nearest-neighbor similarity, computed novelty score, duplicate-versus-create decision, and whether pattern separation preserved a new record despite high similarity.
+- Benchmarks and tests for this contract must prove deterministic enough behavior for debugging and measurement, bounded nearest-neighbor work, duplicate routing without full scans, and separation rules that do not regress into silent collapse of nearby but distinct memories.
+
+### 13.2.7 Encode embedding, local-model, and cache-boundary contract
+
+Embedding generation on the write path exists to support novelty, duplicate routing, ranking inputs, and later retrieval, but it must stay bounded, local-first, and operationally explainable.
+
+- The canonical encode fast path uses a local embedding model only. Remote API calls, hosted fallback models, or implicit network retries are out of scope for normal request-path encoding.
+- If the configured local embedder is unavailable, incompatible with the declared dimension set, or cannot load within the bounded startup/runtime contract, encode should fail explicitly or enter a separately declared degraded mode; it must not silently substitute a remote provider.
+- The authoritative embedding attached to a memory is the full-precision local result used for later rescore, repair, migration, and derived-index rebuilds. Hot and cold quantized vectors are derived search projections, not alternate truth.
+- Cache keys must bind at least normalized input bytes, embedding purpose, and embedder generation. Reusing the same text across different purposes such as `content` and `context` must not silently alias if that would obscure inspectability or future model changes.
+- Embedder generation includes whatever version boundary invalidates compatibility: model family, model revision, dimensions, normalization generation, or equivalent runtime fingerprint.
+- A cache hit is valid only when the key matches the current embedder generation and purpose. Model swaps, dimension changes, normalization changes, or incompatible runtime upgrades invalidate prior cached vectors automatically.
+- The request path may cache content and context embeddings independently, but cache reuse must remain bounded in memory and must not become a hidden durable store or the only place an authoritative vector exists.
+- Batch embedding is allowed for consolidation, migration, import, or repair flows where work is explicitly offline or background-scoped. Batch mode is not permission for unbounded request-path queueing or deferred hidden retries during foreground encode.
+- Encode-path observability must surface whether each embedding came from cache or fresh computation, the effective embedder generation, and whether a miss occurred because of invalidation, cold start, or first-seen input.
+- Benchmarks and acceptance checks for this contract should prove bounded cache memory, steady-state cache-hit expectations on repeated content/context, explicit invalidation on generation change, and encode latency that stays within budget on both cache-hit and local-miss paths.
 
 ### 13.3 Schema rules
 

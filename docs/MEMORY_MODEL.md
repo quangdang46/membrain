@@ -144,6 +144,8 @@ Identity/version rules must keep revision, replacement, and collision handling s
 - Contradictory or superseding facts create a new memory identity and connect it with `superseded_by`, `belief_version`, `belief_chain_id`, or a `ConflictRecord`; they do not silently overwrite an existing record in place.
 - Summaries, extracts, repairs, and consolidations usually create new records with their own identities while preserving parent lineage.
 - Duplicate-family collapse may merge retrieval treatment or maintenance state, but canonical IDs remain stable until an explicit merge artifact records the transformation.
+- Duplicate-family handling and interference handling are separate lanes: duplicate-family logic groups materially same or near-same evidence, while interference logic applies bounded maintenance effects to similar but still-distinct memories.
+- `fingerprint` may seed duplicate-family lookup or collision detection, but it does not authorize identity reuse, silent overwrite, cross-namespace merging, or policy bypass.
 - `payload_ref` / `content_ref` must be stable, resolvable, or explicitly tombstoned so identity survives storage relocation.
 
 ## Metadata Families and Contracts
@@ -163,6 +165,7 @@ Identity/version rules must keep revision, replacement, and collision handling s
 - Missing context fields mean `unknown` or `not applicable`, not `global`.
 - Inference is allowed only from bounded execution metadata such as the request envelope, auth/session binding, scheduler ownership, stable source mapping, or parent lineage; it must never come from model speculation over free-form text.
 - Once persisted, explicit and inferred context values participate equally in filtering, replay, and audit, but inspect/explain surfaces should still be able to say when a value was redacted or unavailable.
+- Encode must preserve enough provenance for each bound context field to distinguish caller-supplied values, trusted execution-envelope bindings, lineage carry-forwards, and bounded local derivations; later surfaces must not present all context as if it were user-authored.
 - Derived memories may add fresh context of their own, but they must keep lineage back to source memories instead of replacing older context.
 
 ### Provenance Metadata
@@ -174,6 +177,8 @@ Identity/version rules must keep revision, replacement, and collision handling s
 - `authoritativeness` scores source reliability, not belief truth or recall priority.
 - `content_ref` points at the canonical stored content handle used for redaction, repair, and lazy fetch.
 - `lineage` records parent memory IDs and is mandatory for summarize, merge, extract, repair, contradiction, and consolidation outputs.
+- The provenance envelope must also be sufficient to explain whether attached context, emotional annotations, advisory tags, and provisional write-time scoring came from explicit input, trusted source mapping, parent lineage, or bounded local derivation.
+- `authoritativeness` carries source-trust semantics separately from confidence or salience so later ranking, governance, and explain surfaces do not flatten trust into one opaque importance number.
 - A stored memory is only canonical if it can be traced either directly to a source reference or indirectly through lineage to durable evidence.
 
 ### Utility, Retention, and Recall Metadata
@@ -187,6 +192,8 @@ Identity/version rules must keep revision, replacement, and collision handling s
 - `retention_class` expresses intended durability (`volatile`, `normal`, `durable`, `pinned`) independently from current tier.
 - `decay_state` stores the parameters needed for lazy decay and reinforcement updates without eager whole-store rewrites.
 - `policy_flags` carry governance-critical markers such as legal hold, compliance lock, redaction state, and shareability constraints.
+- Initial `salience` is a provisional write-side signal. It may reflect bounded encode cues such as attention outcome, novelty lane, explicit task relevance, and emotional arousal, but it must not erase provenance or collapse source trust into the same scalar.
+- `encoding_valence` and `encoding_arousal` capture emotional significance when explicit input or bounded local derivation supplies it; their origin must remain explainable alongside salience.
 - Utility or salience may tune ranking and maintenance, but they must never override policy flags, pins, or namespace checks.
 
 ### Linkage and Classification Metadata
@@ -194,6 +201,8 @@ Identity/version rules must keep revision, replacement, and collision handling s
 `tags`, `entity_refs`, and `relation_refs` enrich retrieval without becoming hidden truth.
 
 - `tags` are advisory labels supplied by users, agents, or background jobs.
+- Encode-time contextual tags may describe bounded task, topic, environment, or operator cues that help later recall and ranking, but they remain advisory labels rather than namespace, identity, or relation truth.
+- Tags that materially affect ranking, governance, or explain surfaces must remain attributable to their source path rather than appearing as anonymous annotations.
 - `entity_refs` point to canonical entities for entity-centric recall and repairable graph links.
 - `relation_refs` point to explicit relation records or resolvable tombstones.
 - Summaries, facts, skills, and repaired artifacts must preserve enough tags/entity/relation linkage to remain explainable after compaction or consolidation.
@@ -257,6 +266,27 @@ Before persistence, a normalized candidate must have:
 - Large or structured raw payloads must keep a bounded `compact_text` while preserving canonical detail through `content_ref` or `payload_ref`; lossy truncation without a payload handle is invalid.
 - Ambiguous intake should prefer the more conservative raw-evidence type (`Event` or `Observation`) plus preserved provenance over speculative semantic elevation.
 - If normalization cannot bind namespace, traceable provenance, or a valid canonical type, the write must fail validation rather than persisting opaque text with guessed metadata.
+
+### Encode-time tagging and write-side explainability
+
+Encoding attaches context, emotion, source-trust, and provisional ranking signals before persistence so later retrieval, governance, and explain surfaces do not need to reconstruct them from raw text alone.
+
+- Context binding happens before routing and durable insert; if workspace, session, task, or goal context cannot be bound from explicit input, trusted envelopes, or lineage, the write proceeds without that field rather than guessing.
+- Emotional tagging uses `encoding_valence` and `encoding_arousal`; caller-provided values may be stored directly, and bounded local derivation may add them only when the derivation path remains inspectable.
+- Source trust travels through `authoritativeness` plus provenance handles, not through hidden salience-only heuristics.
+- Initial salience is provisional write-side scoring used for admission, routing, and later ranking decomposition. It must remain explainable as a combination of bounded encode cues rather than an opaque black-box value.
+- Successful writes must preserve enough route metadata that `memory_inspect` and `memory_explain` can answer what content or payload was stored, which context and tags were explicit versus inferred, which provenance handles justified the write, and which write-side signals affected admission or tier choice.
+
+### Duplicate-family, interference, and fast-path observability
+
+Duplicate handling, interference checks, and write-path observability are related encode concerns, but they must stay separately inspectable.
+
+- Duplicate-family handling answers whether intake belongs to an existing materially same evidence family; interference answers whether similar but distinct memories should carry bounded maintenance penalties or retrieval difficulty. Neither lane replaces contradiction or supersession handling.
+- Duplicate-family checks may use `fingerprint`, bounded similarity search, and source/provenance hints, but a duplicate outcome must not silently overwrite canonical content, provenance, or policy state.
+- Interference checks run only on a bounded similar-candidate slice after near-identical duplicate-family cases are excluded; any resulting penalties change maintenance state, not canonical identity or belief resolution.
+- Encode fast-path duplicate and interference work must stay within explicit shortlist and latency budgets. If secondary maintenance cannot complete inside those budgets, the system should skip or defer it rather than scanning the full corpus or blocking the write indefinitely.
+- Write-path observability must distinguish admission outcome, duplicate-family classification, interference adjustments, and skipped or deferred maintenance so later debugging and benchmark work can attribute latency and behavior correctly.
+- `memory_inspect` and `memory_explain` should be able to report which duplicate/interference lanes fired, which were bypassed or deferred, and whether those lanes later affected retrieval or maintenance behavior.
 
 ## Memory States (Lifecycle)
 
@@ -383,3 +413,12 @@ When new information conflicts with existing evidence:
 - Successful slow-path results may refresh or seed higher warm tiers for bounded reuse, but that cache warming does not itself change the canonical durable owner.
 - Consolidation or explicit demotion moves hot durable ownership toward cold durable surfaces; forgetting or retention action may then archive that durable record according to policy.
 - Working-memory eviction and Tier1 cache eviction are not demotion events by themselves.
+
+### Background consolidation pipeline contract
+
+Background consolidation is one bounded controller workflow ordered as `NREM-like migration -> REM-like linking/desensitization -> homeostasis`.
+
+- The NREM-like pass evaluates eligible hot-route memories and may move canonical durable ownership colder while preserving retrieval continuity, provenance, lineage, and identity/version rules.
+- The REM-like pass may reduce emotional charge and add auditable cross-links or other lineage-backed derived artifacts, but it must not create untraceable sole truth.
+- Homeostasis is the saturation-control pass after those earlier stages; it may archive only policy-eligible weak memories after downscaling and must never prune pinned or last-authoritative evidence.
+- These passes are controller work rather than a separate persisted lifecycle enum; if any stage fails, the last committed durable state remains authoritative and stale derived work is repaired or rebuilt later.

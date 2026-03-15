@@ -80,17 +80,20 @@ encode(input, context, attention, emotional):
   2. embedding = fastembed(input)
   3. context_embedding = fastembed(context)
   4. novelty_score = 1.0 - max_cosine_sim(embedding, existing)
-  5. emotional_tag = { valence, arousal }
-  6. initial_strength = BASE × novelty_mod × attention_mod × emotional_mod
-  7. bypass_decay = arousal > AROUSAL_THRESHOLD && |valence| > VALENCE_THRESHOLD
-  8. state = Labile
-  9. INSERT into hot_store
-  10. interference_check → weaken similar older memories
-  11. engram_builder.try_cluster(new_memory)
-  12. landmark_detector.evaluate(memory)  [Feature 5]
-  13. confidence = 1.0, corroboration check  [Feature 7]
-  14. snapshot_encoding_mood()  [Feature 18]
-  15. audit_log(Encode)  [Feature 19]
+  5. bind context from explicit input, trusted envelope, or lineage
+  6. provenance_envelope = { source_kind, source_ref, authoritativeness, content_ref/payload_ref }
+  7. emotional_tag = { valence, arousal } → persist as { encoding_valence, encoding_arousal }
+  8. initial_salience = f(attention, novelty, task relevance, emotion)
+  9. initial_strength = BASE × novelty_mod × attention_mod × emotional_mod
+  10. bypass_decay = arousal > AROUSAL_THRESHOLD && |valence| > VALENCE_THRESHOLD
+  11. state = Labile
+  12. INSERT into hot_store with context/provenance/salience metadata
+  13. interference_check → weaken similar older memories
+  14. engram_builder.try_cluster(new_memory)
+  15. landmark_detector.evaluate(memory)  [Feature 5]
+  16. confidence = 1.0, corroboration check  [Feature 7]
+  17. snapshot_encoding_mood()  [Feature 18]
+  18. audit_log(Encode)  [Feature 19]
 ```
 
 ---
@@ -159,7 +162,9 @@ reconsolidation_tick():
 
 **membrain**:
 - `attention_score` gates encoding (below 0.2 → discard)
-- `salience` influences retrieval ranking
+- encode assigns an initial `salience` from bounded cues like attention, novelty, explicit task relevance, and emotional arousal
+- `salience` influences retrieval ranking, but remains distinct from `confidence`, `authoritativeness`, and durable strength
+- contextual binding happens during encoding from explicit input, trusted envelopes, or lineage rather than post-hoc free-text guessing
 - Working memory maintains 7-slot attention buffer
 - `focus(id)` boosts attention score for executive control
 - Context Budget API (Feature 4) manages attention-weighted injection into agent context
@@ -172,24 +177,45 @@ reconsolidation_tick():
 
 **membrain**:
 
-```
+```text
 Engram {
   id, memory_ids, centroid_embedding, formation_context, strength
 }
 
-Encoding:
-  similar_engrams = engram_index.search(embedding, top=3)
-  if max_sim > CLUSTER_THRESHOLD → add to existing, update centroid
-  else → create new engram
+Encoding / formation:
+  1. Query engram_index by centroid similarity (top-5 candidate engrams)
+  2. If max_sim > ENGRAM_THRESHOLD (~0.65):
+       add new memory to that engram
+       update centroid incrementally from member embeddings
+       add weighted edge to the closest related member
+  3. If no engram matches:
+       create a new single-member seed engram
+  4. If the new memory is close to two engrams:
+       join the closer engram
+       add a cross-cluster edge to preserve overlap
+  5. If cluster size crosses the soft split threshold
+       (canonical plan example: ~200 members):
+       split into 2 sub-engrams (k=2)
+       keep the parent as an abstract node over the children
+  6. If cluster size crosses the hard limit
+       (canonical plan example: ~500 members):
+       stop adding directly to that cluster
+       create a sibling engram instead
 
 Associative recall:
   1. Vector search → top K candidates
   2. For each → get engram
-  3. Graph traverse: BFS via petgraph (hard depth cap)
-  4. Collect all memory_ids in cluster
-  5. Score and rank
-  6. Reconstruct from fragments
+  3. Graph traverse: BFS via petgraph (hard depth/node/edge caps)
+  4. Collect cluster members and score them with
+     query alignment + path weight + effective strength
+  5. Return a bounded expanded set for ranking/packaging
 ```
+
+Operational maturity rules:
+- A single-member engram is a valid seed, but not yet evidence of a stable mature cluster.
+- Centroid updates must remain inspectable and stable enough that later additions, splits, and restarts are reproducible for operators and tests.
+- Split-versus-sibling behavior is the anti-"god cluster" rule: oversized or drifting clusters divide or fork rather than absorbing unrelated memories indefinitely.
+- Downstream consumers such as skill extraction should treat an engram as mature only when its centroid and split/sibling behavior have stabilized enough to satisfy the Stage 7 graph-maturity gates, rather than assuming every existing cluster is ready for distillation.
 
 ---
 
