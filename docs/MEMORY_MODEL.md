@@ -282,11 +282,12 @@ Encoding attaches context, emotion, source-trust, and provisional ranking signal
 Duplicate handling, interference checks, and write-path observability are related encode concerns, but they must stay separately inspectable.
 
 - Duplicate-family handling answers whether intake belongs to an existing materially same evidence family; interference answers whether similar but distinct memories should carry bounded maintenance penalties or retrieval difficulty. Neither lane replaces contradiction or supersession handling.
+- Duplicate-family routing is an encode-time identity decision. Its observable outcome must say whether the write minted a new canonical identity, attached to an existing duplicate family, or updated/reconsolidated an existing canonical record under explicit duplicate rules rather than leaving operators to infer that from later maintenance state.
 - Duplicate-family checks may use `fingerprint`, bounded similarity search, and source/provenance hints, but a duplicate outcome must not silently overwrite canonical content, provenance, or policy state.
 - Interference checks run only on a bounded similar-candidate slice after near-identical duplicate-family cases are excluded; any resulting penalties change maintenance state, not canonical identity or belief resolution.
 - Encode fast-path duplicate and interference work must stay within explicit shortlist and latency budgets. If secondary maintenance cannot complete inside those budgets, the system should skip or defer it rather than scanning the full corpus or blocking the write indefinitely.
-- Write-path observability must distinguish admission outcome, duplicate-family classification, interference adjustments, and skipped or deferred maintenance so later debugging and benchmark work can attribute latency and behavior correctly.
-- `memory_inspect` and `memory_explain` should be able to report which duplicate/interference lanes fired, which were bypassed or deferred, and whether those lanes later affected retrieval or maintenance behavior.
+- Write-path observability must distinguish admission outcome, duplicate-family route outcome, shortlist evidence such as candidates inspected and nearest-neighbor similarity or novelty, interference adjustments, and skipped or deferred maintenance so later debugging and benchmark work can attribute latency and behavior correctly.
+- `memory_inspect` and `memory_explain` should be able to report which duplicate/interference lanes fired, which were bypassed or deferred, whether pattern separation preserved a new record despite high similarity, and whether those lanes later affected retrieval or maintenance behavior.
 
 ## Memory States (Lifecycle)
 

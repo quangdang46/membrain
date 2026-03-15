@@ -66,12 +66,13 @@ Ingest a new memory item.
 
 **Inputs**: namespace, memory_type, content/payload, source metadata, optional context bindings, optional emotional annotations, optional salience/tags/entity_refs/relation_refs, retention hints
 
-**Outputs**: memory_id, chosen tier, validation outcome, routing reason, provenance summary, write-path summary, deferred enrichment handle
+**Outputs**: memory_id, chosen tier, validation outcome, routing reason, provenance summary, write-path summary (duplicate-family route, bounded similarity evidence, interference disposition), deferred enrichment handle
 
 **Rules**:
 - Writes validate policy first
 - Contradictory writes must not silently overwrite — must emit conflict metadata
 - Encode must preserve enough write-side metadata for later inspect/explain to distinguish caller-provided versus bounded-derived context, emotional annotations, advisory tags, provisional salience inputs, duplicate-family classification, and interference-lane participation
+- `write-path summary` must keep duplicate-family route outcome, bounded shortlist evidence such as nearest-neighbor similarity or candidates inspected, and interference apply/skip/defer state separately inspectable rather than collapsing them into one opaque duplicate flag
 - Supports `visibility` and `namespace_id` for cross-agent sharing (Feature 9)
 
 ### `memory_get`

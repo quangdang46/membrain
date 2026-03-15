@@ -49,7 +49,7 @@ Any request-path benchmark that reports only averages is incomplete. Tail behavi
 
 **Required benchmark surfaces**
 - attention gating and discard thresholds
-- novelty scoring and duplicate routing
+- novelty scoring, duplicate routing, and write-path observability
 - emotional bypass behavior without latency escape hatches
 - working-memory eviction cost
 - bounded proactive/retroactive interference updates
@@ -57,6 +57,7 @@ Any request-path benchmark that reports only averages is incomplete. Tail behavi
 **Gate expectations**
 - full encode remains within the declared encode envelope on representative payload sizes
 - duplicate routing stays bounded by a small candidate search rather than unbounded scans
+- benchmark artifacts expose the duplicate-route observability needed to attribute latency, including shortlist evidence such as candidates inspected or nearest-neighbor similarity plus whether interference work was applied, skipped, or deferred
 - stage evidence makes clear that encode-path restrictions still hold
 
 ### Stage 3 — `on_recall` / LTP-LTD

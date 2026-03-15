@@ -117,6 +117,7 @@ An observability hook is the operator-visible evidence that lets reviewers and m
 
 - The hook must name the concrete metric, trace, audit surface, or explain/inspect output that should move if the change regresses.
 - Request-path changes should expose latency percentiles plus bounded-work signals such as candidate counts, tier-routing decisions, or cache/tier hit rates.
+- Encode-path duplicate-routing or observability changes should also expose shortlist evidence, duplicate-family route outcome, nearest-neighbor or novelty summary, and whether interference work ran, was skipped, or was deferred.
 - Policy or governance changes should expose denial, redaction, or audit signals and preserve enough explainability to show which policy path fired.
 - Background-job or maintenance changes should expose job duration, queue depth, affected-item counts, and any foreground latency delta they impose.
 - The accompanying change notes should point reviewers to the command, dashboard, benchmark artifact, or machine-readable field where the signal can be checked.
