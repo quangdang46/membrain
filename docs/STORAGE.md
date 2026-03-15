@@ -43,15 +43,23 @@ Cold durable archive supporting cheap storage, metadata-first prefiltering, and 
 | hot memory index | stable identity, namespace, canonical type/kind, lifecycle state, current tier, version, strength/salience/decay fields, recall counters, retention and policy markers, provenance handles, contradiction or supersession handles, `content_ref`, `payload_ref`, and any bounded routing flags | authoritative durable | metadata-first prefilter and bounded candidate selection |
 | hot text surface | `compact_text` plus other bounded lexical fields needed for exact or keyword retrieval and explainability | authoritative durable text surface | exact lookup and FTS source without payload fetch |
 | hot embedding surface | authoritative float embeddings or durable refs to them for hot memories | authoritative durable | exact rescore source and rebuild input for the hot ANN lane |
-| normalized link tables | entity, relation, lineage, contradiction, and graph-edge rows keyed by stable ids | authoritative for canonical links; derived for purely similarity-driven materializations | bounded expansion, inspect, and repair |
+| normalized link tables | entity, relation, lineage, contradiction, engram membership, and graph-edge rows keyed by stable ids | authoritative for canonical links and stable cluster membership handles; derived for purely similarity-driven materializations | bounded expansion, inspect, and repair |
 | control metadata | schema version, migration state, repair watermarks, config generation, and any stable id mapping needed by sidecars | authoritative durable control state | safe startup, migration, and rebuild orchestration |
 
 ### Metadata layout rules
 - Keep the prefilter row narrow and stable: fields needed for namespace, policy, lifecycle, ranking, and routing decisions must be queryable without touching large text or detached payload bytes.
 - `compact_text` and other bounded hot lexical fields may live in `hot.db`, but giant payload ownership stays behind `payload_ref` or the cold durable store.
 - `content_ref` and `payload_ref` survive compaction, demotion, redaction, and payload relocation; changing a storage handle must not mint a new identity.
-- Filter-participating entity, relation, contradiction, and provenance metadata must remain available through normalized or otherwise directly queryable structures instead of opaque per-row blobs or ANN-only annotations.
+- Filter-participating entity, relation, contradiction, provenance, and graph-membership metadata must remain available through normalized or otherwise directly queryable structures instead of opaque per-row blobs or ANN-only annotations.
 - Opaque "all metadata in one blob" layouts are out of contract for hot-path state because they force post-filter decoding and weaken inspectability.
+
+### Graph persistence contract
+- Memory-to-memory graph endpoints persist canonical memory ids; cluster metadata persists stable `engram_id` handles plus any explicit parent or child lineage needed to explain later splits.
+- Engram membership rows are authoritative for the stable mapping between a memory and its current cluster handle, while centroid vectors, traversal weights, activation counters, and similar search accelerators remain rebuildable graph state.
+- Canonical relation, contradiction, lineage, and policy-bearing links may be queryable through the same normalized storage family, but graph-local traversal materializations must not become their only surviving representation.
+- Index-local ids such as ANN or centroid sidecar row ids may exist for maintenance, but storage must preserve a deterministic mapping back to canonical memory or engram handles so restart and repair do not depend on opaque transient identifiers.
+- If a graph surface is dropped or rebuilt, inspectable cluster membership, canonical link truth, and tombstone or supersession markers must still resolve from durable rows without replaying the whole corpus from raw payload bytes.
+- Cross-namespace graph adjacency is never implied by vector proximity alone; any persisted cross-namespace linkage requires explicit policy support and remains subject to the same namespace and visibility checks as other canonical links.
 
 ### Hot-path index families
 - Identity indexes must support stable `(namespace, id)` lookup plus any deterministic external-id mapping required by ANN or graph sidecars.

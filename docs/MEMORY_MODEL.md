@@ -103,6 +103,7 @@ Every memory item carries these attributes (directly or derivably):
 | `era_id` | Option | F5 | Which era this memory belongs to |
 | `corroboration_count` | u32 | F7 Confidence | How many memories corroborate |
 | `reconsolidation_count` | u32 | F7 | How many times reconsolidated |
+| `engram_id` | Option<UUID> | Core associative graph | Primary stable cluster handle when the memory participates in bounded engram expansion |
 | `distilled_from_engram` | Option | F8 Skill Extraction | Source engram for procedurals |
 | `namespace_id` | String | F9 Cross-Agent | Namespace for sharing |
 | `visibility` | enum | F9 | private, shared, public |
@@ -234,6 +235,33 @@ Identity/version rules must keep revision, replacement, and collision handling s
 - Inspect and explain surfaces should be able to show the canonical handle, the observed alias or normalized relation kind that produced it, and whether the reference is resolved, ambiguous, or tombstoned.
 - Graph materializations, caches, and extracted summaries remain derived state; authoritative durable entity and relation records win during repair or rebuild.
 - When compaction, repair, or consolidation cannot preserve an entity or relation reference exactly, the system must emit an explicit loss or tombstone record instead of inventing a replacement.
+
+## Graph identity and edge taxonomy contract
+
+Graph-linked retrieval adds bounded neighborhood structure without minting a second identity system.
+
+### Graph entity classes
+
+- Memory nodes use the canonical memory identity tuple (`namespace` + `id`). Graph traversal, caches, and inspect surfaces must point back to that same handle rather than a graph-local surrogate.
+- Engram or cluster records use their own stable `engram_id` for membership, centroid maintenance, and bounded expansion seeds. An `engram_id` is a cluster handle, not a replacement memory identity.
+- Cluster lineage after split or hierarchy maintenance must remain explicit through stable parent/child linkage such as `parent_engram_id`, so repair and inspect can explain how a later cluster descends from an earlier one.
+- Entity, relation, goal, contradiction, and lineage handles may seed adjacency or filtering, but their authoritative meaning remains in canonical entity, relation, conflict, and workflow records rather than in graph-only copies.
+
+### Edge taxonomy
+
+- `Associative` edges represent similarity or co-activation neighborhoods used for bounded engram expansion and partial-cue recall. They are rebuildable from durable evidence plus embeddings and must not become the sole surviving record of a semantic claim.
+- `Temporal` edges represent ordered adjacency grounded in timestamps, session or episode continuity, or other durable chronology evidence.
+- `Causal` edges represent claimed or derived “led to” structure and must remain backed by inspectable evidence, lineage, or canonical relation records rather than existing only as an opaque traversal hint.
+- `Contradictory` edges represent active contrast or disagreement neighborhoods that support explain, belief-history, and conflict-aware recall; they do not replace `ConflictRecord`, supersession, or belief-chain state.
+- Additional graph-local labels are allowed only when documented as derived materializations, and they must not silently widen the canonical user-visible taxonomy above.
+
+### Persistence identifier and authority rules
+
+- Persistent graph rows use stable canonical handles at their endpoints: memory ids for memory-to-memory edges, stable engram ids for cluster metadata, and canonical entity or relation handles when those records are the real authority.
+- Sidecar-only ids such as ANN row ids or `usearch_id` may exist for index maintenance, but they are deterministic external mappings rather than durable public identifiers and must never be the only way to interpret a graph row after repair.
+- Purely similarity-driven graph materializations are derived state and may be dropped or rebuilt; edges that encode canonical relation, contradiction, lineage, or policy-relevant truth must continue to resolve through authoritative durable records.
+- Cross-namespace graph or cluster links require explicit policy support and must never bypass namespace or visibility enforcement merely because two endpoints are near each other in vector or graph space.
+- Tombstoned, redacted, or superseded endpoints keep inspectable loss or policy markers; graph repair may remove stale accelerators, but it must not invent replacement endpoints or silently collapse conflict semantics.
 
 ## Encode-Time Normalization Contract
 

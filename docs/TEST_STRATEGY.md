@@ -9,11 +9,22 @@ The testing strategy must prove correctness, boundedness, durability, explainabi
 
 - Every suite emits structured artifacts useful for regression analysis.
 - Failure-injection and recovery suites should also record the violated invariant, affected namespace or shard, authoritative durable input, whether prior durable state remained intact, and any repair or escalation artifact.
-- No test depends on wall-clock time when logical ticks or controlled clocks can express the same behavior.
+- No correctness, lifecycle, or policy test depends on wall-clock time when interaction ticks, logical ticks, or controlled clocks can express the same behavior; benchmark and soak harnesses may measure real elapsed time for performance claims but not as the sole proof of semantic behavior.
 - Any request-path change must be tested for both correctness and boundedness.
 - Any stateful mutation stage must include restart or crash-safety coverage where relevant.
 - Policy and namespace checks must be validated before parity claims across CLI, daemon, IPC, or MCP layers.
 - Benchmark results without representative metadata are exploratory evidence, not gate-closing evidence.
+- Any benchmark-closing suite must record the benchmark harness or command entrypoint, dataset or fixture identity, build mode, warm/cold semantics, sample count, representativeness label, and artifact location needed to rerun or audit the measurement.
+
+## Deterministic time-control contract
+
+Use time as data, not ambient process state.
+
+- correctness, lifecycle, retry-budget, timeout, decay, recency, reconsolidation, and policy tests should drive time through interaction ticks, logical ticks, or injected clock fixtures
+- time-sensitive test artifacts should name the clock or tick source, the starting state, and the tick sequence needed to reproduce the outcome
+- wall-clock sleeps, scheduler timing, or real elapsed time are acceptable only for benchmark or soak harnesses measuring performance characteristics; they do not close semantic correctness gates by themselves
+- when a benchmark also touches time-sensitive semantics, pair the wall-clock measurement with deterministic fixture coverage for the semantic rule
+- failure and repair artifacts for time-sensitive regressions should record the relevant tick or clock position so the scenario is replayable
 
 ## Namespace and isolation minimum matrix
 
@@ -201,6 +212,35 @@ Every stage completion should leave behind:
 - migration note if schema changed
 - rollback note if behavior changed
 - ops note if background jobs changed
+
+## Phase gate proof map
+
+Each roadmap phase closes only when the stage artifacts above are strong enough to satisfy the corresponding `PLAN.md` phase gate rather than merely proving isolated tests passed.
+
+### Phase 0 — Contracts and measurable foundation prerequisites
+- the benchmark report must prove a rerunnable harness exists and that Tier1 MVP latency is measurable on declared hardware
+- the design note must freeze the object-model and invariant assumptions needed for benchmarkable work
+- the failure matrix must cover the baseline boundedness and correctness assumptions that would invalidate early measurement if they drift
+
+### Phase 1 — Core encode, storage, and bounded retrieval baseline
+- benchmark reports must cover Tier2 indexed retrieval, session or entity query behavior, and a measurable ranking baseline
+- the design note or interface note must identify the debug or operator retrieval explanation surface used to satisfy the phase gate
+- rollback or migration notes must be present whenever new retrieval or storage behavior changes external semantics
+
+### Phase 2 — Contradiction handling, graph-assisted retrieval, and explainable packaging
+- benchmark and failure artifacts must prove graph support stays budgeted and repairable, contradiction records exist, and explainable recall packaging is inspectable
+- the design note must identify which routing, contradiction, and packaging fields are canonical for cross-surface validation
+- migration or rollback notes must accompany any envelope, packaging, or contradiction-schema change that this phase introduces
+
+### Phase 3 — Dynamic lifecycle, repair, and regression hardening
+- benchmark reports must show consolidation utility, forgetting quality, and repair or compaction safety under failure injection
+- the failure matrix must make unacceptable fact loss, stale-result exposure, or repair drift visible enough to block the phase if they remain unresolved
+- ops notes are required whenever background maintenance behavior, repair controllers, or degraded-mode assumptions change
+
+### Phase 4 — Operational tooling, justified scale-out, and later-stage extensions
+- benchmark reports must justify sharding or distribution with empirical workload pressure rather than architectural preference
+- the artifact bundle must include the operations runbook or design note for shard movement, repair, recovery, and governance enforcement
+- failure and benchmark evidence must cover shard movement, repair, recovery, and cross-shard governance before the phase can close
 
 ## Global no-go conditions
 

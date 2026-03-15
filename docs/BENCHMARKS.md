@@ -17,6 +17,20 @@ Every benchmark claim must record:
 
 If the workload, corpus size, or sample count is not representative, label the result as exploratory instead of using it to close a stage gate.
 
+## Benchmark harness reproducibility contract
+
+Gate-closing benchmark evidence must come from a rerunnable harness or command entrypoint rather than a one-off anecdotal run.
+
+Every benchmark-closing run must also record:
+
+- the exact harness or command entrypoint used to produce the run
+- the declared fixture or dataset identity, including the generation recipe when the workload is synthetic
+- the release or comparable production build mode on the declared hardware profile
+- the warm/cold semantics for process, model, index, cache, or other state that materially affects the path
+- the sample count or iteration count used to derive the reported percentiles
+- whether the run is representative or exploratory
+- the artifact location for the machine-readable report and any bounded-work counters needed to audit the result
+
 ## Global latency budgets
 
 | Path | Contract |
@@ -134,6 +148,67 @@ Any request-path benchmark that reports only averages is incomplete. Tail behavi
 - graph-assisted recall stays bounded under declared caps
 - split logic remains stable enough for reproducible clustering behavior
 - restart does not corrupt graph state or silently change traversal behavior
+
+## Stage-close evidence map
+
+### Stage 1 — Foundation + Lazy Decay
+A gate-closing bundle should at minimum include:
+- a benchmark report covering the first measurable Tier1 or encode baseline, cache hit-versus-miss behavior, and metadata-only prefilter behavior
+- a failure matrix covering WAL verification, decay instability, cache regressions, and hidden full-scan regressions
+- a design note naming the object-model and invariant assumptions frozen tightly enough to support benchmarkable work
+- migration or rollback notes when Stage 1 work also changes schema or externally visible behavior
+
+### Stage 2 — Full Encode Pipeline
+A gate-closing bundle should at minimum include:
+- a benchmark report covering attention gating, novelty scoring, duplicate routing, working-memory eviction, and bounded interference costs
+- a failure matrix covering duplicate storms, hidden-scan regressions, observability gaps, and boundedness failures in interference updates
+- a design note describing the deterministic encode decisions and write-path observability surfaces the benchmark evidence relies on
+- rollback or migration notes when the encode path changes externally visible routing or storage semantics
+
+### Stage 3 — `on_recall` / LTP-LTD
+A gate-closing bundle should at minimum include:
+- a benchmark report covering recall overhead, stability-growth behavior, labile-state persistence, and Tier1 refresh cost
+- a failure matrix covering restart drift, cache or index divergence after recall-side updates, and request-boundedness regressions
+- a design note describing recall-side mutation rules and their observable checkpoints
+- rollback notes when recall-side strengthening or labile transition behavior changes user-visible semantics
+
+### Stage 4 — Three-tier retrieval
+A gate-closing bundle should at minimum include:
+- a benchmark report covering Tier1, Tier2, and Tier3 latency, partial versus full versus miss outcomes, graph overhead, and deferred payload-fetch counts
+- a failure matrix covering escalation mistakes, graph-cap violations, contradiction-aware partial-recall regressions, and premature payload-fetch leakage
+- a design note describing the routing, ranking, and explainability fields reviewers should inspect when validating the stage
+- migration or rollback notes when retrieval packaging, ranking fields, or exposed result envelopes change
+
+### Stage 5 — Reconsolidation
+A gate-closing bundle should at minimum include:
+- a benchmark report covering labile-window enforcement, update apply and reindex coherence, cache invalidation cost, and crash-safe update behavior
+- a failure matrix covering stale-window rejection, interrupted apply flows, DB or ANN or cache divergence, and policy-sensitive update rejection
+- a design note describing reconsolidation checkpoints and durable-state assumptions
+- rollback notes when reconsolidation changes externally visible update semantics
+
+### Stage 6 — Consolidation
+A gate-closing bundle should at minimum include:
+- a benchmark report covering migration throughput, foreground latency delta, retrievability after move, REM-like auditability, and dry-run versus apply cost
+- a failure matrix covering interrupted cycles, protected-evidence handling, stale warmed-state exposure, and degraded-mode behavior under foreground load
+- a design note describing consolidation-controller scope and durable-truth-first assumptions
+- an ops note for the background-job behavior and observability surfaced by the stage, plus rollback notes when externally visible retention or movement behavior changes
+
+### Stage 7 — Graph maturity
+A gate-closing bundle should at minimum include:
+- a benchmark report covering centroid stability, split or sibling behavior, traversal-cap enforcement, restart integrity, and graph-assisted recall overhead
+- a failure matrix covering serialization corruption, traversal budget escape, clustering instability, and repair or rebuild drift
+- a design note describing graph-formation and graph-recall assumptions that operators and reviewers should treat as canonical for the stage
+- an ops note when graph rebuild, repair, or maintenance behavior changes how the mature graph is validated in production
+
+## Minimum benchmark artifact bundle
+
+Each benchmark artifact bundle should include:
+
+- a summary report naming the scenario, stage, contract, and pass/fail outcome
+- machine-readable latency output sufficient to inspect p50, p95, p99, concurrency, and warm/cold status for the measured run
+- workload metadata linking the run to the declared dataset or fixture identity, payload shape, and representativeness label
+- bounded-work or routing evidence relevant to the measured path, such as candidate counts, tier hits or escalations, cache hit or miss state, deferred payload-fetch counts, or foreground latency delta for background jobs
+- an explicit note when the run is exploratory and therefore cannot close a stage gate
 
 ## Benchmark artifact templates
 

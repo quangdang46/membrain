@@ -69,6 +69,7 @@ These restrictions translate `PLAN.md` into contributor-facing checks that must 
 ### Benchmark and research restrictions
 
 - Never publish or cite a benchmark without dataset cardinality, machine profile, build mode, and warm/cold declaration
+- Benchmark evidence must also name the harness or command entrypoint, representativeness label, and artifact location so reviewers can rerun or audit the claim
 - Do not present p95 or p99 claims from microbench-sized sample counts as production facts; label them exploratory until representative
 - If a brain-inspired mechanism lacks measured benefit under benchmark and ablation, treat it as optional rather than canonical
 
@@ -96,7 +97,7 @@ These are contract-level review inputs, not optional nice-to-haves. If a change 
 | Change class | Required evidence | Review proof must name explicitly | Reject when... |
 |---|---|---|---|
 | Architecture or core behavior | design note; rollback note when externally visible behavior changes | affected invariants, contract surface, downstream docs that were updated, and why the new behavior still matches the thesis | behavior changed without a design note, rollback path, or resolved doc consistency |
-| Hot-path or performance-sensitive work | benchmark result; observability hook | dataset cardinality, machine profile, build mode, warm/cold declaration, touched p50/p95/p99 path metrics, and bounded-work signals such as candidate counts or tier/cache hit rates | benchmark evidence is missing, metadata is incomplete, touched path latency is still unknown, or no observability hook is named |
+| Hot-path or performance-sensitive work | benchmark result; observability hook | dataset cardinality, machine profile, build mode, warm/cold declaration, harness or command entrypoint, sample-count or representativeness label, artifact location, touched p50/p95/p99 path metrics, and bounded-work signals such as candidate counts or tier/cache hit rates | benchmark evidence is missing, metadata is incomplete, touched path latency is still unknown, or no observability hook is named |
 | Schema or durable-storage change | migration note; rollback note when behavior changes | changed tables/columns/meanings, compatibility window, rebuild/backfill plan, rollback scope, and required doc propagation to `PLAN.md`, `MEMORY_MODEL.md`, `CLI.md`, or `MCP_API.md` when exposed | migration notes are missing, rollback scope is undefined, rebuildability is unproven, or dependent docs were left inconsistent |
 | Forgetting, deletion, retention, or archiving semantics | governance analysis; dedicated policy coverage; rollback note when externally visible | retention class or legal-hold behavior, tombstone/loss handling, audit surface, and whether the change can ever remove last authoritative evidence | governance analysis is missing, policy coverage is absent, or deletion/retention behavior becomes silent or irreversible without explicit contract |
 | Namespace, sharing, denial, or redaction behavior | dedicated isolation/denial tests; explain/audit evidence | enforcement point before expensive work, expected denial/redaction artifacts, and parity across CLI, daemon, IPC, and MCP surfaces that expose the flow | isolation/denial tests are missing, denial/redaction paths are not inspectable, or behavior differs silently across surfaces |
@@ -106,10 +107,18 @@ These are contract-level review inputs, not optional nice-to-haves. If a change 
 ### Exact rejection trigger rules
 
 - Missing a required artifact for any touched change class is a rejection condition, even if unrelated artifacts are present.
-- Incomplete evidence counts as missing evidence. For example, a benchmark without dataset/machine/warm-cold metadata does not close the hot-path gate.
+- Incomplete evidence counts as missing evidence. For example, a benchmark without dataset/machine/warm-cold metadata, rerunnable harness details, or representativeness labeling does not close the hot-path gate.
 - Generic regression coverage does not substitute for dedicated scope-specific proof. Namespace or policy changes still need isolation/denial coverage; repair or migration changes still need rebuild/resilience coverage.
 - Contradictory evidence across docs, tests, benchmarks, or rollout notes should be treated as unresolved rather than averaged together; the PR stays rejectable until the conflict is resolved explicitly.
 - If a change spans multiple classes, reviewers should apply the union of the relevant rows above rather than choosing the easiest row that happens to fit.
+
+### Determinism review rules
+
+Time-sensitive review proof must stay as reproducible as the functional contract it is testing.
+
+- correctness claims about decay, recency, reconsolidation windows, retry budgets, timeouts, or other tick-sensitive behavior should point to interaction-tick, logical-tick, or injected-clock fixtures rather than ambient wall time
+- wall-clock or sleep-based evidence is acceptable for benchmark or soak measurement only when the claim is about real elapsed performance; it does not replace deterministic semantic coverage
+- a PR is rejectable if a touched time-sensitive rule cannot name the deterministic fixture, starting state, and expected artifact or if the only proof depends on nondeterministic sleeps or scheduler timing
 
 ### Observability Hook Contract
 
@@ -162,7 +171,7 @@ Any change that causes a measured regression must either:
 - Unit tests for all scoring formulas (decay, strength, ranking)
 - Integration tests for encode→recall round-trip
 - Benchmark tests for hot-path operations
-- No test may depend on wall-clock time (use interaction ticks)
+- No correctness, lifecycle, or policy test may depend on wall-clock time when interaction ticks or injected clocks can express the same behavior; benchmark harnesses may measure real elapsed time for latency claims, but not as the sole proof of semantic behavior
 
 ## Schema Change Protocol
 

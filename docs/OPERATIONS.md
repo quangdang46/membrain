@@ -117,6 +117,9 @@ membrain health --json | jq '{
   avg_confidence: .avg_confidence,
   unresolved_conflicts: .unresolved_conflicts,
   uncertain: .uncertain_count,
+  total_engrams: .total_engrams,
+  avg_cluster_size: .avg_cluster_size,
+  top_engrams: .top_engrams[:5],
   last_dream: .last_dream_tick
 }'
 membrain doctor run
@@ -126,6 +129,7 @@ membrain doctor run
 - Hot utilization trending up → schedule consolidation
 - Average confidence dropping → investigate conflict rate
 - Unresolved conflicts accumulating → trigger belief resolution
+- Engram count or average cluster size drifting sharply → investigate graph fanout, split pressure, or stale rebuild state
 - Doctor warnings → schedule repair
 
 ---
@@ -258,8 +262,15 @@ membrain benchmark tier2 --json | jq '.p99_us'
 ## 5.2 Graph and lineage repair
 
 ### Preconditions
-- Canonical edge tables and lineage records are readable.
+- Canonical edge tables, engram membership rows, and lineage records are readable.
+- Operators know whether the affected scope is missing only derived graph materializations or whether canonical graph rows themselves are suspect.
 - Conflicting background compaction or migration jobs are paused.
+
+### Persisted-versus-rebuildable graph surfaces
+- Durable graph truth is limited to normalized canonical edge rows, stable engram records, parent-child engram lineage, and durable membership mappings needed to answer which memory belongs to which cluster.
+- In-memory petgraph state, centroid ANN sidecars, neighborhood materializations, graph-health summaries, and similar warm surfaces are rebuildable accelerators.
+- Traversal counters or hotness hints such as edge activation counts may persist for observability, but restart correctness must not depend on preserving them exactly; if they are stale or dropped, the system may reset them while keeping canonical edge truth intact.
+- A serialized graph dump or checkpoint may accelerate restart, but it is never the sole source of truth and must always be replaceable from canonical durable rows.
 
 ### Command Sequence
 ```bash
@@ -268,22 +279,39 @@ membrain repair graph --dry-run
 membrain repair graph --namespace default
 membrain repair lineage --dry-run
 membrain repair lineage --namespace default
+membrain health --json | jq '{
+  total_engrams: .total_engrams,
+  avg_cluster_size: .avg_cluster_size,
+  top_engrams: .top_engrams[:5]
+}'
 ```
+
+### Restart integrity contract
+- Startup validates graph schema or format generation, durable edge-table readability, engram-membership readability, and deterministic handle mapping before graph-enabled recall is advertised as healthy.
+- If only derived graph materializations are missing or stale, startup may continue in a colder graph-bypassed or graph-lazy-rewarm mode while authoritative durable rows remain available.
+- If canonical edge tables or stable membership mappings are unreadable or mixed-generation, affected namespaces must fall back to graph-disabled degraded serving or read-only or offline posture until validation or repair passes.
+- Restart is successful only when graph-enabled recall, inspect, and explain paths can resolve canonical endpoints again without trusting stale sidecars or mixed-generation dumps.
 
 ### Metrics to Watch
 - Canonical edge count vs rebuilt materialized edge count
-- Broken-lineage count before/after
+- Total engrams, average cluster size, and top-engram drift against expected baselines
+- Broken-lineage and orphan-membership count before/after
+- Graph-disabled, graph-bypassed, stale-graph, or degraded-mode rates during restart and repair
 - Repair queue depth for follow-on unresolved items
 - Any explicit loss records emitted during repair
 
 ### Rollback Conditions
 - Repaired graph output diverges further from canonical edge tables
-- Broken-lineage count increases after mutation
+- Broken-lineage or orphan-membership count increases after mutation
+- Graph-enabled recall or explain remains dependent on stale sidecars after validation
 - Online retrieval latency breaches budget during the repair window
 
 ### Post-run Validation
 - `memory_explain` can traverse lineage and graph ancestry again
+- `graph(id)` or equivalent inspect surface resolves cluster membership and related memories from current canonical handles
+- Health or stats surfaces expose sane `total_engrams`, `avg_cluster_size`, and bounded top-engram summaries for the affected scope
 - No unresolved orphan nodes or broken ancestry chains remain without queued follow-up repair
+- Any still-degraded graph-disabled or graph-bypassed scope remains explicitly declared to operators rather than silently serving partial graph results
 
 ---
 
