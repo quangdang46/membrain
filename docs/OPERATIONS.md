@@ -254,6 +254,12 @@ membrain health --brief
 - Cache repopulation completes without new policy or lineage drift
 - Retrieval behavior is slower temporarily, but semantically unchanged
 
+### Derived-cache repair rules
+- Caches, sidecars, and prefetch queues are drop-and-rewarm derived surfaces keyed by effective namespace, declared owner boundary, and the policy and generation inputs that affect reuse.
+- Repair and migration must rebind fresh generation anchors before rewarmed state becomes eligible for reuse.
+- If invalidation anchors are uncertain after repair, migration, policy change, namespace rebinding, owner-boundary change, or partial failure, bypass warm state and fall back to slower durable-truth reads until validation passes.
+- Warmup recovery succeeds only when latency improves without changing namespace isolation, candidate parity, owner-boundary correctness, or policy outcomes.
+
 ---
 
 ## 6. Retention Enforcement

@@ -37,6 +37,15 @@ All recall-facing transports should map onto one logical `RecallRequest` even wh
 - `cold_tier` defaults to `auto` and may be `avoid` or `allow`; it controls whether Tier3 candidate generation is considered, not whether cold payloads may be fetched before the final candidate cut.
 - No request option may force pre-cut cold payload fetch, bypass namespace pruning, or override policy denial/redaction behavior.
 
+### Cache and warm-path contract
+- request-path caches, prefetch queues, and warm layers are derived accelerators, not authoritative evidence
+- any cache or warm-path hit is valid only after request normalization, effective namespace binding, policy pruning, and owner-boundary checks for the current request
+- warm-path optimizations may short-circuit expensive stages within bounded budgets, but they must not bypass namespace pruning, policy denial/redaction, sibling caps, or the no pre-cut cold payload fetch rule
+- request-local reuse must track normalized request shape and relevant schema, index, policy, and ranking generations; item-, relation-, summary-, session-, task-, goal-, and process-local warm state must expire with its authoritative owner boundary
+- if warm state is stale, version-mismatched, scoped too broadly, or missing a fresh generation anchor for the current request, the system must bypass it and continue on colder authoritative paths rather than serve an ambiguous hit
+- absence, disablement, or repair of warm state may degrade latency but must not change the durable meaning of the request
+- when cache or prefetch participation materially affects the route, explain and audit surfaces should preserve that fact in machine-readable metadata
+
 ## Candidate generation phases
 1. direct key or id hints
 2. tier1 active-window scan

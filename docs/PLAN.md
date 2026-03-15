@@ -12934,6 +12934,8 @@ The system should track:
 
 Cache and prefetch are only valid if they reduce tail latency without poisoning correctness.
 
+Every cache, warm layer, and prefetch queue is a bounded derived accelerator rather than a source of truth. Durable truth wins whenever a derived surface disagrees or cannot prove it is still valid for the current namespace, policy, or version scope.
+
 ### 20.1 Cache families
 
 The design may include:
@@ -12953,16 +12955,23 @@ The design may include:
 All caches should obey:
 - version-aware invalidation
 - namespace-aware keys
+- explicit owner boundaries such as item-local, request-local, relation-local, summary-source-local, session-local, task-local, goal-local, or process-local
+- relevant policy and version scope in cache keys when those inputs affect reuse semantics
 - bounded memory usage
 - stale-result observability
+- explicit bypass or drop-and-rewarm behavior during repair or uncertainty
 - cache hit and miss metrics
+- rebuildability from authoritative durable inputs
+- fresh generation anchors before repaired or migrated warm state becomes reusable again
 
 ### 20.3 Prefetch restrictions
 
 1. Prefetch must be hint-driven, never mandatory for correctness.
 2. Prefetch must not starve real foreground work.
 3. Prefetch should be cancelable when user intent changes.
-4. Prefetch should not cross namespace boundaries.
+4. Prefetch should not cross namespace boundaries or bypass policy checks.
+5. Prefetch and warm-path state must remain derived and discardable; slower authoritative reads are preferable to semantically different warmed results.
+6. Prefetch must not force cold payload fetch before the final candidate cut.
 
 ---
 
