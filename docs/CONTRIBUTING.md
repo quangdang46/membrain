@@ -91,6 +91,26 @@ These are contract-level review inputs, not optional nice-to-haves. If a change 
 - Governance-sensitive changes must include governance analysis, and also a rollback note when the change alters externally visible behavior.
 - Schema changes must include migration notes even when the schema surface is small.
 
+### Change-type evidence matrix
+
+| Change class | Required evidence | Review proof must name explicitly | Reject when... |
+|---|---|---|---|
+| Architecture or core behavior | design note; rollback note when externally visible behavior changes | affected invariants, contract surface, downstream docs that were updated, and why the new behavior still matches the thesis | behavior changed without a design note, rollback path, or resolved doc consistency |
+| Hot-path or performance-sensitive work | benchmark result; observability hook | dataset cardinality, machine profile, build mode, warm/cold declaration, touched p50/p95/p99 path metrics, and bounded-work signals such as candidate counts or tier/cache hit rates | benchmark evidence is missing, metadata is incomplete, touched path latency is still unknown, or no observability hook is named |
+| Schema or durable-storage change | migration note; rollback note when behavior changes | changed tables/columns/meanings, compatibility window, rebuild/backfill plan, rollback scope, and required doc propagation to `PLAN.md`, `MEMORY_MODEL.md`, `CLI.md`, or `MCP_API.md` when exposed | migration notes are missing, rollback scope is undefined, rebuildability is unproven, or dependent docs were left inconsistent |
+| Forgetting, deletion, retention, or archiving semantics | governance analysis; dedicated policy coverage; rollback note when externally visible | retention class or legal-hold behavior, tombstone/loss handling, audit surface, and whether the change can ever remove last authoritative evidence | governance analysis is missing, policy coverage is absent, or deletion/retention behavior becomes silent or irreversible without explicit contract |
+| Namespace, sharing, denial, or redaction behavior | dedicated isolation/denial tests; explain/audit evidence | enforcement point before expensive work, expected denial/redaction artifacts, and parity across CLI, daemon, IPC, and MCP surfaces that expose the flow | isolation/denial tests are missing, denial/redaction paths are not inspectable, or behavior differs silently across surfaces |
+| Repair, rebuild, migration, or background operations | ops note; observability hook; resilience/rebuild coverage | job duration, queue depth, affected-item counts, foreground latency delta, degraded-mode behavior, rollback conditions, and durable-truth-first recovery proof | background work can regress foreground contracts without detection, repair cannot prove derived state rebuild from durable truth, or rollback/containment is unspecified |
+| Interface contract changes (CLI, daemon, JSON-RPC, MCP) | design note or interface contract update; parity validation | changed envelopes/flags/errors, standalone-versus-daemon equivalence where relevant, and cross-surface user-visible differences | interface docs are stale, parity is unverified, or one surface changes semantics or error behavior silently |
+
+### Exact rejection trigger rules
+
+- Missing a required artifact for any touched change class is a rejection condition, even if unrelated artifacts are present.
+- Incomplete evidence counts as missing evidence. For example, a benchmark without dataset/machine/warm-cold metadata does not close the hot-path gate.
+- Generic regression coverage does not substitute for dedicated scope-specific proof. Namespace or policy changes still need isolation/denial coverage; repair or migration changes still need rebuild/resilience coverage.
+- Contradictory evidence across docs, tests, benchmarks, or rollout notes should be treated as unresolved rather than averaged together; the PR stays rejectable until the conflict is resolved explicitly.
+- If a change spans multiple classes, reviewers should apply the union of the relevant rows above rather than choosing the easiest row that happens to fit.
+
 ### Observability Hook Contract
 
 An observability hook is the operator-visible evidence that lets reviewers and maintainers detect whether a hot-path or semantics-changing change still honors the contract after it lands.

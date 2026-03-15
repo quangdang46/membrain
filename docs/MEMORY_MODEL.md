@@ -112,6 +112,7 @@ Every memory item carries these attributes (directly or derivably):
 | `encoding_valence` | Option | F18 Emotional | Mood at encoding time |
 | `encoding_arousal` | Option | F18 | Arousal at encoding time |
 | `observation_source` | Option | F6 Observation | Source: stdin, file, watch |
+| `observation_chunk_id` | Option | F6 Observation | Groups bounded observation fragments produced by one watch or batch ingestion pass |
 
 ## Identity and Version Rules
 
@@ -224,6 +225,38 @@ Identity/version rules must keep revision, replacement, and collision handling s
 - Inspect and explain surfaces should be able to show the canonical handle, the observed alias or normalized relation kind that produced it, and whether the reference is resolved, ambiguous, or tombstoned.
 - Graph materializations, caches, and extracted summaries remain derived state; authoritative durable entity and relation records win during repair or rebuild.
 - When compaction, repair, or consolidation cannot preserve an entity or relation reference exactly, the system must emit an explicit loss or tombstone record instead of inventing a replacement.
+
+## Encode-Time Normalization Contract
+
+All write paths must normalize raw intake into one canonical memory object envelope before persistence. Normalization chooses the first persisted `memory_type`, binds scope and provenance, and preserves raw evidence without prematurely collapsing it into distilled knowledge.
+
+### Normalization outputs
+
+Before persistence, a normalized candidate must have:
+
+- a namespace-bound identity allocation path plus timestamps suitable for canonical storage,
+- a chosen `memory_type` and any explicit brain-inspired kind classification,
+- bounded `compact_text` plus either inline content or a stable `content_ref` / `payload_ref`,
+- a source envelope (`source_kind`, `source_ref`, `authoritativeness`) that preserves how the item entered the system,
+- any request, auth, session, workspace, or task context that is explicitly bound by execution metadata, and
+- lineage only when the item is derived from prior memories rather than first-order intake.
+
+### Source-to-type mapping rules
+
+- Raw messages, actions, tool calls, and state changes default to `Event` on first persistence unless a more specific canonical family below applies.
+- Passive observation, watch, file, or environment signals normalize to `Observation`; `observation_source` is required when known, and `observation_chunk_id` groups bounded observation fragments from one observation pass without inventing new session boundaries.
+- Completed tool executions normalize to `ToolOutcome`; normalization must preserve tool identity, execution reference, execution context, outcome category, and detachable output payload handles when results are too large for hot inline storage.
+- Explicit durable user conventions or standing instructions normalize to `UserPreference` only when caller intent or typed ingestion marks them as stable preference state; otherwise they remain raw evidence first.
+- Session starts, stops, checkpoints, handoffs, and equivalent temporal boundaries normalize to `SessionMarker`.
+- Distilled `Fact`, `Summary`, `Relation`, `Skill`, `Constraint`, or `Hypothesis` records should normally arise from typed ingestion or later extraction and consolidation, not speculative promotion of raw text during first-write normalization.
+
+### Preservation and non-inference rules
+
+- Normalization may derive structured metadata only from explicit input, request envelopes, authenticated context, stable source mappings, or bounded derivation rules that preserve lineage.
+- Free-form text alone must not invent `workspace_id`, `agent_id`, `session_id`, `task_id`, entity links, relation edges, or user-preference status.
+- Large or structured raw payloads must keep a bounded `compact_text` while preserving canonical detail through `content_ref` or `payload_ref`; lossy truncation without a payload handle is invalid.
+- Ambiguous intake should prefer the more conservative raw-evidence type (`Event` or `Observation`) plus preserved provenance over speculative semantic elevation.
+- If normalization cannot bind namespace, traceable provenance, or a valid canonical type, the write must fail validation rather than persisting opaque text with guessed metadata.
 
 ## Memory States (Lifecycle)
 

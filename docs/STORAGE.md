@@ -132,6 +132,24 @@ Cold durable archive supporting cheap storage, metadata-first prefiltering, and 
 - When a derived surface can be restored only partially, the system must emit explicit loss or staleness telemetry and keep the authoritative record of what was or was not reconstructed.
 - A persisted derived surface that cannot explain its source lineage, freshness, owner boundary, or rebuild path is out of contract for production use.
 
+## Compaction, repair, and rebuild expectations for persistent state
+
+### Compaction scope and invariants
+- Compaction may rewrite payload layout, chunk or manifest layout, bounded lexical previews, retained hot serving mirrors, derived durable artifacts, and drop-and-rewarm accelerators when the rewrite preserves stable memory identity and the durable-truth hierarchy.
+- Compaction may coalesce or regenerate summaries, checkpoints, graph summaries, and compaction manifests only as lineage-bearing derived artifacts; it must never silently promote them into canonical memory truth.
+- Compaction must preserve namespace scope, policy markers, retention or hold markers, contradiction state, lineage, canonical relation truth, `content_ref`, and any still-authoritative `payload_ref`. Repacking bytes or relocating payloads is acceptable; changing identity or authority boundaries without an explicit migration is not.
+- Compaction is a storage-efficiency and rebuildability tool, not a hidden forgetting path. Payload dropping, hard deletion, or contradiction collapse still require the explicit policy or governance flow and any required tombstone or loss records.
+
+### Rebuild classes and allowed sources
+- Authoritative durable rows in hot, cold, and accepted procedural stores are not rebuilt from summaries, caches, ANN sidecars, or compaction artifacts. If those rows are damaged, recovery must come from snapshot, backup, restore, or another explicitly authoritative durable copy rather than from derived state.
+- Derived durable artifacts such as summaries, checkpoints, graph summaries, tentative skills, and compaction manifests are rebuildable from authoritative memories, canonical relations, lineage, and policy-bearing metadata. Repair may drop and regenerate them when those rebuild inputs remain intact.
+- Acceleration surfaces such as ANN, FTS, graph materializations, caches, and serving mirrors are always disposable. Repair may bypass, clear, and rewarm them without changing durable semantics.
+
+### Repair and validation expectations
+- Repair should proceed namespace-first when possible, record the authoritative source generations it used, and keep the affected surface visibly stale or degraded until post-run validation passes.
+- Post-repair proof must cover count parity with durable truth, preserved lineage or policy or tombstone markers, and explicit loss or staleness records for anything that could not be reconstructed fully.
+- When compaction or repair must mutate authoritative structures that live on the read path, the affected namespace or shard must move to degraded, read-only, or offline service rather than serving mixed-generation truth.
+
 ## Migration, versioning, and rollback protocol
 
 ### Schema version contract

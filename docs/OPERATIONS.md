@@ -124,9 +124,13 @@ membrain compress                   # apply schema compression
 ### Preconditions
 - No active high-priority recall workloads
 - Daemon is running
+- A snapshot or equivalent durable backup exists for any namespace whose authoritative storage layout will be rewritten
+- Operators have confirmed the planned work is compaction or rebuild of existing truth, not an implicit retention or deletion action
 
 ### Command Sequence
 ```bash
+membrain snapshot --name pre-compaction --note "Before storage compaction"
+membrain doctor run
 membrain consolidate
 membrain compress
 membrain dream               # run dream cycle if idle
@@ -137,9 +141,18 @@ membrain skills --extract    # extract procedural memories from mature engrams
 - Background job duration
 - Hot-path latency during compaction (must not exceed budget)
 - Schemas created, episodes compressed
+- Any moved or rewritten payload count vs preserved durable-record count
+- Any explicit loss, tombstone, or staleness records emitted during the window
 
 ### Rollback Conditions
 - Online recall latency exceeds budget → pause background jobs
+- Count parity, lineage, policy, or retention markers diverge from durable truth during or after compaction
+- The operation would require treating a derived artifact as the only surviving source of truth
+
+### Post-run Validation
+- Durable counts and policy-bearing markers remain unchanged except for the explicitly planned compaction rewrite
+- `content_ref` stability, payload-handle resolvability, and lineage continuity still hold for the compacted scope
+- Any regenerated artifacts or sidecars are marked derived and rebuildable rather than authoritative
 
 ---
 
@@ -318,6 +331,34 @@ membrain diff --since <pre_incident_tick>           # what changed
 - Recent deploy inspection
 - Repair queue growth
 - Compaction history
+
+### Rollback eligibility decision
+
+Use rollback only when reverting a recent change is safer than continued degraded serving or live mutation.
+
+- **Prefer containment plus repair** when the incident is confined to derived state and slower durable-truth serving preserves correctness.
+- **Prefer fail-closed containment** for namespace leakage, policy drift, retention ambiguity, or any incident where continued serving could expose protected data or perform destructive actions on ambiguous truth.
+- **Prefer rollback** when a recent binary, config, schema, ranking, routing, or policy rollout is the likely cause and reverting reduces risk faster than rebuilding or replaying forward.
+- **Do not roll back** by trusting stale caches, indexes, summaries, graph projections, or other derived artifacts over authoritative durable records.
+
+### Degraded-service communication contract
+
+When incident handling changes what users can safely get from the system, the interface should communicate that explicitly:
+
+- reduced-fidelity serving should say which bounded fallback is active (colder reads, narrower planner, graph-disabled, index-bypassed, etc.),
+- fail-closed serving should say the affected surface is temporarily unavailable or restricted rather than pretending the result set is complete,
+- warnings, metrics, or explain handles should preserve enough machine-readable evidence for operators to distinguish degraded serving from ordinary misses, and
+- cross-interface behavior should stay semantically aligned across CLI, daemon, IPC/JSON-RPC, and MCP surfaces.
+
+### Post-incident verification
+
+Before closing the incident or disabling containment, prove all of the following:
+
+1. the intended serving mode is restored for the affected namespace, shard, or surface,
+2. durable counts, lineage, contradiction state, namespace isolation, and policy-bearing markers match authoritative expectations again,
+3. degraded-mode, bypass, stale-warning, or fail-closed indicators have cleared or remain explicitly declared for any still-limited surface,
+4. recent repair, rollback, or migration actions did not leave new unresolved queue growth or hidden semantic drift, and
+5. operators have a concrete follow-up record for any intentionally deferred cleanup.
 
 ---
 

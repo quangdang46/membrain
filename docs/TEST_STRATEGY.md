@@ -40,6 +40,17 @@ Any change to lifecycle guards, state-machine edges, replay logic, or repair han
 - retry-budget exhaustion producing operator-visible escalation instead of infinite replay
 - parity across request-path and background-controller behavior for the same edge family
 
+## Formula and invariant minimum matrix
+
+Any change to scoring, decay, ranking fusion, lifecycle math, or invariant-preserving transforms must include dedicated coverage for:
+
+- deterministic unit vectors for canonical formulas such as `effective_strength`, `initial_strength`, `reconsolidation_window`, decay updates, and the shared ranking-family score decomposition where those formulas are implemented,
+- property tests for monotonicity, bounded output ranges, duplicate-penalty or noise-penalty stability, and other declared invariants from the scoring or decay contracts,
+- cross-implementation parity tests whenever the same formula or predicate exists in multiple execution lanes (for example Rust versus SQL prefilters or request-path versus maintenance-path evaluation),
+- invariant-preserving transformation coverage for summarize, merge, extract, repair, consolidation, compaction, migration, or similar rewrites so lineage, namespace, policy-bearing metadata, contradiction state, and identity or supersession rules do not drift,
+- failure-path coverage showing that invalid transforms reject cleanly, internal failure preserves prior durable state, and repair or escalation artifacts appear when the contract says they should, and
+- controlled-clock or tick-driven fixtures for any age, recency, or reconsolidation math instead of wall-clock sleeps.
+
 ## Core suite families
 
 ### Unit tests

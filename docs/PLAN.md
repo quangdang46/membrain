@@ -12595,6 +12595,19 @@ A memory's canonical identity is the tuple of `namespace` + `id`.
 - `relation_refs` point to explicit relation records or resolvable tombstones.
 - Summaries, facts, skills, and repaired artifacts must preserve enough tags/entity/relation linkage to remain explainable after compaction or consolidation.
 
+### 13.2.5 Encode normalization contract
+
+All write paths must normalize raw intake into one canonical memory object envelope before persistence. This step freezes the first persisted `memory_type`, binds scope and provenance, and preserves raw evidence without prematurely collapsing it into distilled knowledge.
+
+- Raw messages, actions, tool calls, and state changes default to `Event` on first persistence unless a more specific canonical family below applies.
+- Passive observation or watch, file, and environment signals normalize to `Observation`; when batched, they should preserve `observation_source` and optional `observation_chunk_id`.
+- Completed tool executions normalize to `ToolOutcome` and must preserve tool identity, execution reference, execution context, outcome category, and detachable output payload handles when the raw result is too large for hot inline storage.
+- Durable explicit user conventions or standing instructions normalize to `UserPreference` only when typed ingestion or caller intent marks them as stable preference state; otherwise they stay as raw evidence first.
+- Session starts, stops, checkpoints, and handoff boundaries normalize to `SessionMarker`.
+- Distilled `Fact`, `Summary`, `Relation`, `Skill`, `Constraint`, or `Hypothesis` records should normally arise from typed ingestion or later extraction and consolidation, not speculative promotion of raw text during first-write normalization.
+- Normalization may derive structured metadata only from explicit input, request envelope, authenticated context, stable source mappings, or bounded derivation rules that preserve lineage; it must not infer scope or entity/relation links purely from free-form text.
+- If normalization cannot bind namespace, traceable provenance, or a valid canonical type, the write is a validation failure.
+
 ### 13.3 Schema rules
 
 1. **Version increments on accepted mutation**
@@ -13295,6 +13308,15 @@ Each test family should intentionally probe:
 - crash-recovery behavior
 - observability signal verification
 
+### 28.2.1 Formula and invariant coverage
+
+For scoring, decay, lifecycle math, or invariant-preserving transforms, the strategy should require:
+- deterministic unit vectors for canonical formulas such as `effective_strength`, `initial_strength`, `reconsolidation_window`, decay updates, and shared ranking-family score decomposition where implemented,
+- property tests for monotonicity, bounded output ranges, and other declared invariants,
+- cross-implementation parity tests whenever the same formula or predicate exists in more than one execution lane,
+- transformation tests proving summarize, merge, extract, repair, consolidation, compaction, or migration preserve lineage, namespace, policy-bearing metadata, contradiction semantics, and identity or supersession rules, and
+- failure-path tests proving invalid transforms reject cleanly while internal failures preserve prior durable state and emit repair or escalation artifacts when required.
+
 ### 28.3 Output contract
 
 Every suite should emit structured artifacts that support regression analysis over time.
@@ -13967,10 +13989,13 @@ The `MEMORY_MODEL.md` taxonomy includes several types that should also receive s
 #### 33.6.3 Observation
 - raw or near-raw observation distinct from action outcome
 - useful for episodic grouping and factual extraction
+- should preserve `observation_source` and optional `observation_chunk_id` when one watch or batch ingestion pass yields multiple bounded fragments
+- should prefer provenance-preserving raw capture over premature factual distillation
 
 #### 33.6.4 ToolOutcome
 - normalized representation of tool execution result
 - should preserve tool identity, execution context, outcome category, and provenance
+- should retain a stable execution reference and detachable payload handle when the raw result is too large for hot inline storage
 
 #### 33.6.5 UserPreference
 - durable user-specific preference
