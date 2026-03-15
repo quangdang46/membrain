@@ -2,7 +2,7 @@
 
 ## Tier definitions
 ### Tier1
-In-process hot memory with bounded size.
+In-process hot cache with bounded size.
 
 ### Tier2
 Warm indexed store supporting exact and bounded hybrid retrieval.
@@ -17,6 +17,16 @@ Cold durable archive supporting cheap storage, metadata-first prefiltering, and 
 - rebuild must be possible from durable evidence
 - indexes must be repairable
 - tier1 should avoid large payload ownership
+
+## Working-memory admission and first-write routing
+- Working memory is a bounded pre-persistence controller surface for attended input. It is not authoritative durable state and it is not a synonym for Tier1 cache residency.
+- Working-memory admission is gated by bounded encode-side attention or relevance checks. Intake that never crosses that gate may leave working memory without minting a canonical memory id, durable lineage, or tier assignment.
+- Encode admission into canonical durable storage happens only when the candidate still qualifies for persistence at the moment the controller flushes it (for example direct typed intake, explicit durable write, or a bounded working-memory eviction or flush path). Inputs that fall below the encode gate may disappear from controller state without becoming canonical memories.
+- Once an item is accepted for persistence, the first authoritative durable write lands in hot durable surfaces (`hot.db` plus bounded hot text and embedding surfaces) and only then may Tier1 or other warm accelerators be seeded.
+- Ordinary online encode does not mint new canonical memories directly into `cold.db`; cold durable ownership is reached later through consolidation, archive, import, migration, or repair flows.
+- Successful recall or successful slow-path retrieval may refresh Tier1 serving state, but cache residency changes alone do not change canonical durable ownership.
+- Eviction from working memory or Tier1 changes only controller/cache residency. It does not by itself archive, delete, supersede, or change the canonical durable owner.
+- Hot-to-cold durable movement is triggered by explicit consolidation, archive, retention, migration, or repair controllers. Promotion or demotion must therefore be inspectable as a durable controller action rather than inferred from one cache event.
 
 ## hot.db contract
 

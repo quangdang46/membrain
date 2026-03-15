@@ -75,7 +75,7 @@ Every memory item carries these attributes (directly or derivably):
 | `payload_ref` | Option | Reference to detachable full payload when content is stored out-of-line |
 | `compact_text` | String | Human-readable summary that preserves the item's working identity |
 | `fingerprint` | u64 | Duplicate-family hint, never a substitute for canonical identity |
-| `tier` | enum | Tier1, Tier2, or Tier3 |
+| `tier` | enum | Current tier route (`Tier1`, `Tier2`, or `Tier3`); working-memory residency is separate controller state |
 | `salience` | f32 | Current importance score |
 | `confidence` | f32 | Reliability/certainty score (Feature 7) |
 | `utility_estimate` | f32 | Predicted future usefulness |
@@ -378,5 +378,8 @@ When new information conflicts with existing evidence:
 | **Tier2** | SQLite WAL + USearch HNSW (in-RAM) | <5ms | ~50k vectors |
 | **Tier3** | SQLite + USearch mmap (disk-backed) | <50ms | Unlimited |
 
-Promotion: successful slow-path results update higher tiers.
-Demotion: consolidation moves hot → cold; decay + forgetting → archive.
+- Canonical tier assignment begins only after a write is accepted for persistence; working-memory residency is controller state rather than a fourth persisted tier.
+- First-write admission lands in the hot durable route before any cache seeding. Ordinary online encode therefore starts as hot-owned state rather than minting new canonical memories directly into Tier3.
+- Successful slow-path results may refresh or seed higher warm tiers for bounded reuse, but that cache warming does not itself change the canonical durable owner.
+- Consolidation or explicit demotion moves hot durable ownership toward cold durable surfaces; forgetting or retention action may then archive that durable record according to policy.
+- Working-memory eviction and Tier1 cache eviction are not demotion events by themselves.
