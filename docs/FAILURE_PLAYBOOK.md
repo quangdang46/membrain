@@ -188,18 +188,22 @@ Derived artifacts can help diagnose failure, but they must not overrule durable 
 - degraded recall quality
 - latency regression
 - missing or duplicated memories
+- repeated transition-failure artifacts for the same object or edge family
+- objects stuck in their prior durable state with repair pending
 
 ### Immediate response
 - isolate namespace or shard if needed
 - stop destructive jobs
 - preserve forensic logs
 - enable degraded mode if available
+- distinguish retryable internal failures from terminal validation or policy failures before replaying work
 
 ### Root-cause checklist
 - validate lineage
 - compare index counts to durable records
 - inspect recent deploys
 - inspect repair queue growth
+- inspect transition-failure artifacts and retry-budget exhaustion
 - inspect compaction job history
 
 ## 10. Latency regression

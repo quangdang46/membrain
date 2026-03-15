@@ -109,6 +109,7 @@ A major PR should be rejected or sent back if:
 - It changes hot-path behavior **without benchmark evidence**
 - It alters schema **without migration notes**
 - It changes forgetting/deletion semantics **without governance analysis**
+- It changes namespace, sharing, denial, or redaction behavior **without dedicated isolation/denial tests**
 - It adds performance-sensitive complexity **without observability**
 - It weakens **repairability** or **lineage preservation**
 - It introduces silent behavior that differs between CLI and MCP paths

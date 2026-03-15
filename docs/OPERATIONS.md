@@ -186,6 +186,13 @@ membrain benchmark tier2 --json | jq '.p99_us'
 - If an index, graph projection, lineage view, or cache is unavailable during rebuild, the system must either fall back to slower durable-truth reads or refuse the affected operation explicitly; it must not pretend the rebuilt surface is complete before validation.
 - Every repair run should declare which namespaces or shards remain fully available, which are degraded to slower reads, and which are temporarily read-only or offline.
 
+### Lifecycle transition repair handoff
+- Failed lifecycle transitions reuse the same durable-truth-first repair model: prior durable state stays authoritative while derived follow-up work is repaired or replayed.
+- Only retryable internal failures should create automatic repair or replay work. Validation failures and policy denials are recorded but must not spin in automated retry loops.
+- Repair queue entries for failed transitions should preserve object handle, namespace or shard scope, prior valid state, attempted edge, failure family, retryability, and escalation boundary.
+- When retry budgets are exhausted, the system should escalate to operator-visible repair or incident handling and may place the affected namespace or shard into degraded mode if correctness is at risk.
+- Pending repair must not silently widen authority: replay controllers keep the same namespace, visibility, and policy scope as the failed transition.
+
 ---
 
 ## 5.2 Graph and lineage repair
@@ -273,6 +280,11 @@ For all major incidents:
 2. **Stop** destructive background jobs (`membrain dream --disable`)
 3. **Preserve** forensic logs (`membrain audit --recent 500 --json > incident.json`)
 4. **Enable** degraded mode if available
+
+Namespace-isolation or cross-tenant leakage must be treated as a security incident, not ordinary validation noise.
+- Freeze or narrow affected shared/public surfaces until namespace filters are revalidated.
+- Keep denied or redacted explain paths from echoing protected handles while the incident is active.
+- Post-incident validation must prove candidate counts, cache warmup, repair outputs, and audit traces all respect namespace boundaries again.
 
 ### Root-Cause Investigation
 

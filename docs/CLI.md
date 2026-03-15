@@ -53,6 +53,8 @@ echo "content" | membrain remember --context "recent commits" --kind semantic
 
 3-tier retrieval: Tier1 cache → SQL pre-filter → HNSW search → rescore → engram BFS → unified scoring.
 
+All CLI recall invocations normalize into the canonical `RecallRequest` described by `PLAN.md` and `RETRIEVAL.md`: `<QUERY>` populates `query_text`, `--context` maps to `context_text`, `--confidence` maps to bounded `effort`, and CLI-only spelling differences must not create different retrieval semantics.
+
 ```bash
 membrain recall "JWT authentication"
 membrain recall "database connection" --context "fixing performance issue"
@@ -64,27 +66,37 @@ membrain recall --like <uuid>              # query-by-example (Feature 3)
 membrain recall --unlike <uuid>            # find most different (Feature 3)
 membrain recall "debugging" --era <id>     # temporal era filter (Feature 5)
 membrain recall "prefs" --min-confidence 0.8  # confidence filter (Feature 7)
-membrain recall "prefs" --namespace project-x  # cross-agent (Feature 9)
+membrain recall "prefs" --namespace project-x --include-public  # widened shared/public scope only
 membrain recall "arch decision" --at before-refactor  # time travel (Feature 12)
 membrain recall "session" --mood-congruent  # emotional boost (Feature 18)
+membrain recall "auth" --explain summary --cold-tier avoid
 ```
 
 | Option | Default | Description |
 |--------|---------|-------------|
-| `--context, -c` | — | Current context (boosts relevant memories) |
-| `--top, -n` | 5 | Number of results |
+| `--context, -c` | — | Current context; maps to `context_text` |
+| `--top, -n` | 5 | Result budget |
 | `--kind, -k` | — | Filter: episodic, semantic, procedural |
 | `--min-strength` | config | Minimum effective strength |
-| `--confidence` | normal | Search depth: fast, normal, high |
+| `--confidence` | normal | Bounded effort level: fast, normal, high |
 | `--show-decaying` | — | Include memories near decay threshold |
-| `--no-engram` | — | Disable engram expansion |
-| `--as-of` | — | Time-travel to tick N |
-| `--like` | — | Query using existing memory's vector |
-| `--unlike` | — | Find most dissimilar memories |
+| `--no-engram` | — | Force `graph_mode=off` |
+| `--as-of` | — | Time-travel using `as_of_tick` |
+| `--like` | — | Query-by-example cue via `like_id` |
+| `--unlike` | — | Query-by-example cue via `unlike_id` |
 | `--era` | — | Filter to temporal era |
 | `--min-confidence` | — | Minimum confidence score |
-| `--at` | — | Recall at named snapshot |
-| `--namespace` | default | Namespace scope |
+| `--at` | — | Recall at named snapshot (`at_snapshot`) |
+| `--namespace` | caller default if deterministic, otherwise required | Namespace scope |
+| `--include-public` | false | Widen only to policy-approved shared/public surfaces |
+| `--explain` | summary | Explain verbosity: none, summary, full |
+| `--cold-tier` | auto | Cold-tier routing hint: avoid, auto, allow |
+
+Normalization and safety rules:
+- `<QUERY>` may be omitted only when `--like` or `--unlike` provides the primary cue.
+- `--as-of` and `--at` must not be combined unless a later contract defines deterministic precedence.
+- `--include-public` does not bypass namespace ACLs or expose private cross-namespace data.
+- `--cold-tier allow` may enable Tier3 candidate generation, but it does not permit pre-cut cold payload fetch.
 
 ### `membrain forget <ID> [OPTIONS]`
 

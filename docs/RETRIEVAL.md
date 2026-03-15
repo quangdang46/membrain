@@ -11,6 +11,32 @@ Return the smallest evidence set that maximizes downstream task success.
 - constraint retrieval
 - reconstruction retrieval
 
+## Canonical recall query contract
+
+All recall-facing transports should map onto one logical `RecallRequest` even when their syntax differs.
+
+### Required core
+- `query_text` is the primary cue text. It may be omitted only when `like_id` or `unlike_id` supplies the primary cue by reference.
+- CLI `<QUERY>`, JSON-RPC `query` or `query_text`, and MCP task/goal text all populate this same canonical cue field rather than defining separate recall semantics.
+- `mode` defaults to `auto` and may select `exact`, `recent`, `semantic`, `associative`, `constraint`, or `reconstruction`.
+- `context_text` is optional caller-supplied task/session context that may sharpen ranking, but it must not silently replace the main cue.
+
+### Scope and filters
+- `namespace` names the requested effective namespace. Historical feature notes that say `namespace_id` for recall refer to this same input, not a second independent selector.
+- `include_public` defaults to `false` and is the ordinary widening knob for approved shared/public surfaces.
+- Optional scoped filters may include `workspace_id`, `agent_id`, `session_id`, `task_id`, `memory_kinds`, `era_id`, `as_of_tick`, `at_snapshot`, `min_strength`, `min_confidence`, `show_decaying`, and `mood_congruent`.
+- `like_id` and `unlike_id` are query-by-example cues, not bypasses around policy, ranking, or boundedness rules.
+
+### Budgets and explainability
+- `result_budget`, `token_budget`, and `time_budget_ms` are caller hints; if more than one is present, the stricter bound wins.
+- `effort` is `fast|normal|high` and tunes bounded candidate-generation and rerank budgets without exceeding hard system caps.
+- `explain` is `none|summary|full` and controls requested explain verbosity, not whether routing/ranking traces exist internally.
+
+### Graph and cold-path knobs
+- `graph_mode` defaults to `auto` and may be `off` or `expand`, but every graph path remains subject to hard depth, node, and sibling caps.
+- `cold_tier` defaults to `auto` and may be `avoid` or `allow`; it controls whether Tier3 candidate generation is considered, not whether cold payloads may be fetched before the final candidate cut.
+- No request option may force pre-cut cold payload fetch, bypass namespace pruning, or override policy denial/redaction behavior.
+
 ## Candidate generation phases
 1. direct key or id hints
 2. tier1 active-window scan
@@ -32,6 +58,13 @@ Return the smallest evidence set that maximizes downstream task success.
 - duplicate family collapse
 - per-conflict sibling caps
 - result diversity constraints
+
+### Request normalization rules
+- Missing `query_text` is valid only when `like_id` or `unlike_id` is present.
+- A request that combines incompatible time scopes such as `as_of_tick` and `at_snapshot`, or incompatible cue families that the interface cannot reconcile deterministically, must fail as validation error rather than guessing precedence.
+- Unknown retrieval modes, invalid effort levels, malformed IDs, or malformed namespace values are validation failures before candidate generation.
+- Omitted `namespace` is valid only when one deterministic default can be bound from authenticated context or stable session/job ownership.
+- If request normalization widens scope to shared/public surfaces, the response must preserve that widening in explain/audit metadata.
 
 ## Ranking contract
 - ranking runs only after namespace and policy pruning, candidate caps, dedup, and per-conflict sibling caps have been applied

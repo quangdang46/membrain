@@ -14,6 +14,31 @@ The testing strategy must prove correctness, boundedness, durability, explainabi
 - Policy and namespace checks must be validated before parity claims across CLI, daemon, IPC, or MCP layers.
 - Benchmark results without representative metadata are exploratory evidence, not gate-closing evidence.
 
+## Namespace and isolation minimum matrix
+
+Any change to namespace, sharing, ACL, denial, or redaction semantics must include dedicated coverage for:
+
+- explicit same-namespace allow paths
+- deterministic default-namespace binding when one default exists
+- missing-namespace validation failure when no deterministic default exists
+- malformed or unknown namespace rejection before candidate generation or writes
+- cross-namespace denial without leakage of protected counts, handles, or existence hints
+- approved shared/public access paths via explicit visibility controls
+- background-job, cache, and repair-path preservation of namespace scope
+- parity across CLI, daemon, IPC, and MCP surfaces
+
+## Lifecycle transition failure minimum matrix
+
+Any change to lifecycle guards, state-machine edges, replay logic, or repair handoff must include dedicated coverage for:
+
+- allowed-edge success for each touched object family
+- forbidden-edge rejection as `validation_failure`
+- namespace or policy guard rejection as `policy_denied`
+- internal failure preserving prior durable state without silent half-transition
+- repairable failure emitting a repair handle or queued follow-up artifact when applicable
+- retry-budget exhaustion producing operator-visible escalation instead of infinite replay
+- parity across request-path and background-controller behavior for the same edge family
+
 ## Core suite families
 
 ### Unit tests

@@ -12681,6 +12681,37 @@ At minimum, the architecture should support:
 - constraint retrieval
 - reconstruction retrieval
 
+### 15.1.1 Canonical recall request model
+
+All recall-facing interfaces should normalize into one logical `RecallRequest`.
+
+**Core fields**
+- `query_text` is the main cue text and may be omitted only when `like_id` or `unlike_id` supplies the primary cue by reference.
+- `mode` defaults to `auto` and may resolve to `exact`, `recent`, `semantic`, `associative`, `constraint`, or `reconstruction`.
+- `context_text` is optional caller-supplied task/session context that may sharpen ranking but must not silently replace the main cue.
+
+**Scope and filters**
+- `namespace` names the requested effective namespace. Historical feature text that says `namespace_id` for recall should be interpreted as this same canonical request field, not as a second independent selector.
+- `include_public` defaults to `false` and is the ordinary widening knob for approved shared/public surfaces.
+- Optional scoped filters may include `workspace_id`, `agent_id`, `session_id`, `task_id`, `memory_kinds`, `era_id`, `as_of_tick`, `at_snapshot`, `min_strength`, `min_confidence`, `show_decaying`, and `mood_congruent`.
+- `like_id` and `unlike_id` are query-by-example cues, not bypasses around policy, ranking, or boundedness rules.
+
+**Budgets and explainability**
+- `result_budget`, `token_budget`, and `time_budget_ms` are caller hints; if more than one is present, the stricter bound wins.
+- `effort` is `fast|normal|high` and tunes bounded candidate-generation and rerank budgets without exceeding hard system caps.
+- `explain` is `none|summary|full` and controls requested explain verbosity, not whether routing/ranking traces exist internally.
+
+**Graph and cold-path knobs**
+- `graph_mode` defaults to `auto` and may be `off` or `expand`, but every graph path remains subject to hard depth, node, and sibling caps.
+- `cold_tier` defaults to `auto` and may be `avoid` or `allow`; it controls whether Tier3 candidate generation is considered, not whether cold payloads may be fetched before the final candidate cut.
+- No request option may force pre-cut cold payload fetch, bypass namespace pruning, or override policy denial/redaction behavior.
+
+**Normalization rules**
+- Missing `query_text` is valid only when `like_id` or `unlike_id` is present.
+- Requests that combine incompatible time scopes or cue families must fail as validation errors rather than guess precedence.
+- Unknown retrieval modes, malformed IDs, malformed namespace values, or invalid effort levels are validation failures before candidate generation.
+- Omitted `namespace` is valid only when one deterministic default can be bound from authenticated context, stable session binding, or scheduled job ownership.
+
 ### 15.2 Canonical candidate generation pipeline
 
 The canonical order is:
@@ -14145,6 +14176,18 @@ Every MCP response should be able to carry:
 **Purpose**
 - perform task-oriented bounded retrieval for context construction
 
+**Canonical request model**
+- `query_text` or task text as the primary cue
+- optional `context_text`
+- `mode`
+- `result_budget`, `token_budget`, or `time_budget_ms`
+- `effort`
+- `explain`
+- `namespace` plus optional `include_public`
+- optional scoped filters (`workspace_id`, `agent_id`, `session_id`, `task_id`, `memory_kinds`, `era_id`, `as_of_tick`, `at_snapshot`, `min_strength`, `min_confidence`, `show_decaying`, `mood_congruent`)
+- optional `like_id` / `unlike_id` query-by-example cues
+- optional `graph_mode` and `cold_tier`
+
 **Expected inputs**
 - task or goal description
 - retrieval mode hints
@@ -14157,6 +14200,14 @@ Every MCP response should be able to carry:
 - contradiction markers
 - decaying-soon markers if enabled
 - packaging metadata suitable for prompt construction
+
+**Rules**
+- `query_text` may be omitted only when `like_id` or `unlike_id` provides the primary cue
+- effective namespace and sharing scope resolve before candidate generation begins
+- omitted `namespace` is valid only when one deterministic default can be bound from authenticated context or stable session/job ownership
+- `include_public` widens only to policy-approved shared/public surfaces
+- `graph_mode` and `cold_tier` may tune routing, but they must not bypass hard graph caps, trigger pre-cut cold payload fetch, or override policy denial/redaction behavior
+- incompatible time scopes or malformed request knobs are validation failures, not precedence guesses
 
 ### 34.8 Tool: `memory_link`
 

@@ -20,7 +20,7 @@ Every MCP request carries:
 
 | Field | Required | Description |
 |-------|----------|-------------|
-| `namespace` | yes | Namespace scope |
+| `namespace` | usually | Requested namespace scope; may be omitted only when the wrapper can bind one deterministic default before policy or retrieval work |
 | `workspace_id` | if applicable | Workspace identifier |
 | `agent_id` | if applicable | Calling agent identity |
 | `session_id` | if applicable | Active session |
@@ -31,9 +31,13 @@ Every MCP request carries:
 
 Context-envelope rules:
 - These fields are execution context, not authorization shortcuts; namespace and policy checks still gate every tool.
+- Every request resolves to exactly one effective namespace before storage, index, graph, or retrieval work begins.
+- If `namespace` is omitted and no deterministic caller-scoped default exists, fail as validation error before candidate generation or writes.
+- Malformed or unknown namespaces are validation failures; cross-namespace attempts without explicit approved sharing semantics are policy denials.
 - `task_id` is the primary request-scope handle for explicit goals, beads, tickets, and other work items; additional many-to-many goal links should be represented in persisted memories through relations/lineage rather than ad hoc request fields.
 - If a caller omits a field because it is unknown or not applicable, downstream responses and inspect/explain surfaces must preserve the distinction between absent and redacted.
 - Servers may infer omitted context only from bounded transport metadata such as authenticated caller identity, session binding, scheduler ownership, or stable source mapping; they must not infer scope from free-form prompt text.
+- Flags such as `include_public` may widen recall only to explicitly shareable surfaces allowed by policy; they do not bypass namespace ACLs or private visibility.
 
 ## Common Response Envelope
 
@@ -41,8 +45,9 @@ Context-envelope rules:
 |-------|-------------|
 | `ok` | Success boolean |
 | `request_id` | Echo of request ID |
-| `namespace` | Echo of namespace |
+| `namespace` | Echo of the effective namespace after deterministic binding |
 | `result` | Tool-specific payload |
+| `error_kind` | Optional machine-readable failure family when `ok=false`: `validation_failure`, `policy_denied`, or `internal_failure` |
 | `warnings` | Non-fatal issues |
 | `policy_filters_applied` | Which policies affected the result |
 | `explain_handle` | Handle or embedded explanation |
@@ -81,13 +86,36 @@ Bounded search over indexes, tags, entities, time ranges, or semantic hints.
 
 **Outputs**: candidate list, filter summary, index families used, omitted-result note if capped, conflict-state summaries for returned items when applicable
 
+**Rules**:
+- namespace, visibility, and policy pruning happen before index fanout or expensive retrieval work
+- denied cross-namespace requests must fail without leaking protected candidate counts, record existence, or workspace/session detail
+
 ### `memory_recall`
 
 Task-oriented bounded retrieval for context construction. The primary retrieval tool.
 
-**Inputs**: task/goal description, retrieval mode hints, token budget or result budget, namespace/actor context
+**Canonical request model**:
+- `query_text` or task text as the primary cue
+- optional `context_text`
+- `mode`
+- `result_budget`, `token_budget`, or `time_budget_ms`
+- `effort`
+- `explain`
+- `namespace` plus optional `include_public`
+- optional scoped filters (`workspace_id`, `agent_id`, `session_id`, `task_id`, `memory_kinds`, `era_id`, `as_of_tick`, `at_snapshot`, `min_strength`, `min_confidence`, `show_decaying`, `mood_congruent`)
+- optional `like_id` / `unlike_id` query-by-example cues
+- optional `graph_mode` and `cold_tier`
 
 **Outputs**: ranked evidence set, score summaries, contradiction markers, decaying-soon markers, packaging metadata for prompt construction
+
+**Rules**:
+- `query_text` may be omitted only when `like_id` or `unlike_id` provides the primary cue
+- effective namespace and sharing scope must be resolved before candidate generation begins
+- omitted `namespace` is valid only when one deterministic default can be bound from authenticated context or stable session/job ownership
+- `include_public` widens only to explicitly shareable surfaces permitted by policy
+- denied or redacted namespace filters must remain inspectable without disclosing protected record existence or payload details
+- `graph_mode` and `cold_tier` may tune routing, but they must not bypass hard graph caps, trigger pre-cut cold payload fetch, or override policy denial/redaction behavior
+- incompatible time scopes or malformed request knobs are validation failures, not precedence guesses
 
 **Conflict contract**:
 - unresolved conflicts remain queryable directly rather than requiring inference from free-form text
@@ -100,7 +128,7 @@ Task-oriented bounded retrieval for context construction. The primary retrieval 
 - `min_confidence` — confidence filter (Feature 7)
 - `era_id` — temporal era filter (Feature 5)
 - `at_snapshot` — time travel recall (Feature 12)
-- `namespace_id` / `include_public` — cross-agent (Feature 9)
+- `namespace` / `include_public` — cross-agent scope with one effective namespace plus optional approved widening (Feature 9)
 - `mood_congruent` — emotional boost (Feature 18)
 
 ### `memory_link`
