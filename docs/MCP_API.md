@@ -13,6 +13,7 @@
 6. Expose stable machine-readable outputs for automation
 7. Keep request-path work bounded and measurable rather than hiding unbounded work behind tool wrappers
 8. Treat provenance, lineage, and policy context as required execution inputs, not optional diagnostics
+9. Shared operations exposed through CLI, daemon/JSON-RPC, and MCP should preserve the same underlying request and outcome semantics even when their human presentation differs
 
 ## Common Request Envelope
 
@@ -52,6 +53,8 @@ Context-envelope rules:
 | `policy_filters_applied` | Which policies affected the result |
 | `explain_handle` | Handle or embedded explanation |
 | `metrics` | Latency, candidate counts, and any cache/degraded-mode counters needed to explain bounded serving; when namespace enforcement depends on bypass, denial, or degraded fallback, the machine-readable evidence may live in `metrics`, `warnings`, or the explanation referenced by `explain_handle`, but it must remain inspectable |
+
+CLI JSON output for equivalent operations may package these fields differently for command ergonomics, but it should preserve the same effective namespace, policy, explanation, warning, and degraded-serving meaning rather than inventing a separate semantic contract.
 
 ---
 

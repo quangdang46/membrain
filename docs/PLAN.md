@@ -1477,14 +1477,14 @@ pub trait BrainStore: Send + Sync {
 ```bash
 # Encoding
 membrain remember "Today I learned Rust lifetimes is actually very simple"
-membrain remember "Encountered NullPointer bug at 3am" --emotion "-0.7,0.8"
+membrain remember "Rate limit is 100 req/s for Stripe API" --context "integrating payments" --kind semantic
 membrain remember "Context is: building membrain" --context "coding session"
 
 # Retrieval
 membrain recall "Rust lifetimes"
 membrain recall "recently encountered bugs" --top 5
 membrain recall "coding session" --context "debugging" --json
-membrain recall "negative emotions" --include-emotional
+membrain ask "what's most important about deploy?"
 
 # Management
 membrain forget <uuid>
@@ -1493,7 +1493,8 @@ membrain stats
 
 # Brain operations
 membrain consolidate
-membrain export > memories.json
+membrain repair index --namespace default
+membrain export --format json > memories.json
 membrain import < memories.json
 
 # Daemon & Server
@@ -1504,10 +1505,10 @@ membrain daemon status
 # MCP server (Claude Code / Cursor used)
 membrain mcp
 
-# Debug
-membrain inspect <uuid>    # xem full memory details
-membrain graph <uuid> # see the engram cluster of memory
-membrain health            # brain health report
+# Debug / operator surfaces
+membrain inspect <uuid>
+membrain why <uuid> --json
+membrain health --brief
 ```
 
 ### 8.2 MCP Tools (Claude Code / Cursor)
@@ -8962,29 +8963,22 @@ Parts list:
 ```
 membrain <COMMAND> [OPTIONS]
 
-COMMANDS:
-  remember      Store a new memory
-  recall        Retrieve relevant memories
-  forget        Archive (soft-delete) a memory
-  strengthen    Manually apply LTP to a memory
-  update        Submit a pending update during reconsolidation window
-  stats         Brain health statistics
-  list          List memories (filterable)
-  show          Show full details of a specific memory
-  diff          Show how memories changed between two ticks
-  consolidate   Manually trigger NREM+REM+Homeostasis cycle
-  prime         Pre-warm working memory with context (spotlight mode)
-  remind        Set a prospective trigger
-  watch         Watch for memories approaching decay threshold
-  export        Export memories to JSON/NDJSON
-  import        Import memories from JSON/NDJSON
-  daemon        Daemon management (start|stop|status|restart)
-  mcp           Start MCP stdio server
-  config        Show/edit configuration
-  doctor        Diagnose brain health issues
+CANONICAL COMMAND FAMILIES:
+  remember / observe / import      Encode or ingest new evidence
+  recall / ask / budget            Query and package bounded context
+  inspect / why / beliefs / audit  Inspect structure, lineage, and reasoning
+  stats / health / doctor          Operator and health surfaces
+  repair / benchmark               Maintenance, rebuild, and proof surfaces
+  consolidate / compress / dream   Background and maintenance workflows
+  diff / timeline / snapshot       History and time-oriented inspection
+  fork / merge / namespace         Namespace and branch management
+  share / unshare                  Visibility management
+  forget / strengthen / update     Direct memory-state changes
+  export                           Durable externalization
+  daemon / mcp                     Service surfaces
 
 Global options:
-  --json          Output as JSON (all commands support this)
+  --json          Output as JSON (all major commands support this)
   --quiet, -q     Suppress informational output
   --verbose, -v   Show extra details
   --db-path       Override default database location
@@ -8993,9 +8987,13 @@ Global options:
 Usage style:
   # Pipe-friendly
   echo "JWT tokens expire after 1h" | membrain remember
-  membrain recall "auth" | jq '.memories[0].content'
-  membrain stats --json | jq '.hot_count'
+  membrain recall "auth" --json
+  membrain stats --json
 ```
+
+Historical note:
+- The detailed command sketches in this source snapshot preserve earlier design exploration.
+- When those sketches drift from the stable command surface, naming rules, or output-mode contract, Section 35 plus `docs/CLI.md` are authoritative.
 
 ### 9.2 Command: remember
 
@@ -14361,134 +14359,75 @@ Every MCP response should be able to carry:
 
 ## 35. Detailed CLI Contract
 
-The CLI is the operator and developer surface for the same core system. It must expose power without bypassing policy.
+The CLI is the operator and developer surface for the same core system. It must expose power without bypassing policy, and it should summarize the same underlying semantics exposed through daemon, JSON-RPC, and MCP surfaces.
+
+`docs/CLI.md` is the detailed command reference. This section fixes the canonical CLI promises that the subsystem doc elaborates.
 
 ### 35.1 CLI design principles
 
 - CLI commands map cleanly onto core memory actions
-- CLI should be scriptable and machine-readable
+- the CLI should be scriptable and machine-readable
 - human-readable output should be layered on top of a structured result model
-- CLI must not create hidden behavior different from MCP behavior
+- CLI command spelling may differ from MCP tool naming, but it must not create hidden behavior different from MCP behavior
+- feature-specific commands should extend an existing family unless there is a strong reason to add a new top-level surface
 
-### 35.2 Core commands from `CLI.md`
+### 35.2 Canonical command families
 
-```bash
-membrain put event --namespace ws/app --type user_message --content "..."
-membrain get --id mem_123
-membrain search --query "rust linker failure"
-membrain recall --goal "fix build pipeline"
-membrain consolidate --session sess_42
-membrain inspect --id mem_456
-membrain benchmark tier1
-membrain repair index --namespace ws/app
-```
+The canonical CLI families are:
+- encode / intake — `remember`, `observe`, `import`
+- recall / query — `recall`, `ask`, `budget`
+- inspect / explain / audit — `inspect`, `why`, `beliefs`, `audit`
+- maintenance / admin — `stats`, `health`, `doctor`, `repair`, `benchmark`, `consolidate`, `compress`, `dream`, `export`, `daemon`, `mcp`
+- history / namespace / change management — `timeline`, `landmark`, `diff`, `snapshot`, `fork`, `merge`, `share`, `unshare`, `namespace`, `forget`, `strengthen`, `update`
 
-### 35.3 Required command families
+The stable surface should prefer one canonical spelling per operation. Aliases may exist only as explicit compatibility shims with documented warning and removal behavior.
 
-The plan should treat the following CLI families as canonical:
-- `put`
-- `get`
-- `search`
-- `recall`
-- `consolidate`
-- `inspect`
-- `benchmark`
-- `repair`
-- `pin`
-- `forget`
-- `stats`
-- `doctor`
-- `export`
-- `import`
+### 35.3 Shared flag vocabulary
 
-### 35.4 `put` contract
+Across the CLI surface:
+- `--json` selects machine-readable output for the same semantic result shown in text mode
+- `--quiet` suppresses non-essential human narration without hiding required machine-readable data
+- `--verbose` adds detail without changing result semantics
+- `--namespace` binds one effective namespace; omission is valid only when a deterministic default exists
+- `--include-public` widens only to explicitly shareable public/shared surfaces allowed by policy
+- `--explain` requests explanation verbosity without changing retrieval semantics
+- `--dry-run` requests a non-mutating preview of state-changing work
+- `--force` may bypass local confirmation/readiness prompts, but never policy enforcement
+- `--at` and `--as-of` are historical-scope selectors; incompatible combinations are validation failures
+- command-specific `--format` options may select rendering or serialization details, but they do not replace the global `--json` contract
 
-Should support:
-- event ingestion
-- typed content
-- namespace selection
-- structured metadata
-- tags/entity refs/relation refs
-- optional retention hints
+### 35.4 Recall contract at the CLI layer
 
-### 35.5 `get` contract
+The recall surface should reuse the canonical `RecallRequest` contract from `RETRIEVAL.md`.
 
-Should support:
-- lookup by id
-- raw JSON output
-- human-readable pretty output
-- optional lineage expansion
-- optional policy-debug info for authorized operators
+- CLI `<QUERY>` populates `query_text`
+- `--context` maps to `context_text`
+- effort, explanation, namespace scope, graph, and cold-tier knobs keep the same underlying meaning as the canonical retrieval contract
+- CLI-only spelling differences must not create different retrieval, policy, or boundedness semantics
+- human output and JSON output may present recall results differently, but they must preserve the same route, omission, freshness, conflict, and degraded-serving meaning
 
-### 35.6 `search` contract
-
-Should support:
-- query text
-- structured filters
-- namespace restriction
-- type restriction
-- time range filters
-- result limits
-- JSON output
-
-### 35.7 `recall` contract
-
-Should support:
-- goal-based recall
-- task-text recall
-- bounded result count
-- bounded token budget output
-- explain mode
-- include-conflicts mode
-- include-decaying mode
-
-### 35.8 `consolidate` contract
-
-Should support:
-- per-session consolidation
-- per-task consolidation
-- duplicate collapse
-- summary regeneration
-- dry-run mode
-- metrics output
-
-### 35.9 `inspect` contract
-
-Should support:
-- memory item inspection
-- lineage view
-- graph neighborhood preview
-- retention and decay state
-- tier routing explanation
-
-### 35.10 `benchmark` contract
-
-Should support:
-- Tier1 benchmark
-- Tier2 benchmark
-- Tier3 benchmark
-- encode benchmark
-- retrieval benchmark
-- maintenance benchmark
-- JSON artifact emission
-
-### 35.11 `repair` contract
-
-Should support:
-- index repair
-- graph repair
-- summary regeneration
-- duplicate-family cleanup
-- shard repair
-- dry-run mode
-- bounded execution mode
-
-### 35.12 CLI output modes
+### 35.5 Output modes, outcome classes, and default-safe ergonomics
 
 Every major command should support:
 - human-readable text
 - structured JSON
 - exit codes that separate validation failure, policy denial, and internal error
+
+At the CLI layer, users must be able to distinguish at least these outcome classes:
+- accepted
+- rejected
+- partial
+- preview
+- blocked
+- degraded
+
+For destructive or high-blast-radius CLI paths, the default-safe posture is:
+- prefer the narrowest explicit scope
+- prefer preview or dry-run before mutation when the command supports it
+- surface blocked outcomes when readiness, scope, or confirmation is missing
+- treat `--force` as a local confirmation override, never as a policy bypass
+
+This section defines the user-visible outcome and ergonomics vocabulary only. The final machine-readable retrieval/result envelope, detailed remediation taxonomy, and destructive-action safeguard schema remain owned by the adjacent interface and governance contracts.
 
 ---
 

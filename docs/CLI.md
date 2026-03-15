@@ -1,6 +1,7 @@
 # membrain — CLI Reference
 
-> Canonical source: PLAN.md Sections 9 and 35.
+> Canonical source: PLAN.md Section 35.
+> Historical CLI overview: PLAN.md Section 9.
 > Feature-specific commands: PLAN.md Sections 46–47.
 
 ## Global Options
@@ -20,6 +21,67 @@
 - Human-readable output layered on top of structured results
 - CLI must not create hidden behavior different from MCP behavior
 - Every major command supports: human text, JSON, and meaningful exit codes
+
+## CLI Contract Scope
+
+This document fixes the stable CLI surface for `mb-1hw.1`: command families, naming rules, shared flag vocabulary, human-versus-JSON parity, and alias/deprecation expectations.
+
+It does **not** finalize:
+- the canonical retrieval result envelope from `mb-1hw.8`
+- the detailed error/remediation taxonomy from `mb-1hw.9`
+- the destructive preflight / blocked-action schema from `mb-1hd.7`
+
+Those sibling contracts may add payload fields or stronger safeguards later, but they should plug into the command and outcome vocabulary defined here rather than redefining it.
+
+## Stable Command Families and Naming Rules
+
+Canonical CLI families:
+- **encode / intake** — `remember`, `observe`, `import`
+- **recall / query** — `recall`, `ask`, `budget`
+- **inspect / explain / audit** — `inspect`, `why`, `beliefs`, `audit`
+- **maintenance / admin** — `stats`, `health`, `doctor`, `repair`, `benchmark`, `consolidate`, `compress`, `dream`, `export`, `daemon`, `mcp`
+- **history / namespace / change management** — `timeline`, `landmark`, `diff`, `snapshot`, `fork`, `merge`, `share`, `unshare`, `namespace`, `forget`, `strengthen`, `update`
+
+Naming rules:
+- prefer verb-first command names for user-triggered operations
+- use noun subcommands only for grouped resource surfaces such as `namespace` and `snapshot`
+- keep one canonical spelling per operation; new synonyms or shadow verbs are not part of the stable surface unless explicitly documented as aliases
+- feature-specific work should extend an existing family unless it has a strong reason to introduce a new top-level command
+- command spelling may vary from MCP tool names, but it must not change the underlying request, policy, or outcome semantics
+
+## Shared Flag Vocabulary
+
+These flags define shared CLI vocabulary even when only some commands accept them:
+
+- `--json` — emit machine-readable output for the same semantic result shown in text mode; it does not select a different execution path
+- `--quiet` — suppress non-essential human-oriented narration; it must not remove required machine-readable fields in `--json` mode
+- `--verbose` — add detail only; it must not change the outcome class or underlying result semantics
+- `--db-path` — override the storage location without changing logical namespace or policy scope
+- `--tick` — include tick-oriented temporal markers when the command exposes them
+- `--namespace` — bind one effective namespace; if no deterministic default exists, omission is a validation failure
+- `--include-public` — widen only to explicitly shareable public/shared surfaces allowed by policy
+- `--explain` — request `none`, `summary`, or `full` explanation verbosity without changing retrieval semantics
+- `--dry-run` — request a previewable, non-mutating description of a command that would otherwise change state
+- `--force` — bypass local confirmation or readiness prompts when the command allows it; it never bypasses policy checks
+- `--at` / `--as-of` — select historical scope by named snapshot or tick; incompatible combinations are validation failures
+- `--format` — command-specific rendering or export selector used only when a surface has multiple domain formats, such as `budget` markdown or `export` / `import` serialization formats; it complements rather than replaces the global `--json` contract
+
+## Default-Safe Ergonomics
+
+At the CLI layer, destructive or high-blast-radius commands should follow these ergonomics even before the fuller safeguard contract is specified elsewhere:
+- default to the narrowest explicit scope rather than silently widening namespace, history, or maintenance coverage
+- prefer `--dry-run` or another preview path before state-changing repair, merge, invalidation, compression, or deletion-adjacent work
+- surface a **blocked** outcome when confirmation, scope, or readiness conditions are missing instead of guessing or proceeding implicitly
+- treat `--force` as a local confirmation override only; it does not bypass policy, namespace, or safety invariants
+- keep preview, blocked, degraded, and accepted outcomes distinguishable in both text and JSON modes
+
+## Alias and Deprecation Policy
+
+- Every stable operation should have one documented canonical spelling.
+- Aliases are compatibility shims, not parallel first-class commands.
+- Documentation and examples should prefer canonical spellings once they exist.
+- Any future alias or deprecation must name the replacement spelling, warning behavior, and planned removal boundary.
+- JSON output should preserve enough machine-readable detail for callers to detect deprecation warnings without scraping human prose.
 
 ---
 
@@ -143,7 +205,7 @@ Diagnose brain health: orphan edges, missing embeddings, stale indexes, broken l
 
 ```bash
 membrain doctor run
-membrain doctor --repair dry-run
+membrain doctor run --json
 ```
 
 ---
@@ -377,20 +439,21 @@ membrain import --format ndjson < backup.ndjson
 
 ---
 
-## Daemon & MCP Server
+## Repair & Benchmarking
+
+### `membrain repair <SURFACE> [OPTIONS]`
+
+Repair commands preview or rebuild derived surfaces from durable truth without changing the logical meaning of a namespace.
 
 ```bash
-membrain daemon start
-membrain daemon stop
-membrain daemon status
-membrain daemon restart
-
-membrain mcp       # start MCP stdio server
+membrain repair index --dry-run
+membrain repair index --namespace default
+membrain repair graph --dry-run
+membrain repair lineage --namespace default
+membrain repair cache --namespace default
 ```
 
----
-
-## Benchmarking
+### `membrain benchmark [TARGET]`
 
 Benchmark and diagnostic coverage should include not only happy-path tier latency but also representative load, rebuild, and migration-sensitive evidence when those paths change.
 
@@ -402,9 +465,39 @@ membrain benchmark encode
 membrain benchmark retrieval
 ```
 
-## Output Modes
+---
+
+## Daemon & MCP Server
+
+```bash
+membrain daemon start
+membrain daemon stop
+membrain daemon status
+membrain daemon restart
+
+membrain mcp       # start MCP stdio server
+```
+
+## Output Modes and Outcome Classes
 
 Every major command supports:
 - Human-readable text (default)
 - Structured JSON (`--json`)
 - Exit codes: 0=success, 1=validation failure, 2=policy denial, 3=internal error
+
+Output-mode rules:
+- Text mode and JSON mode must describe the same command outcome even when they differ in presentation density.
+- `--json` should expose warnings, route/explain handles, and policy/degraded context in machine-readable form when those details materially affect the outcome.
+- `--quiet` may suppress extra narration in text mode, but it must not hide outcome class, actionable warnings, or policy-visible refusal.
+- `--verbose` may add explanatory detail in either mode, but only as additive information.
+- Command-specific `--format` options may change rendering or file serialization, but they must not redefine the success/failure semantics already represented by text mode and `--json`.
+
+CLI-visible outcome classes:
+- **accepted** — the command completed normally
+- **rejected** — the command failed validation or was denied by policy
+- **partial** — the command returned a bounded but incomplete result and must say what was omitted or deferred
+- **preview** — the command intentionally returned a non-mutating dry-run or inspection of planned work
+- **blocked** — the command refused to proceed until another readiness, scope, or confirmation condition is met
+- **degraded** — the command completed through a slower, reduced-fidelity, or repair-aware path and must surface that fact
+
+These classes define what users must be able to distinguish at the CLI layer. The final machine-readable result envelope, detailed remediation taxonomy, and destructive-action safeguard schemas remain owned by `mb-1hw.8`, `mb-1hw.9`, and `mb-1hd.7`.
