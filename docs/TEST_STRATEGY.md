@@ -1,184 +1,152 @@
-# TEST STRATEGY
+# membrain — Test Strategy
 
-The testing strategy must cover correctness, performance, durability, and explainability.
+> Canonical sources: `PLAN.md` implementation milestones, benchmark overlays, and phase-gate rules.
+> If this document diverges from `PLAN.md`, the plan wins.
 
-## 1. Unit tests
+The testing strategy must prove correctness, boundedness, durability, explainability, and stage readiness. Generic suite names are not enough by themselves; each stage must have explicit gate expectations and exit artifacts.
 
-### Objective
-Unit tests exist to catch a distinct class of failures.
+## Cross-cutting test rules
 
-### Coverage targets
-- normal flow
-- edge cases
-- adversarial inputs
-- crash-recovery behavior
-- observability signal verification
+- Every suite emits structured artifacts useful for regression analysis.
+- No test depends on wall-clock time when logical ticks or controlled clocks can express the same behavior.
+- Any request-path change must be tested for both correctness and boundedness.
+- Any stateful mutation stage must include restart or crash-safety coverage where relevant.
+- Policy and namespace checks must be validated before parity claims across CLI, daemon, IPC, or MCP layers.
+- Benchmark results without representative metadata are exploratory evidence, not gate-closing evidence.
 
-### Output
-Each suite should emit structured artifacts useful for regression analysis.
+## Core suite families
 
-## 2. Property tests
+### Unit tests
+Use for formulas, scoring pieces, state transitions, and invariants that should fail fast and deterministically.
 
-### Objective
-Property tests exist to catch a distinct class of failures.
+### Property tests
+Use for monotonicity, bounds, idempotency, and invariant preservation across broad input ranges.
 
-### Coverage targets
-- normal flow
-- edge cases
-- adversarial inputs
-- crash-recovery behavior
-- observability signal verification
+### Integration tests
+Use for encode/recall/update/consolidate flows that cross stores, indexes, caches, and user-facing entry points.
 
-### Output
-Each suite should emit structured artifacts useful for regression analysis.
+### Latency and load tests
+Use for request-path budgets, tail latency, concurrency safety, and background-foreground interference measurement.
 
-## 3. Integration tests
+### Chaos, rebuild, and migration tests
+Use for failure injection, repairability, crash recovery, schema motion, and rebuild-from-durable-truth claims.
 
-### Objective
-Integration tests exist to catch a distinct class of failures.
+### Policy, namespace, and quality tests
+Use for policy denial behavior, cross-namespace isolation, retrieval quality, explainability, and user-visible safety constraints.
 
-### Coverage targets
-- normal flow
-- edge cases
-- adversarial inputs
-- crash-recovery behavior
-- observability signal verification
+## Stage-by-stage gate expectations
 
-### Output
-Each suite should emit structured artifacts useful for regression analysis.
+### Stage 1 — Foundation + Lazy Decay
 
-## 4. Latency tests
+**Required suites**
+- unit tests for `effective_strength` and basic scoring
+- integration tests for encode → recall roundtrip
+- latency tests for initial Tier1/encode baseline
 
-### Objective
-Latency tests exist to catch a distinct class of failures.
+**Must prove before closing the stage**
+- lazy decay is numerically stable
+- WAL mode and metadata-only prefilter behavior are verified
+- cache benefit is measured rather than assumed
+- the first measurable request-path baseline is recorded
 
-### Coverage targets
-- normal flow
-- edge cases
-- adversarial inputs
-- crash-recovery behavior
-- observability signal verification
+### Stage 2 — Full Encode Pipeline
 
-### Output
-Each suite should emit structured artifacts useful for regression analysis.
+**Required suites**
+- integration tests for attention gating, novelty routing, duplicate handling, and working-memory eviction
+- property or adversarial tests for bounded interference behavior
+- latency tests for full encode cost under representative payloads
 
-## 5. Load tests
+**Must prove before closing the stage**
+- attention and novelty decisions are deterministic enough to debug and benchmark
+- duplicate routing does not regress into unbounded scans
+- working-memory eviction and interference updates stay bounded
 
-### Objective
-Load tests exist to catch a distinct class of failures.
+### Stage 3 — `on_recall` / LTP-LTD
 
-### Coverage targets
-- normal flow
-- edge cases
-- adversarial inputs
-- crash-recovery behavior
-- observability signal verification
+**Required suites**
+- unit/property tests for stability growth and decay-reset behavior
+- integration tests for labile transition, access-count updates, and cache refresh
+- restart tests for durable labile-state persistence
+- latency tests for recall overhead
 
-### Output
-Each suite should emit structured artifacts useful for regression analysis.
+**Must prove before closing the stage**
+- `on_recall` remains request-bounded
+- recall-induced updates survive restart without state drift
+- strengthening behavior is monotonic and inspectable
 
-## 6. Chaos tests
+### Stage 4 — Three-tier retrieval
 
-### Objective
-Chaos tests exist to catch a distinct class of failures.
+**Required suites**
+- integration tests for tier escalation, context reranking, tip-of-the-tongue behavior, and explicit `full` versus `partial` versus `miss` outcomes
+- latency/load tests for Tier1, Tier2, and Tier3 budgets
+- explainability tests for routing/ranking traces
+- bounded graph-expansion tests when graph assistance is enabled
+- adversarial tests for ambiguous partial cues, near-duplicate clusters, and contradiction-aware partial recall
 
-### Coverage targets
-- normal flow
-- edge cases
-- adversarial inputs
-- crash-recovery behavior
-- observability signal verification
+**Must prove before closing the stage**
+- Tier1, Tier2, and Tier3 all meet their declared latency contracts on representative corpora
+- graph/engram expansion respects hard node and depth caps
+- partial-match paths do not leak full payloads before the final cut
+- tip-of-the-tongue results stay explicit about fragmentary status, remaining ambiguity, and omitted evidence
+- low-signal partial cues terminate with a bounded miss or fragment shortlist rather than speculative reconstruction
 
-### Output
-Each suite should emit structured artifacts useful for regression analysis.
+### Stage 5 — Reconsolidation
 
-## 7. Rebuild tests
+**Required suites**
+- integration tests for labile-window enforcement and accepted/rejected updates
+- crash-recovery tests for pending update application
+- coherence tests for DB, ANN, and cache state after update
+- policy tests for invalid or forced update paths
 
-### Objective
-Rebuild tests exist to catch a distinct class of failures.
+**Must prove before closing the stage**
+- reconsolidation does not leave cache/index divergence
+- stale-window rejection is explicit and safe
+- accepted updates are durable, inspectable, and bounded
 
-### Coverage targets
-- normal flow
-- edge cases
-- adversarial inputs
-- crash-recovery behavior
-- observability signal verification
+### Stage 6 — Consolidation
 
-### Output
-Each suite should emit structured artifacts useful for regression analysis.
+**Required suites**
+- integration tests for migration, retrievability after move, REM-like processing, and dry-run behavior
+- load tests for foreground impact while consolidation runs
+- chaos/rebuild tests for interrupted or partial consolidation cycles
+- policy tests for pinned and authoritative evidence handling
 
-## 8. Migration tests
+**Must prove before closing the stage**
+- background consolidation preserves online SLOs
+- migrated content remains retrievable and explainable
+- consolidation never silently drops protected or authoritative evidence
 
-### Objective
-Migration tests exist to catch a distinct class of failures.
+### Stage 7 — Graph maturity
 
-### Coverage targets
-- normal flow
-- edge cases
-- adversarial inputs
-- crash-recovery behavior
-- observability signal verification
+**Required suites**
+- integration tests for formation, split, sibling creation, and recall expansion
+- property tests for traversal caps and centroid stability
+- restart tests for serialization integrity
+- latency tests for graph-assisted retrieval overhead
 
-### Output
-Each suite should emit structured artifacts useful for regression analysis.
+**Must prove before closing the stage**
+- graph-assisted retrieval stays bounded under declared caps
+- graph persistence survives restart without corruption
+- split logic remains reproducible enough for operational debugging
 
-## 9. Policy tests
+## Required exit artifacts for a completed stage
 
-### Objective
-Policy tests exist to catch a distinct class of failures.
+Every stage completion should leave behind:
 
-### Coverage targets
-- normal flow
-- edge cases
-- adversarial inputs
-- crash-recovery behavior
-- observability signal verification
+- benchmark report
+- failure matrix
+- design note
+- migration note if schema changed
+- rollback note if behavior changed
+- ops note if background jobs changed
 
-### Output
-Each suite should emit structured artifacts useful for regression analysis.
+## Global no-go conditions
 
-## 10. Cross-namespace isolation tests
+Do not declare a stage ready if any of the following are still true:
 
-### Objective
-Cross-namespace isolation tests exist to catch a distinct class of failures.
-
-### Coverage targets
-- normal flow
-- edge cases
-- adversarial inputs
-- crash-recovery behavior
-- observability signal verification
-
-### Output
-Each suite should emit structured artifacts useful for regression analysis.
-
-## 11. Recall quality tests
-
-### Objective
-Recall quality tests exist to catch a distinct class of failures.
-
-### Coverage targets
-- normal flow
-- edge cases
-- adversarial inputs
-- crash-recovery behavior
-- observability signal verification
-
-### Output
-Each suite should emit structured artifacts useful for regression analysis.
-
-## 12. Compression utility tests
-
-### Objective
-Compression utility tests exist to catch a distinct class of failures.
-
-### Coverage targets
-- normal flow
-- edge cases
-- adversarial inputs
-- crash-recovery behavior
-- observability signal verification
-
-### Output
-Each suite should emit structured artifacts useful for regression analysis.
+- touched request paths have unknown p95/p99 behavior
+- contradiction, policy, or namespace semantics changed without dedicated tests
+- new derived state cannot be rebuilt or repaired from durable truth
+- background execution succeeds only by degrading foreground contracts
+- parity across standalone and service-facing surfaces is unverified where the stage depends on it
 

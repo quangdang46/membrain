@@ -36,6 +36,15 @@ Orthogonal to the taxonomy above, the brain-inspired encoding pipeline uses:
 | `Procedural` | How-to knowledge, extracted from clusters, bypasses decay |
 | `Schema` | Abstract pattern distilled from repeated episodes (Feature 17) |
 
+### Canonical vocabulary rules
+
+- Every persisted memory has exactly one canonical `memory_type` from the taxonomy above; downstream schema overlays, APIs, and explain surfaces should use that vocabulary consistently.
+- Brain-inspired kinds are a separate classification axis from `memory_type`. A `Fact`, `Summary`, or `Goal` may still be encoded or treated as `Semantic`; an `Event` or `ToolOutcome` is commonly `Episodic`; a `Skill` is commonly `Procedural`.
+- The canonical kind inventory is currently `Episodic`, `Semantic`, `Procedural`, and `Schema`.
+- Historical snapshot prose in `PLAN.md` sometimes names `Emotional` as a kind. The canonical contract does **not** treat `Emotional` as a separate `MemoryKind`; emotional significance is represented through emotional-tag or trajectory metadata such as `encoding_valence`, `encoding_arousal`, salience, confidence effects, and decay modifiers.
+- Kinds are intended to guide encoding, consolidation, retrieval, and forgetting behavior; they do not replace provenance, lineage, contradiction state, or policy metadata.
+- Interfaces should reject or explicitly migrate unknown or legacy kind labels rather than silently accepting a divergent vocabulary.
+
 ## Core Fields
 
 Every memory item carries these attributes (directly or derivably):
@@ -84,7 +93,9 @@ Every memory item carries these attributes (directly or derivably):
 
 | Field | Type | Feature | Description |
 |-------|------|---------|-------------|
-| `superseded_by` | Option | F2 Belief Versioning | Points to newer version |
+| `conflict_state` | enum | Core contradiction handling | `none`, `open`, `resolved`, `superseded`, or `authoritative_override` |
+| `conflict_record_ids` | Vec<UUID> | Core contradiction handling | Linked contradiction artifacts that inspect/recall can surface without losing provenance |
+| `superseded_by` | Option | F2 Belief Versioning | Points to newer version when a contradiction resolves as supersession |
 | `belief_version` | u32 | F2 | Version number in belief chain |
 | `belief_chain_id` | Option | F2 | Groups versions together |
 | `is_landmark` | bool | F5 Landmarks | Temporal anchor |
@@ -138,13 +149,19 @@ Identity/version rules must keep revision, replacement, and collision handling s
 
 ### Context Metadata
 
-`workspace_id`, `agent_id`, `session_id`, and `task_id` capture the execution scope around a memory without replacing `namespace`.
+`workspace_id`, `agent_id`, `session_id`, and `task_id` capture the execution scope around a memory without replacing `namespace`. Goal context uses the same activity-context contract: when one explicit goal or work item governs the activity, `task_id` is the primary handle; when goal association is many-to-many or preserved historically, it should travel through `relation_refs` and lineage to `Goal` memories rather than through a second conflicting scope key.
 
-- `workspace_id` scopes memories to a workspace or repo-like boundary for isolation, replay, and retrieval filtering.
-- `agent_id` identifies the actor that created the record or emitted a derived artifact; it is provenance, not an authorization shortcut.
-- `session_id` groups memories from one live interaction window for episodic replay, handoff, and consolidation.
-- `task_id` ties the memory to an explicit unit of work such as a goal, issue, or bead when one exists.
+| Field | Persisted shape | Required when | Nullable when | Allowed inference | Output / redaction |
+|-------|-----------------|---------------|---------------|-------------------|--------------------|
+| `workspace_id` | `Option<String>` | The source belongs to a concrete workspace/repo boundary or retrieval isolation depends on workspace scoping | Imported, global, or system artifacts have no single workspace | From the request envelope or a stable `source_ref` mapping only | Normal recall/search/get surfaces may return an opaque handle or omit the raw value with a redaction marker when the caller lacks workspace visibility |
+| `agent_id` | `Option<String>` | An authenticated agent, worker, or scheduled job produced the record | Human-authored, imported, or system-originated artifacts lack a stable actor identity | From authenticated caller or job ownership only | Normal surfaces may coarsen to an opaque actor handle; inspect/audit may reveal the raw value only after policy checks |
+| `session_id` | `Option<String>` | Live interaction events, `ToolOutcome`, `SessionMarker`, or session-scoped episodes/summaries come from one session window | Imported history, cross-session facts, and maintenance outputs have no single session | From active session binding or bounded batch scope only | Search/recall may omit or redact raw session identifiers unless the caller is entitled to session detail; inspect/explain must still distinguish redacted from absent |
+| `task_id` | `Option<String>` | The memory was produced under an explicit issue, bead, ticket, task, or goal-shaped work item | Ambient exploration or background state has no explicit task anchor | From bound task context only; never from free-form text guesses | Return the raw handle only when the caller can resolve that task context; otherwise use an opaque handle or redaction marker |
+| Goal context | `task_id` or goal-linked `relation_refs` | An explicit goal shaped the activity or later consolidation must preserve goal association | No explicit goal exists | Copied from request/task binding or parent lineage, never guessed from content text | Expose the governing task handle or goal-linked metadata subject to the same namespace, policy, and redaction rules as other linked memories |
+
 - Missing context fields mean `unknown` or `not applicable`, not `global`.
+- Inference is allowed only from bounded execution metadata such as the request envelope, auth/session binding, scheduler ownership, stable source mapping, or parent lineage; it must never come from model speculation over free-form text.
+- Once persisted, explicit and inferred context values participate equally in filtering, replay, and audit, but inspect/explain surfaces should still be able to say when a value was redacted or unavailable.
 - Derived memories may add fresh context of their own, but they must keep lineage back to source memories instead of replacing older context.
 
 ### Provenance Metadata
@@ -180,6 +197,34 @@ Identity/version rules must keep revision, replacement, and collision handling s
 - `relation_refs` point to explicit relation records or resolvable tombstones.
 - Summaries, facts, skills, and repaired artifacts must preserve enough tags/entity/relation linkage to remain explainable after compaction or consolidation.
 
+### Entity and relation canonicalization contract
+
+`entity_refs` and `relation_refs` must resolve to stable canonical handles rather than ad hoc extracted strings. The contract freezes what downstream systems may rely on without forcing one extraction or normalization algorithm.
+
+#### Entity canonicalization rules
+
+- Canonical entity identity is namespace-scoped and stable: preferred display-name changes, formatting cleanup, or alias additions do not mint a new entity identity.
+- Observed surface forms such as aliases, spellings, handles, or mention text are evidence about an entity, not the entity identity itself.
+- A memory may carry multiple entity references when the evidence truly mentions multiple entities; it must not collapse them into one handle for convenience.
+- If canonicalization is uncertain, the system must preserve the unresolved mention or low-confidence candidate state rather than forcing a speculative entity link.
+- Later merge or split decisions for entities must be explicit, auditable transformations so retrieval, graph repair, and contradiction workflows can explain why an older reference now resolves differently.
+
+#### Relation canonicalization rules
+
+- Canonical relation identity is separate from free-form prose and separate from memory identity; `relation_refs` point to normalized relation records, not just edge labels inferred on the fly.
+- Every canonical relation record must identify explicit endpoints using canonical memory, entity, or goal handles, unless one endpoint has been tombstoned explicitly.
+- Relation kind or edge label should normalize to a shared durable vocabulary at the storage boundary, but the docs do not require one particular ontology or extraction model.
+- Relation records must preserve provenance or derivation handles and enough confidence or status metadata for explain, contradiction handling, and repair to treat them as structured evidence rather than opaque annotations.
+- Competing or contradictory relations between the same endpoints must coexist as inspectable state until resolved; the system must not silently overwrite one edge with another.
+- Cross-namespace relation edges require explicit policy support; relation canonicalization must never become a backdoor around namespace or visibility controls.
+
+#### Downstream expectations
+
+- Retrieval may use canonical entity and relation handles for filtering, expansion, and reranking, but alias text alone must never become the sole surviving truth.
+- Inspect and explain surfaces should be able to show the canonical handle, the observed alias or normalized relation kind that produced it, and whether the reference is resolved, ambiguous, or tombstoned.
+- Graph materializations, caches, and extracted summaries remain derived state; authoritative durable entity and relation records win during repair or rebuild.
+- When compaction, repair, or consolidation cannot preserve an entity or relation reference exactly, the system must emit an explicit loss or tombstone record instead of inventing a replacement.
+
 ## Memory States (Lifecycle)
 
 ```
@@ -199,12 +244,28 @@ Labile → SynapticDone → Consolidating → Consolidated → Archived
 
 ### State Transition Rules
 
-1. Newly encoded → `Labile` (within reconsolidation window)
-2. Window expires without update → `SynapticDone`
-3. Consolidation engine processes → `Consolidating` → `Consolidated`
-4. Recalled → temporarily returns to `Labile`
-5. Contradicted by newer memory → `Superseded`
-6. Strength falls below threshold → `Archived`
+1. Newly encoded memories enter `Labile` and stay there only for the reconsolidation window.
+2. When the reconsolidation window expires without an accepted mutation, the memory becomes `SynapticDone`.
+3. Consolidation moves `SynapticDone -> Consolidating -> Consolidated`; this pipeline must preserve identity, lineage, and policy-bearing metadata.
+4. Successful recall may temporarily reopen a `SynapticDone` or `Consolidated` memory into `Labile` so reconsolidation can occur without minting a new identity.
+5. True contradiction resolution may move a memory to `Superseded`; supersession is not decay, archival, or deletion.
+6. Forgetting or retention action may move a non-pinned memory to `Archived`; archived memories remain durable and inspectable even when normal recall stops surfacing them.
+
+### Lifecycle guard summary
+
+Before any lifecycle transition is committed, the system must validate namespace access control, policy pinning or legal hold, retention constraints, lineage preservation, unresolved contradiction semantics, and repair-job lock safety.
+
+### Failure behavior summary
+
+If a lifecycle transition fails mid-flight:
+- preserve the last known valid state
+- emit a transition error artifact or event
+- enqueue repairable follow-up work when possible
+- never leave the memory in a silent half-transitioned state
+
+### Relationship to lower-level state machines
+
+This section freezes the canonical persisted lifecycle for memory items. The `created`, `indexed`, `recalled`, `reinforced`, `decayed`, `demoted`, and `deleted` stages described in `docs/STATE_MACHINES.md` are lower-level logical/controller transitions and operational outcomes, not a second conflicting persisted lifecycle enum for memories.
 
 ## Strength & Decay Model
 
@@ -241,13 +302,29 @@ Floor: 0.1 (never fully invalidated). Ceiling: 1.0.
 
 ## Contradiction Handling
 
-When new information conflicts with existing:
-1. Do **not** silently overwrite
-2. Create or update a `ConflictRecord` / `belief_conflicts` entry
-3. Attach evidence references for both sides
-4. Let retrieval/ranking choose presentation order
-5. Preserve enough metadata for audit and repair
-6. Old memory gains state `Superseded`, linked via `superseded_by`
+### Canonical semantic distinctions
+
+- **Contradiction** means two or more memories make materially incompatible claims about the same subject, time slice, or policy-relevant fact. Contradictions create explicit conflict artifacts; they do not silently rewrite either side.
+- **Supersession** is one possible contradiction resolution where a newer memory becomes the default operative version for normal retrieval. The older memory remains preserved, inspectable, and linked by `superseded_by`, `belief_chain_id`, and lineage.
+- **Unresolved conflict** means the system has detected contradiction but no winner has been accepted yet. Both sides remain first-class evidence and recall/inspect surfaces must expose the disagreement explicitly.
+- **Authoritative override** is a policy-aware resolution where an explicitly higher-authority source or human decision marks one side as the preferred operational interpretation without erasing the losing evidence.
+
+### Machine-readable representation
+
+When new information conflicts with existing evidence:
+1. Do **not** silently overwrite either record.
+2. Create or update a `ConflictRecord` / `belief_conflicts` entry.
+3. Preserve evidence references, provenance, and lineage for both sides.
+4. Record `conflict_state` on affected memories as one of `open`, `resolved`, `superseded`, or `authoritative_override`.
+5. Keep linked `conflict_record_ids` so inspect/recall can surface conflict state without reconstructing it from raw text.
+6. Only set `superseded_by` and move the older memory to lifecycle state `Superseded` when the resolution is actually supersession.
+7. For authoritative overrides, record the preferred memory plus the authority source/reason in the conflict artifact rather than mutating old evidence in place.
+
+### Retrieval, inspect, and repair implications
+
+- Retrieval and inspect surfaces may prefer one side for ranking or packaging, but they must still be able to expose open conflict state, suppressed alternatives, and the evidence lineage behind the decision.
+- Ranking treats contradiction state as a first-class signal; it is not a post-processing hack layered on after retrieval.
+- Repair and audit flows must be able to rebuild contradiction state from durable conflict artifacts plus preserved source lineage.
 
 ## Schema Rules
 

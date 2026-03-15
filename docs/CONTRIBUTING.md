@@ -22,6 +22,17 @@
 - policy and namespace enforcement before expensive work
 - research mechanisms promoted to core behavior only when they remain bounded, explainable, and benchmarked
 
+## Contract Scope and Ownership
+
+This document freezes the contributor-facing contract that downstream docs, reviews, and backlog work can cite without reopening foundational ambiguity.
+
+It is the home for:
+- documentation-precedence rules for contract documents
+- evidence and artifact requirements for major, performance-sensitive, and governance-sensitive changes
+- PR rejection triggers tied to those contracts
+
+It is not the repository's session playbook. Work selection, `br`/`bv` operating flow, Agent Mail coordination, linehash edit discipline, handoff payloads, and troubleshooting steps live in `../AGENTS.md` and the workflow backlog. Use this file to decide what a change must prove; use the workflow guidance to decide how contributors execute and hand off the work.
+
 ## Architecture Invariants (Non-Negotiable)
 
 These rules cannot be violated by any PR:
@@ -73,6 +84,23 @@ Every major change must include:
 | Rollback note | Any behavior change |
 | Governance analysis | Any forgetting/deletion semantic change |
 | Observability hook | Any performance-sensitive complexity |
+
+These are contract-level review inputs, not optional nice-to-haves. If a change spans multiple categories, it owes the union of the required artifacts.
+
+- Performance-sensitive changes must include both benchmark evidence and the observability hook needed to detect regressions.
+- Governance-sensitive changes must include governance analysis, and also a rollback note when the change alters externally visible behavior.
+- Schema changes must include migration notes even when the schema surface is small.
+
+### Observability Hook Contract
+
+An observability hook is the operator-visible evidence that lets reviewers and maintainers detect whether a hot-path or semantics-changing change still honors the contract after it lands.
+
+- The hook must name the concrete metric, trace, audit surface, or explain/inspect output that should move if the change regresses.
+- Request-path changes should expose latency percentiles plus bounded-work signals such as candidate counts, tier-routing decisions, or cache/tier hit rates.
+- Policy or governance changes should expose denial, redaction, or audit signals and preserve enough explainability to show which policy path fired.
+- Background-job or maintenance changes should expose job duration, queue depth, affected-item counts, and any foreground latency delta they impose.
+- The accompanying change notes should point reviewers to the command, dashboard, benchmark artifact, or machine-readable field where the signal can be checked.
+- If the only way to detect regression is to re-read code or attach a debugger, the change is not observable enough to satisfy this contract.
 
 ## PR Rejection Rules
 
@@ -137,3 +165,11 @@ INDEX.md         ← doc pointer
 
 Subsystem docs should elaborate, **not contradict** PLAN.md.
 If they diverge, resolve the conflict explicitly.
+
+Contract precedence and scope ownership work as follows:
+
+1. `PLAN.md` is the canonical design contract and tie-breaker.
+2. Subsystem docs under `docs/` elaborate one surface at a time and must stay consistent with the plan.
+3. `CONTRIBUTING.md` freezes contributor-facing evidence requirements, review gates, and PR rejection triggers derived from the canonical plan.
+4. `INDEX.md` is a navigation aid; it helps readers find the right contract surface but does not redefine it.
+5. `../AGENTS.md` translates these contracts into day-to-day execution, coordination, and handoff guidance; it clarifies workflow but does not change product behavior or evidence thresholds.

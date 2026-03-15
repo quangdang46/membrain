@@ -22,6 +22,25 @@ Every operational runbook follows this structure:
 4. **Rollback conditions** — when to abort
 5. **Post-run validation** — how to verify success
 
+## Change-Introduction Observability Bundle
+
+When a major change alters hot-path behavior, schema, forgetting/deletion semantics, or background execution, the rollout or handoff note should leave operators with both the required artifact bundle and the concrete signals to monitor after the change lands.
+
+### Required note bundle by change type
+- design note for architectural changes
+- benchmark result for hot-path or performance-sensitive changes
+- migration note for schema changes
+- rollback note for behavior changes
+- governance analysis for forgetting or deletion semantic changes
+- ops note when background jobs, repair flows, or maintenance cadence change
+
+### Metrics and traces to name explicitly
+- request-path latency p50/p95/p99, candidate counts, tier hit rates, cache hit rates, or routing traces for retrieval/encode changes
+- denial or redaction counts, audit events, and explain/inspect evidence for policy, namespace, or governance changes
+- job duration, queue depth, moved or repaired item counts, and foreground latency delta for consolidation, repair, compaction, or similar background work
+
+The note should also point to the exact command, dashboard, benchmark artifact, or machine-readable field operators will use, and should follow the same `metrics to watch` plus `rollback conditions` discipline as the standard runbook shape above.
+
 ---
 
 ## 1. Capacity Planning

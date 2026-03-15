@@ -52,3 +52,22 @@ Return the smallest evidence set that maximizes downstream task success.
 - packaged results may prioritize a preferred memory for normal task use, but they must still expose open disagreement, suppressed alternatives, or omitted conflict siblings when caps prevent returning the whole set
 - duplicate-family collapse must not blend contradictory evidence into one synthetic statement
 - inspect, explain, ranking, and repair flows must be able to reconstruct contradiction state from durable conflict artifacts plus preserved lineage and provenance
+
+## Pattern-completion contract
+- pattern completion is a bounded recovery lane for fragmentary or partial-cue recall, not the default path when exact, recent, or indexed evidence already satisfies the request
+- retrieval may enter this lane only after the normal direct and tiered shortlist has been scored, or when the caller explicitly asks for approximate or fragmentary recall
+- expansion starts from a small scored seed set and may use local engram, graph, duplicate-family, entity, or temporal neighbors only within explicit per-seed caps
+- metadata, snippets, and handles may be inspected during expansion, but cold or large payload fetch remains deferred until the final candidate cut
+- partial-cue expansion must stop when node, depth, sibling, or payload budgets are exhausted, or when marginal gain falls below the lane's continuation threshold
+- contradiction and supersession state remain first-class during pattern completion; fragmentary recall must not flatten open disagreement into one reconstructed answer
+
+## Tip-of-the-tongue and reconstruction packaging
+- if a single candidate or tightly bounded cluster survives the final cut, packaging may return a normal evidence set while recording that pattern completion assisted the route
+- if no full candidate survives but bounded evidence fragments exist, the system must return an explicitly partial result instead of inventing the missing content
+- partial results should expose anchored clues such as snippet spans, entity, time, or task matches, cluster or relation handles, matched cue dimensions, and why the system stopped short of a full answer
+- reconstruction may combine multiple preserved fragments only when each fragment stays individually traceable to source memories and the package marks unresolved gaps or ambiguity explicitly
+- low-signal or over-budget queries must end in a bounded miss or fragment shortlist, not a speculative completion
+
+## Pattern-completion regression contract
+- regression coverage must prove deterministic tier escalation, capped seed-set expansion, no pre-cut cold-payload fetch, explicit `full` versus `partial` versus `miss` result classification, and inspectable routing and ranking traces for the chosen lane
+- adversarial cases must include near-duplicate cues, ambiguous entity or time hints, conflict or supersession siblings, and low-signal prompts that should terminate without speculative reconstruction

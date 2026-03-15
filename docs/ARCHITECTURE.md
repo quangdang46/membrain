@@ -44,3 +44,25 @@ The production contract is a brain-inspired cognitive runtime, not a claim of li
 6. Retrieval ranking must be explainable after the fact.
 7. Consolidation must never silently discard authoritative evidence.
 8. Contradictions must be represented explicitly, not hidden by overwrite.
+
+## 5. Restriction contract
+
+These are architectural guardrails, not tuning suggestions. They apply across standalone CLI, daemon, MCP, IPC, tests, and any future wrapper surface.
+
+### Request-path and foreground restrictions
+- No LLM or remote API calls in encode, recall, `on_recall`, reconsolidation-apply, or forgetting-eligibility paths.
+- No full-store `O(n)` scans on any request path; every retrieval lane must run within an explicit candidate budget.
+- No cold-payload decompression or large payload fetch before the final candidate cut.
+- No graph expansion without hard depth and node caps.
+- No policy or namespace bypass in wrapper surfaces; governance checks happen before expensive retrieval work, not after.
+
+### Storage and lifecycle restrictions
+- Tier1 stores handles and hot metadata, not giant payload ownership.
+- Tier2 keeps metadata and filtering state separate from large content so prefilters stay bounded.
+- Tier3 and graph/index acceleration state remain rebuildable from durable records.
+- Archive and forgetting flows stay reversible by default unless explicit policy requires irreversible deletion.
+
+### Research and benchmark restrictions
+- No benchmark claim without dataset cardinality, machine profile, build mode, and warm/cold declaration.
+- Do not present p95 or p99 claims from microbench-sized samples as production facts; label them exploratory instead.
+- Brain-inspired mechanisms remain optional research behavior unless benchmark and ablation evidence justify promotion to the core contract.

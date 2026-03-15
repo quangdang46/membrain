@@ -128,49 +128,58 @@ Beads provides a lightweight, dependency-aware issue database and CLI (`br` - be
 
 **Important:** `br` is non-invasive—it NEVER runs git commands automatically. You must manually commit changes after `br sync --flush-only`.
 
+**Workspace contract for this repo:** `.beads/` is already initialized here. Preserve the live workspace and the issue IDs already present in `.beads/issues.jsonl` instead of re-running init or changing prefixes to match generic examples or older defaults. Before assuming the workspace is missing or unhealthy, validate it with `br info` and `br doctor`.
+
 ### Conventions
 
 - **Single source of truth:** Beads for task status/priority/dependencies; Agent Mail for conversation and audit
-- **Shared identifiers:** Use Beads issue ID (e.g., `br-123`) as Mail `thread_id` and prefix subjects with `[br-123]`
+- **Existing workspace first:** Build on the current backlog state and preserve this repo’s existing issue-ID family (currently `mb-...`) rather than inventing a new prefix or reinitializing Beads
+- **Shared identifiers:** Use the current Beads issue ID verbatim (e.g., `mb-1ga.5`) as Mail `thread_id` and prefix subjects with `[mb-1ga.5]`
 - **Reservations:** When starting a task, call `file_reservation_paths()` with the issue ID in `reason`
 
 ### Typical Agent Flow
 
-1. **Pick ready work (Beads):**
+1. **Validate workspace health when needed:**
+   ```bash
+   br info
+   br doctor
+   ```
+
+2. **Pick ready work (Beads):**
    ```bash
    br ready --json  # Choose highest priority, no blockers
    ```
 
-2. **Reserve edit surface (Mail):**
+3. **Reserve edit surface (Mail):**
    ```
-   file_reservation_paths(project_key, agent_name, ["src/**"], ttl_seconds=3600, exclusive=true, reason="br-123")
-   ```
-
-3. **Announce start (Mail):**
-   ```
-   send_message(..., thread_id="br-123", subject="[br-123] Start: <title>", ack_required=true)
+   file_reservation_paths(project_key, agent_name, ["src/**"], ttl_seconds=3600, exclusive=true, reason="mb-1ga.5")
    ```
 
-4. **Work and update:** Reply in-thread with progress
+4. **Announce start (Mail):**
+   ```
+   send_message(..., thread_id="mb-1ga.5", subject="[mb-1ga.5] Start: <title>", ack_required=true)
+   ```
 
-5. **Complete and release:**
+5. **Work and update:** Reply in-thread with progress
+
+6. **Complete and release:**
    ```bash
-   br close 123 --reason "Completed"
+   br close mb-1ga.5 --reason "Completed"
    br sync --flush-only  # Export to JSONL (no git operations)
    ```
    ```
    release_file_reservations(project_key, agent_name, paths=["src/**"])
    ```
-   Final Mail reply: `[br-123] Completed` with summary
+   Final Mail reply: `[mb-1ga.5] Completed` with summary
 
 ### Mapping Cheat Sheet
 
 | Concept | Value |
 |---------|-------|
-| Mail `thread_id` | `br-###` |
-| Mail subject | `[br-###] ...` |
-| File reservation `reason` | `br-###` |
-| Commit messages | Include `br-###` for traceability |
+| Mail `thread_id` | Current Beads issue ID (e.g., `mb-1ga.5`) |
+| Mail subject | `[<issue-id>] ...` |
+| File reservation `reason` | `<issue-id>` |
+| Commit messages | Include `<issue-id>` for traceability |
 
 ---
 
@@ -323,6 +332,30 @@ git push                # Push to remote
 
 <!-- end-bv-agent-instructions -->
 
+## Contributor Golden Path and Troubleshooting
+
+Use this as the safe default path for both humans and agents working in this repository.
+
+### Golden Path
+
+1. **Orient on the canon first** — read `docs/PLAN.md` for product contract questions, `docs/INDEX.md` and `docs/CONTRIBUTING.md` for doc hierarchy and review/evidence rules, and `AGENTS.md` for execution, coordination, and handoff workflow.
+2. **Pick work from ready backlog** — use `bv --robot-triage` or `br ready --json` to choose ready work instead of guessing or starting from blocked items.
+3. **Claim the bead explicitly** — move the selected Bead to `in_progress` before editing so the shared backlog reflects reality.
+4. **Reserve only the edit surface you need** — use Agent Mail reservations for the smallest practical file or glob set, and keep Beads state separate from coordination narrative.
+5. **Announce start in the bead thread** — send a start message with the Bead ID, planned surface, and any expected validation so other contributors can deconflict early.
+6. **Implement with the repo’s workflow rules** — use `linehash` for shell-based targeted edits when appropriate, refresh stale anchors instead of forcing them, and keep changes bounded to the bead’s actual scope.
+7. **Validate the changed surface** — run the quality gates that fit the surface you changed, including targeted checks and any required benchmark, lint, or bug-scan steps, and note anything intentionally deferred.
+8. **Sync shared state before handoff** — update Bead status, run `br sync --flush-only`, release or transfer reservations, and send a completion or handoff message with what changed, what was validated, and what remains.
+
+### Troubleshooting Guideposts
+
+- **Stale `linehash` anchors:** re-run `linehash read <file>` and retry with the refreshed anchors instead of forcing an edit.
+- **Doc conflicts or ambiguity:** trace the question back through `docs/PLAN.md`, then `docs/INDEX.md` / `docs/CONTRIBUTING.md`; if the canon is still ambiguous, pause that point and capture the conflict in the active bead instead of guessing.
+- **Reservation conflicts:** narrow the reservation, wait if the overlap is real, or coordinate in-thread before broadening scope.
+- **Unexpected concurrent diffs:** treat them as normal shared work, not cleanup targets; never stash, revert, overwrite, or delete them just because you did not author them.
+- **Workflow uncertainty:** prefer `bv --robot-triage`, `br ready --json`, and the existing bead thread over ad-hoc assumptions about what to work on next.
+- **Blocked validation or partial completion:** say so explicitly in the handoff, keep the bead state accurate, and create follow-up beads for newly discovered or deferred work rather than hiding TODOs in prose.
+
 ## Landing the Plane (Session Completion)
 
 **When ending a work session**, you MUST complete ALL steps below.
@@ -402,6 +435,10 @@ UBS stands for "Ultimate Bug Scanner": **The AI Coding Agent's Secret Weapon: Fl
 **Install:** `curl -sSL https://raw.githubusercontent.com/Dicklesworthstone/ultimate_bug_scanner/master/install.sh | bash`
 
 **Golden Rule:** `ubs <changed-files>` before every commit. Exit 0 = safe. Exit >0 = fix & re-run.
+**Workflow Contract:**
+- Prefer explicit changed files or staged files, not whole-repo scans, unless the change truly spans the whole project
+- Treat `ubs` as a required bug-finding pass for the surface you changed, not as optional cleanup
+- Investigate every finding, fix the real issue when valid, and re-run `ubs` on the changed surface until it passes or you explicitly document a justified deferral in the handoff
 
 **Commands:**
 ```bash
@@ -450,6 +487,12 @@ Parse: `file:line:col` → location | 💡 → how to fix | Exit 0/1 → pass/fa
 `cass` indexes prior agent conversations (Claude Code, Codex, Cursor, Gemini, ChatGPT, etc.) so we can reuse solved problems.
 
 **Rules:** Never run bare `cass` (TUI). Always use `--robot` or `--json`.
+
+**Workflow Contract:**
+- Use `cass` before re-investigating a bug, failure mode, design question, or workflow problem that may already have been solved in earlier sessions
+- Prefer narrow, automation-safe queries first (`search`, `view`, `expand`, `capabilities`, `robot-docs`) and keep output lean with flags like `--fields minimal`, `--agent`, and `--days N`
+- Treat `cass` as a reuse and orientation tool: extract prior solutions or context, then verify them against the current repository state before acting
+- Never use interactive cass modes in agent workflows
 
 ### Examples
 

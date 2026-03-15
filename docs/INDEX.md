@@ -13,7 +13,18 @@
 | [CLI.md](CLI.md) | Full CLI command reference with examples |
 | [MCP_API.md](MCP_API.md) | MCP tool contract — inputs, outputs, rules |
 | [OPERATIONS.md](OPERATIONS.md) | Production runbooks, failure modes, incident response |
-| [CONTRIBUTING.md](CONTRIBUTING.md) | Contributor workflow, PR rules, quality gates |
+| [CONTRIBUTING.md](CONTRIBUTING.md) | Contributor-facing contract: evidence requirements, PR rules, quality gates |
+| [../AGENTS.md](../AGENTS.md) | Active repository workflow: coordination, reservations, handoff, and execution discipline |
+
+## Documentation Precedence and Scope
+
+1. `PLAN.md` is the canonical design contract and wins when another document drifts.
+2. Subsystem docs under `docs/` elaborate the relevant surface; they do not override the plan.
+3. `CONTRIBUTING.md` freezes contributor-facing evidence requirements, quality gates, and PR rejection triggers.
+4. `../AGENTS.md` translates those contracts into day-to-day workflow, coordination, and troubleshooting guidance for active contributors.
+5. Entry-point docs and indexes help readers navigate; they do not redefine the contract.
+
+Use this split intentionally: decide **what the system promises** and **what evidence a change owes** from `PLAN.md` plus the relevant subsystem doc and `CONTRIBUTING.md`; decide **how to execute, coordinate, and hand off work** from `../AGENTS.md`.
 
 ## PLAN.md Structure Reference
 

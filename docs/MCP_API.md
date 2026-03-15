@@ -24,10 +24,16 @@ Every MCP request carries:
 | `workspace_id` | if applicable | Workspace identifier |
 | `agent_id` | if applicable | Calling agent identity |
 | `session_id` | if applicable | Active session |
-| `task_id` | if applicable | Active task |
+| `task_id` | if applicable | Active task or governing goal/work-item handle |
 | `request_id` | yes | Idempotency/tracing key |
 | `policy_context` | yes | Policy hints |
 | `time_budget_ms` | optional | Retrieval time budget |
+
+Context-envelope rules:
+- These fields are execution context, not authorization shortcuts; namespace and policy checks still gate every tool.
+- `task_id` is the primary request-scope handle for explicit goals, beads, tickets, and other work items; additional many-to-many goal links should be represented in persisted memories through relations/lineage rather than ad hoc request fields.
+- If a caller omits a field because it is unknown or not applicable, downstream responses and inspect/explain surfaces must preserve the distinction between absent and redacted.
+- Servers may infer omitted context only from bounded transport metadata such as authenticated caller identity, session binding, scheduler ownership, or stable source mapping; they must not infer scope from free-form prompt text.
 
 ## Common Response Envelope
 
@@ -63,9 +69,9 @@ Ingest a new memory item.
 
 Retrieve a memory item by ID.
 
-**Outputs**: typed memory view, provenance fields, current tier, policy-redacted fields
+**Outputs**: typed memory view, provenance fields, current tier, policy-redacted fields, machine-readable conflict metadata when present (`conflict_state`, `conflict_record_ids`, `belief_chain_id`, `superseded_by`)
 
-**Rules**: exact lookup does not bypass redaction or namespace checks
+**Rules**: exact lookup does not bypass redaction or namespace checks; exact lookup still preserves contradiction and supersession state instead of flattening to one silent winner
 
 ### `memory_search`
 
@@ -73,7 +79,7 @@ Bounded search over indexes, tags, entities, time ranges, or semantic hints.
 
 **Inputs**: query string or structured filters, namespace/scope, memory types, session/task/goal filters, result budget
 
-**Outputs**: candidate list, filter summary, index families used, omitted-result note if capped
+**Outputs**: candidate list, filter summary, index families used, omitted-result note if capped, conflict-state summaries for returned items when applicable
 
 ### `memory_recall`
 
@@ -82,6 +88,12 @@ Task-oriented bounded retrieval for context construction. The primary retrieval 
 **Inputs**: task/goal description, retrieval mode hints, token budget or result budget, namespace/actor context
 
 **Outputs**: ranked evidence set, score summaries, contradiction markers, decaying-soon markers, packaging metadata for prompt construction
+
+**Conflict contract**:
+- unresolved conflicts remain queryable directly rather than requiring inference from free-form text
+- supersession marks the older memory as preserved but non-default for normal packaging; it does not erase the losing evidence
+- authoritative override may change the preferred operational answer, but the response must retain the override reason plus the losing evidence handle
+- if result caps suppress some conflicting siblings, the response must indicate omission rather than implying consensus
 
 **Extended options** (from features):
 - `like_id` / `unlike_id` — query-by-example (Feature 3)
@@ -101,13 +113,13 @@ Create or update explicit relations between memories, entities, or goals.
 
 Retrieve diagnostic and structural details about a memory.
 
-**Exposes**: current tier, lineage, policy flags, lifecycle state, index presence, graph neighborhood summary, decay/retention info
+**Exposes**: current tier, lineage, policy flags, lifecycle state, index presence, graph neighborhood summary, decay/retention info, and linked contradiction state (`conflict_state`, related `ConflictRecord` handles, preferred memory if resolved)
 
 ### `memory_explain`
 
 Explain why a memory was stored, routed, recalled, ranked, filtered, demoted, or forgotten.
 
-**Explains**: routing signals, ranking components, policy filters, lineage ancestry, consolidation ancestry, forgetting/demotion reasons
+**Explains**: routing signals, ranking components, policy filters, lineage ancestry, consolidation ancestry, forgetting/demotion reasons, and any contradiction resolution path (open conflict, supersession, or authoritative override)
 
 ### `memory_consolidate`
 
