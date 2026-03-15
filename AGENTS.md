@@ -31,6 +31,28 @@
 
 ---
 
+## Documentation Precedence and Conflict Resolution
+
+Use this order whenever docs disagree or when backlog work needs a canonical interpretation:
+
+1. `docs/PLAN.md` is the canonical design contract.
+2. Subsystem docs under `docs/` elaborate `PLAN.md`; they do not override it.
+3. `docs/INDEX.md` and `docs/CONTRIBUTING.md` define doc hierarchy, contributor workflow, and PR discipline that must stay aligned with `PLAN.md`.
+4. `AGENTS.md` translates repository workflow, coordination, and execution discipline for active contributors; it should clarify how to operate within the canon, not invent competing product behavior.
+5. Historical artifacts, legacy command references, logs, scratch plans, and older snapshot prose are informative only; they do not override the canonical contract.
+
+### Conflict-Resolution Procedure
+
+- If a subsystem doc disagrees with `PLAN.md`, `PLAN.md` wins until the conflict is resolved explicitly.
+- If two non-canonical docs disagree, do not average them together or guess based on convenience; trace both back to `PLAN.md` and the active bead.
+- Resolve ambiguity locally only when the canonical interpretation is directly supported by `PLAN.md` plus the established hierarchy in `docs/INDEX.md` and `docs/CONTRIBUTING.md`, and the fix does not invent new product behavior.
+- Pause implementation on that point when the canonical interpretation is still ambiguous, when multiple reasonable readings would change product or workflow behavior, or when fixing the conflict would require creating new contract language rather than applying existing guidance.
+- If implementation pauses, capture the conflict in the active bead; if no bead cleanly owns it, create a focused follow-up bead for the doc or workflow gap, note which files or sections conflict, and state the blocked decision that should not be guessed through.
+- Patch documentation directly only when the change is a faithful clarification of already-canonical behavior; if the update changes scope, introduces new rules, or resolves a true contract gap, update or create the corresponding bead first so the backlog remains the audit trail.
+- Notify other agents in the matching Agent Mail thread when you open or escalate the conflict so parallel contributors do not silently diverge.
+- When `PLAN.md` contains older merged-snapshot text that conflicts with its explicit canonical corrections, thesis, invariants, or restrictions, the explicit canonical overlays win.
+
+---
 
 ## MCP Agent Mail — Multi-Agent Coordination
 
@@ -44,29 +66,48 @@ A mail-like layer that lets coding agents coordinate asynchronously via MCP tool
 
 ### Same Repository Workflow
 
-1. **Register identity:**
+1. **Register identity at session start:**
    ```
    ensure_project(project_key=<abs-path>)
    register_agent(project_key, program, model)
    ```
+   Do this before sending mail, reserving files, or claiming active collaboration state.
 
-2. **Reserve files before editing:**
+2. **Reserve the smallest practical edit surface before editing:**
    ```
    file_reservation_paths(project_key, agent_name, ["src/**"], ttl_seconds=3600, exclusive=true)
    ```
+   Prefer narrow file or glob reservations over broad repo-wide claims. Use exclusive reservations for active edits and shared reservations only when observing or coordinating without mutating the same surface.
 
-3. **Communicate with threads:**
+3. **Coordinate in issue-linked threads:**
    ```
    send_message(..., thread_id="FEAT-123")
    fetch_inbox(project_key, agent_name)
    acknowledge_message(project_key, agent_name, message_id)
    ```
+   Use the Bead ID as the thread ID when possible. Post a start message when claiming work, progress replies when plans or scope change materially, a completion message when done, and a handoff message when leaving unfinished or partially validated work.
 
-4. **Quick reads:**
+4. **Acknowledge and maintain reservations:**
+   Poll your inbox often enough to catch coordination changes, acknowledge messages that request acknowledgement, renew reservations if work is still active near TTL expiry, and release reservations promptly when the edit surface is no longer needed. If work is being handed off directly, transfer reservations explicitly in-thread by naming the recipient, reserved paths, and remaining TTL; the handoff is not complete until the receiving agent acknowledges takeover.
+
+### Reservation Hygiene
+
+- Reserve the smallest practical set of files or globs that covers the edit you are actually making; narrow existing reservations instead of broadening them reflexively.
+- Use **exclusive** reservations when you expect to modify the surface; use **shared** reservations only for read-heavy collaboration or investigation that should not block active editors.
+- Prefer adding another small reservation for a newly discovered file over grabbing an entire directory preemptively.
+- If a reservation conflicts, first narrow your pattern, wait for expiry when the work is truly overlapping, or coordinate in-thread before escalating scope.
+- Renew TTL only while the work is actively in progress; release reservations as soon as the protected surface is no longer being edited.
+- If work is handed off mid-stream, prefer an explicit transfer message in the existing Agent Mail thread over silent reservation expiry; the receiving agent should acknowledge before the original holder treats the surface as handed off.
+- Do not treat reservations as ownership of a whole feature area; they are short-lived collision-avoidance hints for specific edit surfaces.
+
+5. **Quick reads:**
    ```
    resource://inbox/{Agent}?project=<abs-path>&limit=20
    resource://thread/{id}?project=<abs-path>&include_bodies=true
    ```
+
+6. **Keep Agent Mail distinct from Beads:**
+   Use Agent Mail for coordination, reservations, and handoff narrative; use Beads for task status, dependencies, and backlog truth.
 
 ### Macros vs Granular Tools
 
@@ -288,11 +329,27 @@ git push                # Push to remote
 
 **MANDATORY WORKFLOW:**
 
-1. **File issues for remaining work** - Create issues for anything that needs follow-up
-2. **Run quality gates** (if code changed) - Tests, linters, builds
-3. **Update issue status** - Close finished work, update in-progress items
-4. **Sync beads** - `br sync --flush-only` to export to JSONL
-5. **Hand off** - Provide context for next session
+1. **File issues for remaining work** - Create follow-up beads for anything unfinished, newly discovered, or intentionally deferred instead of leaving implicit TODOs.
+2. **Run quality gates** - Run the tests, linters, builds, benchmarks, or targeted checks appropriate to the changed surface, and note anything intentionally deferred.
+3. **Update issue status** - Close finished work, keep partial work accurately open or in progress, and preserve blocker or dependency state needed for the next contributor.
+4. **Sync beads** - `br sync --flush-only` to export JSONL after status updates.
+5. **Hand off** - Leave enough context for the next contributor to resume safely without re-deriving what changed, what was validated, what remains, and which reservations, mail threads, or status transitions still matter.
+
+**Session-close rules:**
+
+- Unexpected worktree edits are normal concurrent work from other agents and are **not** cleanup targets.
+- Never stash, revert, overwrite, delete, or otherwise disturb concurrent edits just because you did not author them.
+- If the user explicitly asks for the built-in TODO functionality, comply; otherwise keep Beads as the canonical shared-work tracker.
+- If validation is blocked or deferred, say so explicitly in the handoff instead of implying completion.
+
+**Minimum handoff payload:**
+
+- Bead IDs touched, with final status for each (`completed`, still `in_progress`, blocked, or intentionally deferred).
+- Files, docs, commands, or surfaces changed so the next contributor knows where to look first.
+- Validation already run, including what passed, what failed, and what was intentionally not run.
+- Open risks, unresolved questions, or decisions that should not be resumed blindly.
+- The next recommended step, including whether a follow-up bead already exists or still needs to be created.
+- Any active reservations, relevant Agent Mail thread IDs, or coordination state that still matters, including whether reservations were released or explicitly transferred to another agent.
 
 ---
 

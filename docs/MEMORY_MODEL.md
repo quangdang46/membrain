@@ -62,9 +62,10 @@ Every memory item carries these attributes (directly or derivably):
 | `source_kind` | Option | How it was created (cli, mcp, api, observe) |
 | `source_ref` | Option | Reference to source |
 | `authoritativeness` | f32 | Source reliability score |
-| `content_ref` | Option | Reference to content storage |
-| `compact_text` | String | Human-readable text summary |
-| `fingerprint` | u64 | xxhash64 for duplicate detection |
+| `content_ref` | Option | Reference to canonical content storage |
+| `payload_ref` | Option | Reference to detachable full payload when content is stored out-of-line |
+| `compact_text` | String | Human-readable summary that preserves the item's working identity |
+| `fingerprint` | u64 | Duplicate-family hint, never a substitute for canonical identity |
 | `tier` | enum | Tier1, Tier2, or Tier3 |
 | `salience` | f32 | Current importance score |
 | `confidence` | f32 | Reliability/certainty score (Feature 7) |
@@ -100,6 +101,84 @@ Every memory item carries these attributes (directly or derivably):
 | `encoding_valence` | Option | F18 Emotional | Mood at encoding time |
 | `encoding_arousal` | Option | F18 | Arousal at encoding time |
 | `observation_source` | Option | F6 Observation | Source: stdin, file, watch |
+
+## Identity and Version Rules
+
+### Canonical identity contract
+
+A memory's canonical identity is the tuple of `namespace` + `id`.
+
+- `id` must be globally unique within the applicable namespace policy boundary.
+- `memory_type` classifies the item but does not participate in identity; type migrations must preserve identity unless policy requires a replacement record.
+- `compact_text` is the human-readable working identity for recall, review, and debugging, but it is not a durable key.
+- `fingerprint` is a duplicate-family and collision-detection hint, never an authorization token or canonical identifier.
+- `content_ref` and `payload_ref` are storage handles; changing them does not mint a new identity.
+- If a payload is detached, redacted, or compacted, the memory keeps the same `id` so long as lineage and policy semantics remain continuous.
+
+### Canonical version contract
+
+`version` tracks accepted mutation of one canonical memory record.
+
+- `version` starts at `1` on first persistence and increments only when a mutation is accepted.
+- Rejected writes, policy-denied updates, and no-op repair passes do not increment `version`.
+- `created_at` is immutable after first persistence; accepted mutation updates `updated_at` so `created_at <= updated_at` always holds.
+- Mutations that preserve identity may update content, metadata, decay state, tier, or policy-carrying fields, but they must preserve lineage and auditability.
+- Changes that replace meaning rather than revise it must create a new record linked by lineage or supersession rather than reusing the old version counter.
+
+### Replacement, supersession, and duplicate-family rules
+
+Identity/version rules must keep revision, replacement, and collision handling separate.
+
+- Contradictory or superseding facts create a new memory identity and connect it with `superseded_by`, `belief_version`, `belief_chain_id`, or a `ConflictRecord`; they do not silently overwrite an existing record in place.
+- Summaries, extracts, repairs, and consolidations usually create new records with their own identities while preserving parent lineage.
+- Duplicate-family collapse may merge retrieval treatment or maintenance state, but canonical IDs remain stable until an explicit merge artifact records the transformation.
+- `payload_ref` / `content_ref` must be stable, resolvable, or explicitly tombstoned so identity survives storage relocation.
+
+## Metadata Families and Contracts
+
+### Context Metadata
+
+`workspace_id`, `agent_id`, `session_id`, and `task_id` capture the execution scope around a memory without replacing `namespace`.
+
+- `workspace_id` scopes memories to a workspace or repo-like boundary for isolation, replay, and retrieval filtering.
+- `agent_id` identifies the actor that created the record or emitted a derived artifact; it is provenance, not an authorization shortcut.
+- `session_id` groups memories from one live interaction window for episodic replay, handoff, and consolidation.
+- `task_id` ties the memory to an explicit unit of work such as a goal, issue, or bead when one exists.
+- Missing context fields mean `unknown` or `not applicable`, not `global`.
+- Derived memories may add fresh context of their own, but they must keep lineage back to source memories instead of replacing older context.
+
+### Provenance Metadata
+
+`source_kind`, `source_ref`, `authoritativeness`, `content_ref`, timestamps, and `lineage` form the provenance envelope.
+
+- `source_kind` identifies the producing path (`cli`, `mcp`, `api`, `observe`, `import`, `repair`, `consolidation`, or an equivalent bounded extension).
+- `source_ref` is a stable pointer to the originating request, file/span, tool call, message, or imported artifact.
+- `authoritativeness` scores source reliability, not belief truth or recall priority.
+- `content_ref` points at the canonical stored content handle used for redaction, repair, and lazy fetch.
+- `lineage` records parent memory IDs and is mandatory for summarize, merge, extract, repair, contradiction, and consolidation outputs.
+- A stored memory is only canonical if it can be traced either directly to a source reference or indirectly through lineage to durable evidence.
+
+### Utility, Retention, and Recall Metadata
+
+`salience`, `confidence`, `utility_estimate`, `recall_count`, `last_access_at`, `retention_class`, `decay_state`, and `policy_flags` describe how the system should treat the memory over time.
+
+- `salience` is the immediate routing and ranking signal for current importance.
+- `confidence` captures reliability and corroboration state; it is separate from strength and source authoritativeness.
+- `utility_estimate` predicts future usefulness for ranking, promotion, demotion, and context-budget packing.
+- `recall_count` and `last_access_at` track successful surfaced reuse, not merely candidate generation.
+- `retention_class` expresses intended durability (`volatile`, `normal`, `durable`, `pinned`) independently from current tier.
+- `decay_state` stores the parameters needed for lazy decay and reinforcement updates without eager whole-store rewrites.
+- `policy_flags` carry governance-critical markers such as legal hold, compliance lock, redaction state, and shareability constraints.
+- Utility or salience may tune ranking and maintenance, but they must never override policy flags, pins, or namespace checks.
+
+### Linkage and Classification Metadata
+
+`tags`, `entity_refs`, and `relation_refs` enrich retrieval without becoming hidden truth.
+
+- `tags` are advisory labels supplied by users, agents, or background jobs.
+- `entity_refs` point to canonical entities for entity-centric recall and repairable graph links.
+- `relation_refs` point to explicit relation records or resolvable tombstones.
+- Summaries, facts, skills, and repaired artifacts must preserve enough tags/entity/relation linkage to remain explainable after compaction or consolidation.
 
 ## Memory States (Lifecycle)
 

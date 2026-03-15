@@ -2,6 +2,17 @@
 
 This document enumerates failure modes, signals, immediate mitigations, and longer-term fixes.
 
+## Truth hierarchy during incidents
+
+When incident evidence conflicts, operators resolve truth in this order:
+
+1. authoritative durable records for memory identity, lineage, policy, and contradiction state
+2. canonical relation tables and canonical content handles
+3. derived summaries, checkpoints, and compaction artifacts
+4. indexes, caches, graph materializations, and other acceleration sidecars
+
+Derived artifacts can help diagnose failure, but they must not overrule durable truth.
+
 ## 1. Tier1 overflow
 
 ### Symptoms

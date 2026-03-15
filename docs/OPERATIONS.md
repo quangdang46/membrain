@@ -146,6 +146,90 @@ membrain benchmark tier2 --json | jq '.p99_us'
 
 ---
 
+## 5.1 Canonical rebuild flow matrix
+
+| Surface | Authoritative input | Repair command shape | Availability during rebuild | Post-run proof |
+|---|---|---|---|---|
+| indexes / ANN / lexical projections | durable records + canonical embeddings + policy-bearing metadata | `membrain repair index ...` | online by default; exact lookup and durable-truth reads remain available, ranked recall may run colder/slower | candidate counts match durable truth; latency returns to budget |
+| graph edges / neighborhoods / materialized clusters | normalized SQLite relation tables + lineage | `membrain repair graph ...` | online only if canonical edge tables remain readable; otherwise degrade affected namespaces to read-only or offline | graph counts match canonical edge tables; bounded traversal resumes |
+| lineage chains / ancestry views | durable lineage records + supersession/conflict records | `membrain repair lineage ...` | online if explain/inspect can fall back to durable lineage reads; otherwise degrade explain surfaces until validated | no broken chains; explain surfaces resolve ancestry |
+| caches / sidecars / planner accelerators | durable records + policy/namespace filters | `membrain repair cache ...` or drop-and-rewarm | fully online; slower reads are acceptable while caches repopulate | caches repopulate without becoming sole truth |
+
+### Flow requirements
+- Run doctor and a dry run before mutating repair when available.
+- Use namespace-scoped repair first; widen scope only when divergence is proven cross-namespace.
+- Durable truth wins whenever rebuilt output disagrees with a derived surface.
+- If full fidelity cannot be restored, emit an irreversible-loss record and leave the degraded surface visible to operators.
+
+### Repair mode and availability contract
+- **Online repair** is the default for derived surfaces whose authoritative inputs remain readable. During online repair, exact lookup, policy checks, and reads from durable truth stay available; derived surfaces may be stale, colder, or temporarily bypassed, but they must not return invented results.
+- **Offline repair** is required when the authoritative durable inputs are not trustworthy enough for bounded live serving, when migration or schema rollback is in progress, or when repair mutates the same canonical structures needed for safe reads. During offline repair, affected namespaces or shards must be placed in degraded mode or read-only service until canonical validation passes.
+- If an index, graph projection, lineage view, or cache is unavailable during rebuild, the system must either fall back to slower durable-truth reads or refuse the affected operation explicitly; it must not pretend the rebuilt surface is complete before validation.
+- Every repair run should declare which namespaces or shards remain fully available, which are degraded to slower reads, and which are temporarily read-only or offline.
+
+---
+
+## 5.2 Graph and lineage repair
+
+### Preconditions
+- Canonical edge tables and lineage records are readable.
+- Conflicting background compaction or migration jobs are paused.
+
+### Command Sequence
+```bash
+membrain doctor run
+membrain repair graph --dry-run
+membrain repair graph --namespace default
+membrain repair lineage --dry-run
+membrain repair lineage --namespace default
+```
+
+### Metrics to Watch
+- Canonical edge count vs rebuilt materialized edge count
+- Broken-lineage count before/after
+- Repair queue depth for follow-on unresolved items
+- Any explicit loss records emitted during repair
+
+### Rollback Conditions
+- Repaired graph output diverges further from canonical edge tables
+- Broken-lineage count increases after mutation
+- Online retrieval latency breaches budget during the repair window
+
+### Post-run Validation
+- `memory_explain` can traverse lineage and graph ancestry again
+- No unresolved orphan nodes or broken ancestry chains remain without queued follow-up repair
+
+---
+
+## 5.3 Cache and sidecar rebuild
+
+### Preconditions
+- Operators have confirmed caches and sidecars are not being treated as sole truth.
+- The namespace or shard can tolerate temporary cold-start latency.
+
+### Command Sequence
+```bash
+membrain doctor run
+membrain repair cache --dry-run
+membrain repair cache --namespace default
+membrain health --brief
+```
+
+### Metrics to Watch
+- Cache hit rate dip and recovery curve
+- Candidate count parity against durable truth
+- Namespace isolation and policy-filter integrity during warmup
+
+### Rollback Conditions
+- Warmed caches surface items blocked by namespace or policy filters
+- Rewarmed candidate counts continue to diverge from durable truth
+
+### Post-run Validation
+- Cache repopulation completes without new policy or lineage drift
+- Retrieval behavior is slower temporarily, but semantically unchanged
+
+---
+
 ## 6. Retention Enforcement
 
 ### Command Sequence

@@ -11,6 +11,8 @@
 4. Distinguish user error, policy denial, and internal failure
 5. Preserve idempotency where practical
 6. Expose stable machine-readable outputs for automation
+7. Keep request-path work bounded and measurable rather than hiding unbounded work behind tool wrappers
+8. Treat provenance, lineage, and policy context as required execution inputs, not optional diagnostics
 
 ## Common Request Envelope
 
@@ -132,6 +134,13 @@ Controlled forgetting: suppress, decay, demote, compact, summarize, archive, red
 Run or schedule repair: indexes, graph, lineage, summaries, shards.
 
 **Rules**: durable evidence wins over derived state; output what was fixed/rebuilt/unresolved; partial-fidelity repair records explicit loss
+
+**Should return**:
+- repaired surface kind (`index`, `graph`, `lineage`, `cache`, `summary`, `shard`)
+- authoritative input set used for rebuild
+- namespace or shard scope touched
+- unresolved items still queued for repair
+- explicit loss records when only degraded fidelity could be restored
 
 ---
 
