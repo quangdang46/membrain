@@ -52,8 +52,8 @@ All recall-facing transports should map onto one logical `RecallRequest` even wh
 - route metadata should preserve candidate counts before and after cache-influenced stages and whether degraded mode or cache-disabled serving forced colder fallback
 
 ## Candidate generation phases
-1. direct key or id hints
-2. tier1 active-window scan
+1. direct key or id hints, including Tier1 exact-handle get when resident
+2. tier1 active-window scan for recent/hot reuse
 3. tier2 exact index search
 4. tier2 graph neighborhood expansion
 5. tier2 semantic candidate generation
@@ -61,6 +61,17 @@ All recall-facing transports should map onto one logical `RecallRequest` even wh
 7. dedup and diversify
 8. ranking
 9. packaging
+
+## Tier1 exact and recent retrieval contract
+- Tier1 is the first bounded retrieval surface for exact and recent recall. It is an in-process derived accelerator, not authoritative evidence.
+- Tier1 may return or shortlist only already-authorized items after request normalization, deterministic effective-namespace binding, and policy or owner-boundary checks for the live request.
+- Tier1 exact retrieval is a direct handle path: given a stable memory id, external id mapping, or deterministic exact cue that resolves to one hot item, the system should attempt an O(1)-style lookup against Tier1-resident hot metadata before consulting Tier2.
+- Tier1 recent retrieval is a bounded active-window scan over a recency-ordered ring buffer or equivalent bounded hot structure for one effective namespace. The scan budget is capped by the window and query-class limits, never by total durable corpus size.
+- Tier1 entries may carry stable ids, compact text or snippets, recency markers, strength or salience scalars, freshness or generation anchors, and policy-bearing hot metadata needed to validate reuse; Tier1 must not own giant payloads or become the sole durable source.
+- Exact or recent Tier1 outcomes must remain inspectable as hit, miss, bypass, or stale-bypass style events, including whether the exact-handle lane or recent-window lane fired and how many recent candidates were inspected when that materially affects the route.
+- If the current request cannot prove a Tier1 entry is valid for its namespace, policy, version, or freshness anchors, the system must bypass that entry and continue on the colder canonical path rather than serving an ambiguous hit.
+- Tier1 participation may short-circuit later candidate generation for a satisfied request, but it must not trigger ANN search, graph expansion, namespace widening, or pre-cut cold payload fetch inside the Tier1 lane itself.
+- Successful encode, successful recall, and successful slower-tier retrieval may seed or refresh Tier1 for bounded reuse, but seeding, eviction, or refresh does not by itself change canonical durable ownership, archive state, or supersession state.
 
 ## Candidate explosion control
 - hard caps by query type

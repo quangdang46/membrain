@@ -76,6 +76,7 @@ Any request-path benchmark that reports only averages is incomplete. Tail behavi
 
 **Required benchmark surfaces**
 - Tier1 exact-hit latency
+- Tier1 recent-window search latency at a declared active-window size
 - Tier2 indexed retrieval latency at declared hot cardinality
 - Tier3 fallback latency at declared cold cardinality
 - context reranking benefit
