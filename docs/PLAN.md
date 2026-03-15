@@ -12523,6 +12523,8 @@ Every stored item should carry, directly or derivably, the following attributes:
 - `decay_state`
 - `retention_class`
 - `policy_flags`
+- `conflict_state`
+- `conflict_record_ids`
 - `lineage`
 - `version`
 - `tags`
@@ -12604,12 +12606,26 @@ A memory's canonical identity is the tuple of `namespace` + `id`.
 
 ### 13.4 Contradiction handling contract
 
+The contract must distinguish four different outcomes instead of collapsing them into one vague "conflict" state:
+
+- **Contradiction** means two or more memories make materially incompatible claims about the same subject, time slice, or policy-relevant fact.
+- **Supersession** is a contradiction resolution where a newer memory becomes the default operative version for normal retrieval while the older memory is preserved and linked.
+- **Unresolved conflict** means contradiction has been detected but no winner has been accepted yet; both sides remain first-class evidence.
+- **Authoritative override** is a policy-aware resolution where a higher-authority source or explicit human decision chooses the preferred operational interpretation without erasing the losing evidence.
+
 When a new fact conflicts with an existing fact:
 - do not overwrite the older fact silently;
 - create or update a `ConflictRecord`;
 - attach evidence references for both sides;
-- let retrieval/ranking choose presentation order later;
+- record machine-readable conflict state on affected memories and conflict artifacts;
+- let retrieval/ranking choose presentation order later without erasing disagreement;
 - preserve enough metadata for audit and repair.
+
+Additional required semantics:
+- `superseded_by` and lifecycle state `Superseded` apply only when the resolution is true supersession.
+- Unresolved conflicts must remain queryable directly rather than requiring inference from free-form text.
+- Authoritative overrides must record the authority source, authority reference, and resolution reason in durable conflict metadata.
+- Ranking, explanation, repair, and governance flows must treat contradiction state as first-class structured input.
 
 ---
 
@@ -12727,22 +12743,38 @@ The ranking docs and formulas should be treated as a tunable scoring framework, 
 ### 16.2 Expected score inputs
 
 The ranker may combine:
+- retrieval relevance or query alignment
 - recency
+- strength
 - salience
 - confidence
 - utility estimate
-- query alignment
-- goal alignment
+- goal, task, session, entity, or broader context alignment
 - memory type priors
-- contradiction penalty or contradiction surfacing bonus
+- graph support or resonance
+- contradiction penalty, disagreement-surfacing bonus, supersession penalty, or authoritative-override preference
 - duplicate-family collapse penalties
 - noise penalty
 
-### 16.3 Ranking output requirements
+### 16.3 Baseline ranking and bounded rerank contract
+
+Ranking should proceed in two bounded stages:
+1. baseline fusion on the capped candidate set using the score families above
+2. optional reranking on a small top-K shortlist when task, session, entity, or packaging context should sharpen ordering
+
+Rules:
+- reranking is an adjustment layer, not a second opaque ranker with unrelated logic
+- hard policy masks, namespace checks, and explicit suppressions apply before both stages and are never overridden by reranking
+- contradiction and supersession state remain first-class structured inputs throughout both stages
+- reranking may improve same-context or same-task retrieval, but it must emit inspectable deltas rather than hiding the original baseline
+
+### 16.4 Ranking output requirements
 
 Each scored result should ideally expose:
 - total score
-- component breakdown
+- baseline score families or component breakdown
+- rerank delta if applied
+- major penalty or bonus reasons
 - decaying-soon signal if applicable
 - contradiction/conflict marker if applicable
 - source tier
@@ -13631,6 +13663,7 @@ The `DATA_SCHEMAS.md` document identifies a base shape repeated across major mem
 
 **Purpose**
 - represent contradiction explicitly rather than hiding it in overwrite behavior
+- distinguish contradiction detection from later resolution so unresolved disagreement is durable, inspectable state
 
 **Required fields**
 - `id`
@@ -13638,6 +13671,9 @@ The `DATA_SCHEMAS.md` document identifies a base shape repeated across major mem
 - `updated_at_ms`
 - `namespace`
 - `version`
+- `status` (`open` or `resolved`)
+- references to conflicting memories
+- evidence handles for both sides
 
 **Typical optional fields**
 - `workspace_id`
@@ -13648,15 +13684,18 @@ The `DATA_SCHEMAS.md` document identifies a base shape repeated across major mem
 - `tags`
 
 **Additional expected fields**
-- references to conflicting memories
-- evidence handles for both sides
-- optional conflict status (open/resolved/superseded)
-- optional resolution explanation
+- `resolution_kind` (`coexist`, `superseded`, `authoritative_override`, or another explicitly modeled resolution)
+- `preferred_memory_id` when one side becomes the default operational interpretation
+- `superseding_memory_id` when the resolution is true supersession
+- authority source / authority reference / resolution reason when an authoritative override resolves the dispute
+- `resolved_at_ms` when status moves from `open` to `resolved`
 
 **Validation rules**
 - must be created or updated when contradiction is detected
 - must preserve both sides of the disagreement
+- unresolved conflicts must remain queryable without inferring state from free-form text
 - may influence ranking, but not storage erasure
+- authoritative override must preserve losing evidence and add explicit authority metadata rather than mutating old evidence in place
 
 #### 33.4.7 Goal
 
@@ -14474,13 +14513,20 @@ For each algorithm family, the production code should prefer:
 Most ranking-like scores can start from this common template:
 
 ```text
-score = bias
-      + w_recency * recency_feature
-      + w_salience * salience_feature
-      + w_confidence * confidence_feature
-      + w_utility * utility_feature
-      + w_goal * goal_alignment_feature
-      - w_noise * noise_feature
+baseline_score = bias
+               + w_relevance * retrieval_relevance_feature
+               + w_recency * recency_feature
+               + w_strength * strength_feature
+               + w_salience * salience_feature
+               + w_confidence * confidence_feature
+               + w_utility * utility_feature
+               + w_context * context_alignment_feature
+               + w_graph * graph_support_feature
+               + w_conflict * contradiction_or_resolution_feature
+               - w_dup * duplicate_penalty
+               - w_noise * noise_feature
+
+final_score = baseline_score + rerank_delta
 ```
 
 ### 37.2 Scores that should share this calibration philosophy
@@ -14503,10 +14549,11 @@ score = bias
 - calibrate by workload, not globally across all tasks
 - apply hard policy masks before soft ranking
 - keep score decomposition inspectable
+- keep rerank deltas bounded, attributable, and separately observable from baseline fusion
 
 ### 37.4 Practical consequence
 
-The architecture should expose score components as first-class observability data so tuning can happen without guesswork.
+The architecture should expose baseline score families, rerank deltas, and final ordering reasons as first-class observability data so tuning can happen without guesswork.
 
 ---
 
@@ -14886,8 +14933,11 @@ usearch ANN. Add as optional sub-step in Milestone 7 or early Milestone 8.
 
 When encoding a new memory that semantically conflicts with an existing one
 (high similarity + divergent content), instead of silent overwrite or duplicate,
-membrain creates a belief version chain. Old memory is marked `Superseded` and
-linked to the new version. The agent can query belief evolution over time.
+membrain creates durable contradiction metadata and a belief history chain. The
+resolution may remain open, resolve as coexistence, resolve as supersession, or
+resolve via authoritative override. Only true supersession marks the older
+memory `Superseded` and links it to the newer version. The agent can query
+belief evolution and unresolved disagreement over time.
 
 **Schema Changes**
 
@@ -14897,13 +14947,18 @@ ALTER TABLE memories ADD COLUMN belief_version INTEGER NOT NULL DEFAULT 1;
 ALTER TABLE memories ADD COLUMN belief_chain_id TEXT;
 
 CREATE TABLE belief_conflicts (
-  id              TEXT PRIMARY KEY,
-  chain_id        TEXT NOT NULL,
-  old_memory_id   TEXT NOT NULL REFERENCES memories(id),
-  new_memory_id   TEXT NOT NULL REFERENCES memories(id),
-  similarity      REAL NOT NULL,
-  detected_at     INTEGER NOT NULL,
-  resolution      TEXT NOT NULL  -- 'superseded' | 'coexist' | 'merged'
+  id                   TEXT PRIMARY KEY,
+  chain_id             TEXT NOT NULL,
+  old_memory_id        TEXT NOT NULL REFERENCES memories(id),
+  new_memory_id        TEXT NOT NULL REFERENCES memories(id),
+  similarity           REAL NOT NULL,
+  detected_at          INTEGER NOT NULL,
+  status               TEXT NOT NULL, -- 'open' | 'resolved'
+  resolution           TEXT NOT NULL, -- 'superseded' | 'coexist' | 'authoritative_override' | 'merged'
+  preferred_memory_id  TEXT REFERENCES memories(id),
+  authority_ref        TEXT,
+  resolution_reason    TEXT,
+  resolved_at          INTEGER
 );
 ```
 
@@ -14933,7 +14988,8 @@ impl ConflictDetector {
 pub enum ConflictResolution {
     Supersede { old_id: Uuid },
     Coexist,
-    UpdateExisting { target_id: Uuid },
+    AuthoritativeOverride { preferred_id: Uuid, authority_ref: String },
+    UpdateExisting { target_id: Uuid }, // only for same-meaning revision, not contradiction overwrite
 }
 
 pub enum MemoryState {
