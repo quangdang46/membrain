@@ -51,7 +51,7 @@ Context-envelope rules:
 | `warnings` | Non-fatal issues |
 | `policy_filters_applied` | Which policies affected the result |
 | `explain_handle` | Handle or embedded explanation |
-| `metrics` | Latency, candidate counts |
+| `metrics` | Latency, candidate counts, and any cache/degraded-mode counters needed to explain bounded serving; when namespace enforcement depends on bypass, denial, or degraded fallback, the machine-readable evidence may live in `metrics`, `warnings`, or the explanation referenced by `explain_handle`, but it must remain inspectable |
 
 ---
 
@@ -106,7 +106,7 @@ Task-oriented bounded retrieval for context construction. The primary retrieval 
 - optional `like_id` / `unlike_id` query-by-example cues
 - optional `graph_mode` and `cold_tier`
 
-**Outputs**: ranked evidence set, score summaries, contradiction markers, decaying-soon markers, packaging metadata for prompt construction
+**Outputs**: ranked evidence set, score summaries, contradiction markers, decaying-soon markers, packaging metadata for prompt construction, and explain metadata sufficient to summarize route choice, omitted-result reasons, provenance, freshness, cache or degraded-serving behavior, and full trace stages when requested
 
 **Rules**:
 - `query_text` may be omitted only when `like_id` or `unlike_id` provides the primary cue
@@ -141,13 +141,13 @@ Create or update explicit relations between memories, entities, or goals.
 
 Retrieve diagnostic and structural details about a memory.
 
-**Exposes**: current tier, lineage, policy flags, lifecycle state, index presence, graph neighborhood summary, decay/retention info, and linked contradiction state (`conflict_state`, related `ConflictRecord` handles, preferred memory if resolved)
+**Exposes**: current tier, lineage, policy flags, lifecycle state, index presence, graph neighborhood summary, decay/retention info, cache-related routing metadata when relevant, provenance summary, freshness markers, and linked contradiction state (`conflict_state`, related `ConflictRecord` handles, preferred memory if resolved)
 
 ### `memory_explain`
 
 Explain why a memory was stored, routed, recalled, ranked, filtered, demoted, or forgotten.
 
-**Explains**: routing signals, ranking components, policy filters, lineage ancestry, consolidation ancestry, forgetting/demotion reasons, and any contradiction resolution path (open conflict, supersession, or authoritative override)
+**Explains**: routing signals, ranking components, cache family/event/reason metadata when cache behavior materially affected the route, policy filters, exclusion or omission reasons, lineage ancestry, consolidation ancestry, provenance summary, freshness markers, trace stages when full detail is requested, forgetting/demotion reasons, and any contradiction resolution path (open conflict, supersession, or authoritative override)
 
 ### `memory_consolidate`
 
@@ -167,19 +167,20 @@ Raise retention protection or bypass normal forgetting/demotion.
 
 Controlled forgetting: suppress, decay, demote, compact, summarize, archive, redact, soft/hard delete.
 
-**Rules**: distinguish utility-driven forgetting from compliance deletion; preserve lineage; never remove last authoritative evidence unless policy allows
+**Rules**: distinguish utility-driven forgetting from compliance deletion; preserve lineage; enforce retention and legal-hold denial paths explicitly; never remove last authoritative evidence unless policy allows
 
 ### `memory_repair`
 
 Run or schedule repair: indexes, graph, lineage, summaries, shards.
 
-**Rules**: durable evidence wins over derived state; output what was fixed/rebuilt/unresolved; partial-fidelity repair records explicit loss
+**Rules**: durable evidence wins over derived state; prior durable state stays authoritative while repair is in flight; output what was fixed/rebuilt/unresolved; partial-fidelity repair records explicit loss; retry-budget exhaustion or escalation must remain visible when repair cannot complete automatically
 
 **Should return**:
 - repaired surface kind (`index`, `graph`, `lineage`, `cache`, `summary`, `shard`)
 - authoritative input set used for rebuild
 - namespace or shard scope touched
 - unresolved items still queued for repair
+- prior-state, stale-result, or degraded-serving markers when they materially affected the repair window
 - explicit loss records when only degraded fidelity could be restored
 
 ---

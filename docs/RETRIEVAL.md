@@ -42,9 +42,14 @@ All recall-facing transports should map onto one logical `RecallRequest` even wh
 - any cache or warm-path hit is valid only after request normalization, effective namespace binding, policy pruning, and owner-boundary checks for the current request
 - warm-path optimizations may short-circuit expensive stages within bounded budgets, but they must not bypass namespace pruning, policy denial/redaction, sibling caps, or the no pre-cut cold payload fetch rule
 - request-local reuse must track normalized request shape and relevant schema, index, policy, and ranking generations; item-, relation-, summary-, session-, task-, goal-, and process-local warm state must expire with its authoritative owner boundary
+- prefetch hints remain bound to the current session or task intent and may warm only handles or bounded shortlists; they must be canceled when intent, namespace scope, or policy scope changes
+- session warmup may preload a bounded session-local hot set, but every warmed family still needs fresh generation anchors before reuse on the live request path
+- process-local cold-start mitigation may reduce bootstrap latency, but request-visible reuse still must bind the current effective namespace, owner boundary, and relevant model or index generations
 - if warm state is stale, version-mismatched, scoped too broadly, or missing a fresh generation anchor for the current request, the system must bypass it and continue on colder authoritative paths rather than serve an ambiguous hit
 - absence, disablement, or repair of warm state may degrade latency but must not change the durable meaning of the request
-- when cache or prefetch participation materially affects the route, explain and audit surfaces should preserve that fact in machine-readable metadata
+- when cache or prefetch participation materially affects the route, explain and audit surfaces should preserve that fact in machine-readable metadata, including cache family, cache event, cache reason, warm source, and generation status
+- stale or invalidated warm state must surface as an explicit warning or bypass reason rather than being silently recoded as an ordinary miss
+- route metadata should preserve candidate counts before and after cache-influenced stages and whether degraded mode or cache-disabled serving forced colder fallback
 
 ## Candidate generation phases
 1. direct key or id hints
@@ -94,6 +99,15 @@ All recall-facing transports should map onto one logical `RecallRequest` even wh
 - packaged results may prioritize a preferred memory for normal task use, but they must still expose open disagreement, suppressed alternatives, or omitted conflict siblings when caps prevent returning the whole set
 - duplicate-family collapse must not blend contradictory evidence into one synthetic statement
 - inspect, explain, ranking, and repair flows must be able to reconstruct contradiction state from durable conflict artifacts plus preserved lineage and provenance
+
+## Explain and inspect surface contract
+- `explain=summary` is the default result-consumption surface: it should say why returned items appeared, which major route choices fired, which policy or budget boundaries mattered, and which freshness or conflict markers affect use of the result
+- `explain=full` or explicit inspect mode should add stage-by-stage routing traces, including candidate entry reasons, exclusion reasons, candidate counts, graph hops, cache and tier decisions, baseline score families, rerank deltas, and final packaging reasons
+- `explain=none` may suppress embedded explanation in the main response, but it must not change retrieval semantics or prevent later inspection through an explanation handle or equivalent trace reference
+- explanation surfaces must distinguish why an item appeared from why alternatives did not, including policy-filtered, budget-capped, duplicate-collapsed, low-confidence, superseded, stale-bypassed, or conflict-suppressed outcomes while respecting redaction boundaries
+- provenance summaries should identify source kind, source reference or opaque handle, lineage ancestry, and any summary or consolidation ancestry needed to inspect the returned item without treating derived artifacts as sole truth
+- freshness markers should surface decaying-soon, snapshot or as-of scoping, stale-derived warnings, and other time-sensitivity signals; conflict markers should surface open disagreement, supersession lineage, override reason, and omitted-sibling notes when applicable
+- CLI, daemon or JSON-RPC, and MCP surfaces may format explanations differently for humans, but the machine-readable field families should stay equivalent across interfaces, including `route_summary`, `result_reasons`, `omitted_summary`, `policy_summary`, `provenance_summary`, `freshness_markers`, `conflict_markers`, and `trace_stages` when full traces are requested
 
 ## Pattern-completion contract
 - pattern completion is a bounded recovery lane for fragmentary or partial-cue recall, not the default path when exact, recent, or indexed evidence already satisfies the request

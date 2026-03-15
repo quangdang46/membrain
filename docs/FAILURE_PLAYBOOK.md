@@ -125,12 +125,14 @@ Derived artifacts can help diagnose failure, but they must not overrule durable 
 - degraded recall quality
 - latency regression
 - missing or duplicated memories
+- candidate pools or duplicate-collapse counters growing beyond declared caps
 
 ### Immediate response
 - isolate namespace or shard if needed
 - stop destructive jobs
 - preserve forensic logs
 - enable degraded mode if available
+- force colder or narrower fallback if duplicate expansion is outrunning bounded request-path budgets
 
 ### Root-cause checklist
 - validate lineage
@@ -138,6 +140,7 @@ Derived artifacts can help diagnose failure, but they must not overrule durable 
 - inspect recent deploys
 - inspect repair queue growth
 - inspect compaction job history
+- inspect duplicate-collapse counters, candidate-count traces, and cache bypass or stale-warning evidence to confirm containment stayed bounded
 
 ## 7. Planner budget blow-up
 
@@ -146,12 +149,14 @@ Derived artifacts can help diagnose failure, but they must not overrule durable 
 - degraded recall quality
 - latency regression
 - missing or duplicated memories
+- candidate-planning or routing-budget counters exceeding declared caps repeatedly
 
 ### Immediate response
 - isolate namespace or shard if needed
 - stop destructive jobs
 - preserve forensic logs
 - enable degraded mode if available
+- force simpler or narrower bounded routing while planner budgets are being exceeded continuously
 
 ### Root-cause checklist
 - validate lineage
@@ -159,6 +164,7 @@ Derived artifacts can help diagnose failure, but they must not overrule durable 
 - inspect recent deploys
 - inspect repair queue growth
 - inspect compaction job history
+- inspect planning-budget counters, candidate-count traces, and degraded-mode or cache-bypass evidence to confirm containment remained explicit
 
 ## 8. Graph fanout explosion
 
@@ -167,12 +173,14 @@ Derived artifacts can help diagnose failure, but they must not overrule durable 
 - degraded recall quality
 - latency regression
 - missing or duplicated memories
+- graph-expansion depth or node counters hitting containment caps repeatedly
 
 ### Immediate response
 - isolate namespace or shard if needed
 - stop destructive jobs
 - preserve forensic logs
 - enable degraded mode if available
+- force graph-disabled or shallower bounded fallback if traversal caps are being hit continuously
 
 ### Root-cause checklist
 - validate lineage
@@ -180,6 +188,7 @@ Derived artifacts can help diagnose failure, but they must not overrule durable 
 - inspect recent deploys
 - inspect repair queue growth
 - inspect compaction job history
+- inspect traversal-cap telemetry, candidate-count traces, and omission reasons to confirm fanout containment stayed explicit
 
 ## 9. Repair backlog growth
 
@@ -234,12 +243,14 @@ Derived artifacts can help diagnose failure, but they must not overrule durable 
 - degraded recall quality
 - latency regression
 - missing or duplicated memories
+- policy-denied, redacted, or cache-bypass paths disagreeing across interfaces
 
 ### Immediate response
 - isolate namespace or shard if needed
 - stop destructive jobs
 - preserve forensic logs
 - enable degraded mode if available
+- freeze shared or public widening paths and bypass warm state until namespace filters are revalidated from durable truth
 
 ### Root-cause checklist
 - validate lineage
@@ -247,6 +258,7 @@ Derived artifacts can help diagnose failure, but they must not overrule durable 
 - inspect recent deploys
 - inspect repair queue growth
 - inspect compaction job history
+- inspect cache-event, degraded-mode, and explain-trace evidence across CLI, daemon, and MCP surfaces to confirm the leak was contained without protected-count disclosure
 
 ## 12. Retention-policy bug
 
@@ -255,12 +267,14 @@ Derived artifacts can help diagnose failure, but they must not overrule durable 
 - degraded recall quality
 - latency regression
 - missing or duplicated memories
+- legal-hold, tombstone, or purge-eligibility markers drifting from durable expectations
 
 ### Immediate response
 - isolate namespace or shard if needed
 - stop destructive jobs
 - preserve forensic logs
 - enable degraded mode if available
+- freeze purge, archive, or payload-drop workflows until retention and legal-hold markers are revalidated from durable truth
 
 ### Root-cause checklist
 - validate lineage
@@ -268,4 +282,5 @@ Derived artifacts can help diagnose failure, but they must not overrule durable 
 - inspect recent deploys
 - inspect repair queue growth
 - inspect compaction job history
+- inspect retention audits, legal-hold markers, and tombstone evidence to confirm migration or repair did not erase policy-bearing durable state
 

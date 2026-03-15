@@ -335,6 +335,7 @@ When new information conflicts with existing evidence:
 5. Policy flags travel with the memory, not only one index layer
 6. Tier location is persisted state, not inference
 7. `payload_ref` / `content_ref` must be stable, resolvable, or explicitly tombstoned
+8. Hot-path filter fields, lifecycle/tier state, policy markers, contradiction handles, and provenance handles must remain queryable without fetching detached payload bytes or decoding opaque metadata blobs
 
 ## Tiering
 

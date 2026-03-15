@@ -36,13 +36,22 @@ Every cache, sidecar, warm layer, and prefetch queue in retrieval is a bounded d
 - if a cache cannot explain its ownership boundaries, stale state, or fallback behavior, it should be treated as not production-ready
 
 ### Prefetch and warmup boundaries
-- prefetch is hint-driven, optional, budget-bounded, and cancelable when user intent changes
+- prefetch hints are speculative, owner-bound handles or shortlists keyed to the current session or task intent; they are optional, budget-bounded, and cancelable when user intent changes
+- session warmup may preload only a bounded hot set for one bound session and one effective namespace; it must expire when that session or its visibility scope changes
+- cold-start mitigation may prewarm process-local bootstrap artifacts, but any request-visible reuse still must bind the current effective namespace, owner boundary, and fresh generation anchors before it affects results
 - prefetch, session warmup, goal-conditioned warming, and cold-start mitigation must not starve foreground work or cross namespace boundaries
 - no warm-path optimization may force pre-cut cold payload fetch or bypass policy, namespace pruning, or redaction behavior
 
 ### Minimum observability
-- operators and explain surfaces should be able to distinguish cache hit, miss, bypass, invalidation, stale warning, repair warmup, and disabled mode
-- cache participation should remain inspectable enough to separate staleness, policy filtering, and ranking behavior during debugging and resilience work
+- operators and explain surfaces should be able to distinguish cache hit, miss, bypass, invalidation, stale warning, repair warmup, disabled mode, and cache-induced degraded mode
+- stale or invalidated warm state must surface as an explicit warning or bypass reason rather than collapsing into an ordinary miss
+- cache participation should remain inspectable enough to separate staleness, policy filtering, ranking behavior, and cold fallback during debugging and resilience work
+
+### Explain and routing-trace integration
+- machine-readable explain, inspect, and audit metadata should expose at minimum `cache_family`, `cache_event`, `cache_reason`, `warm_source`, and `generation_status` whenever cache or warm-path behavior materially affects the route
+- routing traces should also preserve candidate counts before and after each cache-influenced stage so operators can tell whether latency changes came from reuse, pruning, or colder fallback
+- policy-denied or redacted routes may hide protected handles or counts, but they must still preserve that a cache path was skipped, bypassed, or filtered for policy reasons
+- cache-disabled or degraded-mode serving must stay distinct from an ordinary cold miss so operators and tests can attribute regressions correctly
 
 ## Cache family map
 
@@ -137,8 +146,10 @@ ANN probe cache accelerates repeated vector-search shortlist generation for the 
 Prefetch hints accelerate likely next lookups as speculative handles, not authoritative payloads.
 
 ### Guardrails
-- version-aware invalidation
-- namespace-aware keys
+- session-local or task-local ownership only; hints must not be reused outside the bound intent owner
+- keys should include family + effective namespace + bound session or task + intent signature + relevant policy generation
+- authoritative intent change, session or task rebinding, policy change, or budget exhaustion should cancel, bypass, or drop queued hints
+- prefetch may speculate on handles or shortlist candidates only; payload materialization still waits for the final bounded request path
 - bounded memory use
 - stale-result observability
 - cache hit and miss metrics
@@ -149,8 +160,10 @@ Prefetch hints accelerate likely next lookups as speculative handles, not author
 Session warmup accelerates early session recall by preloading a bounded hot set for the current scoped session.
 
 ### Guardrails
-- version-aware invalidation
-- namespace-aware keys
+- session-local ownership within one effective namespace; warmed state expires with the bound session even if bytes remain resident
+- keys should include family + effective namespace + session binding + policy generation + fresh generation anchors for every warmed family the session reuses
+- authoritative session rebinding, namespace widening or narrowing, policy change, or warmed-family generation shift must invalidate or bypass the warmed set
+- session warmup may improve early latency, but foreground retrieval must fall back to colder authoritative paths whenever warmed state is missing, stale, or scoped too broadly
 - bounded memory use
 - stale-result observability
 - cache hit and miss metrics
@@ -173,8 +186,10 @@ Goal-conditioned cache accelerates repeated retrieval for the current task or go
 Cold-start mitigation accelerates startup and first-query behavior through discardable warm artifacts only.
 
 ### Guardrails
-- version-aware invalidation
-- namespace-aware keys
+- process-local ownership only; bootstrap artifacts may survive within one process generation but must not masquerade as durable shared state
+- keys should include family + process generation + effective namespace when request-visible reuse occurs + model generation + index generation
+- process restart, model or index generation shift, namespace rebinding, or uncertain repair state must invalidate, bypass, or rebuild mitigations before reuse
+- cold-start mitigation may preload bootstrap handles, indexes, or models, but request-serving paths still need fresh owner-bound checks and generation anchors before warmed artifacts affect results
 - bounded memory use
 - stale-result observability
 - cache hit and miss metrics

@@ -81,6 +81,7 @@ Every operation executes in exactly one effective namespace, even when additiona
 - Cross-tenant or cross-user isolation failures are security incidents.
 - Derived artifacts such as caches, graph projections, summaries, and explain traces must preserve the same namespace and visibility boundaries as durable truth.
 - Namespace-aware keys and filters are required for caches, repair, and prefetch layers so warm state cannot leak across tenants.
+- When cache, repair, or degraded-serving paths are bypassed, stale, or rebuilding, explain and audit surfaces must still preserve machine-readable evidence that the namespace boundary was enforced rather than silently collapsing the event into an ordinary miss or generic internal error.
 
 ## Denial, redaction, and explain contract
 

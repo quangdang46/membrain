@@ -8,7 +8,7 @@ In-process hot memory with bounded size.
 Warm indexed store supporting exact and bounded hybrid retrieval.
 
 ### Tier3
-Cold durable archive supporting cheap storage and reconstructable recall.
+Cold durable archive supporting cheap storage, metadata-first prefiltering, and reconstructable recall.
 
 ## Principles
 - every tier has a different cost profile
@@ -17,6 +17,189 @@ Cold durable archive supporting cheap storage and reconstructable recall.
 - rebuild must be possible from durable evidence
 - indexes must be repairable
 - tier1 should avoid large payload ownership
+
+## hot.db contract
+
+### Role and ownership
+- `hot.db` is the authoritative durable metadata store backing Tier2 exact and hybrid retrieval plus Tier1 promotion for memories whose canonical durable metadata still lives in the hot tier.
+- It keeps the filterable hot-path record for memories that still participate in foreground retrieval, including cases where bulky payload bytes have already moved to cold storage while canonical metadata ownership remains hot.
+- Once consolidation or demotion moves a memory's canonical durable metadata ownership to `cold.db`, any remaining hot-tier row for that memory is a derived query-serving mirror rather than a second authoritative source.
+- It does not become the long-term owner of giant payload blobs, ANN search vectors, or other acceleration artifacts whose loss must remain repairable.
+
+### Logical schema split
+
+| Table family | Required contents | Authority class | Request-path role |
+|---|---|---|---|
+| hot memory index | stable identity, namespace, canonical type/kind, lifecycle state, current tier, version, strength/salience/decay fields, recall counters, retention and policy markers, provenance handles, contradiction or supersession handles, `content_ref`, `payload_ref`, and any bounded routing flags | authoritative durable | metadata-first prefilter and bounded candidate selection |
+| hot text surface | `compact_text` plus other bounded lexical fields needed for exact or keyword retrieval and explainability | authoritative durable text surface | exact lookup and FTS source without payload fetch |
+| hot embedding surface | authoritative float embeddings or durable refs to them for hot memories | authoritative durable | exact rescore source and rebuild input for the hot ANN lane |
+| normalized link tables | entity, relation, lineage, contradiction, and graph-edge rows keyed by stable ids | authoritative for canonical links; derived for purely similarity-driven materializations | bounded expansion, inspect, and repair |
+| control metadata | schema version, migration state, repair watermarks, config generation, and any stable id mapping needed by sidecars | authoritative durable control state | safe startup, migration, and rebuild orchestration |
+
+### Metadata layout rules
+- Keep the prefilter row narrow and stable: fields needed for namespace, policy, lifecycle, ranking, and routing decisions must be queryable without touching large text or detached payload bytes.
+- `compact_text` and other bounded hot lexical fields may live in `hot.db`, but giant payload ownership stays behind `payload_ref` or the cold durable store.
+- `content_ref` and `payload_ref` survive compaction, demotion, redaction, and payload relocation; changing a storage handle must not mint a new identity.
+- Filter-participating entity, relation, contradiction, and provenance metadata must remain available through normalized or otherwise directly queryable structures instead of opaque per-row blobs or ANN-only annotations.
+- Opaque "all metadata in one blob" layouts are out of contract for hot-path state because they force post-filter decoding and weaken inspectability.
+
+### Hot-path index families
+- Identity indexes must support stable `(namespace, id)` lookup plus any deterministic external-id mapping required by ANN or graph sidecars.
+- Composite prefilter indexes must cover effective namespace or visibility scope, lifecycle or tier eligibility, and the rank-driving scalars used for the first bounded cut so SQLite can trim candidates before ANN, graph expansion, or payload fetch.
+- Secondary indexes should support the structured filters the request path actually uses, such as canonical type or kind, engram or cluster handle, relation or entity adjacency, and recent or labile state when those are part of a bounded route.
+- FTS5 or equivalent lexical projections over `compact_text` and selected bounded text fields are allowed and expected, but they are derived from authoritative hot rows rather than a second source of truth.
+- Maintenance indexes for consolidation, reconsolidation windows, forgetting, and repair may exist alongside request-path indexes, but they do not justify full-store scans on foreground paths.
+
+### Mutation and consistency rules
+- Encode writes authoritative hot rows first: identity, metadata, handles, and any hot text or embedding surfaces. Only after the durable write succeeds may FTS projections, hot ANN membership, or caches be refreshed.
+- `on_recall` updates recency, recall counters, strength or stability fields, and any labile-window metadata in `hot.db`, then refreshes Tier1. It must not rewrite bulky payloads or rebuild ANN state unless embedding-bearing state actually changed.
+- Reconsolidation, contradiction resolution, policy changes, and schema-preserving edits must follow the memory-model versioning rules in durable rows first, then regenerate derived hot projections from those accepted rows.
+- Consolidation or demotion may move bulky payload ownership and later the memory's canonical durable metadata ownership to cold surfaces. Once that ownership transfer is complete, any retained hot row is only a bounded serving mirror for identity, policy, provenance, and routing, and removal from the hot ANN lane happens only after the cold durable metadata reflects the new canonical state.
+- Startup and repair rebuild hot ANN, FTS, cluster materializations, cached counts, and similar accelerators from authoritative hot rows or from cold durable truth when a retained hot row is only a serving mirror. When a derived accelerator disagrees with canonical durable ownership, the canonical durable store wins.
+
+## cold.db contract
+
+### Role and ownership
+- `cold.db` is the authoritative durable Tier3 record for consolidated and archived memories whose canonical durable ownership has moved off the hot path.
+- It owns the cold durable metadata row plus any cold-owned payload bytes, detached content objects, retention markers, and archive state needed to preserve inspectable memory truth over long horizons.
+- When a memory's canonical durable ownership lives in `cold.db`, any hot-tier copy kept for bounded foreground routing is derived serving state and must be refreshed or dropped from cold durable truth.
+- It does not share authority with the cold ANN sidecar, FTS projections, bloom filters, shard descriptors, caches, or other accelerators; those remain rebuildable conveniences.
+
+### Logical schema split
+
+| Table family | Required contents | Authority class | Request-path role |
+|---|---|---|---|
+| cold memory index | stable identity, namespace, canonical type/kind, lifecycle state, current tier, version, retention class, archive status, policy markers, strength/salience/decay snapshot, provenance handles, contradiction or supersession handles, `content_ref`, `payload_ref`, integrity markers, and any cold routing flags | authoritative durable | metadata-first prefilter and durable inspect anchor |
+| cold payload ownership | detached payload bytes, compression or encoding metadata, chunk manifests, tombstones, and integrity data when the durable payload is owned in Tier3 | authoritative durable payload surface | final payload materialization after bounded candidate cut |
+| cold text or snippet surface | bounded lexical preview, excerpt, or other inspectable text needed for explainability and exact fallback without pulling the full detached payload | authoritative durable only when stored as the canonical bounded text surface; otherwise derived | metadata-first exact fallback and inspect |
+| cold embedding records | authoritative float embeddings or durable refs needed to rescore cold candidates and rebuild quantized search sidecars | authoritative durable | cold semantic rescore and rebuild input |
+| archive control metadata | retention policy, hold or purge markers, migration watermarks, repair state, and audit records for archive transitions | authoritative durable control state | retention enforcement, repair, and inspect |
+
+### Payload layout and detached handle rules
+- `content_ref` names the canonical logical content handle for the memory and stays stable across compaction, archive promotion, payload rechunking, and storage-class moves unless it is explicitly tombstoned.
+- `payload_ref` names the current durable payload location or manifest used to materialize the full body; it may change when bytes are recompressed, rechunked, or relocated, but the memory identity and `content_ref` must not.
+- A cold durable row must preserve enough directly queryable metadata to route, filter, rank, inspect, and explain the memory without decoding the detached payload body first.
+- Detached payload layouts may use inline blobs, chunk manifests, or object-style references, but each layout must remain resolvable from durable records and must carry integrity metadata plus an explicit tombstone path when content is intentionally removed.
+- If policy, redaction, or retention removes payload bytes, the durable row must retain the identity, lineage, provenance, policy outcome, and tombstone reason rather than pretending the memory never existed.
+
+### Archive and retention rules
+- Archive is a durable lifecycle state, not a hidden trash bin: archived memories remain inspectable through metadata, lineage, policy, and retention surfaces even when their payload is detached, compressed, or partially withheld.
+- Retention decisions must be represented in cold durable metadata with explicit class, horizon, hold, and purge eligibility markers so operators can explain why a memory remains, is frozen, or is pending deletion.
+- Archiving may move payload bytes to cheaper layouts or storage classes, but it must not orphan `content_ref`, `payload_ref`, or the ability to inspect why the record exists.
+- Purge or payload-drop flows must leave a durable tombstone or loss record whenever policy requires preserving the fact of prior existence, prior authority, or prior retention action.
+- Inspect surfaces should be able to answer what exists, where the durable payload lives, whether it is archived or tombstoned, and which retention rule controls it without performing a full payload fetch.
+- Migration and repair flows must preserve legal-hold, retention-horizon, and tombstone markers even when payload layouts, manifests, or sidecars are rewritten.
+- If detached payloads or derived cold surfaces are stale, partially restored, or unavailable during repair, inspect and audit surfaces must expose explicit staleness or loss markers rather than implying the record disappeared or was fully rebuilt.
+
+### Cold-path query and rebuild rules
+- Cold retrieval starts with metadata-first SQL prefiltering over cold durable rows, using namespace, policy, lifecycle, archive, retention, and rank-driving scalars before any ANN probe or payload fetch.
+- Bounded lexical previews, snippets, and other small text surfaces may participate in cold filtering and explainability, but full detached payload materialization stays deferred until after the final candidate cut.
+- No cold path may require decompression or object fetch just to decide basic eligibility, contradiction state, retention visibility, or archive status.
+- Startup and repair may rebuild cold ANN, FTS, manifests, and other sidecars from authoritative cold rows plus authoritative embeddings and payload ownership records.
+- When `cold.db`, payload manifests, and a cold sidecar diverge, the authoritative durable record set wins; repair rebuilds the sidecar or emits explicit loss telemetry if durable payload evidence is incomplete.
+
+## Procedural and derived-state persistence surfaces
+
+### Surface classes
+
+| Surface class | Typical examples | Authority class | Canonical source / rebuild source | Why it persists |
+|---|---|---|---|---|
+| procedural durable surface | accepted pattern→action mappings, policies, preferences, durable procedural metadata | authoritative durable when explicitly accepted as the operative rule or behavior | n/a for accepted truth; promotion or edit still keeps lineage to acceptance/source context | exact procedural lookup and policy-bearing actionability |
+| derived durable artifacts | summaries, extracted facts, tentative skills, graph or neighborhood summaries, checkpoints, shard descriptors, compaction manifests | derived durable artifact | authoritative memories, canonical relation tables, lineage, policy/redaction state, and workflow inputs | reuse, inspect, audit, or handoff without recomputing every time |
+| derived acceleration surfaces | Tier1 caches, result caches, summary caches, entity neighborhood caches, ANN probe caches, graph materializations, FTS, bloom filters, prefix indexes | derived acceleration state | authoritative durable rows plus current schema, policy, lineage, index, embedding, and model-dependent generations | latency reduction only |
+
+### Procedural durable surface rules
+- A dedicated procedural store such as `procedural.db` is allowed for stable pattern→action mappings, policies, preferences, and other procedural metadata whose value is the action rule itself rather than a summary of some other memory.
+- Procedural entries that are explicitly authored, approved, or otherwise accepted as the operative rule are authoritative durable state and must survive cache drops, index rebuilds, and tier repair.
+- Extracted skills synthesized from repeated episodes or outcomes are not automatically authoritative just because they are stored durably; they remain lineage-bearing derived artifacts until an explicit acceptance path promotes them.
+- Skill extraction or procedural generalization must not delete the underlying episodic or semantic evidence or the source engram links that justify the rule.
+
+### Derived durable artifact rules
+- Persisted summaries, extracted facts, graph summaries, tentative skills, checkpoints, and compaction outputs must record artifact type, source-set or lineage handles, producer/workflow generation, freshness or repair status, and the rebuild inputs needed to regenerate them.
+- Durable storage of an artifact is justified when reuse, inspectability, auditability, or background coordination is valuable; durability alone does not grant authority over memory existence, policy, contradiction, or canonical relation truth.
+- Graph or neighborhood summaries may be stored for bounded inspect and recall support, but canonical entity and relation tables remain the source of truth and summary projections must be replaceable.
+- If source evidence, lineage, policy, redaction, schema, or workflow generation changes, dependent derived artifacts must be invalidated, regenerated, or marked stale instead of silently surviving across the mismatch.
+
+### Acceleration and cache rules
+- Summary caches, entity neighborhood caches, ANN probe caches, Tier1 item caches, result caches, negative caches, graph materializations, and other warm surfaces remain derived acceleration state whether they live in RAM, SQLite, mmap sidecars, or separate files.
+- Each family must declare its owner boundary, generation anchors, invalidation triggers, and degraded-mode fallback so repair can decide whether to bypass, rebuild, or discard it.
+- Foreground correctness must not depend on any warm surface being populated; when cache state is missing, stale, or ambiguous, the system serves slower authoritative paths rather than semantically different warmed results.
+- Process-local, session-local, task-local, or goal-local warm state expires with its owner boundary even if bytes are still present on disk or in memory.
+
+### Rebuild and promotion rules
+- Rebuild flows always proceed downward from authoritative durable evidence to derived durable artifacts and then to acceleration layers; they must never silently promote a stale artifact into truth because it is convenient.
+- Promotion of a derived procedural artifact into authoritative procedural state requires an explicit acceptance event, retained lineage, and a durable version transition rather than an implicit side effect of repeated reuse.
+- When a derived surface can be restored only partially, the system must emit explicit loss or staleness telemetry and keep the authoritative record of what was or was not reconstructed.
+- A persisted derived surface that cannot explain its source lineage, freshness, owner boundary, or rebuild path is out of contract for production use.
+
+## Migration, versioning, and rollback protocol
+
+### Schema version contract
+- Every authoritative durable store, derived durable store, and persisted sidecar that participates in storage or retrieval must carry an explicit schema or format generation that can be inspected before read, repair, or rebuild work begins.
+- Schema generation must be tracked separately for canonical durable rows, payload manifests, procedural durable surfaces, and persisted derived accelerators so operators can tell which layer changed and which layers only need rebuild.
+- A version bump is required whenever stored field meaning, invariants, retention semantics, policy-bearing metadata, identity handles, rebuild inputs, or on-disk artifact interpretation changes.
+- Additive fields that do not alter interpretation may remain backward-readable during rollout, but the generation boundary and compatibility window still must be documented explicitly.
+
+### Migration unit and ordering rules
+- Migrations must preserve stable memory identity, lineage, timestamps, namespace scope, policy markers, contradiction state, retention state, and canonical content handles across hot, cold, and procedural durable stores.
+- Canonical durable schema changes land before dependent derived durable artifacts or sidecars are migrated or rebuilt; derived layers must never be upgraded first and then treated as truth.
+- A migration plan must declare which surfaces are in-place transforms, copy-forward rewrites, rebuild-only sidecars, or explicit drop-and-regenerate artifacts.
+- Cross-store migrations must keep old and new records interpretable long enough for bounded validation, rollback, or replay; do not create a window where neither representation is authoritative.
+
+### Rollback contract
+- Every schema or storage-behavior change must declare rollback conditions, rollback scope, and the precise durable truth the system falls back to if validation fails.
+- Rollback may discard newly built sidecars, caches, and other derived surfaces freely, but it must not discard accepted authoritative durable mutations without an explicit restore or reverse-migration path.
+- If a migration changes externally visible behavior, operators need both storage rollback notes and behavior rollback notes so CLI, daemon, IPC, and MCP surfaces can be restored consistently.
+- When rollback cannot fully restore a partially migrated derived artifact, the system should prefer dropping or rebuilding that artifact from authoritative durable truth instead of preserving ambiguous mixed-generation state.
+
+### Validation and repair gates
+- Before a mutating migration, operators should be able to snapshot durable truth, export or back up the affected scope, and run doctor or dry-run checks appropriate to the surface.
+- After migration, validation must prove schema readability, durable-record counts or invariants, policy and retention marker preservation, lineage continuity, and rebuildability of dependent indexes, caches, and graph surfaces.
+- If validation fails, affected namespaces or shards may run in degraded or read-only mode while rollback or repair proceeds, but they must not serve ambiguous mixed-generation truth.
+- Repair after migration follows the same durable-truth-first rule as ordinary rebuild: canonical rows win, derived artifacts are regenerated downward, and partial fidelity requires explicit loss or staleness telemetry.
+
+### Cross-doc propagation rules
+- Any schema change must update the canonical schema location in `PLAN.md`, the relevant field or lifecycle contract in `MEMORY_MODEL.md`, and any exposed CLI or MCP surfaces in `CLI.md` or `MCP_API.md` before the change is considered documented.
+- Storage migrations that affect operations must also update `OPERATIONS.md` with command sequence, rollback conditions, and post-run validation expectations.
+- Contributor-facing migration and rollback notes belong in `CONTRIBUTING.md`; storage-specific versioning and ordering rules belong here in `STORAGE.md`.
+- If a change touches only derived accelerators or cache generations, the docs still must say whether the change is rebuild-only, requires warm-state invalidation, or requires a durable migration.
+
+### Compatibility and coexistence rules
+- Mixed-version coexistence is allowed only for an explicitly declared compatibility window with clear read/write rules; silent perpetual backward-compatibility shims are out of contract.
+- Readers may tolerate older additive layouts temporarily, but writers must not emit ambiguous records whose interpretation depends on guessing the active generation.
+- Namespace isolation, policy checks, retention markers, legal-hold markers, tombstones, and lineage semantics must survive migrations exactly unless the migration itself explicitly changes those semantics and records the reason.
+- A migration that cannot preserve the ability to rebuild dependent derived surfaces from authoritative durable truth is unacceptable until the rebuild path is specified.
+
+## Vector indexing contract
+
+### Official split
+- Semantic vector retrieval uses USearch-based ANN sidecars split into a bounded hot lane and a disk-backed cold lane.
+- Both lanes accelerate recall only; authoritative truth stays in durable SQLite records plus authoritative embeddings.
+
+### Hot vector lane (Tier2)
+- Purpose: low-latency semantic recall over recent or partially consolidated memories.
+- Residency: in-memory only and bounded by `hot_capacity` (the canonical plan examples use 50,000 vectors).
+- Representation: reduced-precision search vectors chosen by benchmarked configuration; the plan's default examples use float16-style hot storage/query quantization while durable float32 embeddings remain available for exact rescore.
+- Candidate budget: metadata-first SQL prefilter before ANN, capped by the configured prefilter limit (canonical plan example: 5,000 ids), then a bounded ANN shortlist (canonical plan examples: top-100 raw hits) and a smaller full-precision rescore slice (canonical plan examples: top-20) before graph expansion and final packaging.
+- Mutation path: add or update on encode and any embedding-changing reconsolidation; remove when consolidation migrates a memory out of the hot semantic set.
+- Persistence: derived and rebuildable, not authoritative. The hot ANN sidecar may be rebuilt from hot durable tables on daemon start or repair instead of being treated as durable truth.
+- Failure contract: a missing or stale hot index may degrade latency or routing quality, but it must not lose memory existence, lineage, policy, or contradiction state.
+
+### Cold vector lane (Tier3)
+- Purpose: disk-scale semantic recall over consolidated or cold memories after a hot miss or low-confidence hot result.
+- Residency: persisted mmap-backed sidecar, remapped on startup, disk-bounded rather than RAM-bounded.
+- Representation: quantized search vectors optimized for mmap retrieval (the canonical plan examples use int8), while authoritative float32 embeddings or equivalent durable evidence remain available for rescore.
+- Candidate budget: cold ANN probe remains bounded (canonical plan examples: top-100), and payload decompression or fetch stays deferred until after final candidate trimming and policy-safe packaging.
+- Mutation path: append or update during consolidation, archive promotion, or repair rebuilds rather than on every hot write.
+- Persistence: persisted derived artifact. When the sidecar diverges from durable records, `cold.db` and the authoritative embedding records win and the sidecar is rebuilt.
+- Failure contract: cold sidecar corruption is a repairable operational defect, not data loss; rebuild uses durable records and emits explicit loss telemetry if exact reconstruction is impossible.
+
+### Cross-tier rules
+- Namespace and policy pruning happen before either ANN lane runs.
+- No request path may force a full-store scan, pre-cut payload fetch, or bypass declared candidate budgets.
+- Hot and cold indexes use the same stable ids as durable records; index-local handles must not create separate memory identities.
+- Tier transitions must update durable metadata first or atomically with index mutation so repair can replay safely.
+- Benchmark claims for vector retrieval must declare dimensions, quantization format, prefilter limit, ANN shortlist size, rescore slice, hardware, and warm versus cold conditions.
 
 ## Durable-versus-derived state matrix
 

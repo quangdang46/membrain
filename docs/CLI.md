@@ -89,7 +89,7 @@ membrain recall "auth" --explain summary --cold-tier avoid
 | `--at` | — | Recall at named snapshot (`at_snapshot`) |
 | `--namespace` | caller default if deterministic, otherwise required | Namespace scope |
 | `--include-public` | false | Widen only to policy-approved shared/public surfaces |
-| `--explain` | summary | Explain verbosity: none, summary, full |
+| `--explain` | summary | Explain verbosity: none, summary, full; summary explains why results appeared and what major route/policy/budget boundaries mattered, while full adds routing-trace stages and exclusion details |
 | `--cold-tier` | auto | Cold-tier routing hint: avoid, auto, allow |
 
 Normalization and safety rules:
@@ -97,6 +97,8 @@ Normalization and safety rules:
 - `--as-of` and `--at` must not be combined unless a later contract defines deterministic precedence.
 - `--include-public` does not bypass namespace ACLs or expose private cross-namespace data.
 - `--cold-tier allow` may enable Tier3 candidate generation, but it does not permit pre-cut cold payload fetch.
+- `--explain summary` should surface major route choices, omitted-result reasons, freshness/conflict markers, and any cache bypass, stale-warning, or degraded-mode outcome that materially affected returned results.
+- `--explain full` should preserve machine-readable routing-trace parity with daemon, IPC/JSON-RPC, and MCP surfaces, including candidate counts, cache family or event data, and exclusion reasons where those surfaces exist.
 
 ### `membrain forget <ID> [OPTIONS]`
 
@@ -127,7 +129,7 @@ membrain stats --at before-refactor    # stats at snapshot point
 
 ### `membrain inspect <ID> [OPTIONS]`
 
-Full memory details: tier, lineage, policy, lifecycle, graph neighborhood, decay.
+Full memory details: tier, lineage, policy, lifecycle, graph neighborhood, decay, cache-related routing metadata when relevant, provenance summary, freshness markers, and conflict state.
 
 ```bash
 membrain inspect <uuid>
@@ -212,6 +214,8 @@ membrain diff --since 4000 --top 5 --json
 
 ### `membrain audit <ID> [OPTIONS]` (Feature 19)
 
+Audit output should preserve retention, legal-hold, repair, and degraded-serving evidence strongly enough that operators can distinguish policy outcomes from stale or partially rebuilt derived state.
+
 ```bash
 membrain audit <uuid>                       # full history
 membrain audit <uuid> --since 5000
@@ -249,9 +253,12 @@ membrain beliefs --resolve <id>       # resolve pending conflict
 
 ### `membrain why <ID> [OPTIONS]` (Feature 11)
 
+Trace causal and retrieval rationale for one item, including lineage and route ancestry when available.
+
 ```bash
 membrain why <uuid>                   # trace causal chain to root evidence
 membrain why <uuid> --depth 5
+membrain why <uuid> --json            # machine-readable route/provenance chain
 ```
 
 ### `membrain invalidate <ID> [OPTIONS]` (Feature 11)
@@ -384,6 +391,8 @@ membrain mcp       # start MCP stdio server
 ---
 
 ## Benchmarking
+
+Benchmark and diagnostic coverage should include not only happy-path tier latency but also representative load, rebuild, and migration-sensitive evidence when those paths change.
 
 ```bash
 membrain benchmark tier1

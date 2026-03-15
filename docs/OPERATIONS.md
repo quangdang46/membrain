@@ -245,6 +245,7 @@ membrain health --brief
 - Cache hit rate dip and recovery curve
 - Candidate count parity against durable truth
 - Namespace isolation and policy-filter integrity during warmup
+- Stale-warning, bypass, invalidation, and degraded-mode rates by cache family
 
 ### Rollback Conditions
 - Warmed caches surface items blocked by namespace or policy filters
@@ -256,6 +257,9 @@ membrain health --brief
 
 ### Derived-cache repair rules
 - Caches, sidecars, and prefetch queues are drop-and-rewarm derived surfaces keyed by effective namespace, declared owner boundary, and the policy and generation inputs that affect reuse.
+- Prefetch queues must be rebuilt from live session or task intent only; repaired hints should be discarded rather than replayed if the original owner binding or intent signature is no longer authoritative.
+- Session warmup recovery may rebuild a bounded session-local hot set, but rewarmed entries remain unusable until the session binding, visibility scope, and warmed-family generation anchors are rebound.
+- Process-local cold-start mitigation may be reinitialized during repair or restart, but request-serving paths must treat prewarm artifacts as bootstrap-only until current namespace and generation checks succeed.
 - Repair and migration must rebind fresh generation anchors before rewarmed state becomes eligible for reuse.
 - If invalidation anchors are uncertain after repair, migration, policy change, namespace rebinding, owner-boundary change, or partial failure, bypass warm state and fall back to slower durable-truth reads until validation passes.
 - Warmup recovery succeeds only when latency improves without changing namespace isolation, candidate parity, owner-boundary correctness, or policy outcomes.
@@ -274,6 +278,8 @@ membrain dead-zones --min-age 10000                     # very old unaccessed
 ### Metrics to Watch
 - Archive rate vs encode rate (healthy: archive ~10-20% of encode)
 - Pinned memory count growth (unbounded pinning is an anti-pattern)
+- Legal-hold or purge-eligibility count drift after policy or migration changes
+- Tombstone and retention-audit anomalies that suggest a hold, purge, or archive marker was lost in repair
 
 ---
 
@@ -291,6 +297,11 @@ Namespace-isolation or cross-tenant leakage must be treated as a security incide
 - Freeze or narrow affected shared/public surfaces until namespace filters are revalidated.
 - Keep denied or redacted explain paths from echoing protected handles while the incident is active.
 - Post-incident validation must prove candidate counts, cache warmup, repair outputs, and audit traces all respect namespace boundaries again.
+
+Duplicate storms, graph fanout explosions, and stale-cache incidents should also be handled as boundedness failures rather than mere latency noise.
+- Confirm degraded mode or colder fallback is active before allowing request load to continue.
+- Verify routing traces still expose candidate counts, cache bypass reasons, and any stale-warning or degraded-mode markers needed to explain the containment path.
+- If transition repair is in flight, verify the prior durable state remains authoritative and that retry-budget exhaustion or escalation artifacts are visible to operators.
 
 ### Root-Cause Investigation
 
@@ -325,6 +336,13 @@ membrain diff --since pre-migration   # review changes
 ### Rollback Conditions
 - Doctor reports errors post-migration → restore from backup
 - Benchmark shows regression > 20% → investigate
+- Cache invalidation, stale-warning, or degraded-mode signals indicate migrated warm state is being reused ambiguously
+- Namespace, retention, or legal-hold validation diverges from pre-migration expectations
+
+### Post-run Validation
+- Repaired or migrated caches rebuild from fresh generation anchors instead of reusing ambiguous warm state.
+- Candidate counts, explain traces, and cache metadata remain semantically consistent across CLI, daemon, IPC, and MCP surfaces.
+- Namespace isolation, retention markers, legal-hold markers, and tombstones match pre-migration durable truth unless an explicit migration step changed them.
 
 ---
 

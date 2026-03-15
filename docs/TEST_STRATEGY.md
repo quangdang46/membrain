@@ -8,6 +8,7 @@ The testing strategy must prove correctness, boundedness, durability, explainabi
 ## Cross-cutting test rules
 
 - Every suite emits structured artifacts useful for regression analysis.
+- Failure-injection and recovery suites should also record the violated invariant, affected namespace or shard, authoritative durable input, whether prior durable state remained intact, and any repair or escalation artifact.
 - No test depends on wall-clock time when logical ticks or controlled clocks can express the same behavior.
 - Any request-path change must be tested for both correctness and boundedness.
 - Any stateful mutation stage must include restart or crash-safety coverage where relevant.
@@ -51,13 +52,35 @@ Use for monotonicity, bounds, idempotency, and invariant preservation across bro
 Use for encode/recall/update/consolidate flows that cross stores, indexes, caches, and user-facing entry points.
 
 ### Latency and load tests
-Use for request-path budgets, tail latency, concurrency safety, and background-foreground interference measurement.
+Use for request-path budgets, tail latency, concurrency safety, duplicate-storm containment, graph fanout containment, and background-foreground interference measurement.
 
 ### Chaos, rebuild, and migration tests
-Use for failure injection, repairability, crash recovery, schema motion, and rebuild-from-durable-truth claims.
+Use for failure injection, repairability, crash recovery, stale-result visibility under mutation or repair, failed-transition recovery, schema motion, restart and rebuild-from-durable-truth claims, and migration safety.
 
 ### Policy, namespace, and quality tests
-Use for policy denial behavior, cross-namespace isolation, retrieval quality, explainability, and user-visible safety constraints.
+Use for policy denial behavior, cross-namespace isolation, retrieval quality, retention and legal-hold regression behavior, explainability, and user-visible safety constraints.
+
+## Cache observability regression minimum matrix
+
+Any change to cache reuse, prefetch, warmup, invalidation, degraded serving, or explain integration must include dedicated coverage for:
+
+- cache hit, miss, bypass, invalidation, and disabled-mode visibility by cache family
+- explicit stale-warning or bypass-reason output when warm state is rejected for owner-boundary, namespace, policy, or generation-anchor mismatch
+- routing-trace artifacts that preserve candidate counts before and after cache-influenced stages
+- parity of cache metadata across CLI, daemon, IPC, and MCP explain or inspect surfaces where those surfaces exist
+- degraded-mode or cache-disabled serving remaining distinguishable from an ordinary cold miss
+- namespace or policy-filtered cache paths preserving denial or redaction semantics without leaking protected handles or counts
+
+## Resilience and governance suite minimum matrix
+
+Any change to repair, rebuild, migration, retention, namespace policy, or other operationally sensitive behavior must include dedicated coverage for:
+
+- latency and load behavior under representative concurrency, including duplicate-storm and graph-fanout containment
+- restart, crash, rebuild, and migration flows proving durable truth can restore derived state without silent widening of authority
+- cache invalidation correctness and stale-result visibility during mutation, repair, and degraded serving
+- failed-transition recovery preserving prior durable state and emitting repair or escalation artifacts when applicable
+- cross-namespace leakage prevention across request paths, caches, repair controllers, and background jobs
+- retention-policy and legal-hold regressions staying explicit, auditable, and policy-correct under repair and migration
 
 ## Stage-by-stage gate expectations
 
@@ -107,6 +130,7 @@ Use for policy denial behavior, cross-namespace isolation, retrieval quality, ex
 - explainability tests for routing/ranking traces
 - bounded graph-expansion tests when graph assistance is enabled
 - adversarial tests for ambiguous partial cues, near-duplicate clusters, and contradiction-aware partial recall
+- parity tests for summary versus full explain surfaces across CLI, daemon, IPC, and MCP where those surfaces exist
 
 **Must prove before closing the stage**
 - Tier1, Tier2, and Tier3 all meet their declared latency contracts on representative corpora
@@ -114,6 +138,7 @@ Use for policy denial behavior, cross-namespace isolation, retrieval quality, ex
 - partial-match paths do not leak full payloads before the final cut
 - tip-of-the-tongue results stay explicit about fragmentary status, remaining ambiguity, and omitted evidence
 - low-signal partial cues terminate with a bounded miss or fragment shortlist rather than speculative reconstruction
+- explain outputs preserve returned-result reasons, omitted-result reasons, provenance summaries, freshness or conflict markers, and stable routing-trace fields without cross-surface semantic drift
 
 ### Stage 5 — Reconsolidation
 
@@ -134,12 +159,13 @@ Use for policy denial behavior, cross-namespace isolation, retrieval quality, ex
 - integration tests for migration, retrievability after move, REM-like processing, and dry-run behavior
 - load tests for foreground impact while consolidation runs
 - chaos/rebuild tests for interrupted or partial consolidation cycles
-- policy tests for pinned and authoritative evidence handling
+- policy tests for pinned, retention-governed, legal-hold, and authoritative evidence handling
 
 **Must prove before closing the stage**
 - background consolidation preserves online SLOs
 - migrated content remains retrievable and explainable
 - consolidation never silently drops protected or authoritative evidence
+- interrupted or restarted consolidation preserves prior durable truth, leaves repairable artifacts when needed, and does not leak stale or cross-namespace warmed state
 
 ### Stage 7 — Graph maturity
 
