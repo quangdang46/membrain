@@ -232,6 +232,10 @@ Operational maturity rules:
 
 Identical (sim > 0.99) is not interference — it is duplicate detection.
 
+Interference is a bounded similarity lane for still-distinct memories. It may adjust maintenance state or retrieval difficulty, but it does not decide duplicate-family identity, contradiction resolution, or whether emotional tagging sets `bypass_decay`.
+
+Emotional-bypass retention is a separate per-memory decay rule: high arousal and valence may keep elapsed logical ticks from decaying `effective_strength`, yet that memory can still appear in interference candidate slices. Interference penalties and emotional desensitization remain distinct controller behaviors rather than one shared mechanism.
+
 ---
 
 ## 11. Context Reconstruction

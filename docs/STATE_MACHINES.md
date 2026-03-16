@@ -44,6 +44,7 @@ When successful recall reopens a stable memory into `Labile`:
 
 - recall opens a bounded mutation window only; it does not itself submit or apply a semantic content change
 - any pending update must be accepted before the window expires and while namespace, policy, contradiction, lineage, and repair-job guards still pass
+- if an in-window content update would materially contradict the reopened memory's current claim, the system must route through explicit contradiction handling and mint a new belief-chain member instead of mutating the reopened row in place
 - accepted reconsolidation mutates the authoritative durable row first, then refreshes derived embeddings, ANN or FTS indexes, caches, and other warm surfaces; if a derived refresh fails, the durable update remains authoritative and the derived surface is marked stale or queued for repair
 - if the window expires first, stale pending updates are rejected or discarded explicitly and the memory restabilizes to its pre-reopen durable stable state without applying them
 - reconsolidation reopen and restabilization do not silently demote a previously `Consolidated` memory, promote an unconsolidated one, or change canonical durable ownership; those edges remain explicit controller actions

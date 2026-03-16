@@ -12576,6 +12576,8 @@ A memory's canonical identity is the tuple of `namespace` + `id`.
 - Mutations that preserve identity may update content, metadata, decay state, tier, or policy-carrying fields, but they must preserve lineage and auditability.
 - Changes that replace meaning rather than revise it must create a new record linked by lineage or supersession rather than reusing the old version counter.
 - Contradictory or superseding facts create a new memory identity and connect it with `superseded_by`, `belief_version`, `belief_chain_id`, or a `ConflictRecord`; they do not silently overwrite an existing record in place.
+- `belief_version` is chain-local ordering for distinct belief entries, not a substitute for per-record `version`; accepted in-place revision advances `version`, while a new competing or successor record advances the chain.
+- Open conflict, coexistence, and authoritative override may change which entry is operationally preferred, but they must not mutate the losing record's content in place or mark it `Superseded` unless true supersession was accepted.
 
 ### 13.2.1 Context metadata contract
 
@@ -12698,6 +12700,9 @@ Additional required semantics:
 - `superseded_by` and lifecycle state `Superseded` apply only when the resolution is true supersession.
 - Unresolved conflicts must remain queryable directly rather than requiring inference from free-form text.
 - Authoritative overrides must record the authority source, authority reference, and resolution reason in durable conflict metadata.
+- Conflict handling must classify accepted writes as same-identity revision, open conflict, coexistence, supersession, or authoritative override before durable state commits.
+- `version` advances only for accepted in-place mutation of one canonical record. `belief_version` advances only when a distinct belief entry joins or advances within a `belief_chain_id`.
+- Open conflict and coexistence preserve all participating memories as first-class evidence even when one entry is operationally preferred for default packaging.
 - Ranking, explanation, repair, and governance flows must treat contradiction state as first-class structured input.
 
 ---
@@ -12739,9 +12744,10 @@ If a transition fails mid-flight:
 4. Important but rarely accessed memories may surface as `decaying soon` rather than silently disappearing.
 5. Successful recall may reopen an eligible memory into `Labile` for a bounded reconsolidation window, but recall alone must not silently create a semantic content update.
 6. A reconsolidation update is accepted only while that window is open and after namespace, policy, lineage, contradiction, and repair-lock guards pass.
-7. Accepted reconsolidation mutates authoritative durable truth first; embedding refresh, ANN or FTS rebuild, and cache invalidation are derived follow-on work and must be marked stale or queued for repair rather than silently rolling back durable truth if they fail.
-8. Restabilization returns the memory to the pre-reopen durable stable state unless an explicit consolidation, archive, restore, contradiction-resolution, or repair controller commits a different lifecycle edge.
-9. If the window closes before acceptance, the pending update must be rejected or discarded explicitly and the memory must restabilize without applying the stale update.
+7. If an in-window update would materially contradict the reopened memory's current claim, the system must fork into contradiction handling and mint a new belief-chain member instead of applying that content change in place.
+8. Accepted reconsolidation mutates authoritative durable truth first; embedding refresh, ANN or FTS rebuild, and cache invalidation are derived follow-on work and must be marked stale or queued for repair rather than silently rolling back durable truth if they fail.
+9. Restabilization returns the memory to the pre-reopen durable stable state unless an explicit consolidation, archive, restore, contradiction-resolution, or repair controller commits a different lifecycle edge.
+10. If the window closes before acceptance, the pending update must be rejected or discarded explicitly and the memory must restabilize without applying the stale update.
 
 ---
 

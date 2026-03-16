@@ -149,6 +149,17 @@ Identity/version rules must keep revision, replacement, and collision handling s
 - `fingerprint` may seed duplicate-family lookup or collision detection, but it does not authorize identity reuse, silent overwrite, cross-namespace merging, or policy bypass.
 - `payload_ref` / `content_ref` must be stable, resolvable, or explicitly tombstoned so identity survives storage relocation.
 
+### Mutation routing and belief-chain versioning rules
+
+Contradiction-aware writes must classify whether accepted new evidence is revising one canonical memory or introducing a competing belief.
+
+- If the accepted change preserves the same operative claim, the system may mutate that record in place, preserve lineage, and increment `version`.
+- If the accepted change would materially alter the claim, time-slice interpretation, or other policy-relevant meaning, the system must mint a new memory identity, preserve evidence for both sides, and attach or create the relevant `ConflictRecord` and `belief_chain_id` instead of overwriting the older row.
+- `belief_version` is chain-local ordering across distinct belief entries. It advances when a new competing or successor record joins the chain; it does not replace the per-record `version` counter for accepted in-place mutation.
+- Open conflict or coexistence may influence default packaging, but they must not rewrite the losing memory's content in place or mark it `Superseded` unless supersession is explicitly accepted.
+- Authoritative override records authority metadata and the preferred operational interpretation in durable conflict state without erasing the losing evidence.
+- Only true supersession sets `superseded_by`, moves the older memory to `Superseded`, and makes the newer entry the default operative version.
+
 ## Metadata Families and Contracts
 
 ### Context Metadata
@@ -404,6 +415,7 @@ The decay clock is logical and usage-driven rather than wall-clock driven.
 - A memory counts as successfully recalled only when it survives namespace, policy, and lifecycle gating and lands in the final bounded returned set for the request, or when an explicit recall-side mutation surface intentionally invokes the same strengthening path for that memory.
 - Candidate inspection, ANN shortlist membership, graph expansion, reranker consideration, cache warming, inspect-only mention, and redacted or denied rows do not count as successful recall and must not increment `recall_count` or apply LTP.
 - The canonical recall-side mutation is one durable accepted update that persists pending decay, increments `recall_count`, records `last_access_at`, applies bounded `base_strength` and `stability` growth, updates `decay_state.last_accessed_tick`, and reopens the memory into `Labile` when the reconsolidation contract says recall should do so.
+- If an in-window content update would materially contradict the reopened memory's current claim, recall must fork into the contradiction path and mint a new chain member instead of applying that content change in place.
 - Tier1 refresh, cache updates, and other hot serving mirrors happen only after that durable mutation commits; they are derived side effects and must not become the source of truth for whether recall-side strengthening happened.
 - Retries, restart recovery, repair, or cache replay must rebuild from the last committed durable row and must not double-apply recall-side strengthening, counter increments, or labile-window reopening.
 
@@ -452,6 +464,14 @@ When new information conflicts with existing evidence:
 5. Keep linked `conflict_record_ids` so inspect/recall can surface conflict state without reconstructing it from raw text.
 6. Only set `superseded_by` and move the older memory to lifecycle state `Superseded` when the resolution is actually supersession.
 7. For authoritative overrides, record the preferred memory plus the authority source/reason in the conflict artifact rather than mutating old evidence in place.
+
+### Mutation and resolution flow
+
+- Conflict handling must classify whether the accepted write is a same-identity revision, an open conflict, a coexistence outcome, a supersession, or an authoritative override before durable state commits.
+- `version` advances only for accepted in-place mutation of one canonical record. `belief_version` advances only when a distinct belief entry joins an existing `belief_chain_id` or starts a successor position within that chain.
+- Open conflict and coexistence keep the participating memories queryable as first-class evidence. They may expose a preferred operational answer for default packaging, but they must not rewrite the losing record's content or lifecycle in place.
+- Authoritative override updates durable conflict metadata with authority source, authority reference, resolution reason, and the preferred operational interpretation while preserving both sides as inspectable evidence.
+- Supersession is the only resolution that marks the older memory `Superseded`; it must preserve lineage and leave enough durable conflict metadata to reconstruct why the operative default changed.
 
 ### Retrieval, inspect, and repair implications
 

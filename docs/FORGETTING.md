@@ -30,6 +30,13 @@ Forgetting is a controlled reduction of detail, priority, or accessibility in or
 - Archival is recoverable soft deletion; privacy, compliance, or operator-driven destructive deletion follows separate policy-governed paths.
 - Near-threshold memories may be surfaced for reinforcement or operator review instead of silently disappearing when their future utility is still uncertain.
 
+## Interference versus emotional-bypass retention
+- Interference is a similarity-driven pressure between distinct memories. It applies bounded maintenance or retrieval effects such as retroactive weakening of similar older memories or proactive retrieval difficulty, and it remains separate from duplicate-family, contradiction, and policy lanes.
+- Emotional-bypass retention is a per-memory decay override derived from emotional tagging. While `bypass_decay` remains active, elapsed logical ticks do not lower `effective_strength`, and decay-only pruning must not treat that memory as ordinary weak-forgetting input.
+- Emotional bypass is not blanket immunity from every forgetting or governance path. It does not authorize identity reuse, policy bypass, silent restore, or exemption from explicit demotion, archival review, or other non-decay lifecycle decisions.
+- The mechanisms may co-exist: a highly emotional memory can still participate in interference checks, and interference penalties do not themselves set, clear, or explain `bypass_decay`.
+- Any later reevaluation of emotional bypass belongs to explicit emotional-processing or desensitization controller behavior, not to the interference lane.
+
 ## Demotion, archive, deletion, and restore distinctions
 - Demotion reduces default serving priority, payload attachment, or hot-route residency, but the memory remains in an active non-`Archived` lifecycle state and may still surface in normal recall when policy and ranking allow.
 - Demotion may leave some previously served payload surfaces detached or lower fidelity; later promotion or reattachment can recover retained payloads where available, but that is rehydration of an active memory rather than restore from `Archived`.
