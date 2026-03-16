@@ -56,10 +56,17 @@ The mega-plan contains these major regions:
 ### Feature Implementation Specs
 - **Section 46 — Batch 1** (Features 1–10): Dream Mode, Belief Versioning, Query-by-Example, Context Budget API, Temporal Landmarks, Passive Observation, Confidence Intervals, Skill Extraction, Cross-Agent Sharing, Health Dashboard
 - **Section 47 — Batch 2** (Features 11–20): Causal Chain Tracking, Snapshots + Time Travel, Attention Heatmap, Semantic Diff, Fork + Merge, Predictive Pre-recall, Schema Compression, Emotional Trajectory, Audit Log, Query Intent Routing
+- **Batch 2 framing**: later-stage, non-blocking follow-on scope for advanced trust/introspection, branching, predictive, and compression-adjacent features; use it to navigate deferred value without reopening the core execution spine in Sections 40–45.
 
 ### Cross-batch capability lenses
 - **Trust and historical introspection**: use this lens when discussing later-stage user value across batches. It currently groups Belief Versioning (F2), Causal Chain Tracking (F11), Snapshots + Time Travel (F12), Semantic Diff (F14), and Audit Log (F19).
 - These lenses complement the canonical batch chronology; they do not replace milestone order or reopen the core execution spine.
+
+### Phase 4 follow-on framing
+- Use this framing to keep deferred Phase 4 work visible without turning it into default architecture direction or reopening the core execution spine.
+- **Scale-out and distribution**: later-stage, evidence-gated follow-ons that stay blocked until measured workload pressure justifies leaving the bounded single-node model.
+- **Advanced operations and operator ergonomics**: later-stage maturity work that sharpens runbooks, automation, and operator guidance after the base repair/governance spine exists.
+- **Quality-loop and skill-memory follow-ons**: later-stage work that turns benchmark, maintenance, and skill-extraction signals into operator guidance or bounded background tuning without becoming core-path prerequisites.
 
 
 

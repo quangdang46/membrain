@@ -30,6 +30,8 @@
 - add doctor and operator tooling after core behavior is benchmarked and repairable
 - introduce sharding or distribution only when empirical workload pressure justifies it
 - keep advanced feature batches and later-stage extensions non-blocking with respect to the core execution spine
+- treat advanced operations and operational ergonomics as later-stage maturity work layered on top of the base repair, rollback, and governance surfaces rather than as blockers for the core execution spine
+- treat quality-loop and skill-memory follow-ons as later-stage background/operator-guidance work driven by benchmark, maintenance, and extraction signals rather than as prerequisites for core correctness or phase promotion
 - treat snapshot and time-travel inspection as trust/introspection follow-on work: useful for safer operations and historical comparison, but not a prerequisite for proving the bounded core retrieval path
 - treat belief versioning and inspectable history surfaces as trust/introspection follow-on work layered on top of the core contradiction/supersession contract rather than as a blocker for the bounded baseline retrieval spine
 
@@ -63,6 +65,14 @@ Use these rules to keep roadmap ambition from distorting the core execution orde
 - Advanced feature beads should be allowed to elaborate future value, but they must not reopen settled invariants such as bounded request-path work, explicit contradiction representation, deterministic namespace enforcement, explainability, and repairability from durable truth.
 - Phase 4 operator ergonomics and quality-loop improvements may improve maturity after the core spine exists, but they must not be treated as blockers for the core architecture/retrieval/repair/governance sequence.
 - When roadmap or backlog discussion introduces speculative later-stage work, keep it visible as deferred or gated follow-on scope rather than quietly folding it into near-term milestone promises.
+
+## Phase 4 follow-on families
+
+Use this framing to keep the parent Phase 4 bucket explicit without turning it into default near-term scope:
+
+- **Scale-out and distribution** stay evidence-gated follow-ons. The measured-demand gate and `SHARDING_AND_DISTRIBUTION.md` contract exist to resist premature scale-out and keep simpler bounded remedies preferred until workload evidence proves otherwise.
+- **Advanced operations and operator ergonomics** sharpen runbook clarity, automation, and incident/maintenance handling only after the base operational contract is already repairable and benchmarked; they do not bypass maintenance-class, rollback, or observability requirements from `OPERATIONS.md`.
+- **Quality-loop and skill-memory follow-ons** consume rerunnable benchmark evidence, maintenance outcomes, and bounded skill-extraction outputs to drive later recommendations or background tuning; they stay non-blocking, inspectable, and subordinate to auditable inputs rather than becoming a hidden prerequisite for core-path behavior.
 
 ## Trust and historical introspection cluster
 
