@@ -161,13 +161,13 @@ Create or update explicit relations between memories, entities, or goals.
 
 Retrieve diagnostic and structural details about a memory.
 
-**Exposes**: current tier, lineage, policy flags, lifecycle state, index presence, graph neighborhood summary, decay/retention info, cache-related routing metadata when relevant, provenance summary, freshness markers, duplicate-family or interference-maintenance summaries when present, and linked contradiction state (`conflict_state`, related `ConflictRecord` handles, preferred memory if resolved)
+**Exposes**: current tier, lineage, policy flags, lifecycle state, archive reason and restore eligibility when relevant, index presence, graph neighborhood summary, decay/retention info, cache-related routing metadata when relevant, provenance summary, freshness markers, duplicate-family or interference-maintenance summaries when present, degraded or partial-fidelity markers when archival recovery is incomplete, and linked contradiction state (`conflict_state`, related `ConflictRecord` handles, preferred memory if resolved)
 
 ### `memory_explain`
 
 Explain why a memory was stored, routed, recalled, ranked, filtered, demoted, or forgotten.
 
-**Explains**: routing signals, ranking components, cache family/event/reason metadata when cache behavior materially affected the route, policy filters, exclusion or omission reasons, lineage ancestry, consolidation ancestry, provenance summary, freshness markers, trace stages when full detail is requested, which context/emotional/tagging inputs were explicit versus bounded-derived, whether duplicate-family or interference lanes fired/bypassed/deferred, forgetting/demotion reasons, and any contradiction resolution path (open conflict, supersession, or authoritative override)
+**Explains**: routing signals, ranking components, cache family/event/reason metadata when cache behavior materially affected the route, policy filters, exclusion or omission reasons, lineage ancestry, consolidation ancestry, provenance summary, freshness markers, trace stages when full detail is requested, which context/emotional/tagging inputs were explicit versus bounded-derived, whether duplicate-family or interference lanes fired/bypassed/deferred, forgetting/demotion reasons, archive-versus-delete reasoning, restore eligibility or denial basis when relevant, and any contradiction resolution path (open conflict, supersession, or authoritative override)
 
 ### `memory_consolidate`
 
@@ -187,7 +187,7 @@ Raise retention protection or bypass normal forgetting/demotion.
 
 Controlled forgetting: suppress, decay, demote, compact, summarize, archive, redact, soft/hard delete.
 
-**Rules**: distinguish utility-driven forgetting from compliance deletion; preserve lineage; enforce retention and legal-hold denial paths explicitly; never remove last authoritative evidence unless policy allows
+**Rules**: distinguish utility-driven forgetting from compliance deletion; preserve lineage; enforce retention and legal-hold denial paths explicitly; never remove last authoritative evidence unless policy allows; archive-by-default forgetting remains inspectable and recoverable only through explicit restore paths rather than implicit recall
 
 ### `memory_repair`
 

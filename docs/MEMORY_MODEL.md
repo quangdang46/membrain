@@ -347,6 +347,16 @@ Labile → SynapticDone → Consolidating → Consolidated → Archived
 
 Before any lifecycle transition is committed, the system must validate namespace access control, policy pinning or legal hold, retention constraints, lineage preservation, unresolved contradiction semantics, and repair-job lock safety.
 
+### Demotion, archive, restore, and deletion distinctions
+
+- Demotion changes tier ownership, payload attachment, or default serving priority without moving the memory into `Archived`; demoted memories remain eligible for normal recall when policy and ranking allow, so later promotion is not itself a restore operation.
+- Demotion may still leave payloads detached, snippet-only, or otherwise lower fidelity on the default serving path. Rehydrating those retained surfaces is a bounded active-memory operation, not an archive restore, and it must report degraded state when full payload reattachment is unavailable.
+- `Archived` means the memory has left ordinary default recall and now requires an explicit restore or replay path before it can return to active serving. Ordinary recall, cache warming, and snapshot inspection must not silently reopen archived memories.
+- Policy-driven hard deletion is separate from archival. It may remove content or payload recoverability, but it must leave durable tombstone or audit evidence when policy requires and must never be implied by utility-driven forgetting alone.
+- Restore preserves canonical identity, provenance, lineage, policy markers, contradiction state, and archive history. Derived indexes, caches, and warm routing mirrors are rebuilt after the durable lifecycle change commits; they do not define whether restore succeeded.
+- If only retained authoritative metadata survives while payload or other previously served surfaces were redacted, detached, or lost, the restored item must carry explicit degraded or partial-fidelity markers rather than masquerading as a full rewind of the pre-archive state.
+- Archived items remain inspectable and auditable even when default recall omits them. After explicit restore, they re-enter normal ranking and routing subject to the same policy, freshness, contradiction, and lifecycle rules as other active memories.
+
 ### Failure behavior summary
 
 If a lifecycle transition fails mid-flight:
@@ -388,6 +398,14 @@ The decay clock is logical and usage-driven rather than wall-clock driven.
 - Successful recall persists decay first, then applies recall-side reinforcement and stability growth, then resets the decay clock to the current tick as part of the same accepted mutation.
 - Maintenance jobs such as consolidation, demotion, or forgetting may also persist decay when they commit a durable lifecycle or routing decision, but they must preserve the same formula and clock semantics as request-path recall.
 - SQL or index prefilters may evaluate the same formula against stored decay parameters, but those accelerators remain derived behavior and must not redefine the canonical formula.
+
+### Successful recall contract
+
+- A memory counts as successfully recalled only when it survives namespace, policy, and lifecycle gating and lands in the final bounded returned set for the request, or when an explicit recall-side mutation surface intentionally invokes the same strengthening path for that memory.
+- Candidate inspection, ANN shortlist membership, graph expansion, reranker consideration, cache warming, inspect-only mention, and redacted or denied rows do not count as successful recall and must not increment `recall_count` or apply LTP.
+- The canonical recall-side mutation is one durable accepted update that persists pending decay, increments `recall_count`, records `last_access_at`, applies bounded `base_strength` and `stability` growth, updates `decay_state.last_accessed_tick`, and reopens the memory into `Labile` when the reconsolidation contract says recall should do so.
+- Tier1 refresh, cache updates, and other hot serving mirrors happen only after that durable mutation commits; they are derived side effects and must not become the source of truth for whether recall-side strengthening happened.
+- Retries, restart recovery, repair, or cache replay must rebuild from the last committed durable row and must not double-apply recall-side strengthening, counter increments, or labile-window reopening.
 
 ### Strength Modification
 

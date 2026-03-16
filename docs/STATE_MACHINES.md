@@ -38,6 +38,17 @@ Every lifecycle transition validates guards from a shared vocabulary so controll
 | ConflictRecord | `Labile -> SynapticDone -> Consolidated`; `Consolidated -> Archived` only after resolution and retention rules allow it | linked-evidence integrity, authority metadata when resolved, namespace access control | unresolved conflicts must not be archived or deleted while they remain needed to explain operative state; conflict closure must not mutate losing evidence in place |
 | Retention / decay / shard-related controller state | controller-owned updates may accompany lifecycle edges or maintenance actions, but they do not independently authorize a memory lifecycle jump | controller scope binding, repair-job lock, policy precedence | no direct user-facing `recalled`, `reinforced`, or `superseded` edge on controller state; no namespace changes or identity reuse via controller metadata alone |
 
+## Recall reopen and reconsolidation-apply contract
+
+When successful recall reopens a stable memory into `Labile`:
+
+- recall opens a bounded mutation window only; it does not itself submit or apply a semantic content change
+- any pending update must be accepted before the window expires and while namespace, policy, contradiction, lineage, and repair-job guards still pass
+- accepted reconsolidation mutates the authoritative durable row first, then refreshes derived embeddings, ANN or FTS indexes, caches, and other warm surfaces; if a derived refresh fails, the durable update remains authoritative and the derived surface is marked stale or queued for repair
+- if the window expires first, stale pending updates are rejected or discarded explicitly and the memory restabilizes to its pre-reopen durable stable state without applying them
+- reconsolidation reopen and restabilization do not silently demote a previously `Consolidated` memory, promote an unconsolidated one, or change canonical durable ownership; those edges remain explicit controller actions
+- ordinary recall must not use reconsolidation to smuggle in silent overwrite, forced supersession, or policy bypass
+
 ## Forbidden edge classes
 
 The following are globally forbidden unless a stricter subsystem contract explicitly allows them and preserves auditability:

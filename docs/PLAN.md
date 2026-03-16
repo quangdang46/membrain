@@ -671,23 +671,30 @@ Brain:
   Stable memory → recall → labile → mutable → reconsolidate
 
 membrain:
-  Each recall:
-    memory.state = Labile { since: now(), window: reconsolidation_window(age) }
-    memory.pending_update = Some(new_context)
+  On eligible successful recall:
+    if reconsolidation_window(age, strength) > 0:
+      memory.state = Labile { since: now(), window: reconsolidation_window(age, strength) }
 
-  reconsolidation_window(age):
+  Recall reopens a bounded mutation window; it does NOT implicitly create a pending_update.
+
+  reconsolidation_window(age, strength):
     base = RECONSOLIDATION_BASE_WINDOW
     factor = 1.0 / (1.0 + age_in_days / 30.0)  // older = shorter window
-    return base * factor
+    return strength >= LABILE_STRENGTH_MIN ? base * factor : 0
+
+  External update:
+    while memory is Labile, submit bounded pending_update for later apply
 
   reconsolidation_tick():
     for each Labile memory:
-      if now() - since > window:
-        if pending_update.is_some():
-          content = merge(content, pending_update)
-          embedding = re_embed(content)
-          strength += RECONSOLIDATION_BONUS
-        state = Stable
+      if now() - since <= window && pending_update.is_some():
+        apply accepted update to authoritative durable truth
+        refresh derived embedding / index / cache state afterward
+        strength += RECONSOLIDATION_BONUS
+        restabilize to the pre-reopen durable stable state
+      else if now() - since > window:
+        discard stale pending_update without applying it
+        restabilize to the pre-reopen durable stable state
 ```
 
 ### 4.7 Active Forgetting Engine
@@ -918,7 +925,7 @@ CONSOLIDATION MICRO-CYCLE (pressure-triggered)
   Homeostasis: bulk effective_strength scan → prune < MIN → archive
 
 RECONSOLIDATION TICK (per interaction)
-  scan Labile memories → if window expired → apply update → Stable
+  scan Labile memories → apply accepted in-window updates; expired windows discard stale pending updates and restabilize
 
 FORGETTING ENGINE (lazy pressure-triggered)
   interference resolution: similar pairs → penalty
@@ -12730,6 +12737,11 @@ If a transition fails mid-flight:
 2. Decay should be lazy where possible, using derived effective strength rather than heavy eager writes.
 3. Reinforcement must not create runaway immortal noise.
 4. Important but rarely accessed memories may surface as `decaying soon` rather than silently disappearing.
+5. Successful recall may reopen an eligible memory into `Labile` for a bounded reconsolidation window, but recall alone must not silently create a semantic content update.
+6. A reconsolidation update is accepted only while that window is open and after namespace, policy, lineage, contradiction, and repair-lock guards pass.
+7. Accepted reconsolidation mutates authoritative durable truth first; embedding refresh, ANN or FTS rebuild, and cache invalidation are derived follow-on work and must be marked stale or queued for repair rather than silently rolling back durable truth if they fail.
+8. Restabilization returns the memory to the pre-reopen durable stable state unless an explicit consolidation, archive, restore, contradiction-resolution, or repair controller commits a different lifecycle edge.
+9. If the window closes before acceptance, the pending update must be rejected or discarded explicitly and the memory must restabilize without applying the stale update.
 
 ---
 

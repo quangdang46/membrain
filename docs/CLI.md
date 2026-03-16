@@ -173,6 +173,12 @@ membrain forget <uuid>
 membrain forget <uuid> --force    # bypass confirmation
 ```
 
+Rules:
+- `forget` archives by default; it does not imply hard deletion unless a separate policy-authorized destructive path is invoked.
+- Archived memories remain inspectable and auditable, and those surfaces should expose archive reason, restore eligibility, and any degraded-fidelity markers when only partial recovery is possible.
+- Ordinary recall, cold-tier lookup, and snapshot inspection do not implicitly restore archived memories.
+- Explicit restore or admin paths may reactivate archived memories when policy allows, but they restore only retained authoritative evidence and must surface partial or degraded state rather than pretending to recreate a perfect pre-archive copy.
+
 ### `membrain strengthen <ID>`
 
 Manually apply LTP to a memory (same effect as on_recall).
@@ -193,7 +199,7 @@ membrain stats --at before-refactor    # stats at snapshot point
 
 ### `membrain inspect <ID> [OPTIONS]`
 
-Full memory details: tier, lineage, policy, lifecycle, graph neighborhood, decay, cache-related routing metadata when relevant, provenance summary, freshness markers, and conflict state.
+Full memory details: tier, lineage, policy, lifecycle, archive reason and restore eligibility when relevant, graph neighborhood, decay, cache-related routing metadata when relevant, provenance summary, freshness markers, conflict state, and degraded-fidelity markers when partial archival recovery applies.
 
 ```bash
 membrain inspect <uuid>
