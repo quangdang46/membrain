@@ -56,6 +56,18 @@ Context-envelope rules:
 
 CLI JSON output for equivalent operations may package these fields differently for command ergonomics, but it should preserve the same effective namespace, policy, explanation, warning, and degraded-serving meaning rather than inventing a separate semantic contract.
 
+## Daemon JSON-RPC Contract
+
+- The daemon transport is Unix socket plus JSON-RPC 2.0. Socket discovery, pid/socket lifecycle, and CLI fallback behavior stay owned by the daemon lifecycle contract, but once connected the daemon interface exposes the same underlying bounded operations as the CLI and MCP surfaces.
+- Each daemon request uses the JSON-RPC 2.0 envelope: `jsonrpc`, `id`, `method`, and `params`. `params` carries the procedure-specific request plus any required common context-envelope fields from this document; transport wrappers must not infer missing namespace or policy scope from free-form prompt text.
+- Canonical daemon procedure families mirror the stable CLI families: encode/intake (`remember`, `observe`, `import`), recall/query (`recall`, `ask`, `budget`), inspect/audit (`inspect`, `why`, `beliefs`, `audit`, `stats`, `health`, `doctor`), maintenance/admin (`repair`, `consolidate`, `compress`, `dream`, `export`), and history/namespace/change procedures (`timeline`, `snapshot`, `diff`, `share`, `unshare`, `forget`, `strengthen`, `update`, `fork`, `merge`, `namespace`). Method spelling may differ from MCP tool names, but it must not change the underlying request, policy, or outcome semantics.
+- A successful protocol-level daemon response returns JSON-RPC `result` whose payload preserves the common response-envelope semantics defined above, including `ok`, `request_id`, effective `namespace`, `warnings`, `policy_filters_applied`, `explain_handle`, and `metrics` when those fields materially affect the outcome.
+- Protocol- or dispatch-level failures use the JSON-RPC `error` object and the standard JSON-RPC 2.0 code families for parse failure, invalid request, method not found, invalid params, or internal transport/dispatch error. Once the daemon has accepted a recognized membrain procedure, domain-level failure families should stay machine-readable through the membrain response payload via `error_kind` (`validation_failure`, `policy_denied`, `internal_failure`) so parity with CLI and MCP is preserved.
+- Batch requests may be supported only as independent bounded operations. Each element resolves namespace, policy, candidate budgets, and degraded warnings independently; one failing item must not widen scope or silently contaminate sibling outcomes.
+- JSON-RPC notifications are optional and should be reserved for explicitly documented fire-and-forget procedures. Core retrieval, inspect, and mutating procedures should use request/response form so callers can observe validation failures, policy denials, warnings, degraded mode, and explanation handles.
+- Concurrency is a daemon throughput property, not a semantic distinction. Concurrent requests must preserve per-call namespace isolation, bounded-work guarantees, and explainability exactly as if the same procedures were executed one at a time.
+- Detailed remediation wording, user-facing recovery hints, and richer failure taxonomies remain owned by `mb-1hw.9`; this section only fixes the daemon transport contract and where machine-readable failure families live.
+
 ---
 
 ## Core Tools
@@ -111,7 +123,9 @@ Task-oriented bounded retrieval for context construction. The primary retrieval 
 - optional `like_id` / `unlike_id` query-by-example cues
 - optional `graph_mode` and `cold_tier`
 
-**Outputs**: ranked evidence set, score summaries, contradiction markers, decaying-soon markers, packaging metadata for prompt construction, and explain metadata sufficient to summarize route choice, omitted-result reasons, provenance, freshness, cache or degraded-serving behavior, and full trace stages when requested
+When `at_snapshot` is present, the request becomes bounded historical inspection rather than live recall: later-created memories are excluded, time-sensitive strength or freshness is recomputed against the snapshot tick, and the result must disclose partial/degraded historical visibility if current retention, policy, or repair state prevents a full reconstruction of what was once visible.
+
+**Outputs**: ranked evidence set, score summaries, graph-assistance and associative-context summaries when applicable, contradiction markers, decaying-soon markers, packaging metadata for prompt construction, and explain metadata sufficient to summarize route choice, omitted-result reasons, provenance, freshness, cache or degraded-serving behavior, and full trace stages when requested
 
 **Rules**:
 - `query_text` may be omitted only when `like_id` or `unlike_id` provides the primary cue
@@ -120,6 +134,7 @@ Task-oriented bounded retrieval for context construction. The primary retrieval 
 - `include_public` widens only to explicitly shareable surfaces permitted by policy
 - denied or redacted namespace filters must remain inspectable without disclosing protected record existence or payload details
 - `graph_mode` and `cold_tier` may tune routing, but they must not bypass hard graph caps, trigger pre-cut cold payload fetch, or override policy denial/redaction behavior
+- when graph assistance contributes, the response must preserve which returned memories entered directly, which were introduced by bounded graph expansion, whether graph support changed ranking versus only adding supporting context, and what associative context was omitted by caps or policy
 - incompatible time scopes or malformed request knobs are validation failures, not precedence guesses
 
 **Conflict contract**:
@@ -206,7 +221,15 @@ Trigger offline synthesis cycle.
 
 ### `belief_history(query)` — Feature 2
 
-**Returns**: `{ chain_id, versions: [{id, content, tick, superseded_by}], conflicts }`
+Returns the inspectable belief chain for a topic or query without rewriting the underlying contradiction/supersession model.
+
+**Returns**: `{ chain_id, preferred_memory_id, resolution_state, versions: [{ id, content, tick, belief_version, superseded_by, conflict_state }], conflicts }`
+
+**Rules**:
+- this is a later-stage trust/introspection surface built on top of the already-canonical contradiction, lineage, and supersession records
+- history views must preserve whether a chain is unresolved, coexisting, superseded, or under authoritative override rather than implying that all disagreement collapsed into one clean winner
+- supersession-aware retrieval may prefer the current operational answer for default packaging, but belief-history results must keep older versions and losing evidence inspectable
+- the tool should stay bounded to one effective namespace and one chain/topic at a time unless a later contract explicitly widens that scope
 
 ### `context_budget(token_budget, current_context?, working_memory_ids?, format?)` — Feature 4
 
@@ -254,7 +277,18 @@ Cascade confidence penalty from invalidated root.
 
 ### `snapshot(name, note?)` / `list_snapshots()` — Feature 12
 
-**Returns**: `{ name, tick, memory_count }`
+Creates and enumerates named historical inspection anchors.
+
+**Returns**:
+- `snapshot(name, note?)` → `{ name, tick, note, memory_count, namespace }`
+- `list_snapshots()` → `{ snapshots: [{ name, tick, note, memory_count, namespace }] }`
+
+**Rules**:
+- snapshot creation records a namespace-scoped tick checkpoint plus compact metadata; it does not clone payloads or create a second authoritative store
+- snapshot listing returns metadata only and must remain bounded enough for operator and automation use
+- deleting a snapshot removes the handle for future historical inspection, but must respect maintenance and rollback policy that may require keeping the last restorable anchor for a scope
+- a later `memory_recall` or equivalent tool using `at_snapshot` must exclude memories created after the snapshot tick and recompute time-sensitive strength/freshness against that historical tick
+- snapshot-scoped inspection remains subject to current policy, redaction, and retained-authoritative-evidence limits; when later retention, repair loss, or policy changes prevent full reconstruction, the response should surface partial or degraded historical inspection rather than imply a perfect restore
 
 ### `hot_paths(top_n?)` / `dead_zones(min_age_ticks?)` — Feature 13
 

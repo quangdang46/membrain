@@ -55,8 +55,8 @@ All recall-facing transports should map onto one logical `RecallRequest` even wh
 1. direct key or id hints, including Tier1 exact-handle get when resident
 2. tier1 active-window scan for recent/hot reuse
 3. tier2 exact index search
-4. tier2 graph neighborhood expansion
-5. tier2 semantic candidate generation
+4. tier2 semantic candidate generation
+5. bounded tier2 graph neighborhood expansion from the capped shortlist
 6. tier3 fallback
 7. dedup and diversify
 8. ranking
@@ -86,6 +86,17 @@ All recall-facing transports should map onto one logical `RecallRequest` even wh
 - Route metadata for Tier2 should preserve the prefilter candidate count, which indexed lanes fired, ANN shortlist size, rescore slice size, early-stop or bypass reasons, and whether Tier3 escalation happened.
 - Encode, reconsolidation, and repair flows mutate authoritative hot durable rows first and refresh Tier2 indexes second. A stale or missing Tier2 index is a latency or retrieval-quality defect, not a truth-loss event; repair may discard and rebuild derived Tier2 indexes from authoritative hot durable evidence.
 
+## Tier3 cold fallback contract
+- Tier3 is the cold fallback retrieval lane over authoritative cold durable rows for consolidated or archived memories whose canonical durable ownership lives off the hot path. It is a bounded request-path fallback, not the default first resort when Tier1 or Tier2 can already satisfy the request.
+- `cold_tier=avoid` suppresses Tier3 candidate generation for ordinary recall and should return the best hotter bounded outcome, degraded partial, or miss rather than silently overriding the hint. `cold_tier=auto` allows planner-driven escalation when hotter lanes exhaust their declared budget, return no eligible candidates, or surface only low-confidence or archive-missing results. `cold_tier=allow` permits Tier3 consideration without skipping earlier normalization, policy, and candidate-trimming stages.
+- Escalation into Tier3 occurs only after request normalization, deterministic effective-namespace binding, policy or owner-boundary checks, and the bounded Tier1/Tier2 lanes have either failed to satisfy the request or produced an inspectable reason to consult cold evidence. Tier3 entry must remain inspectable as a deliberate planner decision, not an implicit widening of scope.
+- Tier3 begins with metadata-first SQL prefiltering over cold durable rows using namespace, visibility, lifecycle or archive eligibility, retention state, contradiction or supersession handles, canonical type/kind, and other rank-driving scalars needed for the first bounded cut. This prefilter must bound the cold eligible set before any cold ANN probe, lexical projection, or payload materialization.
+- Tier3 may use stable-id or exact lookup, bounded lexical preview or snippet search, and cold ANN over the prefiltered eligible set. ANN sidecars, preview surfaces, and other cold accelerators remain derived lanes; when they diverge from `cold.db`, authoritative cold durable rows and cold embedding records win and the derived surfaces are rebuilt or bypassed.
+- Tier3 candidate generation may inspect only cold metadata, bounded preview text, snippet surfaces, authoritative embeddings or refs, and archive-control metadata needed to filter, rank, inspect, and explain. It must not decompress detached payloads, fetch object bodies, or materialize large cold content before the final candidate cut.
+- Detached cold payload materialization is permitted only after dedup, ranking, and the final bounded candidate cut, and only for the small winning set needed for final packaging, inspect, or explicit full-result assembly. If a winning cold record is redacted, tombstoned, unavailable, or over the remaining budget, the response must degrade explicitly to bounded preview, partial, or miss semantics rather than widen the cut or fetch more payloads speculatively.
+- If cold derived lanes are stale, missing, or under repair, Tier3 may bypass those lanes and continue with colder authoritative metadata or preview paths inside the declared budget, or return an explicit degraded, partial, or miss outcome. It must not respond by falling back to an unbounded full-store scan or hiding the loss of cold evidence.
+- Route metadata for Tier3 should preserve whether the cold lane was suppressed, considered, or entered; why escalation happened; the cold prefilter candidate count; which cold lanes fired; ANN shortlist or rescore slice sizes when used; how many cold payload fetches were deferred until after the final cut; and whether final packaging ended as `full`, `partial`, `miss`, or degraded.
+
 ## Candidate explosion control
 - hard caps by query type
 - per-edge traversal budgets
@@ -96,6 +107,16 @@ All recall-facing transports should map onto one logical `RecallRequest` even wh
 - duplicate family collapse
 - per-conflict sibling caps
 - result diversity constraints
+
+### Bounded graph-expansion contract
+- graph expansion may open only from a bounded, already-authorized seed shortlist produced by earlier direct, exact, lexical, or semantic stages; graph traversal must not bootstrap itself from the whole corpus or reopen namespaces that earlier stages excluded.
+- the default request-path traversal is priority-weighted BFS from the current seed set, with higher-confidence or higher-weight edges explored before weaker edges, but always under the same hard continuation rules.
+- every traversal must enforce at least a hard max depth, hard max collected-node budget, and minimum traversable edge weight; the current canonical defaults remain `max_depth=3`, `max_nodes=50`, and `min_edge_weight=0.5` unless a later benchmarked contract changes them explicitly.
+- traversal may inspect only bounded metadata, snippets, handles, and graph-local scalars while expanding; large or cold payload fetch remains deferred until the final candidate cut.
+- traversal continues only while the next hop stays within depth, node, sibling, and time budgets and still improves the bounded candidate set; when the next eligible hop falls below the lane's continuation threshold, expansion stops rather than widening heuristics.
+- graph expansion must be skippable without semantic corruption: if `graph_mode=off`, the graph is degraded or disabled, the bounded seed set is empty, or request-path budgets are already exhausted, retrieval should continue with a graph-bypassed route instead of forcing traversal.
+- graph-disabled or graph-capped serving must remain inspectable. Explain and inspect surfaces should preserve whether graph expansion ran, why it was skipped, which seeds opened the traversal, how many hops and nodes were consumed, and whether a cap or degraded-mode fallback terminated expansion early.
+- contradiction, supersession, duplicate-family, and namespace-denial boundaries remain in force during traversal; BFS may surface related evidence, but it must not flatten conflicts, bypass policy masks, or manufacture one synthetic answer from mutually incompatible nodes.
 
 ### Request normalization rules
 - Missing `query_text` is valid only when `like_id` or `unlike_id` is present.
@@ -110,6 +131,15 @@ All recall-facing transports should map onto one logical `RecallRequest` even wh
 - baseline score families must stay separately inspectable: retrieval relevance, recency/strength/salience, confidence/utility, goal-task-entity-context alignment, memory-type priors, graph support, contradiction or supersession state, and duplicate/noise penalties
 - reranking may sharpen session, task, entity, or packaging priorities, but it must not bypass hard policy masks, hide losing conflict evidence, or require unbounded payload fetches
 - final ordering must preserve a machine-readable decomposition with baseline family scores, rerank adjustments, notable penalties or bonuses, and the final packaged order reason
+
+## Graph participation in ranking and packaging
+- graph support is an additive bounded score family derived from inspectable graph facts such as seed provenance, hop depth, path weight, and whether the candidate also entered through a direct lane; it must not replace primary query relevance or hide that a candidate was graph-assisted.
+- graph-expanded neighbors are supporting evidence, not automatic winners. A candidate should not outrank a materially stronger direct, exact, lexical, or semantic match solely because it shares an engram or neighborhood path.
+- if a candidate entered through both a direct lane and graph expansion, ranking and packaging may combine those reasons, but explain surfaces must preserve both sources of support rather than collapsing the item into one opaque graph hit.
+- packaging should distinguish primary evidence from supporting associative context. When graph expansion contributes returned neighbors, the package should preserve which items were direct anchors or seed-aligned hits and which items were admitted as graph-supported context.
+- if graph assistance materially affects inclusion or ordering, the packaged result or its explanation should preserve the seed or engram handle that opened expansion, the bounded hop or path-strength summary, and whether graph support changed ranking, only added supporting context, or was present but non-decisive.
+- graph-only neighbors may appear in the final packaged set only if they still satisfy bounded rescoring against the user cue; when caps force trade-offs, the response should keep the strongest direct evidence visible instead of replacing the whole answer with opaque associative context.
+- if graph-expanded context is omitted by caps or policy, the existing omitted-summary and trace surfaces should say so explicitly rather than implying the returned set exhausted the associative neighborhood.
 
 ## Conflict-aware retrieval contract
 - contradiction state is a first-class retrieval and ranking input, not a post-processing guess from free-form text

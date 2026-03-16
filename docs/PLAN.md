@@ -2982,8 +2982,10 @@ REVIEW EFFECT (spacing):
     After review n: S ≈ 2^(n-1) units
 
   membrain stability growth:
-    After recall n:  stability = BASE_STABILITY × (1 + n × STABILITY_INCREMENT)
-    More precisely: stability += STABILITY_INCREMENT on each recall
+    After recall n:  stability ≈ BASE_STABILITY × (1 + STABILITY_INCREMENT)^n
+
+    Operational update rule per successful recall:
+      stability += STABILITY_INCREMENT × stability
     Bounded: stability = stability.min(MAX_STABILITY) [prevents infinite stability]
 
 INTERACTION COUNT vs REAL TIME:
@@ -2999,9 +3001,11 @@ INTERACTION COUNT vs REAL TIME:
 
   3. Implementation: global atomic counter
      interaction_count: Arc<AtomicU64>
+     Restored from durable brain_state.interaction_tick on startup/restart
      Incremented on every encode OR recall
      Stored as last_accessed_tick at recall time
      Elapsed = current_tick - memory.last_accessed_tick
+     Must remain monotonic across replay/recovery; never substitute wall time
 
 STABILITY INTERPRETATION:
   stability = 100 means: after 100 ticks without recall, retention = e^(-1) ≈ 37%
@@ -11252,7 +11256,7 @@ TESTS:
     - encode 5 similar memories → all in same engram (centroid formed)
     - encode 1 dissimilar memory → new engram created
     - encode SOFT_LIMIT + 1 similar memories → engram splits into 2
-    - bfs: seed → returns up to max_nodes depth-first expansion
+    - bfs: seed → returns a priority-weighted BFS expansion subject to max_depth/max_nodes caps
     - centroid: mean of all member embeddings (verified numerically)
     - serialization: serialize → deserialize → same graph structure
     - edge activation_count: BFS traversal increments count
@@ -12781,8 +12785,8 @@ The canonical order is:
 1. direct key or id hints
 2. Tier1 active-window scan
 3. Tier2 exact index search
-4. Tier2 graph neighborhood expansion
-5. Tier2 semantic candidate generation
+4. Tier2 semantic candidate generation
+5. bounded Tier2 graph neighborhood expansion from the capped shortlist
 6. Tier3 fallback
 7. dedup and diversify
 8. ranking
@@ -12801,6 +12805,17 @@ Every request path implementation must include:
 - low-confidence suppression
 - duplicate family collapse
 - diversity constraints
+
+### 15.3.1 Bounded graph-expansion contract
+
+- graph expansion may open only from a bounded, already-authorized seed shortlist produced by earlier direct, exact, lexical, or semantic stages; graph traversal must not bootstrap itself from the whole corpus or reopen namespaces that earlier stages excluded.
+- the default request-path traversal is priority-weighted BFS from the current seed set, with higher-confidence or higher-weight edges explored before weaker edges, but always under the same hard continuation rules.
+- every traversal must enforce at least a hard max depth, hard max collected-node budget, and minimum traversable edge weight; the current canonical defaults remain `max_depth=3`, `max_nodes=50`, and `min_edge_weight=0.5` unless a later benchmarked contract changes them explicitly.
+- traversal may inspect only bounded metadata, snippets, handles, and graph-local scalars while expanding; large or cold payload fetch remains deferred until the final candidate cut.
+- traversal continues only while the next hop stays within depth, node, sibling, and time budgets and still improves the bounded candidate set; when the next eligible hop falls below the lane's continuation threshold, expansion stops rather than widening heuristics.
+- graph expansion must be skippable without semantic corruption: if `graph_mode=off`, the graph is degraded or disabled, the bounded seed set is empty, or request-path budgets are already exhausted, retrieval should continue with a graph-bypassed route instead of forcing traversal.
+- graph-disabled or graph-capped serving must remain inspectable. Explain and inspect surfaces should preserve whether graph expansion ran, why it was skipped, which seeds opened the traversal, how many hops and nodes were consumed, and whether a cap or degraded-mode fallback terminated expansion early.
+- contradiction, supersession, duplicate-family, and namespace-denial boundaries remain in force during traversal; BFS may surface related evidence, but it must not flatten conflicts, bypass policy masks, or manufacture one synthetic answer from mutually incompatible nodes.
 
 ### 15.4 Packaging contract
 
@@ -12866,6 +12881,16 @@ Rules:
 - hard policy masks, namespace checks, and explicit suppressions apply before both stages and are never overridden by reranking
 - contradiction and supersession state remain first-class structured inputs throughout both stages
 - reranking may improve same-context or same-task retrieval, but it must emit inspectable deltas rather than hiding the original baseline
+
+### 16.3.1 Graph participation in ranking and packaging
+
+- graph support is an additive bounded score family derived from inspectable graph facts such as seed provenance, hop depth, path weight, and whether the candidate also entered through a direct lane; it must not replace primary query relevance or hide that a candidate was graph-assisted.
+- graph-expanded neighbors are supporting evidence, not automatic winners. A candidate should not outrank a materially stronger direct, exact, lexical, or semantic match solely because it shares an engram or neighborhood path.
+- if a candidate entered through both a direct lane and graph expansion, ranking and packaging may combine those reasons, but explain surfaces must preserve both sources of support rather than collapsing the item into one opaque graph hit.
+- packaging should distinguish primary evidence from supporting associative context. When graph expansion contributes returned neighbors, the package should preserve which items were direct anchors or seed-aligned hits and which items were admitted as graph-supported context.
+- if graph assistance materially affects inclusion or ordering, the packaged result or its explanation should preserve the seed or engram handle that opened expansion, the bounded hop or path-strength summary, and whether graph support changed ranking, only added supporting context, or was present but non-decisive.
+- graph-only neighbors may appear in the final packaged set only if they still satisfy bounded rescoring against the user cue; when caps force trade-offs, the response should keep the strongest direct evidence visible instead of replacing the whole answer with opaque associative context.
+- if graph-expanded context is omitted by caps or policy, the existing omitted-summary and trace surfaces should say so explicitly rather than implying the returned set exhausted the associative neighborhood.
 
 ### 16.4 Ranking output requirements
 

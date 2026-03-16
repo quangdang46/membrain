@@ -80,9 +80,9 @@ Every memory item carries these attributes (directly or derivably):
 | `confidence` | f32 | Reliability/certainty score (Feature 7) |
 | `utility_estimate` | f32 | Predicted future usefulness |
 | `recall_count` | u32 | Times successfully recalled |
-| `last_access_at` | Option | Last recall timestamp |
+| `last_access_at` | Option | Last surfaced-reuse audit timestamp; not the decay clock anchor |
 | `retention_class` | enum | volatile, normal, durable, pinned |
-| `decay_state` | struct | Current decay parameters |
+| `decay_state` | struct | Logical-tick decay parameters such as `base_strength`, `stability`, `last_accessed_tick`, and `bypass_decay` |
 | `policy_flags` | Vec | Active policy markers |
 | `lineage` | Vec | Parent memory IDs |
 | `tags` | Vec | User/agent-assigned tags |
@@ -189,9 +189,9 @@ Identity/version rules must keep revision, replacement, and collision handling s
 - `salience` is the immediate routing and ranking signal for current importance.
 - `confidence` captures reliability and corroboration state; it is separate from strength and source authoritativeness.
 - `utility_estimate` predicts future usefulness for ranking, promotion, demotion, and context-budget packing.
-- `recall_count` and `last_access_at` track successful surfaced reuse, not merely candidate generation.
+- `recall_count` and `last_access_at` track successful surfaced reuse, not merely candidate generation; they are audit-facing reuse signals rather than the canonical logical decay clock.
 - `retention_class` expresses intended durability (`volatile`, `normal`, `durable`, `pinned`) independently from current tier.
-- `decay_state` stores the parameters needed for lazy decay and reinforcement updates without eager whole-store rewrites.
+- `decay_state` stores the parameters needed for lazy decay and reinforcement updates without eager whole-store rewrites, including the authoritative logical-tick anchor (`last_accessed_tick`) used by the decay formula.
 - `policy_flags` carry governance-critical markers such as legal hold, compliance lock, redaction state, and shareability constraints.
 - Initial `salience` is a provisional write-side signal. It may reflect bounded encode cues such as attention outcome, novelty lane, explicit task relevance, and emotional arousal, but it must not erase provenance or collapse source trust into the same scalar.
 - `encoding_valence` and `encoding_arousal` capture emotional significance when explicit input or bounded local derivation supplies it; their origin must remain explainable alongside salience.
@@ -365,19 +365,42 @@ This section freezes the canonical persisted lifecycle for memory items. The `cr
 effective_strength = base_strength × e^(-Δtick / stability)
 ```
 
+The decay clock is logical and usage-driven rather than wall-clock driven.
+
+- `Δtick` means `current_tick - decay_state.last_accessed_tick`, where `current_tick` comes from the process-wide interaction counter.
+- The interaction counter advances on request-path encode and recall operations that materially exercise the memory system, so decay reflects intervening brain activity rather than elapsed human time.
+- The canonical durable anchor for decay is `decay_state.last_accessed_tick`; `last_access_at` is an audit timestamp for surfaced reuse and must not replace the logical tick anchor in formulas, SQL prefilters, or repair/rebuild flows.
+- The global interaction counter itself is durable brain state and must resume monotonically across restart or replay rather than resetting opportunistically.
+- Implementations may derive or cache `effective_strength`, but the canonical durable truth remains `base_strength`, `stability`, `last_accessed_tick`, and `bypass_decay` stored in `decay_state`.
+- Normal request paths compute decay lazily on demand; they must not require eager per-tick rewrites of the whole store.
+
 | Parameter | Description |
 |-----------|-------------|
-| `base_strength` | Current persisted strength |
-| `stability` | How resistant to decay (increases with each recall) |
-| `Δtick` | Ticks since last access |
-| `bypass_decay` | If true (emotional): always returns base_strength |
+| `base_strength` | Current persisted strength baseline before applying elapsed logical-tick decay |
+| `stability` | How resistant to decay (increases with each successful recall) |
+| `Δtick` | `current_tick - last_accessed_tick`, measured in interaction ticks rather than elapsed wall time |
+| `bypass_decay` | If true, effective strength remains `base_strength` until the bypass condition is explicitly cleared |
+
+### Lazy decay semantics
+
+- `effective_strength` is computed from persisted decay state at read, ranking, prefilter, consolidation, and maintenance time; idle memories incur zero background decay cost.
+- Persisting decay means replacing `base_strength` with the currently computed `effective_strength` and resetting `last_accessed_tick` to `current_tick`; this happens only when a workflow explicitly commits that decay-aware state transition.
+- Successful recall persists decay first, then applies recall-side reinforcement and stability growth, then resets the decay clock to the current tick as part of the same accepted mutation.
+- Maintenance jobs such as consolidation, demotion, or forgetting may also persist decay when they commit a durable lifecycle or routing decision, but they must preserve the same formula and clock semantics as request-path recall.
+- SQL or index prefilters may evaluate the same formula against stored decay parameters, but those accelerators remain derived behavior and must not redefine the canonical formula.
 
 ### Strength Modification
 
-- **LTP (on recall)**: `strength += LTP_DELTA` (capped at MAX_STRENGTH)
-- **Stability increase**: `stability += STABILITY_INCREMENT × stability`
-- **Interference**: `similar.strength -= interference_penalty(similarity)`
-- **Reconsolidation**: `strength += RECONSOLIDATION_BONUS` (if updated during window)
+- **LTP (on recall)**: after persisting any pending lazy decay, `base_strength += LTP_DELTA` (capped at `MAX_STRENGTH`)
+- **Stability increase**: on each successful recall, `stability += STABILITY_INCREMENT × stability`, bounded by the configured ceiling
+- **Interference**: related memories may receive bounded interference penalties under the separate interference contract; this is not itself the decay formula
+- **Reconsolidation**: accepted updates during the reconsolidation window may add bounded bonuses without changing the logical-tick decay model
+
+### Determinism and audit rules
+
+- Correctness claims about decay, recency, forgetting thresholds, or reconsolidation windows must be expressed with interaction ticks, logical ticks, or injected clocks rather than ambient wall time.
+- Explain, inspect, and audit surfaces should be able to expose the decay inputs that mattered for a result or lifecycle action: `current_tick`, `last_accessed_tick`, `stability`, whether `bypass_decay` applied, and whether decay was merely computed or also persisted.
+- Restart, rebuild, and repair flows must preserve enough durable brain state to reproduce the same decay math after recovery; resetting the logical counter or silently substituting wall-clock timestamps would violate this contract.
 
 ## Confidence Model (Feature 7)
 

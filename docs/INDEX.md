@@ -57,5 +57,9 @@ The mega-plan contains these major regions:
 - **Section 46 — Batch 1** (Features 1–10): Dream Mode, Belief Versioning, Query-by-Example, Context Budget API, Temporal Landmarks, Passive Observation, Confidence Intervals, Skill Extraction, Cross-Agent Sharing, Health Dashboard
 - **Section 47 — Batch 2** (Features 11–20): Causal Chain Tracking, Snapshots + Time Travel, Attention Heatmap, Semantic Diff, Fork + Merge, Predictive Pre-recall, Schema Compression, Emotional Trajectory, Audit Log, Query Intent Routing
 
+### Cross-batch capability lenses
+- **Trust and historical introspection**: use this lens when discussing later-stage user value across batches. It currently groups Belief Versioning (F2), Causal Chain Tracking (F11), Snapshots + Time Travel (F12), Semantic Diff (F14), and Audit Log (F19).
+- These lenses complement the canonical batch chronology; they do not replace milestone order or reopen the core execution spine.
+
 
 

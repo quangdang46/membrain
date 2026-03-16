@@ -33,6 +33,17 @@ Cycle-level rules:
 - bind namespace, policy, and lifecycle eligibility before mutating durable or derived state
 - preserve prior committed state on failure and hand stale derived work to repair instead of leaving half-applied truth
 
+## Skill extraction follow-on contract
+- Skill extraction is a later-stage, non-blocking consolidation follow-on that distills repeated successful episodes or mature engrams into tentative procedural artifacts; core consolidation, compaction, and repair correctness must not depend on it.
+- Run it only from a bounded eligible set whose namespace, policy, lineage, and lifecycle eligibility are already known; it must not scan the full corpus or widen scope across namespaces just to find candidates.
+- Extraction may be triggered by `membrain skills --extract`, `membrain engram <uuid> --extract`, or a separately budgeted idle-window maintenance pass. It is not a mandatory step in every consolidation cycle or compaction window.
+- The extraction path stays background-only and explainable. It may use bounded cluster, keyword, or centroid heuristics, but it must not put unbounded synthesis or an LLM dependency on a foreground recall path.
+- Extracted skills remain derived durable artifacts until an explicit acceptance path promotes them into authoritative procedural state. Durability or repeated reuse alone must not silently promote them.
+- Every extracted procedure must preserve lineage to the source engram or member set, record confidence or tentative status, and keep the underlying episodic or semantic evidence available for inspect, audit, and repair.
+- Interface hooks should remain semantically aligned across `membrain skills`, `membrain skills --extract`, `membrain engram <uuid> --extract`, `skills()`, and `extract_skills()` rather than inventing separate meanings per surface.
+- Future validation should prove bounded background cost, deterministic candidate selection or rejection, preserved source evidence, explicit non-promotion on ambiguity, and namespace or policy enforcement for every extracted artifact.
+- Later follow-ons such as schema compression or quality-loop automation may consume extracted skills, but they must treat this surface as gated background output rather than a prerequisite for core-path behavior.
+
 ## NREM-style migration contract
 - NREM-style migration is the replay-and-transfer pass for eligible hot-route memories; it is not merely Tier1 cache eviction.
 - Candidate selection stays bounded and may use signals such as effective strength, recency, recall or replay relevance, salience, and emotional priority.

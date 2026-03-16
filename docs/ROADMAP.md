@@ -30,12 +30,52 @@
 - add doctor and operator tooling after core behavior is benchmarked and repairable
 - introduce sharding or distribution only when empirical workload pressure justifies it
 - keep advanced feature batches and later-stage extensions non-blocking with respect to the core execution spine
+- treat snapshot and time-travel inspection as trust/introspection follow-on work: useful for safer operations and historical comparison, but not a prerequisite for proving the bounded core retrieval path
+- treat belief versioning and inspectable history surfaces as trust/introspection follow-on work layered on top of the core contradiction/supersession contract rather than as a blocker for the bounded baseline retrieval spine
+
+### Measured-demand readiness gate for sharding and distribution
+
+Do not treat distribution as default roadmap direction. Promote it only when bounded single-node operation has credible evidence of strain that simpler optimizations cannot relieve.
+
+Required readiness evidence should include:
+- sustained benchmark pressure against current latency, throughput, rebuild, or maintenance budgets rather than isolated anecdote
+- workload shape evidence showing that namespace, workspace, or temporal locality no longer fits the single-node operating model cleanly
+- operator pain that remains unacceptable after bounded indexing, caching, repair, and maintenance improvements are applied
+- recovery, repair, or compaction windows that are too large for the intended operating envelope
+- governance and isolation proof showing that sharding would preserve policy enforcement, auditability, and repairability rather than weakening them
+
+Distribution should stay blocked when the observed problem could still be solved by simpler bounded work such as better Tier1/Tier2 budgets, cache and prefetch tuning, maintenance scheduling, repair throughput improvements, or clearer operator tooling.
 
 ## Sequencing rules
 1. Contracts, memory semantics, and namespace policy land before expensive retrieval work.
 2. Retrieval becomes explainable before graph and advanced optimization layers become core behavior.
 3. Repair and rebuild paths exist before large-scale operations or distribution.
 4. Advanced features and sharding remain later-stage work; they never block the core architecture spine.
+
+## Later-stage work gating and non-blocking rules
+
+Use these rules to keep roadmap ambition from distorting the core execution order:
+
+- Advanced feature batches, deep introspection surfaces, and Phase 4 scale-out ideas are promotion targets only after Phases 0–3 have satisfied their own gates; they are not prerequisites for proving the bounded core system.
+- No later-stage feature may delay contract freezes, bounded encode/retrieval work, contradiction handling, repairability, observability, or governance enforcement that the earlier phases depend on.
+- If a later-stage idea competes for the same design surface as core-path work, the core-path contract wins until the earlier gate is closed explicitly.
+- Distribution and sharding remain evidence-gated follow-ons: they do not become default direction, required architecture, or release-blocking scope until actual workload pressure and Phase 4 gate evidence justify them.
+- Advanced feature beads should be allowed to elaborate future value, but they must not reopen settled invariants such as bounded request-path work, explicit contradiction representation, deterministic namespace enforcement, explainability, and repairability from durable truth.
+- Phase 4 operator ergonomics and quality-loop improvements may improve maturity after the core spine exists, but they must not be treated as blockers for the core architecture/retrieval/repair/governance sequence.
+- When roadmap or backlog discussion introduces speculative later-stage work, keep it visible as deferred or gated follow-on scope rather than quietly folding it into near-term milestone promises.
+
+## Trust and historical introspection cluster
+
+Use this capability lens when discussing later-stage user value across feature batches without erasing the canonical batch chronology.
+
+This cluster currently spans:
+- **Feature 2 — Belief Versioning** for inspectable belief chains, explicit resolution state, and supersession-aware history surfaces
+- **Feature 11 — Causal Chain Tracking** for traceable derivation and invalidation flow
+- **Feature 12 — Snapshots + Time Travel** for named historical inspection anchors
+- **Feature 14 — Semantic Diff** for state comparison across ticks or snapshots
+- **Feature 19 — Audit Log** for operation-history and policy-visible change review
+
+Use the cluster to talk about trust, historical inspection, and operator confidence as one capability family. It complements the batch-1 / batch-2 rollout structure rather than replacing it, and it remains later-stage follow-on scope gated behind the bounded core retrieval, governance, and repair spine.
 
 ## Non-negotiable restriction overlays
 

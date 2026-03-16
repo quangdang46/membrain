@@ -148,7 +148,7 @@ membrain recall "auth" --explain summary --cold-tier avoid
 | `--unlike` | — | Query-by-example cue via `unlike_id` |
 | `--era` | — | Filter to temporal era |
 | `--min-confidence` | — | Minimum confidence score |
-| `--at` | — | Recall at named snapshot (`at_snapshot`) |
+| `--at` | — | Historical recall at named snapshot (`at_snapshot`) |
 | `--namespace` | caller default if deterministic, otherwise required | Namespace scope |
 | `--include-public` | false | Widen only to policy-approved shared/public surfaces |
 | `--explain` | summary | Explain verbosity: none, summary, full; summary explains why results appeared and what major route/policy/budget boundaries mattered, while full adds routing-trace stages and exclusion details |
@@ -157,6 +157,8 @@ membrain recall "auth" --explain summary --cold-tier avoid
 Normalization and safety rules:
 - `<QUERY>` may be omitted only when `--like` or `--unlike` provides the primary cue.
 - `--as-of` and `--at` must not be combined unless a later contract defines deterministic precedence.
+- `--at` selects bounded historical inspection at a named snapshot: later-created memories are excluded and time-sensitive strength or freshness is recomputed using the snapshot tick as historical `now`.
+- Snapshot-scoped recall is not a restore guarantee; it can answer only from durable evidence still retained and policy-visible at inspection time, and should return partial or degraded markers rather than fabricate a complete past state when retention, redaction, or repair loss removed authoritative evidence.
 - `--include-public` does not bypass namespace ACLs or expose private cross-namespace data.
 - `--cold-tier allow` may enable Tier3 candidate generation, but it does not permit pre-cut cold payload fetch.
 - `--explain summary` should surface major route choices, omitted-result reasons, freshness/conflict markers, and any cache bypass, stale-warning, or degraded-mode outcome that materially affected returned results.
@@ -307,6 +309,17 @@ membrain uncertain --top 20
 
 ### `membrain beliefs [OPTIONS]` (Feature 2)
 
+Belief Versioning is a later-stage trust/introspection feature built on the already-canonical contradiction, lineage, and supersession model. It turns those durable records into inspectable history surfaces rather than redefining core mutation semantics.
+
+CLI expectations:
+- `membrain beliefs <query>` should return the belief chain or topic history, including current preferred entry, older versions, and any unresolved disagreement or coexistence state.
+- `membrain beliefs --conflicts` should surface open contradiction sets without flattening them into one winner.
+- `membrain beliefs --resolve <id>` records an explicit resolution outcome such as coexistence, supersession, or authoritative override; it must not silently rewrite history.
+- `membrain inspect <id> --history` remains the item-anchored path for full version-chain inspection.
+- Supersession-aware retrieval should prefer the current operational answer for default packaging while still preserving handles to superseded or conflicting evidence when explanation, audit, or history views request them.
+
+This feature stays gated behind the core contradiction/supersession contract and should not be treated as a prerequisite for bounded baseline retrieval.
+
 ```bash
 membrain beliefs "user preferences"   # show belief chain
 membrain beliefs --conflicts          # list contradictions
@@ -376,6 +389,20 @@ membrain budget --tokens 2000 --context "debugging" --format markdown
 ## Snapshots & Branching
 
 ### `membrain snapshot [OPTIONS]` (Feature 12)
+
+Snapshot commands manage named historical anchors for later inspection. A snapshot records the current tick and compact metadata for a namespace-scoped checkpoint; it is a time-travel reference, not an alternate authoritative store or full data clone.
+
+Historical inspection against a snapshot should:
+- exclude memories created after the snapshot tick,
+- recompute time-sensitive strength or freshness using the snapshot tick as historical `now`,
+- remain subject to current namespace, policy, redaction, and retained-evidence constraints,
+- distinguish fully reproducible historical answers from partial or degraded inspection when later repair loss, retention, or policy changes removed authoritative evidence.
+
+CLI surface:
+- `membrain snapshot --name <name> [--note <text>]` creates a named snapshot in the effective namespace.
+- `membrain snapshot list` returns snapshot metadata only, suitable for scripting and operator review.
+- Operators should create clearly named pre-change snapshots before authoritative rewrites or rollback-sensitive operations when the operations contract requires a restorable safety anchor.
+- `membrain snapshot delete <name>` removes the named snapshot handle, but must not silently remove the last restorable safety anchor still required by maintenance or rollback policy.
 
 ```bash
 membrain snapshot --name before-refactor
@@ -477,6 +504,17 @@ membrain daemon restart
 
 membrain mcp       # start MCP stdio server
 ```
+
+### Lifecycle and semantic-parity contract
+
+- `membrain daemon` manages the long-lived runtime described by the canonical plan: a warm process that owns the Unix socket / JSON-RPC service surface, keeps model and derived hot structures warm, and runs bounded background maintenance loops outside the foreground request path.
+- `membrain daemon status` is the operator-facing readiness surface for that runtime. It should report whether the configured daemon is reachable and, when available, expose runtime facts such as socket path, pid, uptime, and other status details that matter for safe routing and diagnosis.
+- `membrain daemon stop` and `membrain daemon restart` preserve graceful lifecycle semantics: stop accepting new work, finish or time-box in-flight requests, flush durable state as required, and remove daemon-owned pid/socket artifacts only after shutdown succeeds.
+- Standalone CLI execution remains a first-class correctness mode for scripts, tests, one-off commands, and daemon-unavailable environments. Standalone may pay cold-start or warm-cache costs, but it must not change the logical request, namespace binding, policy checks, boundedness guarantees, or outcome semantics of an equivalent operation.
+- When a compatible daemon is reachable, CLI commands may forward to it over the Unix socket; when it is unavailable, the CLI may fall back to standalone execution. That routing choice is a performance and lifecycle distinction, not permission to widen scope, skip safeguards, or alter encode/recall behavior.
+- CLI direct mode, CLI-via-daemon, Unix-socket JSON-RPC, and `membrain mcp` are transport adapters over the same underlying operations. Their envelopes may differ, but they must preserve semantic parity for effective namespace, policy denials, explanation families, degraded warnings, and outcome class.
+- If daemon unavailability or missing warm state materially affects service quality, the surface must say so through warnings or the existing `degraded` / `blocked` outcome vocabulary rather than silently pretending the long-lived service guarantees still held.
+- `membrain mcp` is the stdio transport for MCP-capable clients. It should expose the same bounded operations and policy/explain behavior through MCP envelopes rather than inventing alternate command semantics.
 
 ## Output Modes and Outcome Classes
 
