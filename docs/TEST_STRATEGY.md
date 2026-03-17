@@ -91,6 +91,77 @@ Use for failure injection, repairability, crash recovery, stale-result visibilit
 ### Policy, namespace, and quality tests
 Use for policy denial behavior, cross-namespace isolation, retrieval quality, retention and legal-hold regression behavior, explainability, and user-visible safety constraints.
 
+## Contributor validation pyramid
+
+Contributors should run the smallest tier that can still prove the touched contract. If a change spans multiple classes, run the union of the required tiers; representative benchmarks or release rehearsals do not replace deterministic local or CI semantic proof.
+
+### Local loop
+Use before handoff and for every change.
+
+- run targeted deterministic suites for the touched contract surface: unit/property/transition fixtures, doc-example parity fixtures, focused integration paths, and boundedness smoke checks as applicable
+- prefer the smallest replayable fixture or workload that can prove the claim instead of whole-system suites
+- local artifacts should name the fixture or workload identity, changed surface, and any intentionally deferred higher-tier checks
+
+### Required CI loop
+Use as the shared merge gate whenever a change affects repository-visible behavior.
+
+- rerun the touched deterministic suites in a clean environment
+- include cross-surface parity, namespace/policy, restart/rebuild, or boundedness suites when those contracts are in scope
+- validate benchmark metadata, schema/package manifests, and machine-readable interface artifacts that contributors should not trust from one workstation alone
+- fail closed when CI cannot prove the changed contract; do not treat a skipped gate as equivalent to a pass
+
+### Release or heavyweight loop
+Use when evidence depends on representative workloads, cross-platform/package behavior, or operational failure modes that exceed ordinary merge-gate cost.
+
+- run representative benchmark/load/soak suites, repair or migration drills, install/package checks, and other operator-facing rehearsals on declared hardware or corpora
+- produce the benchmark report, failure matrix, ops note, and related release artifacts required by the touched phase gate or change class
+- reserve this tier for stage-closing proof, hot-path claims, repair/governance-sensitive changes, distribution work, or other cases where CI-scale fixtures are intentionally smaller than production evidence
+
+### Change-class to minimum tier mapping
+
+| Change class | Minimum local proof | Required shared gate | Heavyweight/release proof when... |
+| --- | --- | --- | --- |
+| Prose-only doc clarification with no contract or example drift | targeted doc review plus nearby deterministic references stay accurate | optional unless a shared docs gate already exists | not required |
+| Interface/example/flag/envelope changes | doc-example parity fixtures and canonical spelling checks for touched examples | cross-surface parity for the touched CLI, daemon/JSON-RPC, and MCP surfaces | install/package/release docs or shipped surface manifests change |
+| Formula, lifecycle, namespace, or policy semantics | deterministic unit/property/transition fixtures on the changed rule | rerun touched deterministic suites plus restart/policy/isolation coverage where relevant | representative load or stage-gate evidence is also being claimed |
+| Retrieval, ranking, cache, or other hot-path behavior | correctness plus boundedness smoke fixtures and targeted microbenchmarks | regression suites and benchmark-metadata checks for the touched path | latency/SLO claims, representative corpora, or promotion gates depend on the result |
+| Repair, migration, retention, or degraded-mode operations | dry-run/blocked/error-path fixtures plus durable-truth expectations | restart/rebuild/governance matrix for the affected surface | operator runbooks, migration safety, or failure-injection claims are being promoted |
+| Packaging, install, release, or distribution changes | local manifest/schema sanity checks | package/install smoke on supported build surfaces | binaries, installers, cross-platform guarantees, or distribution readiness are being asserted |
+
+### Fixture and workload promotion strategy
+
+- keep stable fixture identities across tiers: a local micro fixture, CI scenario fixture, and release representative workload should describe the same contract family even when scale differs
+- use micro fixtures for deterministic semantics, scenario fixtures for multi-step restart/repair/parity flows, and representative workloads for benchmark/load/release evidence
+- doc examples should map each source doc anchor to a normalized canonical operation plus expected machine-readable fields so drift can be classified precisely
+- benchmark workloads must declare cardinality, hardware, build mode, warm/cold status, sample count, representativeness label, and artifact location; CI may validate those declarations even when only release-tier infrastructure can generate the final numbers
+- when one change touches both semantic correctness and performance, pair a deterministic fixture with the larger workload rather than asking the larger workload to prove both alone
+
+## Interface contract and doc-example parity minimum matrix
+
+Any change to CLI, daemon/JSON-RPC, or MCP command examples, shared flag vocabulary, request envelopes, response envelopes, or remediation examples must include dedicated coverage for:
+
+- golden example fixtures that normalize documented CLI invocations, daemon/JSON-RPC requests, and MCP tool calls into the same canonical operation so example drift is detected as contract drift rather than left to prose review
+- canonical spelling checks for command names, tool names, method names, shared flags, and command-specific parameters so examples cannot silently reintroduce undeclared aliases, stale flags, or stale request fields after the stable interface contract changes
+- response-envelope parity checks ensuring example success, partial, degraded, blocked, rejected, and policy-denied flows preserve the correct machine-readable fields and meanings across CLI JSON, daemon/JSON-RPC, and MCP surfaces
+- explicit validation of explanation families, safeguard objects, remediation hints, and availability markers whenever an example claims to show them, including the stable field-family names rather than transport-specific paraphrase
+- structured artifacts that record the source doc section or anchor, normalized operation, expected canonical fields, and drift classification so reviewers can tell whether a failure reflects semantic breakage or example hygiene noise
+
+### Doc-example drift blocking rules
+
+Treat the change as blocked until examples are updated when drift changes any of:
+
+- canonical command, tool, or method spelling
+- shared or command-specific flag / parameter names, requiredness, incompatibility rules, or normalization semantics
+- machine-readable response fields or outcome-class meaning
+- remediation, availability, or safeguard semantics that affect user recovery or safety expectations
+- example claims about namespace, policy, degraded-mode, or cross-surface parity behavior
+
+Do not block changes for formatting-only drift such as:
+
+- whitespace, line wrapping, or key ordering where the machine-readable meaning stays identical
+- placeholder IDs, timestamps, or example values that keep the same contract meaning
+- prose-only rewording that does not alter command spelling, field names, or envelope semantics
+
 ## Recall quality, policy, and isolation minimum matrix
 
 Any change to recall ranking, packaging, sharing, redaction, or namespace enforcement must include dedicated coverage for:
