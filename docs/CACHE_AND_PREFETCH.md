@@ -195,3 +195,177 @@ Cold-start mitigation accelerates startup and first-query behavior through disca
 - bounded memory use
 - stale-result observability
 - cache hit and miss metrics
+# Cache event taxonomy
+## Cache event taxonomy
+
+### cache_family
+
+| Family | Description |
+|--------|-------------|
+| `tier1_item` | Exact and recent fetches for already-authorized items |
+| `negative_cache` | Repeated structurally valid misses under current policy scope |
+| `result_cache` | Packaged recall results for normalized request shape |
+| `entity_neighborhood` | Graph neighborhood lookups derived from canonical relation tables |
+| `summary_cache` | Derived summaries and projections |
+| `ann_probe_cache` | Vector-search shortlist generation for current index generation |
+| `prefetch_hints` | Speculative handles or shortlists keyed to session or task intent |
+| `session_warmup` | Session-local hot set for current scoped session |
+| `goal_conditioned` | Task or goal-local shortlist for repeated retrieval |
+| `cold_start_mitigation` | Process-local bootstrap warm artifacts only |
+
+### cache_event
+
+| Event | Description |
+|--------|-------------|
+| `hit` | Cache returned a valid entry for current request namespace, owner boundary, policy, and generation anchors |
+| `miss` | No valid entry found in cache for current key and scope |
+| `bypass` | Cache exists but was skipped due to staleness, version mismatch, scope mismatch, or owner-boundary violation |
+| `invalidation` | Cache entry invalidated due to authoritative mutation or generation change |
+| `repair_warmup` | Cache populated or refreshed during repair operation |
+| `stale_warning` | Cache entry exists but was rejected as stale and result came from colder path |
+| `disabled` | Cache is explicitly disabled or in degraded mode for current request |
+| `prefetch_drop` | Prefetch hint canceled due to intent change, budget exhaustion, or policy scope change |
+| `session_expired` | Session warmup invalidated due to session end or scope change |
+
+### cache_reason
+
+| Reason | Description |
+|---------|-------------|
+| `owner_boundary_mismatch` | Cache entry owner boundary does not match current request owner |
+| `namespace_mismatch` | Cache entry namespace does not match current effective namespace |
+| `policy_denied` | Cache entry not authorized under current policy scope |
+| `generation_anchor_mismatch` | Cache entry lacks fresh generation anchor for current request |
+| `version_mismatch` | Cache entry belongs to different schema, index, embedding, or model generation |
+| `scope_too_broad` | Cache entry scoped more broadly than current request allows |
+| `record_not_present` | Referenced memory record no longer exists in authoritative store |
+| `repair_incomplete` | Cache entry from failed or partial repair operation |
+| `policy_changed` | Cache entry invalidated due to policy rule change |
+| `redaction_changed` | Cache entry invalidated due to redaction rules update |
+| `schema_changed` | Cache entry invalidated due to schema generation change |
+| `index_changed` | Cache entry invalidated due to index generation change |
+| `embedding_changed` | Cache entry invalidated due to embedding generation change |
+| `ranking_changed` | Cache entry invalidated due to reranker model version change |
+| `intent_changed` | Prefetch or warmup invalidated due to session or task intent change |
+| `budget_exhausted` | Prefetch canceled due to budget exhaustion |
+| `namespace_narrowed` | Session warmup invalidated due to namespace scope narrowing |
+| `namespace_widened` | Session warmup invalidated due to namespace scope widening |
+
+### warm_source
+
+| Source | Description |
+|---------|-------------|
+| `tier1_item_cache` | Hot metadata store for exact-handle and recent-item lookups |
+| `negative_cache` | Request-local cache for structurally valid misses |
+| `result_cache` | Request-local cache for packaged recall results |
+| `entity_neighborhood` | Relation-local cache derived from canonical relation tables |
+| `summary_cache` | Summary-source-local cache for derived summaries and projections |
+| `ann_probe_cache` | Request-local cache for ANN shortlist probes |
+| `prefetch_queue` | Session-local or task-local speculative lookup queue |
+| `session_warmup` | Session-local hot set |
+| `goal_cache` | Task-local or goal-local shortlist cache |
+| `cold_start_cache` | Process-local bootstrap artifact cache |
+
+### generation_status
+
+| Status | Description |
+|---------|-------------|
+| `valid` | Cache entry has all required generation anchors for current request |
+| `stale` | Cache entry exists but lacks fresh generation anchor |
+| `version_mismatched` | Cache entry generation version differs from current required version |
+| `unknown` | Cache entry generation status cannot be determined |
+
+## Metrics structure for testing
+
+### Per-request metrics
+
+All cache-influenced requests must populate the `metrics` object in the common response envelope with at minimum the following counters:
+
+| Field | Type | Description | Required when... |
+|-------|------|-------------|-----------------|
+| `cache_hit_count` | integer | Number of cache hits across all families for this request | Always |
+| `cache_miss_count` | integer | Number of cache misses across all families for this request | Always |
+| `cache_bypass_count` | integer | Number of cache entries bypassed due to staleness, version mismatch, or scope violation | When any bypass occurs |
+| `cache_invalidation_count` | integer | Number of cache entries invalidated for this request (may be 0) | When invalidation occurs |
+| `prefetch_used_count` | integer | Number of prefetch hints consumed for this request | When prefetch is used |
+| `prefetch_dropped_count` | integer | Number of prefetch hints canceled for this request | When prefetch drops occur |
+| `cold_fallback_count` | integer | Number of times request escalated from cache to colder authoritative path | When cold fallback occurs |
+| `degraded_mode_served` | boolean | `true` if response was served while system was in degraded mode | When degraded mode is active |
+
+### Candidate count preservation
+
+Routing traces must preserve candidate counts at key checkpoints to distinguish cache acceleration from cold-path work:
+
+| Checkpoint | Description | Required for... |
+|-----------|-------------|-----------------|
+| `pre_cache_candidates` | integer | Candidates available before any cache lookup | Always |
+| `post_tier1_candidates` | integer | Candidates after Tier1 cache evaluation | When Tier1 is active |
+| `post_tier2_candidates` | integer | Candidates after Tier2 cache evaluation | When Tier2 is active |
+| `post_ann_candidates` | integer | Candidates after ANN probe cache evaluation | When ANN cache is active |
+| `prefetch_added_candidates` | integer | Candidates added by prefetch queue for this request | When prefetch contributes |
+
+### Per-family breakdown
+
+When multiple cache families participate in a request, metrics must distinguish contributions by family:
+
+| Field | Type | Description | Required when... |
+|-------|------|-------------|-----------------|
+| `tier1_item_hit_count` | integer | Hits from Tier1 item cache | When Tier1 is queried |
+| `negative_cache_hit_count` | integer | Hits from negative cache | When negative cache is queried |
+| `result_cache_hit_count` | integer | Hits from result cache | When result cache is active |
+| `entity_neighborhood_hit_count` | integer | Hits from entity neighborhood cache | When graph expansion is active |
+| `summary_cache_hit_count` | integer | Hits from summary cache | When summary cache is queried |
+| `ann_probe_hit_count` | integer | Hits from ANN probe cache | When ANN search is active |
+| `prefetch_hit_count` | integer | Hits from prefetch queue | When prefetch is used |
+
+## Regression artifacts for testing
+
+### Distinguishable outcomes
+
+Tests must be able to distinguish following cache-related outcomes without inspecting internal state:
+
+| Outcome | How to distinguish | Test evidence required |
+|---------|-----------------|---------------------|
+| Cache hit vs cold miss | Cache `metrics.cache_hit_count > 0` vs `metrics.cache_miss_count > 0` and `cache_event=hit` in trace | `metrics` object populated with hit/miss counts |
+| Cache bypass | `metrics.cache_bypass_count > 0` and explicit `cache_reason` in `trace_stages` | `cache_event=bypass` with reason in trace |
+| Stale-result warning | `cache_event=stale_warning` in `trace_stages` or explicit `stale_warning` in `warnings` | Trace contains stale warning or warnings array |
+| Disabled or degraded mode | `metrics.degraded_mode_served=true` or `cache_event=disabled` | `degraded_mode_served` flag or disabled event in trace |
+| Prefetch vs authoritative | `metrics.prefetch_used_count > 0` vs same candidates returned from authoritative path | Both counters present in `metrics` |
+| Cache invalidation | `metrics.cache_invalidation_count > 0` or `cache_event=invalidation` in trace | Invalidation count or event in trace |
+
+### Required coverage
+
+Every cache observability change must include regression coverage for:
+
+1. **Hit/miss visibility by family**: Each cache family must emit hit/miss counts that can be distinguished in `metrics` output
+2. **Stale-result bypass**: Stale cache entries must surface as `bypass` events with explicit reason, not silent `miss`
+3. **Degraded mode serving**: When cache is disabled or degraded, `degraded_mode_served` must be `true` and distinguishable from ordinary cold miss
+4. **Candidate count preservation**: `pre_cache_candidates`, `post_tier2_candidates`, etc. must be preserved in traces when those families participate
+5. **Prefetch transparency**: `prefetch_used_count` and `prefetch_dropped_count` must both be populated when prefetch is configured
+6. **Per-family breakdown**: Individual family hit counts must be available when multiple families participate
+7. **Parity across interfaces**: Cache metadata (`cache_family`, `cache_event`, `cache_reason`, `warm_source`, `generation_status`) must be identical across CLI, daemon, and MCP explain/inspect surfaces
+
+### Test scenario examples
+
+| Scenario | Expected metrics behavior |
+|-----------|------------------------|
+| Fresh cache hit | `cache_hit_count=1, cache_miss_count=0, cache_bypass_count=0`, `cache_event=hit`, relevant family hit count incremented |
+| Cache miss with no cache | `cache_hit_count=0, cache_miss_count=1, cache_bypass_count=0`, `cache_event=miss` in trace |
+| Stale cache bypass | `cache_hit_count=0, cache_miss_count=0, cache_bypass_count=1`, `cache_event=bypass` with `cache_reason=stale_warning` |
+| Prefetch hit + cold fallback | `cache_hit_count=1, cold_fallback_count=1`, `cache_event=hit` for prefetch, later `cold_fallback_count` incremented |
+| Degraded mode serving | `degraded_mode_served=true`, `cache_event=disabled` or explicit `degraded` warning in `warnings` |
+| Cache invalidation mid-request | `cache_hit_count=1, cache_invalidation_count=1`, both `hit` and `invalidation` events in `trace_stages` |
+
+### Integration with trace_stages
+
+When `explain=full` is requested or explicit inspect mode is active, cache-related events must appear in `trace_stages` with the following structure:
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `stage` | string | Stage name (e.g., `tier1_cache_eval`, `ann_probe_cache_eval`) |
+| `cache_family` | string | Which cache family participated (from taxonomy) |
+| `cache_event` | string | Event type (`hit`, `miss`, `bypass`, `invalidation`, `stale_warning`, `disabled`, `prefetch_drop`, `session_expired`) |
+| `cache_reason` | string | Reason for bypass or invalidation when applicable (from taxonomy) |
+| `warm_source` | string | Which warm source provided to cached entry (from taxonomy) |
+| `generation_status` | string | Generation status validation result (from taxonomy) |
+| `candidates_before` | integer | Candidate count before cache evaluation at this stage |
+| `candidates_after` | integer | Candidate count after cache evaluation at this stage |
