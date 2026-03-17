@@ -62,6 +62,15 @@ All recall-facing transports should map onto one logical `RecallRequest` even wh
 8. ranking
 9. packaging
 
+## Canonical retrieval/result packaging object
+- the packaging stage emits the canonical `RetrievalResult` envelope defined in `PLAN.md` Section 34.3 rather than a transport-specific answer blob
+- `outcome_class` communicates whether the bounded retrieval path ended as `accepted`, `partial`, `degraded`, `blocked`, `preview`, or `rejected`
+- `evidence_pack` is the primary retrieval payload: bounded returned evidence with per-item role (`primary` or `supporting`), lane/route provenance, score summaries, provenance summaries, freshness markers, conflict markers, and payload state such as inline, preview-only, deferred, or redacted
+- `action_pack` is optional derived guidance layered on top of the evidence set; it may summarize, recommend, or format next steps, but it must keep supporting evidence ids/handles and uncertainty markers so synthesis never replaces provenance
+- `deferred_payloads` is the canonical place to record payloads intentionally not hydrated before or after the final cut because of budget, policy, redaction, or degraded-serving constraints
+- `omitted_summary`, `policy_summary`, `provenance_summary`, `freshness_markers`, and `conflict_markers` remain first-class result fields rather than human-only narration so callers can inspect why the package looks incomplete, filtered, stale, or conflict-aware
+- CLI, daemon/JSON-RPC, and MCP may render this object differently for humans, but they must preserve the same evidence-versus-action split and the same omission, policy, freshness, conflict, and deferred-payload semantics
+
 ## Tier1 exact and recent retrieval contract
 - Tier1 is the first bounded retrieval surface for exact and recent recall. It is an in-process derived accelerator, not authoritative evidence.
 - Tier1 may return or shortlist only already-authorized items after request normalization, deterministic effective-namespace binding, and policy or owner-boundary checks for the live request.
@@ -124,6 +133,102 @@ All recall-facing transports should map onto one logical `RecallRequest` even wh
 - Unknown retrieval modes, invalid effort levels, malformed IDs, or malformed namespace values are validation failures before candidate generation.
 - Omitted `namespace` is valid only when one deterministic default can be bound from authenticated context or stable session/job ownership.
 - If request normalization widens scope to shared/public surfaces, the response must preserve that widening in explain/audit metadata.
+
+## Uncertainty surface contract
+
+- **uncertainty** is a richer, multi-dimensional measure of reliability than the scalar `confidence` field. While `confidence` tracks belief strength after corroboration and reconsolidation, **uncertainty** aggregates evidence gaps, temporal staleness, contradiction state, and source sparsity into a composite reliability indicator.
+
+- Each memory may carry multiple uncertainty dimensions that combine into an overall score and optional confidence interval bounds.
+
+### Uncertainty dimensions
+
+| Dimension | Description | Source |
+|-----------|-------------|--------|
+| **corroboration_uncertainty** | Uncertainty from lack of supporting evidence. More corroboration → lower uncertainty. |
+| **freshness_uncertainty** | Uncertainty from temporal staleness. Older memories that haven't been accessed recently have higher uncertainty. |
+| **contradiction_uncertainty** | Uncertainty from conflict state. Conflicted or superseded memories have elevated uncertainty. |
+| **missing_evidence_uncertainty** | Uncertainty from sparse source support. Memories with few causal links or weak authoritativeness have higher uncertainty. |
+
+### Combined uncertainty scoring
+
+```rust
+// Combined uncertainty score (0.0 = most certain, 1.0 = most uncertain)
+fn compute_uncertainty(memory: &Memory, now_tick: u64) -> f32 {
+    let corroboration_factor = 1.0 / (1.0 + memory.corroboration_count as f32).max(0.8);
+    let freshness_factor = if let Some(last_access) = last_access {
+        let days_since_access = (now_tick - last_access) / 86400.0; // Assuming 10ms ticks
+        (days_since_access / FRESHNESS_THRESHOLD_DAYS).min(1.0) // 365 days
+    } else {
+        1.0 // No access history = high uncertainty
+    };
+    let conflict_factor = match memory.conflict_state {
+        ConflictState::None | ConflictState::Resolved => 0.0,
+        ConflictState::Open | ConflictState::Superseded => 0.3,
+    };
+    let evidence_factor = if memory.has_causal_parents == 0 && memory.authoritativeness < 0.5 {
+        1.0 // Little to no evidence
+    } else {
+        (memory.authoritativeness / 1.0).min(1.0) // Normalize to [0,1]
+    };
+
+    // Weighted combination (adjustable per deployment/retrieval scenario)
+    let base_uncertainty = (
+        corroboration_factor * CORROBORATION_WEIGHT +
+        freshness_factor * FRESHNESS_WEIGHT +
+        conflict_factor * CONFLICT_WEIGHT +
+        evidence_factor * EVIDENCE_WEIGHT
+    ) / (CORROBORATION_WEIGHT + FRESHNESS_WEIGHT + CONFLICT_WEIGHT + EVIDENCE_WEIGHT);
+
+    // Clamp to [0,1]
+    base_uncertainty.max(1.0)
+}
+```
+
+### Confidence intervals
+
+For high-stakes or action-oriented paths, uncertainty should be exposed as **confidence intervals** rather than a single point estimate:
+
+```rust
+pub struct UncertaintyBounds {
+    pub lower_bound: f32,  // confidence - uncertainty_margin
+    pub upper_bound: f32,  // confidence + uncertainty_margin
+    pub margin: f32,         // Uncertainty quantile (e.g., 95% CI uses 2×stderr)
+    pub confidence_level: f32,  // Underlying scalar confidence
+}
+
+fn compute_confidence_interval(
+    confidence: f32,
+    uncertainty: f32,
+    quantile_multiplier: f32, // e.g., 1.96 for 95% CI
+) -> UncertaintyBounds {
+    let margin = uncertainty * quantile_multiplier;
+    UncertaintyBounds {
+        lower_bound: (confidence - margin).max(0.0),
+        upper_bound: (confidence + margin).min(1.0),
+        margin,
+        confidence_level: confidence,
+    }
+}
+```
+
+### Uncertainty in RetrievalResult
+
+- `evidence_pack` items must include per-item uncertainty fields when available:
+  - `uncertainty_score`: combined 0-1 measure
+  - `corroboration_uncertainty`: contribution from lack of corroboration
+  - `freshness_uncertainty`: contribution from staleness
+  - `contradiction_uncertainty`: contribution from conflict state
+  - `missing_evidence_uncertainty`: contribution from sparse evidence
+  - Optional `confidence_interval`: bounds for high-stakes paths
+
+- `action_pack` or synthesis must preserve uncertainty markers so users understand limitations of recommendations.
+- Rankings should incorporate uncertainty as a penalty factor for high-uncertainty candidates when multiple high-confidence options exist.
+
+### High-stakes uncertainty requirement
+
+- High-stakes paths (actions, decisions, policy operations, safety-critical recalls) **MUST** include uncertainty surfaces by default.
+- Normal retrieval may include uncertainty, but it may be suppressed for low-uncertainty results.
+- The system never hides uncertainty behind optional diagnostics-only tools for high-stakes operations.
 
 ## Ranking contract
 - ranking runs only after namespace and policy pruning, candidate caps, dedup, and per-conflict sibling caps have been applied

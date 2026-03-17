@@ -28,10 +28,11 @@ This document fixes the stable CLI surface for `mb-1hw.1`: command families, nam
 
 It does **not** finalize:
 - the canonical retrieval result envelope from `mb-1hw.8`
-- the detailed error/remediation taxonomy from `mb-1hw.9`
 - the destructive preflight / blocked-action schema from `mb-1hd.7`
 
-Those sibling contracts may add payload fields or stronger safeguards later, but they should plug into the command and outcome vocabulary defined here rather than redefining it.
+The shared failure/remediation taxonomy in this document should stay aligned with `docs/MCP_API.md` and the degraded/read-only availability contract in `docs/OPERATIONS.md`. Those sibling contracts may add transport-specific envelope fields or stronger safeguards later, but they should plug into the command and outcome vocabulary defined here rather than redefining it.
+
+For retrieval-facing commands, `mb-1hw.8` defines one canonical `RetrievalResult` envelope shared with daemon/JSON-RPC and MCP. CLI text may summarize that object for humans, but CLI `--json` must preserve the same outcome class, evidence-versus-action split (`evidence_pack` and optional `action_pack`), omission semantics, policy/provenance/freshness/conflict markers, deferred-payload meaning, and explanation families instead of inventing a CLI-only result shape.
 
 ## Stable Command Families and Naming Rules
 
@@ -68,11 +69,12 @@ These flags define shared CLI vocabulary even when only some commands accept the
 
 ## Default-Safe Ergonomics
 
-At the CLI layer, destructive or high-blast-radius commands should follow these ergonomics even before the fuller safeguard contract is specified elsewhere:
+At the CLI layer, destructive or high-blast-radius commands should follow these ergonomics in addition to the shared safeguard contract owned by `docs/OPERATIONS.md`:
 - default to the narrowest explicit scope rather than silently widening namespace, history, or maintenance coverage
 - prefer `--dry-run` or another preview path before state-changing repair, merge, invalidation, compression, or deletion-adjacent work
-- surface a **blocked** outcome when confirmation, scope, or readiness conditions are missing instead of guessing or proceeding implicitly
-- treat `--force` as a local confirmation override only; it does not bypass policy, namespace, or safety invariants
+- surface a **blocked** outcome when confirmation, scope, snapshot/generation freshness, or other readiness conditions are missing instead of guessing or proceeding implicitly
+- treat `--force` as a local confirmation override only; it does not bypass policy, namespace, retention, legal-hold, or other safety invariants
+- use **rejected** for malformed or policy-denied requests that still cannot proceed, not as a synonym for confirmation-missing or stale-preflight states
 - keep preview, blocked, degraded, and accepted outcomes distinguishable in both text and JSON modes
 
 ## Alias and Deprecation Policy
@@ -116,6 +118,8 @@ echo "content" | membrain remember --context "recent commits" --kind semantic
 3-tier retrieval: Tier1 cache → SQL pre-filter → HNSW search → rescore → engram BFS → unified scoring.
 
 All CLI recall invocations normalize into the canonical `RecallRequest` described by `PLAN.md` and `RETRIEVAL.md`: `<QUERY>` populates `query_text`, `--context` maps to `context_text`, `--confidence` maps to bounded `effort`, and CLI-only spelling differences must not create different retrieval semantics.
+
+The machine-readable result for `recall` is the canonical `RetrievalResult` envelope from `mb-1hw.8`. In practice that means CLI JSON should expose a bounded `evidence_pack`, optional `action_pack`, `outcome_class`, omission/deferred-payload state, and the same policy/provenance/freshness/conflict/explanation families used by daemon/JSON-RPC and MCP.
 
 ```bash
 membrain recall "JWT authentication"
@@ -175,6 +179,7 @@ membrain forget <uuid> --force    # bypass confirmation
 
 Rules:
 - `forget` archives by default; it does not imply hard deletion unless a separate policy-authorized destructive path is invoked.
+- `membrain forget <uuid> --force` satisfies only the local confirmation step for the exact preflighted scope; policy denial, retention constraints, legal hold, stale preflight state, or widened scope must still block or reject the operation.
 - Archived memories remain inspectable and auditable, and those surfaces should expose archive reason, restore eligibility, and any degraded-fidelity markers when only partial recovery is possible.
 - Ordinary recall, cold-tier lookup, and snapshot inspection do not implicitly restore archived memories.
 - Explicit restore or admin paths may reactivate archived memories when policy allows, but they restore only retained authoritative evidence and must surface partial or degraded state rather than pretending to recreate a perfect pre-archive copy.
@@ -191,6 +196,11 @@ Submit a pending update during reconsolidation window.
 
 Brain health statistics.
 
+Stats contract:
+- `membrain stats` is the read-only operator summary for storage, quality, performance, and runtime counters; it is not a repair, approval, or mutation surface.
+- `--json` should preserve the same machine-readable report consumed by daemon/JSON-RPC and MCP `stats()` equivalents, including tier counts and utilization, strength/confidence or uncertainty rollups, recall/cache metrics, runtime or daemon status when known, and any historical anchor selected via `--at`.
+- When a field is unavailable because the namespace, snapshot, policy scope, or serving posture is degraded, the response should surface explicit warnings or availability state instead of silently dropping the field or replacing it with misleading zeros.
+
 ```bash
 membrain stats
 membrain stats --json
@@ -201,6 +211,11 @@ membrain stats --at before-refactor    # stats at snapshot point
 
 Full memory details: tier, lineage, policy, lifecycle, archive reason and restore eligibility when relevant, graph neighborhood, decay, cache-related routing metadata when relevant, provenance summary, freshness markers, conflict state, and degraded-fidelity markers when partial archival recovery applies.
 
+Inspect contract:
+- `membrain inspect` is the item-anchored structural and diagnostic surface, not a second retrieval path with different semantics.
+- In `--json` mode it should preserve the same machine-readable families the retrieval contract expects when they are relevant to the inspected item: `policy_summary`, `provenance_summary`, `freshness_markers`, `conflict_markers`, and `trace_stages` or an `explain_handle` when deeper routing context is deferred.
+- When the inspected item was returned, filtered, archived, degraded, or partially reconstructed through a bounded route that still matters operationally, `inspect` should expose enough cache/tier/route metadata to explain that state without forcing operators to infer it from prose.
+
 ```bash
 membrain inspect <uuid>
 membrain inspect <uuid> --history       # belief version chain (Feature 2)
@@ -210,6 +225,11 @@ membrain inspect <uuid> --show-source   # source engram for procedurals (Feature
 ### `membrain doctor`
 
 Diagnose brain health: orphan edges, missing embeddings, stale indexes, broken lineage, checkpoint corruption.
+
+Doctor contract:
+- `membrain doctor` is a read-only diagnosis surface; it identifies corruption, stale derived state, and degraded serving posture without implicitly mutating anything. Repair remains an explicit `membrain repair ...` flow.
+- `membrain doctor run --json` should preserve machine-readable per-check results with stable fields for check name, surface kind, status/severity, affected scope, degraded impact, and remediation or repair hints so CLI text, daemon/JSON-RPC, and MCP do not drift.
+- When corruption or unreadable authoritative inputs prevent safe serving, `doctor` should surface the same `error_kind`, `availability`, and remediation semantics used by sibling daemon/MCP contracts rather than collapsing everything into prose-only warnings.
 
 ```bash
 membrain doctor run
@@ -225,6 +245,14 @@ membrain doctor run --json
 Manually trigger NREM+REM+Homeostasis cycle.
 
 ### `membrain compress [OPTIONS]` (Feature 17)
+
+Schema Compression is a later-stage maintenance surface that synthesizes repeated episodic situation patterns into durable schema memories without deleting the underlying source evidence. It remains gated behind consolidation maturity, lineage preservation, and repairable auditability rather than acting as a default foreground path.
+
+CLI expectations:
+- `membrain compress` should report whether the pass is a dry run or apply run, how many candidate episodes or clusters were eligible, how many schema memories were created, and the bounded storage or maintenance impact.
+- Compression should preserve inspectable lineage to the source episodes; `inspect`, audit, and related history surfaces must be able to show which source memories contributed to a schema and which episodes were marked `compressed_into` that schema.
+- Compression should reduce source-episode strength rather than silently deleting source evidence, and any future restore/uncompress path must be explicit rather than implicit retrieval magic.
+- Because this is later-stage follow-on work, CLI surfaces should make its gated/background nature visible instead of implying it is part of the core retrieval spine.
 
 ```bash
 membrain compress              # trigger compression pass
@@ -246,6 +274,11 @@ membrain dream --disable       # pause background dreaming
 ### `membrain health [OPTIONS]` (Feature 10)
 
 Full terminal dashboard: tier utilization, decay curves, engrams, signals, activity.
+
+Health contract:
+- `membrain health` is the operator dashboard rendering of the same bounded `BrainHealthReport` exposed through daemon/JSON-RPC and MCP `health()`.
+- `--json`, `--brief`, and `--watch` are presentation variants over one machine-readable report; they must preserve the same tier/capacity, quality/conflict/uncertainty, activity/runtime, and feature-availability meaning.
+- If historical scope, policy limits, or degraded serving change what can be shown, the surface should say so through warnings or availability markers instead of silently pretending the dashboard is complete.
 
 ```bash
 membrain health
@@ -286,6 +319,13 @@ membrain diff --since 4000 --top 5 --json
 
 Audit output should preserve retention, legal-hold, repair, and degraded-serving evidence strongly enough that operators can distinguish policy outcomes from stale or partially rebuilt derived state.
 
+Audit expectations:
+- entries remain read-only history records, not a restore or replay command surface
+- each entry should preserve the operation, actor/source (`triggered_by`), effective namespace scope, before/after deltas when applicable, and an operator-meaningful reason or note
+- policy-limited audit responses should surface redaction explicitly rather than silently omitting protected context
+- when a visible state change came from repair, snapshot-protected maintenance, migration, compaction, or incident handling, the audit trail should retain enough correlation metadata or note text to connect the entry back to that run without treating snapshots as the audit log
+- CLI text, CLI `--json`, daemon/JSON-RPC, and MCP `audit()` must preserve the same entry meaning, required correlation fields, and degraded or redacted history semantics even if one surface summarizes or paginates differently.
+
 ```bash
 membrain audit <uuid>                       # full history
 membrain audit <uuid> --since 5000
@@ -303,6 +343,13 @@ membrain dead-zones --forget-all
 ```
 
 ### `membrain uncertain [OPTIONS]` (Feature 7)
+
+The uncertainty surface is the user-facing inspection path for Feature 7. It should not stop at a scalar score: when uncertainty is surfaced, the CLI should make it inspectable as what is currently **known**, what is still **assumed**, what remains **uncertain**, what evidence is **missing**, and what `change_my_mind_conditions` or stronger evidence would most directly upgrade confidence.
+
+CLI expectations:
+- `membrain uncertain` should list memories or results whose uncertainty is high enough to warrant review, including `confidence`, `uncertainty_score`, and the dominant contributors such as corroboration, freshness, contradiction, or missing-evidence uncertainty.
+- `--json` should preserve machine-readable uncertainty markers rather than flattening them into prose-only explanation. At minimum, each returned entry should be able to expose `known`, `assumed`, `uncertain`, `missing`, and `change_my_mind_conditions` when that structure is available.
+- High-stakes or action-oriented paths should include confidence intervals and the same uncertainty markers by default rather than hiding them behind an optional diagnostics-only command.
 
 ```bash
 membrain uncertain                    # memories with confidence < 0.5
@@ -335,6 +382,11 @@ membrain beliefs --resolve <id>       # resolve pending conflict
 ### `membrain why <ID> [OPTIONS]` (Feature 11)
 
 Trace causal and retrieval rationale for one item, including lineage and route ancestry when available.
+
+Why-surface contract:
+- `membrain why` is the focused route-and-causality view for one item or belief chain, complementing `inspect` rather than replacing it.
+- `--json` should preserve machine-readable route and explanation families rather than a bespoke trace-only blob: `route_summary`, `result_reasons`, `omitted_summary` when siblings or alternatives were capped, `policy_summary`, `provenance_summary`, `freshness_markers`, `conflict_markers`, and `trace_stages` when full route ancestry is requested.
+- If the command returns a deferred explanation handle instead of embedding the full trace, the handle should still point at the same semantic explanation contract used by recall, daemon/JSON-RPC, and MCP surfaces.
 
 ```bash
 membrain why <uuid>                   # trace causal chain to root evidence
@@ -371,6 +423,8 @@ membrain uncompress <schema-uuid>     # restore source episodes
 ### `membrain ask <QUERY> [OPTIONS]` (Feature 20)
 
 Auto-classifies intent and routes to optimal retrieval configuration. The primary entry point for agents.
+
+`ask` reuses the same canonical `RetrievalResult` envelope as `recall`; intent classification and `formatted_response` are wrappers around that shared result object, not a separate answer schema. The machine-readable response should therefore preserve the underlying `evidence_pack`, optional `action_pack`, `outcome_class`, omission/deferred-payload state, and explanation families even when the default text rendering foregrounds the formatted answer.
 
 ```bash
 membrain ask "what do I know about Rust lifetimes?"
@@ -456,6 +510,12 @@ membrain observe --dry-run
 
 ## Data I/O
 
+Data I/O contract:
+- `membrain export` is a policy-aware externalization surface. It should serialize only the effective namespace or shared scope the caller is allowed to read, and it should preserve machine-readable manifest facts such as chosen format, included stores, item counts, omission/redaction summaries, and any historical or degraded anchor that shaped the dump.
+- `membrain import` is governed ingest, not a raw storage bypass. Imported records still pass ordinary validation, namespace binding, duplicate handling, provenance tagging, and bounded enrichment or repair rules.
+- `--dry-run` on import should return a preview with created/merged/skipped/rejected counts plus any format, policy, or namespace blockers without writing.
+- CLI text, CLI `--json`, daemon/JSON-RPC, and MCP transports may package payloads differently, but they must preserve the same import/export semantics, warnings, and outcome class.
+
 ### `membrain export`
 
 ```bash
@@ -519,6 +579,7 @@ membrain mcp       # start MCP stdio server
 - Standalone CLI execution remains a first-class correctness mode for scripts, tests, one-off commands, and daemon-unavailable environments. Standalone may pay cold-start or warm-cache costs, but it must not change the logical request, namespace binding, policy checks, boundedness guarantees, or outcome semantics of an equivalent operation.
 - When a compatible daemon is reachable, CLI commands may forward to it over the Unix socket; when it is unavailable, the CLI may fall back to standalone execution. That routing choice is a performance and lifecycle distinction, not permission to widen scope, skip safeguards, or alter encode/recall behavior.
 - CLI direct mode, CLI-via-daemon, Unix-socket JSON-RPC, and `membrain mcp` are transport adapters over the same underlying operations. Their envelopes may differ, but they must preserve semantic parity for effective namespace, policy denials, explanation families, degraded warnings, and outcome class.
+- Operator and data-mobility surfaces such as `stats`, `health`, `doctor`, `audit`, `export`, and `import` must keep the same underlying counters, warnings, remediation, availability, and outcome semantics across those transports even when one surface renders dashboards, streams files, or returns structured envelopes.
 - If daemon unavailability or missing warm state materially affects service quality, the surface must say so through warnings or the existing `degraded` / `blocked` outcome vocabulary rather than silently pretending the long-lived service guarantees still held.
 - `membrain mcp` is the stdio transport for MCP-capable clients. It should expose the same bounded operations and policy/explain behavior through MCP envelopes rather than inventing alternate command semantics.
 
@@ -531,17 +592,37 @@ Every major command supports:
 
 Output-mode rules:
 - Text mode and JSON mode must describe the same command outcome even when they differ in presentation density.
-- `--json` should expose warnings, route/explain handles, and policy/degraded context in machine-readable form when those details materially affect the outcome.
+- `--json` should expose warnings, route/explain handles, policy/degraded context, and the stable machine-readable explanation families from the canonical retrieval contract when those details materially affect the outcome. At minimum that means preserving `route_summary`, `result_reasons`, `omitted_summary`, `policy_summary`, `provenance_summary`, `freshness_markers`, `conflict_markers`, and `trace_stages` when the command or requested verbosity makes them relevant, rather than inventing a CLI-only explanation shape.
 - `--quiet` may suppress extra narration in text mode, but it must not hide outcome class, actionable warnings, or policy-visible refusal.
 - `--verbose` may add explanatory detail in either mode, but only as additive information.
 - Command-specific `--format` options may change rendering or file serialization, but they must not redefine the success/failure semantics already represented by text mode and `--json`.
 
 CLI-visible outcome classes:
 - **accepted** — the command completed normally
-- **rejected** — the command failed validation or was denied by policy
+- **rejected** — the command failed validation or was denied by policy; local confirmation would not make the request valid
 - **partial** — the command returned a bounded but incomplete result and must say what was omitted or deferred
-- **preview** — the command intentionally returned a non-mutating dry-run or inspection of planned work
-- **blocked** — the command refused to proceed until another readiness, scope, or confirmation condition is met
+- **preview** — the command intentionally returned a non-mutating dry-run or inspection of planned work, including `preview-only` preflight states
+- **blocked** — the command refused to proceed until another readiness, scope, freshness, or confirmation condition is met
 - **degraded** — the command completed through a slower, reduced-fidelity, or repair-aware path and must surface that fact
 
-These classes define what users must be able to distinguish at the CLI layer. The final machine-readable result envelope, detailed remediation taxonomy, and destructive-action safeguard schemas remain owned by `mb-1hw.8`, `mb-1hw.9`, and `mb-1hd.7`.
+These classes define what users must be able to distinguish at the CLI layer. The final machine-readable retrieval/result envelope remains owned by `mb-1hw.8`, while the destructive-action safeguard schema and degraded/read-only availability contract remain owned by `docs/OPERATIONS.md`.
+
+### Failure taxonomy, retryability, and remediation contract
+
+Text mode should use stable human-facing failure headlines, and `--json` should preserve the same underlying `error_kind`, `retryable`, optional `remediation`, and `availability` semantics shared with daemon/JSON-RPC and MCP.
+
+| Machine-readable kind | Text headline | Retryable? | CLI exit code | Minimum remediation |
+|---|---|---|---|---|
+| `validation_failure` | Invalid request | No | 1 | Fix missing, malformed, incompatible, or stale request inputs before rerunning. |
+| `policy_denied` | Denied by policy | No | 2 | Narrow scope, change namespace/visibility, or obtain the required approval instead of retrying blindly. |
+| `unsupported_feature` | Feature unavailable | No | 1 | Check `health`, feature maturity, build/config support, or required opt-in before retrying. |
+| `transient_failure` | Temporary failure | Yes | 3 | Retry with backoff after the temporary condition or contention clears. |
+| `timeout_failure` | Timed out | Yes | 3 | Retry with a different effort/budget profile or after load drops; do not treat it as proof of permanent failure. |
+| `corruption_failure` | Corruption detected | No | 3 | Run `doctor`, inspect the affected scope, and complete repair/restore before trusting retries or writes. |
+| `internal_failure` | Internal failure | No | 3 | Inspect diagnostics and repair state; do not spin in blind retry loops. |
+
+Rules:
+- `--json` should preserve `error_kind`, `retryable`, and `remediation` even when text mode shortens the wording.
+- `remediation` should include a short summary plus machine-readable next-step hints such as `fix_request`, `change_scope`, `check_health`, `retry_with_backoff`, `retry_with_higher_budget`, `run_doctor`, or `run_repair`.
+- `degraded` is an outcome class rather than an `error_kind`: the command may still succeed, but text and JSON must say what remained queryable, what became read-only, and which actions were blocked instead of silently downgrading semantics.
+- If only part of the requested result survived budgets, policy filters, fallback, or degraded serving, use `partial` or `degraded` with explicit omission/deferred context instead of flattening the response into a generic success message.

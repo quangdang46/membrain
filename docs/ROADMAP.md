@@ -32,6 +32,7 @@
 - keep advanced feature batches and later-stage extensions non-blocking with respect to the core execution spine
 - treat advanced operations and operational ergonomics as later-stage maturity work layered on top of the base repair, rollback, and governance surfaces rather than as blockers for the core execution spine
 - treat quality-loop and skill-memory follow-ons as later-stage background/operator-guidance work driven by benchmark, maintenance, and extraction signals rather than as prerequisites for core correctness or phase promotion
+- treat predictive pre-recall and prospective-trigger follow-ons as later-stage bounded-assistance work layered on top of proven retrieval, cache/prefetch, and observability contracts rather than as prerequisites for the baseline recall path
 - treat snapshot and time-travel inspection as trust/introspection follow-on work: useful for safer operations and historical comparison, but not a prerequisite for proving the bounded core retrieval path
 - treat belief versioning and inspectable history surfaces as trust/introspection follow-on work layered on top of the core contradiction/supersession contract rather than as a blocker for the bounded baseline retrieval spine
 
@@ -73,6 +74,8 @@ Use this framing to keep the parent Phase 4 bucket explicit without turning it i
 - **Scale-out and distribution** stay evidence-gated follow-ons. The measured-demand gate and `SHARDING_AND_DISTRIBUTION.md` contract exist to resist premature scale-out and keep simpler bounded remedies preferred until workload evidence proves otherwise.
 - **Advanced operations and operator ergonomics** sharpen runbook clarity, automation, and incident/maintenance handling only after the base operational contract is already repairable and benchmarked; they do not bypass maintenance-class, rollback, or observability requirements from `OPERATIONS.md`.
 - **Quality-loop and skill-memory follow-ons** consume rerunnable benchmark evidence, maintenance outcomes, and bounded skill-extraction outputs to drive later recommendations or background tuning; they stay non-blocking, inspectable, and subordinate to auditable inputs rather than becoming a hidden prerequisite for core-path behavior.
+- **Predictive pre-recall and prospective-trigger follow-ons** stay later-stage and optional. They may learn bounded query-sequence or future-cue patterns and asynchronously warm Tier1 or planner hints, but only after the baseline recall path, cache invalidation rules, and route observability are already trustworthy; they must never become hidden request-path work, policy-bypass shortcuts, or reasons to widen candidate budgets.
+- When this family is promoted, validation should prove that speculative warmups remain namespace-bound, cancellable, generation-aware, and explicit in health/stats or explain surfaces, and that disabling the feature changes latency posture only rather than the durable meaning of recall results.
 
 ## Trust and historical introspection cluster
 

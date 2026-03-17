@@ -111,6 +111,13 @@ Every memory item carries these attributes (directly or derivably):
 | `has_causal_children` | bool | F11 | Is source of derived beliefs |
 | `compressed_into` | Option | F17 Compression | Schema memory this was compressed into |
 | `encoding_valence` | Option | F18 Emotional | Mood at encoding time |
+|.*| F18 Emotional | Mood at encoding time |/| `encoding_arousal` | Option | F18 Emotional | Mood at encoding time |
+| `uncertainty_score` | f32 | F7 Uncertainty | Combined 0-1 measure from corroboration, freshness, conflict, and evidence sparsity |
+| `corroboration_uncertainty` | f32 | F7 Uncertainty | Uncertainty from lack of supporting evidence |
+| `freshness_uncertainty` | f32 | F7 Uncertainty | Uncertainty from temporal staleness |
+| `contradiction_uncertainty` | f32 | F7 Uncertainty | Uncertainty from conflict state |
+| `missing_evidence_uncertainty` | f32 | F7 Uncertainty | Uncertainty from sparse causal links or weak authoritativeness |
+| `confidence_interval` | Option<UncertaintyBounds> | F7 Uncertainty | Confidence interval bounds for high-stakes paths |
 | `encoding_arousal` | Option | F18 | Arousal at encoding time |
 | `observation_source` | Option | F6 Observation | Source: stdin, file, watch |
 | `observation_chunk_id` | Option | F6 Observation | Groups bounded observation fragments produced by one watch or batch ingestion pass |

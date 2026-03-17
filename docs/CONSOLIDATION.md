@@ -44,6 +44,14 @@ Cycle-level rules:
 - Future validation should prove bounded background cost, deterministic candidate selection or rejection, preserved source evidence, explicit non-promotion on ambiguity, and namespace or policy enforcement for every extracted artifact.
 - Later follow-ons such as schema compression or quality-loop automation may consume extracted skills, but they must treat this surface as gated background output rather than a prerequisite for core-path behavior.
 
+## Quality-loop follow-on contract
+- Quality-loop follow-ons are Phase 4 maturity work: they use benchmark feedback, maintenance outcomes, and extracted-skill signals to improve operator guidance or later background tuning after the core retrieval, governance, and repair spine is already proven.
+- This loop remains explicitly non-blocking. It must not become a hidden prerequisite for phase promotion, request-path correctness, or ordinary consolidation success, and it must not reopen settled bounded-work or policy invariants.
+- Inputs to the loop should come from existing auditable surfaces such as benchmark artifacts, maintenance reports, repair or compaction outcomes, and bounded skill-extraction outputs rather than from opaque heuristics or untraceable background state.
+- Any automation derived from the loop stays background-only, namespace-aware, policy-aware, and bounded by explicit candidate or queue budgets. It may recommend or schedule follow-on work, but it must not silently mutate authoritative truth on the request path.
+- Interface hooks should remain inspectable and semantically aligned across operator docs and machine-readable surfaces so contributors can tell which benchmark artifact, maintenance signal, or extracted-skill set triggered a later recommendation.
+- Future validation should prove that the loop consumes rerunnable benchmark evidence, preserves lineage and policy semantics for any skill-backed recommendation, stays observably non-blocking under maintenance load, and degrades safely by emitting recommendations or queued follow-up work instead of forcing hidden mutations.
+
 ## NREM-style migration contract
 - NREM-style migration is the replay-and-transfer pass for eligible hot-route memories; it is not merely Tier1 cache eviction.
 - Candidate selection stays bounded and may use signals such as effective strength, recency, recall or replay relevance, salience, and emotional priority.

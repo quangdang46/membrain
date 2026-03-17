@@ -76,6 +76,92 @@ Examples: schema rollback, repair when canonical inputs are not trustworthy enou
 - hot-path latency or I/O contention cannot be bounded safely under ordinary load, or
 - the work may emit irreversible-loss records, retention-affecting mutations, or other operator-significant semantic changes.
 
+## Shared safeguard contract for preview, preflight, and destructive actions
+
+This section owns the reusable safeguard contract referenced by `CLI.md`, `MCP_API.md`, and the plan's safe-preflight sandbox for risky or high-blast-radius operations.
+
+It applies to forgetting, deletion, redaction, purge, invalidation, merge or namespace-scope rewrites, repair apply, compaction, compression, migration, rollback, restore, and any other operation whose blast radius can cross namespace boundaries, rewrite authoritative state, or emit irreversible-loss records. Pure read-only assessment surfaces such as `health`, `stats`, `audit`, `doctor`, snapshot listing, diff, or benchmark inspection stay outside confirmation flow unless they are the preflight step for a mutating follow-on.
+
+### Operation classes and minimum safeguards
+
+| Operation class | Typical examples | Minimum safeguard expectation |
+|---|---|---|
+| Class A — read-only assessment | `health`, `stats`, `audit`, `doctor`, snapshot list, diff, dry-run-only benchmark inspection | No confirmation required. May return `accepted` directly because no authoritative or derived state mutates. |
+| Class B — derived-surface mutation | `repair index`, `repair graph`, `repair lineage`, `repair cache`, drop-and-rewarm, other rebuilds whose authoritative inputs remain readable | Preview is strongly expected. If the caller skips an explicit dry run, the system still computes readiness, affected scope, and degraded-mode requirements before apply. Block when authoritative inputs are unreadable, scope is ambiguous, or durable-truth fallback is unavailable. Reversibility must state that durable truth can rebuild the surface. |
+| Class C — authoritative but logically reversible rewrite | `compress`, compaction, migration apply, namespace merge, large-scope invalidation, restore, rollback | Preview is required before mutation, either as an explicit dry-run request or as an embedded preflight in the same request. Confirmation is required. The preview must surface maintenance class, degraded or read-only posture, snapshot or rollback prerequisites, paused-job requirements, and bounded estimates for touched records or namespaces. |
+| Class D — retention-affecting or irreversible mutation | hard delete, purge, destructive redaction, any forget path that can remove last authoritative evidence or emit irreversible-loss records | Preview is required. Explicit policy authorization and destructive confirmation are required. Block until the request can state the irreversibility boundary, authoritative-evidence-loss risk, audit plan, and any required backup or legal-hold outcome. |
+
+### Shared safeguard object
+
+Preview, blocked, rejected, and apply responses for Classes B-D should expose one consistent safeguard object even when CLI, daemon, and MCP package it differently.
+
+| Field | Meaning |
+|---|---|
+| `outcome_class` | Shared outcome vocabulary: `preview`, `blocked`, `accepted`, `degraded`, or `rejected` as appropriate for the operation response. |
+| `preflight_state` | `ready`, `blocked`, `missing_data`, or `stale_knowledge`. `ready` means safeguards are satisfied for this exact scope; it never means policy may be bypassed. |
+| `operation_class` | The matched safeguard class above so operators know whether the path is read-only, derived-surface, authoritative rewrite, or retention/irreversible. |
+| `affected_scope` | Effective namespace, shard, selector set, and bounded estimates for memories, payloads, indexes, caches, or namespaces touched; include whether public/shared widening participates. |
+| `impact_summary` | What may move, rewrite, invalidate, redact, archive, delete, or temporarily degrade service, including any maintenance-window requirement, paused-job requirement, and explicit-loss risk. |
+| `blocked_reasons` | Machine-readable reasons such as `confirmation_required`, `snapshot_required`, `maintenance_window_required`, `scope_ambiguous`, `authoritative_input_unreadable`, `policy_denied`, `legal_hold`, or `stale_preflight`. |
+| `preflight_checks` | Structured results for policy, required-input, freshness, dependency, confidence, and generation/snapshot checks so the caller can see which gate passed, failed, or degraded. |
+| `warnings` | Non-fatal freshness, namespace, policy-redaction, degraded-fallback, or confidence warnings that materially change how safely the result may be used. |
+| `confidence_constraints` | Minimum evidence/confidence expectations for action-oriented guidance, including whether the current result is below a high-stakes threshold and what stronger evidence would be needed to upgrade it. |
+| `reversibility` | One of `repairable_from_durable_truth`, `rollback_via_snapshot`, `partially_reversible`, or `irreversible`, plus the backup, snapshot, or repair prerequisites needed to recover safely. |
+| `confirmation` | Whether local confirmation is required, what exact scope or generation it binds to, and whether `--force` or an allow token may satisfy only the local confirmation step. |
+| `audit` | Event kind, actor/source, request id, preview/preflight id, related snapshot/repair/migration run, and the scope handles needed to correlate preview, apply, and rollback review. |
+
+### Contract rules
+
+- `--force` or an equivalent `preflight.allow` path may satisfy local confirmation only. It never bypasses policy denial, namespace isolation, retention rules, or legal hold.
+- Confirmation must bind to the exact preflighted scope and generation. Widening namespace scope, changing selectors, or mutating after the underlying snapshot/generation moved invalidates the prior confirmation.
+- `outcome_class=preview` means no mutation occurred and the safeguard object is the authoritative description of planned work.
+- `outcome_class=blocked` means mutation did not proceed because a confirmation, freshness, scope, snapshot, maintenance-window, or similar readiness prerequisite is still missing. The response must include `blocked_reasons` plus the next missing prerequisite instead of relying on prose-only diagnostics.
+- `outcome_class=rejected` is reserved for malformed, impossible, or policy-denied requests that cannot proceed even with local confirmation; it is not a synonym for confirmation-missing or stale-preflight states.
+- `preview-only` and `force-confirmed` are preflight outcomes rather than separate top-level response classes: `preview-only` normally surfaces as `outcome_class=preview`, and `force-confirmed` surfaces through `confirmation` plus the remaining checks while policy, namespace, retention, and confidence constraints continue to apply.
+- Successful apply responses should echo the final safeguard state or at least the `audit` correlation fields and any explicit loss, degraded-mode, or rollback markers that materially shaped the run.
+
+### Preflight semantics for risky operations and high-stakes queries
+
+The preflight surface complements preview and confirmation rather than replacing them. It may be exposed as explicit APIs such as `preflight.run`, `preflight.explain`, and `preflight.allow`, or embedded inside command/tool responses, but the underlying semantics should stay shared across CLI, daemon/JSON-RPC, and MCP.
+
+#### Minimum preflight checks
+- **policy check** — confirm namespace binding, sharing scope, retention/legal-hold state, and any deny/redaction rule before expensive work or mutation.
+- **required-input check** — verify selectors, ids, snapshots, backups, and other mandatory inputs are present and mutually compatible.
+- **freshness check** — detect stale snapshots, old preview generations, stale repair baselines, or degraded historical visibility.
+- **dependency check** — confirm required maintenance windows, paused conflicting jobs, prerequisite snapshots, readable authoritative inputs, and dependent repair or migration state.
+- **confidence check** — for action-oriented guidance or high-stakes queries, verify the evidence quality, conflict state, and freshness are strong enough for the requested action level.
+- **generation check** — verify the scope and generation anchored by preview or prior confirmation still match current state.
+
+#### Shared preflight outcomes
+- **allowed / ready** — all required checks passed for the current scope; execution may proceed, subject to any confirmation requirement already declared.
+- **preview-only** — the operation may be described safely, but mutation or high-confidence action guidance cannot proceed until missing confirmation, stronger evidence, or another prerequisite is satisfied.
+- **blocked** — execution must not proceed; the response includes actionable `blocked_reasons` and the failing checks.
+- **degraded** — execution or answer construction may continue only through a lower-fidelity path that remains explicit about colder reads, repair-aware serving, stale visibility, or uncertainty.
+- **force-confirmed** — local confirmation has been supplied for the exact preflighted scope, but policy, namespace, retention, and confidence constraints still apply unchanged.
+
+#### High-stakes query rules
+- High-stakes actions should surface uncertainty by default. If evidence is stale, contradictory, too sparse, or policy-limited, the preflight should prefer `preview-only`, `blocked`, or `degraded` outcomes over silently emitting confident action guidance.
+- `confidence_constraints` should state the minimum evidence quality required for action-oriented output and, when not met, what `change_my_mind_conditions` or stronger evidence would be needed to upgrade the answer.
+- Missing and unauthorized data must remain distinguishable at the internal preflight boundary even when external presentation redacts details for security reasons.
+- Preflight warnings should preserve whether the risk comes from stale knowledge, missing inputs, policy-limited visibility, unresolved conflict, or degraded repair state so callers can decide whether to stop, inspect, or continue with bounded caution.
+
+### Operation-family minimums
+
+- **Forgetting, deletion, redaction, and invalidation** previews must report affected authoritative-evidence counts, retention or legal-hold blockers, whether losing evidence remains inspectable afterward, and whether the path is archive-by-default, redaction-only, or irreversible removal.
+- **Merge or namespace-scope rewrites** must report source and target scopes, visibility or sharing changes, conflict-handling policy, and the rollback or unwind path before mutation.
+- **Repair and rebuild apply** must report the authoritative input set used for rebuild, degraded-serving posture while repair is in flight, unresolved follow-up items, and whether explicit loss records may be emitted if full fidelity cannot be restored.
+- **Compaction, compression, migration, rollback, and restore** must report maintenance class, pre-run snapshot or backup requirement, paused-job requirements, before/after telemetry expectations, rollback owner, and whether the run rewrites authoritative durable layout or only derived surfaces.
+
+## Phase 4 operational ergonomics follow-on contract
+
+- This surface is later-stage maturity work. It activates only after core runbooks, degraded-mode behavior, snapshot/rollback discipline, repair flows, and baseline operator diagnostics are already explicit and trustworthy.
+- Scope includes operator-facing guidance or automation such as runbook selection aids, maintenance-window planning helpers, audit/incident correlation, repair-queue triage, recurring health-review packaging, and other ergonomics layers built on existing operational signals.
+- These helpers remain subordinate to the canonical operations contract. They do not replace required preconditions, approval paths, snapshot requirements, rollback rules, namespace isolation, or policy checks, and they must not silently widen scope or execute destructive maintenance by default.
+- Automation should consume auditable inputs that already exist elsewhere in the system — `health`, `stats`, `doctor`, `audit`, benchmark artifacts, snapshot metadata, maintenance reports, and repair or compaction outcomes — rather than opaque hidden state or untraceable heuristics.
+- Any recommended or scheduled action must stay previewable, bounded, and explainable: operators should be able to see the triggering evidence, affected scope, required maintenance class, and why the system chose recommendation, degraded mode, or no-op.
+- Later-stage ergonomics may queue background follow-up work or assemble operator context, but they must not become a prerequisite for normal request-path correctness, phase promotion, or ordinary maintenance success, and they must fail safely by emitting inspectable suggestions instead of hidden mutations.
+- Future validation should prove low operational overhead, semantic parity across CLI, daemon, IPC, and MCP surfaces that expose the guidance, preserved auditability of assisted actions, and correct containment when source signals are stale, partial, or policy-restricted.
+
 ---
 
 ## 1. Capacity Planning
@@ -250,6 +336,45 @@ membrain benchmark tier2 --json | jq '.p99_us'
 - If an index, graph projection, lineage view, or cache is unavailable during rebuild, the system must either fall back to slower durable-truth reads or refuse the affected operation explicitly; it must not pretend the rebuilt surface is complete before validation.
 - Every repair run should declare which namespaces or shards remain fully available, which are degraded to slower reads, and which are temporarily read-only or offline.
 
+#### Shared availability object for degraded or partial service
+
+Whenever degraded mode, repair posture, fallback, or fail-closed containment materially changes what callers can do, the response should expose one inspectable availability summary across CLI, daemon/JSON-RPC, and MCP.
+
+| Field | Meaning |
+|---|---|
+| `posture` | `full`, `degraded`, `read_only`, or `offline` for the affected scope. |
+| `affected_scope` | Namespace, shard, feature, or selector range whose availability changed. |
+| `query_capabilities` | Which read paths remain available, such as durable-truth lookup, bounded recall, inspect, audit, explain, or health/doctor surfaces. |
+| `mutation_capabilities` | Which writes remain available, preview-only, blocked, or refused. |
+| `degraded_reasons` | Machine-readable reasons such as `graph_unavailable`, `index_bypassed`, `cache_invalidated`, `repair_in_flight`, `stale_generation`, or `authoritative_input_unreadable`. |
+| `recovery_conditions` | The checks, repairs, or validations required before the scope may return to normal serving. |
+| `availability_notes` | Human-facing summary of what changed and which safer fallback path is still available. |
+
+Availability rules:
+- `degraded` means some bounded queries still work, but the response must say which read paths survived and which fidelity or latency guarantees were reduced.
+- `read_only` means query and inspect surfaces may remain available, but authoritative or derived-surface mutation must be blocked or preview-only until validation clears the scope.
+- `offline` means the affected scope must refuse ordinary query and mutation traffic, leaving only explicitly allowed health, audit, doctor, or recovery-oriented surfaces.
+- If correctness, policy isolation, or authoritative-input readability is ambiguous, prefer `read_only` or `offline` over best-effort mutation.
+- A downgraded write path must surface `blocked` or `preview` semantics rather than pretending that degraded mode silently converted a mutating request into a normal success.
+- Degraded availability must preserve policy and namespace boundaries exactly; fallback cannot widen scope, leak protected counts, or hydrate payloads that colder policy checks would deny.
+
+### Verification contract for restart, rebuild, and recovery
+
+Every restart, rebuild, or recovery runbook should leave operator-verifiable evidence that the system either returned to healthy service or remained explicitly degraded. At minimum capture:
+
+- the scenario class (`clean_restart`, `derived_rebuild`, `degraded_recovery`, or `fail_closed_recovery`) and affected namespace or shard scope
+- the authoritative inputs or generations validated at start, including whether canonical rows were readable and which snapshot or repair baseline anchored the run
+- the serving posture during the run: full service, slower durable-truth fallback, graph or index bypass, read-only, or offline
+- the exact parity checks used to clear the surface: durable-count or candidate-count parity, lineage or graph consistency, namespace and policy isolation, cache-generation freshness, and queued repair or irreversible-loss status
+- the release criteria for clearing degraded mode, including which metrics, inspect or explain outputs, and audit records must pass first
+- any remaining degraded scope or queued follow-up repair if the run stops short of full recovery
+
+#### Scenario-specific proof rules
+- **Clean restart** must prove canonical counters, generations, and durable handles were restored without trusting stale or mixed-generation warm state.
+- **Derived-surface rebuild** must prove rebuilt indexes, graph materializations, lineage views, or caches match durable truth before the surface is advertised as healthy.
+- **Degraded recovery** must keep the fallback path explicit and preserve the audit trail until final validation clears it.
+- **Fail-closed recovery** must keep the affected scope unavailable or read-only until canonical validation passes; partial availability is not a substitute for proof.
+
 ### Lifecycle transition repair handoff
 - Failed lifecycle transitions reuse the same durable-truth-first repair model: prior durable state stays authoritative while derived follow-up work is repaired or replayed.
 - Only retryable internal failures should create automatic repair or replay work. Validation failures and policy denials are recorded but must not spin in automated retry loops.
@@ -392,6 +517,8 @@ Duplicate storms, graph fanout explosions, and stale-cache incidents should also
 - If transition repair is in flight, verify the prior durable state remains authoritative and that retry-budget exhaustion or escalation artifacts are visible to operators.
 
 ### Root-Cause Investigation
+
+Treat audit as the canonical operation-history surface for incident review: correlate entries with the affected namespace or shard, actor/source, repair or migration run, and any snapshot-protected maintenance event before deciding whether the observed state came from policy, degradation, or stale derived state.
 
 ```bash
 membrain audit <affected-uuid> --json              # full history

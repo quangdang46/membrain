@@ -62,6 +62,15 @@ Any change to scoring, decay, ranking fusion, lifecycle math, or invariant-prese
 - failure-path coverage showing that invalid transforms reject cleanly, internal failure preserves prior durable state, and repair or escalation artifacts appear when the contract says they should, and
 - controlled-clock or tick-driven fixtures for any age, recency, or reconsolidation math instead of wall-clock sleeps.
 
+### Formula and transition fixture contract
+
+Use named, replayable fixtures for any touched formula or lifecycle edge so later contributors can rerun the exact semantic proof instead of reconstructing it from prose.
+
+- Each touched canonical formula fixture should record the authoritative formula family, full input fields, tick or clock anchor, expected output or tolerance, and whether parity against another execution lane is required.
+- Lifecycle-edge fixtures should record the pre-state, attempted action, guard context, expected outcome class (`success`, `validation_failure`, `policy_denied`, or `internal_failure`), post-state expectation, and any required repair or escalation artifact.
+- When formula math and lifecycle mutation interact in one flow, include deterministic fixtures for the ordering contract rather than testing the pieces in isolation. This especially applies to paths where decay is first persisted, then recall-side reinforcement or labile-window reopening is applied, and to rejected or retried flows that must not double-apply the accepted mutation.
+- Property suites should persist failing seeds or counterexample inputs in their structured artifacts so invariant regressions can be replayed without rediscovering the input space.
+
 ## Core suite families
 
 ### Unit tests
@@ -81,6 +90,19 @@ Use for failure injection, repairability, crash recovery, stale-result visibilit
 
 ### Policy, namespace, and quality tests
 Use for policy denial behavior, cross-namespace isolation, retrieval quality, retention and legal-hold regression behavior, explainability, and user-visible safety constraints.
+
+## Recall quality, policy, and isolation minimum matrix
+
+Any change to recall ranking, packaging, sharing, redaction, or namespace enforcement must include dedicated coverage for:
+
+- representative judged corpora or canonical fixtures that make expected `full`, `partial`, `miss`, contradiction-aware, and tip-of-the-tongue outcomes explicit enough to detect ranking or packaging drift
+- stable top-K or shortlist expectations for direct, recent, lexical, semantic, and bounded graph-assisted paths where those lanes are in scope, including returned-result reasons and omitted-result reasons rather than score-only assertions
+- same-namespace allow behavior and explicit shared/public allow paths producing the same evidence, policy summaries, and deferred-payload behavior across CLI, daemon, IPC, and MCP surfaces
+- cross-namespace, owner-boundary, and policy-denied requests rejecting before widened candidate generation and without leaking protected handles, counts, existence hints, or suppressed conflict siblings
+- policy-filtered or redacted winners degrading to explicit omission, preview, partial, or miss semantics rather than silently substituting unauthorized payloads or widening the candidate cut
+- adversarial ambiguous cues, near-duplicate clusters, contradiction-bearing candidate sets, and fragmentary cues preserving bounded behavior, inspectable uncertainty, and conflict markers instead of speculative reconstruction
+- cache, prefetch, and repair-path recall preserving the same namespace, policy, omission, and explanation semantics as the colder canonical path
+- structured artifacts that record fixture identity, namespace or visibility setup, expected winners and omissions, policy decisions, and machine-readable explanation fields such as `result_reasons`, `omitted_summary`, `policy_summary`, `conflict_markers`, and `trace_stages` when available
 
 ## Cache observability regression minimum matrix
 
@@ -103,6 +125,21 @@ Any change to repair, rebuild, migration, retention, namespace policy, or other 
 - failed-transition recovery preserving prior durable state and emitting repair or escalation artifacts when applicable
 - cross-namespace leakage prevention across request paths, caches, repair controllers, and background jobs
 - retention-policy and legal-hold regressions staying explicit, auditable, and policy-correct under repair and migration
+- preview / blocked / degraded / rejected safeguard parity across CLI, daemon, IPC, and MCP surfaces whenever the changed operation can mutate authoritative state, widen scope, or emit irreversible-loss records
+- differentiation between `policy_denied` or malformed-request rejection versus confirmation-missing, snapshot-missing, stale-preflight, or other blocked-readiness outcomes
+- force-confirmed flows proving that local confirmation changes only the confirmation state while policy, namespace, retention, confidence, and legal-hold checks continue to apply unchanged
+
+## Restart, rebuild, and recovery verification minimum matrix
+
+Any change to startup bootstrap, durable-state replay, derived-surface rebuild, repair resume, or degraded recovery posture must include dedicated coverage for:
+
+- clean restart restoring canonical counters, generation anchors, durable handles, and other persisted state needed for request semantics without trusting stale or mixed-generation warm state
+- startup with missing or stale derived indexes, graph materializations, caches, or sidecars proving the system falls back to colder reads or explicit degraded/read-only posture until validation passes rather than advertising full health prematurely
+- startup with unreadable, ambiguous, or mixed-generation authoritative inputs failing closed for the affected namespace or shard instead of replaying speculative recovery from derived artifacts
+- seeded divergence tests for `repair index`, `repair graph`, `repair lineage`, cache drop-and-rewarm, and similar rebuilds proving rebuilt outputs regain candidate-count, lineage, namespace, and policy parity with durable truth before the surface is marked healthy
+- interrupted restart, rebuild, or recovery runs resuming idempotently from durable checkpoints or explicit repair queue state without duplicating mutations, widening scope, or losing the prior durable state
+- operator-visible recovery artifacts recording the failing surface, serving posture, authoritative input generation or snapshot, queued follow-up repairs, any irreversible-loss record, and the exact checks required to clear degraded mode
+- cross-surface parity for stats, health, doctor, explain, inspect, audit, and import/export manifest signals that expose degraded, graph-disabled, index-bypassed, stale-warning, replay-pending, stale-preflight-invalidated, redacted, or partial-transfer state across CLI, daemon, IPC, and MCP where those surfaces exist
 
 ## Stage-by-stage gate expectations
 
@@ -151,6 +188,7 @@ Any change to repair, rebuild, migration, retention, namespace policy, or other 
 - latency/load tests for Tier1, Tier2, and Tier3 budgets
 - explainability tests for routing/ranking traces
 - bounded graph-expansion tests when graph assistance is enabled
+- recall-quality and policy/isolation tests covering same-namespace allow, cross-namespace denial without leakage, redacted-winner degradation, and contradiction-aware partial recall
 - adversarial tests for ambiguous partial cues, near-duplicate clusters, and contradiction-aware partial recall
 - parity tests for summary versus full explain surfaces across CLI, daemon, IPC, and MCP where those surfaces exist
 
@@ -160,6 +198,8 @@ Any change to repair, rebuild, migration, retention, namespace policy, or other 
 - partial-match paths do not leak full payloads before the final cut
 - tip-of-the-tongue results stay explicit about fragmentary status, remaining ambiguity, and omitted evidence
 - low-signal partial cues terminate with a bounded miss or fragment shortlist rather than speculative reconstruction
+- same-namespace allow paths, explicit shared/public allow paths, and cross-namespace or policy-denied paths all preserve the same bounded candidate-generation and omission semantics without existence leakage
+- redacted or policy-filtered winning candidates degrade explicitly to omission, preview, partial, or miss semantics rather than silently substituting unauthorized payloads
 - explain outputs preserve returned-result reasons, omitted-result reasons, provenance summaries, freshness or conflict markers, and stable routing-trace fields without cross-surface semantic drift
 
 ### Stage 5 — Reconsolidation

@@ -1466,6 +1466,12 @@ pub struct RetrievalResult {
     pub reconstruction: Option<String>,
 }
 
+// NOTE: This early sketch is superseded by the canonical `RetrievalResult`
+// envelope in Section 34.3, which separates `evidence_pack` and `action_pack`
+// and carries outcome, omission, policy, freshness, conflict,
+// deferred-payload, and explanation metadata across CLI, daemon/JSON-RPC,
+// and MCP.
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum RetrievalPath {
     Fast,      // cache hit
@@ -9941,24 +9947,29 @@ Each section below is written in English and focuses on **how to build the featu
 ### 10.7 Safe Preflight Sandbox
 
 **What it adds**
-- A dry-run / validation layer before risky actions.
+- A transport-shared preview / preflight / blocked-action layer before risky actions and high-stakes queries.
 
 **Why it matters**
-- Prevents reckless tool usage and incomplete action execution.
+- Prevents reckless tool usage, stale confirmations, policy bypass by wrapper, and incomplete action execution.
 
 **How to implement**
-1. Before risky actions, run:
+1. Before risky actions or high-stakes action-oriented guidance, run:
    - policy checks
    - required-input checks
    - freshness checks
    - dependency checks
    - confidence checks
-2. Return a preflight report:
-   - ready
-   - blocked
-   - missing data
-   - stale knowledge
-3. Allow user-facing “why blocked?” diagnostics.
+   - generation checks
+2. Return a preflight report using the shared safeguard vocabulary from `docs/OPERATIONS.md`:
+   - `preflight_state`: `ready`, `blocked`, `missing_data`, `stale_knowledge`
+   - preflight outcomes: `allowed / ready`, `preview-only`, `blocked`, `degraded`, `force-confirmed`
+   - machine-readable `blocked_reasons` and check results that explain *why blocked* without relying on prose only
+3. Treat `preflight.allow` / `--force` as local confirmation only:
+   - confirmation binds to the exact scope and generation that were previewed
+   - it never bypasses policy, namespace isolation, retention, or legal-hold constraints
+4. Distinguish confirmation-missing or stale-preflight states from true rejection:
+   - use blocked/preview semantics for missing readiness or confirmation
+   - reserve rejection for malformed, impossible, or policy-denied requests that still cannot proceed
 
 **Minimum API**
 - `preflight.run`
@@ -14256,6 +14267,30 @@ Every MCP response should be able to carry:
 - `explain_handle` or embedded explanation
 - `metrics` for latency / candidate counts where relevant
 
+For recall-facing operations, `result` is not an ad hoc per-transport blob. CLI JSON, daemon/JSON-RPC, and MCP should all reuse one canonical `RetrievalResult` object and may wrap or flatten it differently only for presentation ergonomics.
+
+#### Canonical `RetrievalResult` envelope
+
+The shared retrieval/result object must be able to carry:
+- `outcome_class` — shared result status vocabulary: `accepted`, `partial`, `preview`, `blocked`, `degraded`, or `rejected`
+- `evidence_pack` — the bounded evidence set used for answer construction, including returned items plus their role (`primary` or `supporting`), route/lane of entry, score summary, provenance summary, freshness markers, conflict markers, and whether the payload is inline, preview-only, deferred, or redacted
+- `action_pack` — the optional derived answer/recommendation layer, separated from raw evidence, including synthesized text, procedures, or next-step guidance plus the supporting evidence ids/handles and uncertainty markers that justify it
+- `omitted_summary` — machine-readable counts and reasons for capped, deferred, policy-filtered, duplicate-collapsed, low-confidence, stale-bypassed, or conflict-suppressed candidates so omission never implies consensus
+- `policy_summary` — effective namespace, any approved widening such as `include_public`, material redactions/denials that shaped the answer, and whether policy prevented payload hydration or sibling disclosure
+- `provenance_summary` — source-kind mix, lineage anchors, and whether returned artifacts are raw evidence, summaries, or other derived artifacts
+- `freshness_markers` — decaying-soon, stale-derived, snapshot/as-of, lease, or other time-sensitivity markers that materially affect safe use of the result
+- `conflict_markers` — open conflict, supersession, authoritative-override, omitted-conflict-sibling, and preferred-operational-answer markers without erasing losing evidence handles
+- `deferred_payloads` — handles for content intentionally not materialized yet, with deferral reason, hydration path, and any budget or policy condition that must be satisfied before full payload fetch
+- `packaging_metadata` — bounded prompt-construction or downstream-consumption details such as result/token budget used, graph-assistance summary, cache/degraded-serving summary, and whether the packaged answer is evidence-only or evidence-plus-action
+- embedded explanation families or `explain_handle` — when explanation is embedded instead of referenced only by `explain_handle`, reuse `route_summary`, `result_reasons`, `omitted_summary`, `policy_summary`, `provenance_summary`, `freshness_markers`, `conflict_markers`, and `trace_stages` when full trace detail is requested
+
+Field and reuse rules:
+- `outcome_class` and `evidence_pack` are always present on successful protocol-level retrieval responses, even when the evidence set is empty, partial, blocked, or degraded.
+- `action_pack` is the stable place for synthesized answer or action guidance; interfaces must not hide derived recommendations only in prose while omitting their grounding.
+- Full cold/archive payloads remain deferred until the final bounded candidate cut and should surface through `deferred_payloads` or per-item payload state rather than speculative pre-cut fetch.
+- CLI text, CLI JSON, daemon/JSON-RPC, and MCP may present the envelope differently, but they must preserve the same outcome class, evidence-versus-action split, omission semantics, freshness/conflict markers, and deferred-payload meaning.
+- `mb-1hw.9` may refine failure families and remediation wording, and `mb-1hd.7` may refine preview/blocked/destructive safeguard schemas, but they must extend this shared envelope instead of inventing alternate answer objects.
+
 ### 34.4 Tool: `memory_put`
 
 **Purpose**
@@ -14338,12 +14373,16 @@ Every MCP response should be able to carry:
 - namespace / actor context
 
 **Expected outputs**
-- ranked evidence set
+- the canonical `RetrievalResult` envelope from Section 34.3
+- bounded `evidence_pack`
+- optional `action_pack`
+- `outcome_class`
 - score summaries
 - contradiction markers
 - decaying-soon markers if enabled
-- packaging metadata suitable for prompt construction
+- deferred-payload state and packaging metadata suitable for prompt construction
 - explain fields sufficient to preserve route summary, omitted-result reasons, provenance summary, freshness/conflict markers, and full trace stages when requested
+- when explanation is embedded, the stable machine-readable families `route_summary`, `result_reasons`, `omitted_summary`, `policy_summary`, `provenance_summary`, `freshness_markers`, `conflict_markers`, and `trace_stages` when full routing detail is requested
 
 **Rules**
 - `query_text` may be omitted only when `like_id` or `unlike_id` provides the primary cue
@@ -14376,6 +14415,8 @@ Every MCP response should be able to carry:
 - index presence
 - graph neighborhood summary
 - decay / retention information
+- provenance summary, freshness markers, and conflict markers where relevant
+- trace stages or an `explain_handle` when deeper route context is deferred
 
 ### 34.10 Tool: `memory_explain`
 
@@ -14389,6 +14430,7 @@ Every MCP response should be able to carry:
 - lineage ancestry
 - consolidation ancestry
 - forgetting / demotion reasons
+- the stable machine-readable explanation families `route_summary`, `result_reasons`, `omitted_summary`, `policy_summary`, `provenance_summary`, `freshness_markers`, `conflict_markers`, and `trace_stages` when full routing detail is requested
 
 ### 34.11 Tool: `memory_consolidate`
 
@@ -15880,6 +15922,8 @@ ALTER TABLE memory_embeddings ADD COLUMN model_version TEXT NOT NULL DEFAULT 'al
 
 > 10 additional implementation-ready feature specs (Features 11–20).
 > Each section covers: concept, schema changes, core logic, API/CLI surface, and milestone placement.
+> This batch is later-stage follow-on scope: it keeps future value visible, but it does not reopen the canonical phase gates or execution order in Sections 40 and 44.
+> The dependency and milestone labels below name the earliest sensible attachment points after the relevant core contracts exist; they are not permission to let Batch 2 work block bounded retrieval, contradiction handling, repair, governance, or measured-demand scale decisions.
 
 ---
 
@@ -16957,6 +17001,11 @@ with `remember/recall/forget` as power-user tools.
 | 18 | Emotional Trajectory | `emotional_timeline`, 2 columns | Encoding (M2) | M2+M6 | Low |
 | 19 | Write-Ahead Audit Log | `memory_audit_log` | None | M2 | Very Low |
 | 20 | Query Intent Routing | None | Full retrieval stack | M9/M10 | Very Low |
+
+Reading rules for this batch:
+- `Key Dependency` names the core contract that should already exist before a Batch 2 feature starts consuming that surface.
+- `Milestone` gives the earliest reasonable landing zone for follow-on implementation; it does not make the feature a prerequisite for closing that milestone.
+- Batch 2 features may land independently, stay deferred, or ship selectively as long as the canonical execution spine and earlier phase gates remain intact.
 
 ### 47.12 Critical M1 Schema Additions (Batch 2)
 
