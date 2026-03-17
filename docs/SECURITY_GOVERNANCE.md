@@ -36,6 +36,7 @@ Every operation executes in exactly one effective namespace, even when additiona
 - If no deterministic default exists, the request fails as a validation error before touching retrieval or storage engines.
 - Malformed or unknown namespace values are validation failures, not policy denials.
 - Cross-namespace reads or writes are denied unless they use an explicit approved sharing path such as visibility-scoped sharing, fork or merge surfaces, or a policy-approved cross-namespace relation flow.
+- Query-intent classification and override controls such as `ask` / `override-intent` are retrieval-strategy hints, not scope selectors. They may only tune bounded retrieval or packaging behavior inside the already-authorized effective namespace unless the request also carries a separate explicit widening control that policy allows.
 - Background jobs must inherit namespace scope from the scheduled record or repair plan; they must never infer it from ambient process state.
 
 ### Request-behavior matrix
@@ -98,6 +99,7 @@ Use policy denial when the request is structurally valid but the caller is not e
 
 - Policy denial must not reveal protected counts, memory IDs, candidate rankings, workspace handles, or whether a denied target currently contains matching data.
 - Explain surfaces may name the denial class or violated policy family, but not the protected contents of the denied surface.
+- Query-intent routing must not silently recode a policy denial as low confidence, empty evidence, or a harmless route fallback. If an `ask` request is denied for namespace or sharing reasons, the denial stays explicit even when intent classification itself succeeded.
 - Cross-namespace denials must behave the same across CLI, daemon, MCP, IPC, repair, and background-triggered flows.
 
 ### Redacted success

@@ -142,8 +142,10 @@ The preflight surface complements preview and confirmation rather than replacing
 #### High-stakes query rules
 - High-stakes actions should surface uncertainty by default. If evidence is stale, contradictory, too sparse, or policy-limited, the preflight should prefer `preview-only`, `blocked`, or `degraded` outcomes over silently emitting confident action guidance.
 - `confidence_constraints` should state the minimum evidence quality required for action-oriented output and, when not met, what `change_my_mind_conditions` or stronger evidence would be needed to upgrade the answer.
+- Intent-routed `ask` surfaces should preserve when low classifier confidence, explicit `override-intent`, or action-oriented intent classes changed the retrieval or packaging plan. Those route changes belong in machine-readable warnings or explanation fields rather than disappearing into a generic answer string.
 - Missing and unauthorized data must remain distinguishable at the internal preflight boundary even when external presentation redacts details for security reasons.
-- Preflight warnings should preserve whether the risk comes from stale knowledge, missing inputs, policy-limited visibility, unresolved conflict, or degraded repair state so callers can decide whether to stop, inspect, or continue with bounded caution.
+- If the best route for a high-stakes or action-oriented query is blocked by stale knowledge, policy-limited visibility, or insufficient evidence, the system should return `preview-only`, `blocked`, or `degraded` semantics explicitly instead of silently falling back to a broader or lower-safety retrieval plan.
+- Preflight warnings should preserve whether the risk comes from stale knowledge, missing inputs, policy-limited visibility, unresolved conflict, low intent confidence, explicit override, or degraded repair state so callers can decide whether to stop, inspect, or continue with bounded caution.
 
 ### Operation-family minimums
 

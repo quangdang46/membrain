@@ -270,6 +270,7 @@ fn compute_confidence_interval(
 - provenance summaries should identify source kind, source reference or opaque handle, lineage ancestry, and any summary or consolidation ancestry needed to inspect the returned item without treating derived artifacts as sole truth
 - freshness markers should surface decaying-soon, snapshot or as-of scoping, stale-derived warnings, and other time-sensitivity signals; conflict markers should surface open disagreement, supersession lineage, override reason, and omitted-sibling notes when applicable
 - CLI, daemon or JSON-RPC, and MCP surfaces may format explanations differently for humans, but the machine-readable field families should stay equivalent across interfaces, including `route_summary`, `result_reasons`, `omitted_summary`, `policy_summary`, `provenance_summary`, `freshness_markers`, `conflict_markers`, and `trace_stages` when full traces are requested
+- intent-routed `ask` surfaces must preserve the chosen or overridden intent class, classifier confidence, and any low-confidence fallback or safer-route downgrade in machine-readable explanation metadata; these route-plan changes are explanation facts, not human-only formatting details
 
 ## Pattern-completion contract
 - pattern completion is a bounded recovery lane for fragmentary or partial-cue recall, not the default path when exact, recent, or indexed evidence already satisfies the request

@@ -177,6 +177,7 @@ Any change to recall ranking, packaging, sharing, redaction, or namespace enforc
 - policy-filtered or redacted winners degrading to explicit omission, preview, partial, or miss semantics rather than silently substituting unauthorized payloads or widening the candidate cut
 - adversarial ambiguous cues, near-duplicate clusters, contradiction-bearing candidate sets, and fragmentary cues preserving bounded behavior, inspectable uncertainty, and conflict markers instead of speculative reconstruction
 - cache, prefetch, and repair-path recall preserving the same namespace, policy, omission, and explanation semantics as the colder canonical path
+- intent-routed `ask` fixtures proving visible intent class, low-confidence fallback, explicit `--override-intent` / `override_intent` behavior, and action-oriented safety downgrades preserve bounded candidate generation and machine-readable route metadata across CLI, daemon, IPC, and MCP surfaces
 - structured artifacts that record fixture identity, namespace or visibility setup, expected winners and omissions, policy decisions, and machine-readable explanation fields such as `result_reasons`, `omitted_summary`, `policy_summary`, `conflict_markers`, and `trace_stages` when available
 
 ## Cache observability regression minimum matrix

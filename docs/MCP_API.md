@@ -353,13 +353,21 @@ Import externalized memories through normal governed ingest.
 
 ## Feature-Specific Tools
 
-### `ask(query, explain_intent?)` — Feature 20
+### `ask(query, explain_intent?, override_intent?)` — Feature 20
 
-Auto-classifies query intent and routes to optimal recall config. The recommended primary tool for agents.
+Auto-classifies query intent and routes to optimal recall config. The recommended primary tool for agents. This is a later-stage packaging surface over canonical recall rather than a second retrieval path.
 
 **Returns**: `{ intent, intent_confidence, result: RetrievalResult, formatted_response }`
 
 `result` is the same canonical retrieval/result object used by `memory_recall`, not an ask-specific schema. `formatted_response` is a rendering convenience layered on top of that shared `RetrievalResult`, whose machine-readable fields still carry the evidence-versus-action split and all omission, policy, freshness, conflict, deferred-payload, and explanation semantics.
+
+Visible intent classes should cover the canonical Feature 20 set: `semantic_broad`, `existence_check`, `recent_first`, `strength_weighted`, `uncertainty_focused`, `causal_trace`, `temporal_anchor`, `diverse_sample`, `procedural_lookup`, and the later-stage `emotional_filter`.
+
+**Rules**:
+- `override_intent` may pin one of the visible intent classes when the caller wants a specific bounded packaging posture or when classifier confidence is low. It changes routing and packaging only; it never widens namespace scope, bypasses policy or retention checks, or authorizes a broader retrieval lane than `memory_recall` would allow for the same effective scope.
+- When `intent_confidence` is low, the tool should keep the safest bounded route or fall back to ordinary recall-equivalent packaging with explicit machine-readable route metadata rather than silently broadening retrieval breadth.
+- Low-confidence decisions, explicit overrides, and action-oriented route changes must remain inspectable through the returned `result` explanation families such as `route_summary`, `result_reasons`, `policy_summary`, and `trace_stages` when full traces are requested.
+- If the safer action-oriented route is blocked by stale knowledge, policy-limited visibility, or insufficient evidence, the tool should return explicit `preview`, `blocked`, or `degraded` semantics through `result.outcome_class` rather than hiding the fallback in `formatted_response`.
 
 ### `dream()` — Feature 1
 
@@ -489,7 +497,7 @@ Creates and enumerates named historical inspection anchors.
 - a later `memory_recall` or equivalent tool using `at_snapshot` must exclude memories created after the snapshot tick and recompute time-sensitive strength/freshness against that historical tick
 - snapshot-scoped inspection remains subject to current policy, redaction, and retained-authoritative-evidence limits; when later retention, repair loss, or policy changes prevent full reconstruction, the response should surface partial or degraded historical inspection rather than imply a perfect restore
 
-### `goal_state(task_id?)` / `goal_pause(task_id?, note?)` / `goal_resume(task_id?)` / `goal_abandon(task_id?, reason?)` — Feature 6
+### `goal_state(task_id?)` / `goal_pause(task_id?, note?)` / `goal_resume(task_id?)` / `goal_abandon(task_id?, reason?)` — Plan §10.6
 
 Manage later-stage resumable goal-stack state for long-running work without turning checkpoints into authoritative memory truth.
 

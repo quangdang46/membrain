@@ -447,9 +447,11 @@ membrain uncompress <schema-uuid>     # restore source episodes
 
 ### `membrain ask <QUERY> [OPTIONS]` (Feature 20)
 
-Auto-classifies intent and routes to optimal retrieval configuration. The primary entry point for agents.
+Auto-classifies intent and routes to optimal retrieval configuration. This is a later-stage packaging surface layered on top of canonical `recall`, not a second retrieval system, and it remains bounded by the same namespace, policy, omission, and degraded-serving contract.
 
 `ask` reuses the same canonical `RetrievalResult` envelope as `recall`; intent classification and `formatted_response` are wrappers around that shared result object, not a separate answer schema. The machine-readable response should therefore preserve the underlying `evidence_pack`, optional `action_pack`, `outcome_class`, omission/deferred-payload state, and explanation families even when the default text rendering foregrounds the formatted answer.
+
+Visible intent classes should cover the canonical Feature 20 set: semantic broad, existence check, recent first, strength weighted, uncertainty focused, causal trace, temporal anchor, diverse sample, procedural lookup, and the later-stage emotional filter. Human-facing labels may vary, but the visible class and its confidence should remain stable and inspectable across CLI, daemon/JSON-RPC, and MCP surfaces.
 
 ```bash
 membrain ask "what do I know about Rust lifetimes?"
@@ -461,6 +463,12 @@ membrain ask "how to deploy the service?"
 membrain ask "..." --explain-intent       # show classified intent
 membrain ask "..." --override-intent semantic-broad
 ```
+
+CLI expectations:
+- `--explain-intent` should expose the chosen intent class, classifier confidence, and the bounded route or packaging adjustments that class triggered.
+- `--override-intent <intent>` is an explicit caller override of routing posture only. It may pin one of the visible intent classes, but it must not widen namespace scope, bypass policy or retention checks, or authorize a broader retrieval lane than ordinary `recall` would allow for the same effective scope.
+- When classifier confidence is low, `ask` should keep the safest bounded route or fall back to ordinary `recall`-equivalent packaging with explicit machine-readable warnings or route metadata instead of silently widening recall breadth.
+- If an action-oriented or otherwise safer route is blocked by stale knowledge, policy-limited visibility, or insufficient evidence, the command should surface `preview`, `blocked`, or `degraded` semantics explicitly rather than hiding the route change inside a generic answer string.
 
 ### `membrain budget [OPTIONS]` (Feature 4)
 
@@ -507,7 +515,7 @@ membrain snapshot list
 membrain snapshot delete before-refactor
 ```
 
-### `membrain goal [OPTIONS]` (Feature 6)
+### `membrain goal [OPTIONS]` (Plan §10.6)
 
 Resumable goal-stack commands are a later-stage working-state surface for long-running tasks. They expose explicit goal checkpoints for the current goal stack, selected evidence, pending dependencies, and blocked reason so work can pause, resume, hand off, or be intentionally abandoned without reconstructing state from scratch.
 
