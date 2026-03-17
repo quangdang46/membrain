@@ -206,7 +206,11 @@ membrain health --json | jq '{
   total_engrams: .total_engrams,
   avg_cluster_size: .avg_cluster_size,
   top_engrams: .top_engrams[:5],
-  last_dream: .last_dream_tick
+  last_dream: .last_dream_tick,
+  repair_queue_depth: .repair_queue_depth,
+  backpressure_state: .backpressure_state,
+  availability_posture: .availability_posture,
+  feature_availability: .feature_availability
 }'
 membrain doctor run
 ```
@@ -216,6 +220,8 @@ membrain doctor run
 - Average confidence dropping → investigate conflict rate
 - Unresolved conflicts accumulating → trigger belief resolution
 - Engram count or average cluster size drifting sharply → investigate graph fanout, split pressure, or stale rebuild state
+- Repair queue depth growing or staying non-zero → inspect repair backlog growth before it becomes degraded serving
+- Backpressure state leaving `normal` or availability posture leaving `full` → switch from routine review to the matching runbook or containment path
 - Doctor warnings → schedule repair
 
 ---

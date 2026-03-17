@@ -15766,8 +15766,25 @@ MCP tool: share(id, namespace_id)
 
 `membrain health` renders a full terminal dashboard: tier utilization, decay curve
 health, top engrams, landmark count, conflict count, confidence distribution,
-dream engine status, and recent activity. Makes the brain feel alive and debuggable.
+dream engine status, repair/backpressure posture, feature availability, and recent
+activity. Makes the brain feel alive and debuggable while also giving operators one
+bounded place to inspect whether the system is healthy, degraded, or temporarily
+constrained.
 `--watch` mode refreshes live. The single best demo/showcase command.
+
+**Health contract**
+
+- The surface is read-only: no hidden repair, warmup, cache mutation, or other side
+  effects.
+- CLI, daemon/JSON-RPC, and MCP all expose the same underlying `BrainHealthReport`
+  semantics even when one surface renders ANSI bars, tables, or watch mode.
+- The report must make availability posture, degraded reasons, repair-queue growth,
+  backpressure state, and feature availability/maturity explicit enough that
+  operators and clients can decide whether to continue normal work, inspect `doctor`,
+  or switch to the relevant runbook.
+- When policy scope, historical anchors, or degraded serving limit visibility, the
+  report surfaces warnings or availability state instead of silently fabricating a
+  fully healthy view.
 
 **Schema Changes**
 
@@ -15798,6 +15815,12 @@ pub struct BrainHealthReport {
     pub uncertain_count: usize,
     pub dream_links_total: usize,
     pub last_dream_tick: Option<u64>,
+
+    pub repair_queue_depth: Option<u64>,
+    pub backpressure_state: Option<String>,
+    pub feature_availability: Vec<(String, String)>,
+    pub availability_posture: Option<String>,
+    pub availability_notes: Option<String>,
 
     pub total_recalls: u64,
     pub total_encodes: u64,
@@ -15837,6 +15860,12 @@ pub fn render_health_dashboard(report: &BrainHealthReport) -> String {
 ║  Uncertain       12 low-confidence memories        ║
 ║  Dream links     1,847 total  last: 2h ago         ║
 ╠══════════════════════════════════════════════════════╣
+║  OPERATIONS                                         ║
+║  Availability   degraded (graph bypass)            ║
+║  Repair queue   4 pending                          ║
+║  Pressure       normal                             ║
+║  Features       health:stable  dream:guarded       ║
+╠══════════════════════════════════════════════════════╣
 ║  ACTIVITY                                           ║
 ║  Tick: 48,291   Encodes: 2,104   Recalls: 9,871    ║
 ║  Daemon uptime: 48,291 ticks                       ║
@@ -15860,9 +15889,12 @@ MCP tool: health()
 
 **Milestone Placement**
 
-Basic version (tiers + engrams + activity) in **Milestone 6**.
-Full version including all feature signals in **Milestone 10**.
-`--watch` mode in **Milestone 10**. No dependencies beyond existing queries.
+Basic version (tiers + quality + engrams + activity) in **Milestone 6**.
+Full version including degraded availability posture, repair/backpressure signals,
+and feature-availability summaries in **Milestone 10**.
+`--watch` mode in **Milestone 10**. This remains a later-stage operator surface built
+on top of existing `stats`, `doctor`, runbook, and availability primitives rather
+than a prerequisite for the core retrieval path.
 
 ---
 

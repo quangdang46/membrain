@@ -277,7 +277,8 @@ Full terminal dashboard: tier utilization, decay curves, engrams, signals, activ
 
 Health contract:
 - `membrain health` is the operator dashboard rendering of the same bounded `BrainHealthReport` exposed through daemon/JSON-RPC and MCP `health()`.
-- `--json`, `--brief`, and `--watch` are presentation variants over one machine-readable report; they must preserve the same tier/capacity, quality/conflict/uncertainty, activity/runtime, and feature-availability meaning.
+- `--json`, `--brief`, and `--watch` are presentation variants over one machine-readable report; they must preserve the same tier/capacity, quality/conflict/uncertainty, activity/runtime, repair/backpressure, availability-posture, and feature-availability meaning.
+- The report should make degraded posture, repair-queue growth, and backpressure state inspectable enough that operators can tell whether to continue normal work, inspect `doctor`, or switch to a runbook instead of inferring that state from prose.
 - If historical scope, policy limits, or degraded serving change what can be shown, the surface should say so through warnings or availability markers instead of silently pretending the dashboard is complete.
 
 ```bash

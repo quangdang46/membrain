@@ -428,7 +428,8 @@ Share a memory within a namespace for cross-agent access.
 
 **Rules**:
 - `health()` is the bounded machine-readable operator dashboard shared with CLI `membrain health`; transport-specific rendering may differ, but the underlying report semantics must not.
-- The report should preserve tier and capacity counters, quality/conflict/uncertainty signals, runtime activity, and feature-availability facts strongly enough that automation can make the same decisions a human operator would make from the CLI dashboard.
+- The report should preserve tier and capacity counters, quality/conflict/uncertainty signals, runtime activity, repair/backpressure indicators, availability posture, and feature-availability facts strongly enough that automation can make the same decisions a human operator would make from the CLI dashboard.
+- The machine-readable view should expose enough detail to distinguish healthy service from degraded-but-servable posture, including repair-queue growth or backlog signals, backpressure state, and which feature surfaces are unavailable or maturity-gated.
 - When policy scope, historical anchors, or degraded serving limit visibility, `health()` should return explicit warnings or `availability` state instead of silently fabricating a fully healthy view.
 
 ### `why(id)` — Feature 11

@@ -144,6 +144,7 @@ Any change to CLI, daemon/JSON-RPC, or MCP command examples, shared flag vocabul
 - canonical spelling checks for command names, tool names, method names, shared flags, and command-specific parameters so examples cannot silently reintroduce undeclared aliases, stale flags, or stale request fields after the stable interface contract changes
 - response-envelope parity checks ensuring example success, partial, degraded, blocked, rejected, and policy-denied flows preserve the correct machine-readable fields and meanings across CLI JSON, daemon/JSON-RPC, and MCP surfaces
 - explicit validation of explanation families, safeguard objects, remediation hints, and availability markers whenever an example claims to show them, including the stable field-family names rather than transport-specific paraphrase
+- health/ops example parity checks whenever docs change `health`, `stats`, or `doctor` semantics, including repair-queue, backpressure, availability-posture, and feature-availability fields when those signals are claimed as operator-visible
 - structured artifacts that record the source doc section or anchor, normalized operation, expected canonical fields, and drift classification so reviewers can tell whether a failure reflects semantic breakage or example hygiene noise
 
 ### Doc-example drift blocking rules
