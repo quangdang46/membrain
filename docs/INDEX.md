@@ -67,7 +67,7 @@ The mega-plan contains these major regions:
 - Use this framing to keep deferred Phase 4 work visible without turning it into default architecture direction or reopening the core execution spine.
 - **Scale-out and distribution**: later-stage, evidence-gated follow-ons that stay blocked until measured workload pressure justifies leaving the bounded single-node model.
 - **Advanced operations and operator ergonomics**: later-stage maturity work that sharpens runbooks, automation, and operator guidance after the base repair/governance spine exists.
-- **Inspectable working-state and cognitive blackboard surfaces**: later-stage work that exposes active task/session state, pinned evidence, and steering or resume hints as a visible working-state object; it stays bounded, namespace-aware, and subordinate to the canonical retrieval/explain spine instead of becoming a second hidden memory system.
+- **Inspectable working-state and cognitive blackboard surfaces**: later-stage, optional work that exposes active task/session state, pinned evidence, resumable goal stacks, checkpoint visibility, and explicit pause/resume/abandon status as a visible working-state object. Use this family when clarifying resume semantics or blackboard snapshots, but keep it gated behind the stable retrieval, repair, snapshot, and governance spine, bounded and namespace-aware, subordinate to the canonical retrieval/explain surface, and explicitly non-authoritative compared with durable memory truth and Feature 12 named historical snapshots.
 - **Quality-loop and skill-memory follow-ons**: later-stage work that turns benchmark, maintenance, and skill-extraction signals into operator guidance or bounded background tuning without becoming core-path prerequisites.
 
 

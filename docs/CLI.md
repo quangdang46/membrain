@@ -41,11 +41,11 @@ Canonical CLI families:
 - **recall / query** — `recall`, `ask`, `budget`
 - **inspect / explain / audit** — `inspect`, `why`, `beliefs`, `audit`
 - **maintenance / admin** — `stats`, `health`, `doctor`, `repair`, `benchmark`, `consolidate`, `compress`, `dream`, `export`, `daemon`, `mcp`
-- **history / namespace / change management** — `timeline`, `landmark`, `diff`, `snapshot`, `fork`, `merge`, `share`, `unshare`, `namespace`, `forget`, `strengthen`, `update`
+- **history / namespace / change management** — `timeline`, `landmark`, `diff`, `snapshot`, `goal`, `fork`, `merge`, `share`, `unshare`, `namespace`, `forget`, `strengthen`, `update`
 
 Naming rules:
 - prefer verb-first command names for user-triggered operations
-- use noun subcommands only for grouped resource surfaces such as `namespace` and `snapshot`
+- use noun subcommands only for grouped resource surfaces such as `namespace`, `snapshot`, and `goal`
 - keep one canonical spelling per operation; new synonyms or shadow verbs are not part of the stable surface unless explicitly documented as aliases
 - feature-specific work should extend an existing family unless it has a strong reason to introduce a new top-level command
 - command spelling may vary from MCP tool names, but it must not change the underlying request, policy, or outcome semantics
@@ -261,6 +261,15 @@ membrain compress --dry-run    # show what would be compressed
 
 ### `membrain dream [OPTIONS]` (Feature 1)
 
+Dream Mode is a later-stage, background-only offline synthesis surface layered on top of the already-bounded consolidation and graph contracts. It should stay optional, inspectable, and non-blocking to the core encode/recall/repair spine rather than reading like a default request-path behavior.
+
+CLI expectations:
+- `membrain dream` should make its maintenance-class posture visible: it is an explicit manual trigger for an idle-window synthesis pass, not a foreground recall or encode shortcut.
+- `membrain dream --status` should expose enough operator detail to inspect the last bounded run, including whether the feature is enabled, the last run tick, links created, and any degraded or paused posture that prevented a new cycle.
+- `membrain dream --disable` should pause future background dreaming without deleting canonical memories, graph edges, or lineage-bearing evidence already created by prior accepted runs.
+- Any candidate expansion, similarity search, or merge follow-on must remain bounded, namespace-aware, policy-aware, and lineage-backed; the CLI surface should not imply full-corpus scans or silent promotion of synthetic links into sole authoritative truth.
+- Because this is later-stage follow-on work, the surface should make its gated/background nature visible instead of implying that every deployment or maintenance window must run it.
+
 ```bash
 membrain dream                 # trigger dream cycle manually
 membrain dream --status        # last run, links created
@@ -307,6 +316,14 @@ Contract notes:
 - `membrain timeline --detail` should make active versus closed eras inspectable without forcing callers to infer from prose alone.
 
 ### `membrain mood [OPTIONS]` (Feature 18)
+
+Emotional Trajectory is a later-stage introspection surface over bounded emotional metadata and era-level timeline rows. It should stay inspectable and optional: `membrain mood` is for visibility into emotional-state history, while any retrieval-side `--mood-congruent` behavior remains opt-in rather than a hidden default ranking mode.
+
+CLI expectations:
+- `membrain mood` should report the current bounded mood snapshot or current era summary without implying that mood state is authoritative truth or a standalone memory kind.
+- `membrain mood --history` should remain a read-only timeline view over stored trajectory rows, preserving namespace/policy scope and explicit omission or degraded markers when history is incomplete or filtered.
+- If retrieval exposes `--mood-congruent`, the CLI should make that hint visibly optional and explainable; it may slightly bias ordering among already-eligible candidates but must not widen scope or replace the ordinary retrieval rationale.
+- Because this is later-stage follow-on work, the surface should keep its introspection-first posture visible instead of implying that emotional trajectory is required for baseline encode, recall, or policy behavior.
 
 ```bash
 membrain mood                         # current emotional state
@@ -488,6 +505,24 @@ membrain snapshot --name before-refactor
 membrain snapshot --name v1-launch --note "Day we shipped v1"
 membrain snapshot list
 membrain snapshot delete before-refactor
+```
+
+### `membrain goal [OPTIONS]` (Feature 6)
+
+Resumable goal-stack commands are a later-stage working-state surface for long-running tasks. They expose explicit goal checkpoints for the current goal stack, selected evidence, pending dependencies, and blocked reason so work can pause, resume, hand off, or be intentionally abandoned without reconstructing state from scratch.
+
+CLI expectations:
+- `membrain goal show [--task <id>]` should return the current active or dormant goal stack plus the newest resumability checkpoint metadata for the effective namespace or task scope.
+- `membrain goal pause [--task <id>] [--note <text>]` persists the latest resumability checkpoint and marks the active goal dormant without widening scope or mutating authoritative durable truth beyond checkpoint metadata.
+- `membrain goal resume [--task <id>]` rehydrates from the newest valid checkpoint, restores explicit selected-evidence handles and pending dependencies when possible, and surfaces stale, missing, or policy-incompatible checkpoint state explicitly instead of guessing a fresh plan.
+- `membrain goal abandon [--task <id>] [--reason <text>]` ends the active goal intentionally, preserves the checkpoint or audit trail needed for later inspection, and must not silently delete authoritative evidence or leave the goal implicitly active.
+- Goal-stack checkpoints are resumability anchors for active work. They must stay distinct from Feature 12 named historical snapshots and should remain bounded, inspectable, namespace-aware, and policy-aware in both text and `--json` modes.
+
+```bash
+membrain goal show
+membrain goal pause --task deploy-incident --note "Waiting on customer approval"
+membrain goal resume --task deploy-incident
+membrain goal abandon --task deploy-incident --reason "Superseded by rollback plan"
 ```
 
 ### `membrain fork / merge [OPTIONS]` (Feature 15)

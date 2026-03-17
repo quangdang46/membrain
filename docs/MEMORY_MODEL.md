@@ -171,7 +171,7 @@ Contradiction-aware writes must classify whether accepted new evidence is revisi
 
 ### Context Metadata
 
-`workspace_id`, `agent_id`, `session_id`, and `task_id` capture the execution scope around a memory without replacing `namespace`. Goal context uses the same activity-context contract: when one explicit goal or work item governs the activity, `task_id` is the primary handle; when goal association is many-to-many or preserved historically, it should travel through `relation_refs` and lineage to `Goal` memories rather than through a second conflicting scope key.
+`workspace_id`, `agent_id`, `session_id`, and `task_id` capture the execution scope around a memory without replacing `namespace`. Goal context uses the same activity-context contract: when one explicit goal or work item governs the activity, `task_id` is the primary handle; when goal association is many-to-many or preserved historically, it should travel through `relation_refs` and lineage to `Goal` memories rather than through a second conflicting scope key. Later-stage resumable-goal and blackboard checkpoints are derived workflow artifacts, not a replacement authoritative scope model: they may summarize the active goal stack, selected evidence, pending dependencies, and pause/resume state for one task/session, but they must continue to point back to canonical task, session, and memory handles rather than becoming a second hidden identity layer.
 
 | Field | Persisted shape | Required when | Nullable when | Allowed inference | Output / redaction |
 |-------|-----------------|---------------|---------------|-------------------|--------------------|
@@ -303,6 +303,7 @@ Before persistence, a normalized candidate must have:
 - Completed tool executions normalize to `ToolOutcome`; normalization must preserve tool identity, execution reference, execution context, outcome category, and detachable output payload handles when results are too large for hot inline storage.
 - Explicit durable user conventions or standing instructions normalize to `UserPreference` only when caller intent or typed ingestion marks them as stable preference state; otherwise they remain raw evidence first.
 - Session starts, stops, checkpoints, handoffs, and equivalent temporal boundaries normalize to `SessionMarker`.
+- Resume/checkpoint markers for later-stage working-state features should record explicit boundary events, not guessed semantic milestones. If a resumable-goal stack or blackboard checkpoint is persisted, it remains a derived artifact tied to the governing `task_id`, `session_id`, and source memory handles rather than a new canonical memory family.
 - Distilled `Fact`, `Summary`, `Relation`, `Skill`, `Constraint`, or `Hypothesis` records should normally arise from typed ingestion or later extraction and consolidation, not speculative promotion of raw text during first-write normalization.
 
 ### Preservation and non-inference rules

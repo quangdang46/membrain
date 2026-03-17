@@ -111,6 +111,7 @@ Use redacted success when the caller may know an operation succeeded but is not 
 ## Approved sharing and cross-namespace flows
 
 - `visibility`, `namespace_id`, `include_public`, `share`, `fork`, and `merge` are explicit widening mechanisms; they do not weaken namespace isolation for ordinary requests.
+- Later-stage resumable-goal stacks, blackboard checkpoints, and pause/resume state remain subject to the same effective-namespace, workspace, agent, and session visibility rules as the memories and task context they summarize. A checkpoint may aid resume or inspection, but it must not become a hidden cross-namespace handoff channel or a policy bypass around the underlying evidence.
 - `share` and `unshare` mutate visibility scope, not canonical ownership: the memory keeps one authoritative namespace, identity, lineage, and audit trail even when widened access is allowed or later tightened again.
 - `include_public` widens recall only to policy-approved shared or public surfaces and never to private namespaces.
 - Approved shared/public access remains subordinate to workspace ACL, agent ACL, and session visibility; shared visibility is not a blanket bypass.

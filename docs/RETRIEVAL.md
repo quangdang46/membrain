@@ -26,6 +26,7 @@ All recall-facing transports should map onto one logical `RecallRequest` even wh
 - `include_public` defaults to `false` and is the ordinary widening knob for approved shared/public surfaces.
 - Optional scoped filters may include `workspace_id`, `agent_id`, `session_id`, `task_id`, `memory_kinds`, `era_id`, `as_of_tick`, `at_snapshot`, `min_strength`, `min_confidence`, `show_decaying`, and `mood_congruent`.
 - `era_id` scopes recall to one explicit temporal era within the already-bound effective namespace. Unknown, malformed, or unauthorized era selectors are validation or policy failures rather than cues to widen, guess, or silently fall back to cross-era retrieval.
+- `mood_congruent` is a later-stage, opt-in ranking hint layered on top of the ordinary bounded recall pipeline. It may slightly boost candidates whose stored `encoding_valence` / `encoding_arousal` metadata fit the current bounded mood snapshot or requested mood context, but it must not widen namespace scope, bypass policy filters, invent emotional metadata when none is available, or become a hidden default retrieval mode.
 - `like_id` and `unlike_id` are query-by-example cues, not bypasses around policy, ranking, or boundedness rules.
 
 ### Budgets and explainability
@@ -235,6 +236,7 @@ fn compute_confidence_interval(
 - ranking runs only after namespace and policy pruning, candidate caps, dedup, and per-conflict sibling caps have been applied
 - default final ordering is `baseline fusion -> optional bounded rerank -> packaging`, where reranking is allowed only on a small top-K shortlist
 - baseline score families must stay separately inspectable: retrieval relevance, recency/strength/salience, confidence/utility, goal-task-entity-context alignment, memory-type priors, graph support, contradiction or supersession state, and duplicate/noise penalties
+- emotional-trajectory participation is later-stage and optional. When `mood_congruent` is enabled, any valence/arousal bonus must remain a small additive ranking family over already-eligible candidates rather than a new candidate-generation lane, and explain surfaces should preserve whether the bonus materially changed ordering or was present but non-decisive.
 - reranking may sharpen session, task, entity, or packaging priorities, but it must not bypass hard policy masks, hide losing conflict evidence, or require unbounded payload fetches
 - final ordering must preserve a machine-readable decomposition with baseline family scores, rerank adjustments, notable penalties or bonuses, and the final packaged order reason
 

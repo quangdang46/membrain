@@ -120,6 +120,10 @@ When degraded or repair-aware serving changes what can still be queried or mutat
 | `invalidate()` | **No** | Cascades confidence changes. |
 | `snapshot()` | **Yes, if not exists** | Re-creating snapshot with same name returns tick. |
 | `list_snapshots()` | **Yes** | Read operation is always idempotent. |
+| `goal_state()` | **Yes** | Read operation is always idempotent. |
+| `goal_pause()` | **Yes, if already paused at the same checkpoint** | Re-pausing the same dormant goal may return the existing checkpoint handle. |
+| `goal_resume()` | **Context-dependent** | Re-resuming may return the same active checkpoint only when no newer checkpoint or state transition intervened. |
+| `goal_abandon()` | **Yes, if already abandoned** | Re-abandoning should preserve the prior inactive state and audit/checkpoint handles. |
 | `hot_paths()` | **Yes** | Read operation is always idempotent. |
 | `dead_zones()` | **Yes** | Read operation is always idempotent. |
 | `diff()` | **Yes** | Read operation is always idempotent. |
@@ -359,9 +363,15 @@ Auto-classifies query intent and routes to optimal recall config. The recommende
 
 ### `dream()` — Feature 1
 
-Trigger offline synthesis cycle.
+Trigger a later-stage offline synthesis cycle.
 
 **Returns**: `{ links_created, engrams_merged, last_run_tick }`
+
+**Rules**:
+- `dream()` is a background maintenance mutation, not a request-path retrieval shortcut. It stays optional, explicitly triggered or idle-window scheduled, and non-blocking with respect to the core encode, recall, repair, and governance spine.
+- The operation may add bounded synthetic links or merge follow-on work only from an already-authorized, bounded candidate set; it must not scan the full corpus, widen namespace scope, or bypass policy checks just because the caller asked for synthesis.
+- Any emitted dream links, merge decisions, or related synthesis artifacts must remain inspectable, lineage-backed, and repairable from durable evidence rather than becoming hidden authoritative truth.
+- Transport-specific wrappers may differ in how they present status or operator warnings, but they must preserve the same mutation semantics, enable/disable posture, and bounded-work expectations as CLI `membrain dream` and daemon equivalents.
 
 ### `belief_history(query)` — Feature 2
 
@@ -479,6 +489,25 @@ Creates and enumerates named historical inspection anchors.
 - a later `memory_recall` or equivalent tool using `at_snapshot` must exclude memories created after the snapshot tick and recompute time-sensitive strength/freshness against that historical tick
 - snapshot-scoped inspection remains subject to current policy, redaction, and retained-authoritative-evidence limits; when later retention, repair loss, or policy changes prevent full reconstruction, the response should surface partial or degraded historical inspection rather than imply a perfect restore
 
+### `goal_state(task_id?)` / `goal_pause(task_id?, note?)` / `goal_resume(task_id?)` / `goal_abandon(task_id?, reason?)` — Feature 6
+
+Manage later-stage resumable goal-stack state for long-running work without turning checkpoints into authoritative memory truth.
+
+**Returns**:
+- `goal_state(task_id?)` → `{ task_id, status, goal_stack: [{goal, parent_goal?, priority?, blocked_reason?}], latest_checkpoint: {checkpoint_id, created_tick, evidence_handles, pending_dependencies, stale}, blackboard_summary?, namespace }`
+- `goal_pause(task_id?, note?)` → `{ task_id, status, checkpoint_id, paused_at_tick, note?, namespace }`
+- `goal_resume(task_id?)` → `{ task_id, status, checkpoint_id, resumed_at_tick, restored_evidence_handles, restored_dependencies, warnings?, namespace }`
+- `goal_abandon(task_id?, reason?)` → `{ task_id, status, checkpoint_id?, abandoned_at_tick, reason?, namespace }`
+
+**Rules**:
+- these tools are later-stage working-state surfaces layered on top of stable task/session identity, namespace binding, and policy enforcement; they do not create hidden workflow scope or a second memory authority
+- goal-stack checkpoints are bounded resumability anchors for active work and must stay distinct from Feature 12 named historical inspection anchors
+- checkpoint payloads should preserve explicit selected-evidence handles, pending dependencies, blocked reason, and compact blackboard summary or equivalent working-state metadata rather than copying authoritative memories into a second store
+- `goal_pause()` persists the latest valid resumability checkpoint and marks the task dormant without widening scope or mutating durable truth beyond checkpoint metadata
+- `goal_resume()` rehydrates only from the newest valid checkpoint, restores referenced evidence and dependency handles when still readable, and must surface stale, missing, or policy-incompatible checkpoint state explicitly instead of guessing from scratch
+- `goal_abandon()` ends the active goal intentionally, preserves the checkpoint or audit trail needed for later inspection and handoff, and never silently deletes authoritative evidence or leaves the goal implicitly active
+- when resumability state is unavailable, disabled, or blocked by policy, the response should fail explicitly or return a degraded/blocked posture rather than silently fabricating a reconstructed plan
+
 ### `hot_paths(top_n?)` / `dead_zones(min_age_ticks?)` — Feature 13
 
 **Returns**: hot/dead zone entries with retrieve counts, scores, and age
@@ -511,6 +540,11 @@ Creates and enumerates named historical inspection anchors.
 ### `mood_history(since_tick?, namespace_id?)` — Feature 18
 
 **Returns**: `{ timeline: [{tick_start, tick_end, avg_valence, avg_arousal, state, memory_count}] }`
+
+**Rules**:
+- `mood_history()` is a later-stage, read-only introspection surface over emotional trajectory rows; it does not mutate memories, synthesize a new canonical mood object, or bypass the ordinary namespace and policy contract.
+- Returned timeline rows should stay bounded to one effective namespace and the requested time window, with explicit degraded or omission signaling when history is partial, redacted, or unavailable.
+- Retrieval-side `mood_congruent` behavior may consume the same underlying emotional metadata, but the read-only history view must remain semantically separate from the optional ranking hint so callers can inspect history without silently changing recall behavior.
 
 ### `audit(memory_id?, since_tick?, op?, limit?)` — Feature 19
 

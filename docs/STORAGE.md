@@ -123,7 +123,7 @@ Cold durable archive supporting cheap storage, metadata-first prefiltering, and 
 | Surface class | Typical examples | Authority class | Canonical source / rebuild source | Why it persists |
 |---|---|---|---|---|
 | procedural durable surface | accepted pattern→action mappings, policies, preferences, durable procedural metadata | authoritative durable when explicitly accepted as the operative rule or behavior | n/a for accepted truth; promotion or edit still keeps lineage to acceptance/source context | exact procedural lookup and policy-bearing actionability |
-| derived durable artifacts | summaries, extracted facts, tentative skills, graph or neighborhood summaries, checkpoints, shard descriptors, compaction manifests | derived durable artifact | authoritative memories, canonical relation tables, lineage, policy/redaction state, and workflow inputs | reuse, inspect, audit, or handoff without recomputing every time |
+| derived durable artifacts | summaries, extracted facts, tentative skills, graph or neighborhood summaries, task/session checkpoints, blackboard snapshots, resumable goal-stack state, shard descriptors, compaction manifests | derived durable artifact | authoritative memories, canonical relation tables, lineage, policy/redaction state, and workflow inputs | reuse, inspect, audit, or handoff without recomputing every time |
 | derived acceleration surfaces | Tier1 caches, result caches, summary caches, entity neighborhood caches, ANN probe caches, graph materializations, FTS, bloom filters, prefix indexes | derived acceleration state | authoritative durable rows plus current schema, policy, lineage, index, embedding, and model-dependent generations | latency reduction only |
 
 ### Procedural durable surface rules
@@ -133,7 +133,7 @@ Cold durable archive supporting cheap storage, metadata-first prefiltering, and 
 - Skill extraction or procedural generalization must not delete the underlying episodic or semantic evidence or the source engram links that justify the rule.
 
 ### Derived durable artifact rules
-- Persisted summaries, extracted facts, graph summaries, tentative skills, checkpoints, and compaction outputs must record artifact type, source-set or lineage handles, producer/workflow generation, freshness or repair status, and the rebuild inputs needed to regenerate them.
+- Persisted summaries, extracted facts, graph summaries, tentative skills, task or session checkpoints, blackboard snapshots, resumable goal-stack state, and compaction outputs must record artifact type, source-set or lineage handles, producer/workflow generation, freshness or repair status, and the rebuild inputs needed to regenerate them.
 - Durable storage of an artifact is justified when reuse, inspectability, auditability, or background coordination is valuable; durability alone does not grant authority over memory existence, policy, contradiction, or canonical relation truth.
 - Graph or neighborhood summaries may be stored for bounded inspect and recall support, but canonical entity and relation tables remain the source of truth and summary projections must be replaceable.
 - If source evidence, lineage, policy, redaction, schema, or workflow generation changes, dependent derived artifacts must be invalidated, regenerated, or marked stale instead of silently surviving across the mismatch.
@@ -160,7 +160,7 @@ Cold durable archive supporting cheap storage, metadata-first prefiltering, and 
 
 ### Rebuild classes and allowed sources
 - Authoritative durable rows in hot, cold, and accepted procedural stores are not rebuilt from summaries, caches, ANN sidecars, or compaction artifacts. If those rows are damaged, recovery must come from snapshot, backup, restore, or another explicitly authoritative durable copy rather than from derived state.
-- Derived durable artifacts such as summaries, checkpoints, graph summaries, tentative skills, and compaction manifests are rebuildable from authoritative memories, canonical relations, lineage, and policy-bearing metadata. Repair may drop and regenerate them when those rebuild inputs remain intact.
+- Derived durable artifacts such as summaries, task or session checkpoints, blackboard snapshots, resumable goal-stack state, graph summaries, tentative skills, and compaction manifests are rebuildable from authoritative memories, canonical relations, lineage, and policy-bearing metadata. Repair may drop and regenerate them when those rebuild inputs remain intact.
 - Acceleration surfaces such as ANN, FTS, graph materializations, caches, and serving mirrors are always disposable. Repair may bypass, clear, and rewarm them without changing durable semantics.
 
 ### Repair and validation expectations
@@ -246,7 +246,7 @@ Cold durable archive supporting cheap storage, metadata-first prefiltering, and 
 | canonical content handles (`content_ref`, `payload_ref`) | authoritative durable | SQLite durable tables | lineage + durable records | yes |
 | authoritative float embeddings | authoritative durable | durable embedding storage | source content + embedding pipeline | yes |
 | summaries, extracted facts, skills | derived durable artifact | SQLite/object storage with lineage | authoritative durable evidence | no |
-| checkpoints, shard descriptors, compaction artifacts | derived durable artifact | SQLite/object storage | authoritative durable evidence | no |
+| task/session checkpoints, blackboard snapshots, resumable goal-stack state, shard descriptors, compaction artifacts | derived durable artifact | SQLite/object storage | authoritative durable evidence | no |
 | ANN indexes, FTS projections, graph materializations, bloom filters, prefix indexes, caches | derived acceleration state | sidecars / derived tables / memory | authoritative durable evidence | no |
 
 ## Boundary rules

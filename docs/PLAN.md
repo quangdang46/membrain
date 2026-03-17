@@ -9904,7 +9904,8 @@ Each section below is written in English and focuses on **how to build the featu
    - next action
    - blocked reason
 3. Let retrieval promote items into the blackboard instead of exposing raw floods of candidates.
-4. Snapshot blackboard state at checkpoints.
+4. Treat the blackboard as a visible, namespace-aware working-state projection over selected evidence and active task metadata rather than a second authoritative memory store.
+5. Any persisted `blackboard.snapshot` or summary remains a lineage-bearing checkpoint artifact for inspect/resume/handoff; durable memory identity, policy, contradiction state, and canonical relation truth still live in the authoritative stores.
 
 **Minimum API**
 - `blackboard.get`
@@ -9937,10 +9938,23 @@ Each section below is written in English and focuses on **how to build the featu
    - blackboard summary
    - selected evidence ids
    - pending dependencies
-4. Add restart tests that verify resume quality.
+4. Treat these checkpoints as task/session-scoped working-state anchors:
+   - they stay bounded, inspectable, and policy-aware
+   - they record lineage or generation handles for referenced evidence instead of copying authoritative truth
+   - they may support restart, handoff, or pause/resume, but they do not bypass namespace enforcement or become the only durable record of memory state
+5. Define lifecycle semantics explicitly:
+   - `pause` persists the latest checkpoint and marks the goal dormant without widening scope or mutating durable truth beyond checkpoint metadata
+   - `resume` rehydrates from the newest valid checkpoint and reports stale or missing evidence instead of guessing
+   - `abandon` ends the active goal intentionally, preserves the checkpoint or audit trail needed for later inspection, and never silently deletes authoritative evidence
+6. Keep named historical snapshots distinct from goal-stack checkpoints:
+   - goal-stack checkpoints are resumability anchors for active work
+   - Feature 12 snapshots remain named historical inspection anchors rather than execution-state authority
+7. Add restart tests that verify resume quality and stale-checkpoint handling.
 
 **Minimum acceptance**
 - resume must reconstruct task state without guessing from scratch
+- stale, policy-incompatible, or partially reconstructable checkpoints must degrade explicitly instead of silently widening scope
+- abandon must preserve enough checkpoint or audit metadata for later inspection without leaving the goal implicitly active
 
 ---
 

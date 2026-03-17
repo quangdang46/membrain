@@ -213,6 +213,7 @@ Any change to startup bootstrap, durable-state replay, derived-surface rebuild, 
 - startup with unreadable, ambiguous, or mixed-generation authoritative inputs failing closed for the affected namespace or shard instead of replaying speculative recovery from derived artifacts
 - seeded divergence tests for `repair index`, `repair graph`, `repair lineage`, cache drop-and-rewarm, and similar rebuilds proving rebuilt outputs regain candidate-count, lineage, namespace, and policy parity with durable truth before the surface is marked healthy
 - interrupted restart, rebuild, or recovery runs resuming idempotently from durable checkpoints or explicit repair queue state without duplicating mutations, widening scope, or losing the prior durable state
+- when resumable-goal or blackboard checkpoint features are enabled, restart fixtures that prove pause/resume/abandon state restores from explicit task/session-bound checkpoints, preserves selected-evidence handles and pending dependencies, and fails closed rather than guessing a new active plan when the checkpoint or governing task context is unreadable
 - operator-visible recovery artifacts recording the failing surface, serving posture, authoritative input generation or snapshot, queued follow-up repairs, any irreversible-loss record, and the exact checks required to clear degraded mode
 - cross-surface parity for stats, health, doctor, explain, inspect, audit, and import/export manifest signals that expose degraded, graph-disabled, index-bypassed, stale-warning, replay-pending, stale-preflight-invalidated, redacted, or partial-transfer state across CLI, daemon, IPC, and MCP where those surfaces exist
 
@@ -242,6 +243,7 @@ Any change to startup bootstrap, durable-state replay, derived-surface rebuild, 
 - attention and novelty decisions are deterministic enough to debug and benchmark
 - duplicate routing does not regress into unbounded scans
 - working-memory eviction and interference updates stay bounded
+- if emotional trajectory metadata is included, `encoding_valence` / `encoding_arousal` capture remains explainable, bounded, and reproducible enough for later inspect, uncertainty, and consolidation flows
 
 ### Stage 3 — `on_recall` / LTP-LTD
 
@@ -276,6 +278,7 @@ Any change to startup bootstrap, durable-state replay, derived-surface rebuild, 
 - same-namespace allow paths, explicit shared/public allow paths, and cross-namespace or policy-denied paths all preserve the same bounded candidate-generation and omission semantics without existence leakage
 - redacted or policy-filtered winning candidates degrade explicitly to omission, preview, partial, or miss semantics rather than silently substituting unauthorized payloads
 - explain outputs preserve returned-result reasons, omitted-result reasons, provenance summaries, freshness or conflict markers, and stable routing-trace fields without cross-surface semantic drift
+- if `mood_congruent` is enabled, the emotional bonus remains opt-in, bounded to already-eligible candidates, and inspectable enough to show whether it changed ordering or was non-decisive
 
 ### Stage 5 — Reconsolidation
 
@@ -303,19 +306,21 @@ Any change to startup bootstrap, durable-state replay, derived-surface rebuild, 
 - migrated content remains retrievable and explainable
 - consolidation never silently drops protected or authoritative evidence
 - interrupted or restarted consolidation preserves prior durable truth, leaves repairable artifacts when needed, and does not leak stale or cross-namespace warmed state
+- if emotional trajectory is included, timeline emission remains namespace-aware, read-only from the operator perspective, and rebuildable from bounded emotional metadata rather than becoming a hidden second truth source
 
 ### Stage 7 — Graph maturity
 
 **Required suites**
-- integration tests for formation, split, sibling creation, and recall expansion
-- property tests for traversal caps and centroid stability
-- restart tests for serialization integrity
+- integration tests for formation, split, sibling creation, recall expansion, and any later-stage Dream Mode follow-on that emits graph-affecting synthesis artifacts
+- property tests for traversal caps, centroid stability, and bounded Dream Mode candidate or link-creation caps when that feature is enabled
+- restart tests for serialization integrity, including interrupted or paused Dream Mode state if Stage 7 promotion includes the offline synthesis path
 - latency tests for graph-assisted retrieval overhead
 
 **Must prove before closing the stage**
 - graph-assisted retrieval stays bounded under declared caps
 - graph persistence survives restart without corruption
 - split logic remains reproducible enough for operational debugging
+- if Dream Mode is included, the synthesis pass remains background-only, namespace/policy-aware, lineage-backed, and visibly non-blocking to foreground latency budgets
 
 ## Required exit artifacts for a completed stage
 
