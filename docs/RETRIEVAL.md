@@ -25,6 +25,7 @@ All recall-facing transports should map onto one logical `RecallRequest` even wh
 - `namespace` names the requested effective namespace. Historical feature notes that say `namespace_id` for recall refer to this same input, not a second independent selector.
 - `include_public` defaults to `false` and is the ordinary widening knob for approved shared/public surfaces.
 - Optional scoped filters may include `workspace_id`, `agent_id`, `session_id`, `task_id`, `memory_kinds`, `era_id`, `as_of_tick`, `at_snapshot`, `min_strength`, `min_confidence`, `show_decaying`, and `mood_congruent`.
+- `era_id` scopes recall to one explicit temporal era within the already-bound effective namespace. Unknown, malformed, or unauthorized era selectors are validation or policy failures rather than cues to widen, guess, or silently fall back to cross-era retrieval.
 - `like_id` and `unlike_id` are query-by-example cues, not bypasses around policy, ranking, or boundedness rules.
 
 ### Budgets and explainability

@@ -111,9 +111,12 @@ Use redacted success when the caller may know an operation succeeded but is not 
 ## Approved sharing and cross-namespace flows
 
 - `visibility`, `namespace_id`, `include_public`, `share`, `fork`, and `merge` are explicit widening mechanisms; they do not weaken namespace isolation for ordinary requests.
+- `share` and `unshare` mutate visibility scope, not canonical ownership: the memory keeps one authoritative namespace, identity, lineage, and audit trail even when widened access is allowed or later tightened again.
 - `include_public` widens recall only to policy-approved shared or public surfaces and never to private namespaces.
+- Approved shared/public access remains subordinate to workspace ACL, agent ACL, and session visibility; shared visibility is not a blanket bypass.
 - Cross-namespace relations or links require explicit policy support and must preserve both endpoint namespaces in durable records.
 - Repair, cache warmup, and background maintenance may operate across multiple namespaces only when the plan enumerates those namespaces explicitly and audit surfaces preserve the touched scope.
+- Explain, audit, and cache-related metadata must preserve when approved widening materially shaped the visible result set instead of collapsing it into an ordinary same-namespace allow path.
 
 ## Incident and audit requirements
 

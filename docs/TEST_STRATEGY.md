@@ -36,6 +36,7 @@ Any change to namespace, sharing, ACL, denial, or redaction semantics must inclu
 - malformed or unknown namespace rejection before candidate generation or writes
 - cross-namespace denial without leakage of protected counts, handles, or existence hints
 - approved shared/public access paths via explicit visibility controls
+- explicit `share` / `unshare` mutation paths showing re-share idempotency, revocation of widened access, and preservation of namespace binding and durable identity
 - background-job, cache, and repair-path preservation of namespace scope
 - parity across CLI, daemon, IPC, and MCP surfaces
 
@@ -145,6 +146,7 @@ Any change to CLI, daemon/JSON-RPC, or MCP command examples, shared flag vocabul
 - response-envelope parity checks ensuring example success, partial, degraded, blocked, rejected, and policy-denied flows preserve the correct machine-readable fields and meanings across CLI JSON, daemon/JSON-RPC, and MCP surfaces
 - explicit validation of explanation families, safeguard objects, remediation hints, and availability markers whenever an example claims to show them, including the stable field-family names rather than transport-specific paraphrase
 - health/ops example parity checks whenever docs change `health`, `stats`, or `doctor` semantics, including repair-queue, backpressure, availability-posture, and feature-availability fields when those signals are claimed as operator-visible
+- timeline/landmark example parity checks whenever docs change Feature 5 semantics, including stable `era_id` usage, read-only `timeline` behavior, explicit `landmark` mutation examples, and active-versus-closed era visibility when those are claimed as operator-visible
 - structured artifacts that record the source doc section or anchor, normalized operation, expected canonical fields, and drift classification so reviewers can tell whether a failure reflects semantic breakage or example hygiene noise
 
 ### Doc-example drift blocking rules
@@ -170,6 +172,7 @@ Any change to recall ranking, packaging, sharing, redaction, or namespace enforc
 - representative judged corpora or canonical fixtures that make expected `full`, `partial`, `miss`, contradiction-aware, and tip-of-the-tongue outcomes explicit enough to detect ranking or packaging drift
 - stable top-K or shortlist expectations for direct, recent, lexical, semantic, and bounded graph-assisted paths where those lanes are in scope, including returned-result reasons and omitted-result reasons rather than score-only assertions
 - same-namespace allow behavior and explicit shared/public allow paths producing the same evidence, policy summaries, and deferred-payload behavior across CLI, daemon, IPC, and MCP surfaces
+- era-scoped recall fixtures proving that `era_id` narrows to one explicit era without widening to adjacent history, and that malformed, unknown, or unauthorized era selectors fail explicitly before widened candidate generation
 - cross-namespace, owner-boundary, and policy-denied requests rejecting before widened candidate generation and without leaking protected handles, counts, existence hints, or suppressed conflict siblings
 - policy-filtered or redacted winners degrading to explicit omission, preview, partial, or miss semantics rather than silently substituting unauthorized payloads or widening the candidate cut
 - adversarial ambiguous cues, near-duplicate clusters, contradiction-bearing candidate sets, and fragmentary cues preserving bounded behavior, inspectable uncertainty, and conflict markers instead of speculative reconstruction

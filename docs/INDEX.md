@@ -55,6 +55,7 @@ The mega-plan contains these major regions:
 
 ### Feature Implementation Specs
 - **Section 46 — Batch 1** (Features 1–10): Dream Mode, Belief Versioning, Query-by-Example, Context Budget API, Temporal Landmarks, Passive Observation, Confidence Intervals, Skill Extraction, Cross-Agent Sharing, Health Dashboard
+- **Batch 1 nuance**: some features carry early schema hooks but later operational surfaces; Feature 9 lands `namespace_id`, `agent_id`, and `visibility` early while keeping the full sharing API gated behind the namespace/governance contract.
 - **Section 47 — Batch 2** (Features 11–20): Causal Chain Tracking, Snapshots + Time Travel, Attention Heatmap, Semantic Diff, Fork + Merge, Predictive Pre-recall, Schema Compression, Emotional Trajectory, Audit Log, Query Intent Routing
 - **Batch 2 framing**: later-stage, non-blocking follow-on scope for advanced trust/introspection, branching, predictive, and compression-adjacent features; use it to navigate deferred value without reopening the core execution spine in Sections 40–45.
 

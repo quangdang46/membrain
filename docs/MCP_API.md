@@ -112,7 +112,8 @@ When degraded or repair-aware serving changes what can still be queried or mutat
 | `observe()` | **Yes, if same content** | Duplicate content returns same memory_id. |
 | `uncertain()` | **Yes** | Same query produces consistent results. |
 | `skills()` | **No** | May extract/update skill procedures. |
-| `share()` | **Yes, if not already shared** | Re-sharing same memory is idempotent. |
+| `share()` | **Yes, if same effective visibility** | Re-sharing the same memory into the same approved scope is idempotent. |
+| `unshare()` | **Yes, if already private/non-shared** | Re-tightening the same visibility is idempotent. |
 | `health()` | **Yes** | Read operation is always idempotent. |
 | `audit()` | **Yes** | Read-only history inspection is idempotent for the same visible scope. |
 | `why()` | **Yes** | Read operation is always idempotent. |
@@ -225,6 +226,7 @@ When explanation is embedded, `memory_recall` should preserve the same stable ma
 - omitted `namespace` is valid only when one deterministic default can be bound from authenticated context or stable session/job ownership
 - `include_public` widens only to explicitly shareable surfaces permitted by policy
 - denied or redacted namespace filters must remain inspectable without disclosing protected record existence or payload details
+- `era_id` narrows recall to one explicit era inside the effective namespace; malformed, unknown, or unauthorized era selectors fail as validation or policy outcomes rather than widening to neighboring eras or silently degrading into ordinary unscoped recall
 - `graph_mode` and `cold_tier` may tune routing, but they must not bypass hard graph caps, trigger pre-cut cold payload fetch, or override policy denial/redaction behavior
 - when graph assistance contributes, the response must preserve which returned memories entered directly, which were introduced by bounded graph expansion, whether graph support changed ranking versus only adding supporting context, and what associative context was omitted by caps or policy
 - incompatible time scopes or malformed request knobs are validation failures, not precedence guesses
@@ -390,7 +392,13 @@ Ranked, deduplicated, ready-to-inject memory list that fits within token budget.
 
 ### `timeline()` — Feature 5
 
-**Returns**: `{ landmarks: [{id, label, era_start, era_end, memory_count}] }`
+**Returns**: `{ landmarks: [{id, label, era_id, era_start, era_end, memory_count, current_era}] }`
+
+**Rules**:
+- `timeline()` is a read-only temporal-navigation surface. It summarizes landmark-defined eras for one effective namespace and does not reopen, merge, or relabel eras implicitly.
+- Returned landmarks must remain ordered, namespace-scoped, and policy-filtered before any detail is packaged.
+- `era_id` is the stable selector used by recall-side era filtering; `label` is human-facing text and must not become the authoritative join key.
+- `current_era` indicates whether the listed landmark anchors the namespace's still-open era so callers can distinguish active versus closed eras without inferring from a missing `era_end` alone.
 
 ### `observe(content, context?, chunk_size?, source_label?)` — Feature 6
 
@@ -418,9 +426,21 @@ Segment content into memories via topic boundary detection.
 
 **Returns**: `{ procedures: [{id, content, source_engram_id, confidence, member_count}] }`
 
-### `share(id, namespace_id)` — Feature 9
+### `share(id, namespace_id)` / `unshare(id)` — Feature 9
 
-Share a memory within a namespace for cross-agent access.
+Adjust visibility for cross-agent access without changing the memory's canonical identity or durable ownership.
+
+**Returns**:
+- `share(id, namespace_id)` → `{ id, namespace, visibility, policy_summary }`
+- `unshare(id)` → `{ id, namespace, visibility, policy_summary }`
+
+**Rules**:
+- `share` and `unshare` mutate visibility metadata; they do not mint a second authoritative copy, move the memory into a different canonical namespace, or bypass lineage/provenance requirements.
+- `share` must bind an explicit approved namespace scope and still obey workspace ACL, agent ACL, session visibility, and any later read-time redaction rules.
+- `unshare` tightens future widened access without deleting the underlying memory or changing durable identity.
+- Malformed, unknown, or unauthorized namespace targets fail as `validation_failure` or `policy_denied` outcomes before any hidden copy, fanout, or candidate-generation work occurs.
+- Repeating `share` or `unshare` with the same effective visibility is idempotent.
+- Recall/search/get/explain surfaces must preserve when approved shared/public widening materially shaped the visible result set through `policy_summary` or the equivalent explain-family fields.
 
 ### `health()` — Feature 10
 

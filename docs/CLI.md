@@ -110,7 +110,7 @@ echo "content" | membrain remember --context "recent commits" --kind semantic
 | `--arousal, -A` | 0.0 | Emotional arousal 0.0–1.0 |
 | `--kind, -k` | episodic | Memory kind: episodic, semantic, procedural |
 | `--source` | cli | Source tag: cli, mcp, api |
-| `--share` | — | Mark as shared (cross-agent) |
+| `--share` | — | Mark as shared within the target namespace (cross-agent) |
 | `--namespace` | default | Target namespace |
 
 ### `membrain recall <QUERY> [OPTIONS]`
@@ -150,7 +150,7 @@ membrain recall "auth" --explain summary --cold-tier avoid
 | `--as-of` | — | Time-travel using `as_of_tick` |
 | `--like` | — | Query-by-example cue via `like_id` |
 | `--unlike` | — | Query-by-example cue via `unlike_id` |
-| `--era` | — | Filter to temporal era |
+| `--era` | — | Filter recall to one explicit temporal era in the effective namespace |
 | `--min-confidence` | — | Minimum confidence score |
 | `--at` | — | Historical recall at named snapshot (`at_snapshot`) |
 | `--namespace` | caller default if deterministic, otherwise required | Namespace scope |
@@ -292,12 +292,19 @@ membrain health --at before-refactor  # past state
 
 ### `membrain timeline [OPTIONS]` (Feature 5)
 
+Temporal-landmark surfaces are for bounded temporal navigation, not free-form history rewriting. `membrain timeline` is read-only and lists landmark-defined eras for the effective namespace; `membrain landmark` is the explicit mutation surface for manually promoting one memory into a landmark when policy allows it.
+
 ```bash
 membrain timeline                     # list all landmarks
 membrain timeline --detail            # landmarks + memory count per era
 membrain landmark <uuid>              # promote memory to landmark
 membrain landmark --label "v2 launch" <uuid>
 ```
+
+Contract notes:
+- `--era` on `membrain recall` binds to the stable `era_id` associated with one landmark-defined era; labels are human-facing and are not the canonical selector.
+- unknown or unauthorized era selectors fail explicitly instead of silently widening to all eras or falling back to unscoped recall.
+- `membrain timeline --detail` should make active versus closed eras inspectable without forcing callers to infer from prose alone.
 
 ### `membrain mood [OPTIONS]` (Feature 18)
 
@@ -497,6 +504,8 @@ membrain fork abandon experiment
 
 ## Namespaces & Sharing (Feature 9)
 
+Feature 9 is a later-stage collaboration surface layered on top of the already-canonical namespace and governance spine. The early schema hooks (`namespace_id`, `agent_id`, `visibility`) land before the full sharing workflow, but the user-visible sharing commands remain bounded and policy-first rather than acting as shortcuts around isolation.
+
 ```bash
 membrain remember "deploy steps" --share --namespace project-x
 membrain recall "deploy steps" --namespace project-x
@@ -505,6 +514,13 @@ membrain unshare <uuid>
 membrain namespace list
 membrain namespace stats project-x
 ```
+
+CLI expectations:
+- `remember --share` and `share` change visibility metadata for the targeted memory; they do not move the memory into a different canonical namespace or create a second authoritative copy.
+- `unshare` tightens future cross-agent visibility without deleting the underlying memory or changing its identity, lineage, or durable ownership.
+- Recall remains bound to one effective namespace. Any widened access to shared/public surfaces must stay explicit through ordinary namespace binding plus approved widening knobs such as `--include-public`; sharing must not create hidden global fallback.
+- Malformed, unknown, or unauthorized namespace/visibility requests fail explicitly as `validation_failure` or `policy_denied` outcomes instead of silently widening, falling back, or degrading into ordinary unscoped recall.
+- When shared/public widening materially shapes a result, the same policy boundary should stay inspectable in `--json`, explain, and audit surfaces.
 
 ---
 
