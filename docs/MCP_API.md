@@ -377,7 +377,16 @@ Returns the inspectable belief chain for a topic or query without rewriting the 
 
 Ranked, deduplicated, ready-to-inject memory list that fits within token budget.
 
-**Returns**: `{ injections: [{memory_id, content, utility_score, token_count, reason}], tokens_used }`
+**Returns**: `{ injections: [{memory_id, content, utility_score, token_count, reason}], tokens_used, tokens_remaining }`
+
+**Rules**:
+- this is a later-stage bounded packaging surface layered on top of the canonical recall pipeline; it does not authorize a separate retrieval path, wider namespace scope, or relaxed policy handling
+- `token_budget` is a hard upper bound for the packed result. If useful candidates remain after the greedy cut, the response should use `partial_success`, warnings, or omission metadata to show that the budget—not lack of evidence—truncated the output
+- one effective namespace plus any approved shared/public widening must bind before candidate generation, duplicate collapse, utility scoring, or formatting begins
+- the shortlist remains subject to the ordinary bounded retrieval restrictions: no full-store scans, no uncapped graph fanout, and no pre-cut cold payload fetch just because the caller asked for ready-to-inject output
+- utility ordering may penalize `working_memory_ids` overlap, but overlap only affects ranking within the authorized shortlist; it must not suppress conflict visibility or bypass policy filters
+- `format` changes rendering only. The underlying injection members, utility ordering, warnings, and availability posture should stay semantically aligned with CLI `membrain budget` and daemon equivalents
+- follow-on validation should prove deterministic packing under hard token budgets, parity with recall-side namespace/policy handling, and inspectable truncation when the budget clips otherwise eligible injections
 
 ### `timeline()` — Feature 5
 
@@ -387,7 +396,15 @@ Ranked, deduplicated, ready-to-inject memory list that fits within token budget.
 
 Segment content into memories via topic boundary detection.
 
-**Returns**: `{ memories_created, topic_shifts }`
+**Returns**: `{ memories_created, topic_shifts, bytes_processed }`
+
+**Rules**:
+- this is a later-stage bounded intake surface, not a raw-ingest bypass. Observed content still resolves to one effective namespace and goes through the ordinary validation, provenance, duplicate-routing, and policy path before persistence
+- when one observe call yields multiple fragments, returned and persisted state should preserve `observation_source` plus a shared `observation_chunk_id` so later inspect, audit, and repair flows can trace the bounded observation batch without inventing a synthetic session boundary
+- `source_label` is provenance metadata only; it must not widen namespace scope, suppress policy checks, or override caller identity
+- segmentation remains bounded by explicit chunk-size and topic-shift controls. Convenience wrappers around file or stream observation must not hide unbounded rescans, unbounded buffering, or whole-store work behind the observe surface
+- the underlying outcome semantics should stay aligned with CLI and daemon observe flows: explicit warnings when the batch is truncated, blocked, or gated, and no silent fallback that changes the meaning of ingestion
+- follow-on validation should prove deterministic chunking under fixed inputs, preserved source-label and chunk-group metadata, and parity with the shared intake contract across transports
 
 ### `uncertain(top_k?)` — Feature 7
 

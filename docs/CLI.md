@@ -439,10 +439,21 @@ membrain ask "..." --override-intent semantic-broad
 
 ### `membrain budget [OPTIONS]` (Feature 4)
 
+Context Budget is a later-stage packaging surface that turns bounded recall results into a ready-to-inject context pack. It reuses the same namespace, policy, omission, and degraded-serving semantics as `recall`; it does not introduce a second retrieval path or widen scope for convenience.
+
 ```bash
 membrain budget --tokens 2000
 membrain budget --tokens 2000 --context "debugging" --format markdown
+membrain budget --tokens 1500 --namespace project-x --include-public
 ```
+
+CLI expectations:
+- `--tokens <n>` is the hard packing budget. Successful responses should report `tokens_used` and `tokens_remaining`, and budget-constrained omission should stay visible through the existing `partial` / `degraded` outcome vocabulary rather than disappearing into a generic success.
+- The command starts from the same bounded, policy-pruned retrieval shortlist the recall contract allows for the effective namespace. Duplicate collapse, conflict markers, and the no-pre-cut-cold-payload rule still apply before greedy packing begins.
+- Utility ordering may penalize memories already present in active working state, but that overlap signal affects ranking only; it must not bypass namespace or policy enforcement.
+- `--format` changes only the final injection rendering (for example markdown versus plain text). In `--json` mode, the machine-readable shape should still preserve `injections[{memory_id, content, utility_score, token_count, reason}]`, `tokens_used`, `tokens_remaining`, and any warnings or availability state that materially shaped the result.
+- Because this is later-stage follow-on work rather than a core-path prerequisite, unavailable or gated deployments should surface explicit feature-availability or policy-denial outcomes instead of silently folding the request into ordinary `recall` behavior.
+- Follow-on validation for this surface should at minimum prove deterministic packing under hard token budgets, parity with `recall` for namespace and policy handling, and explicit signaling when budget or feature gating truncates the result.
 
 ---
 
@@ -498,6 +509,8 @@ membrain namespace stats project-x
 
 ## Passive Observation (Feature 6)
 
+Passive Observation is a later-stage intake surface that segments piped or watched content into bounded observation fragments and feeds them through the normal encode pipeline. It improves capture ergonomics, but it does not bypass namespace binding, duplicate handling, provenance rules, or policy checks that would apply to explicit `remember`-style intake.
+
 ```bash
 cat conversation.txt | membrain observe
 echo "user prefers dark mode" | membrain observe --context "preferences"
@@ -505,6 +518,14 @@ membrain observe --watch ~/.claude/conversations/
 membrain observe --watch ./logs/ --pattern "*.jsonl"
 membrain observe --dry-run
 ```
+
+CLI expectations:
+- Observed fragments should preserve explicit provenance. When one observation pass yields multiple memories, each fragment should carry `observation_source` plus a shared `observation_chunk_id` so later inspect, audit, and repair flows can reconstruct where the bounded batch came from.
+- Pipe mode and `--watch` mode are transport ergonomics only. Both should still normalize into `Observation` records under one effective namespace and the ordinary intake validation, duplicate-routing, and policy path.
+- Segmentation stays bounded by declared chunk-size and topic-shift controls. Watch mode may tail or batch new input, but it must not hide unbounded in-memory buffering or full-history rescans behind a convenience flag.
+- `--dry-run` should preview what would be encoded, including estimated fragment counts and any validation, policy, or source-shape blockers, without writing memories.
+- Because this is later-stage follow-on work rather than a core-path prerequisite, unavailable or gated deployments should surface explicit feature-availability or policy-denial outcomes instead of silently pretending passive observation is always on.
+- Follow-on validation for this surface should at minimum prove deterministic chunking under fixed inputs and thresholds, preserved source labeling and chunk grouping, and semantic parity between pipe/watch intake and the shared observe contract.
 
 ---
 
