@@ -54,6 +54,7 @@ Context-envelope rules:
 | `remediation` | Optional machine-readable recovery guidance with a short summary plus stable next-step hints such as `fix_request`, `change_scope`, `check_health`, `retry_with_backoff`, `retry_with_higher_budget`, `run_doctor`, or `run_repair` |
 | `availability` | Optional machine-readable availability summary when the affected scope is degraded, read-only, or partially unavailable |
 | `warnings` | Non-fatal issues |
+| `policy_filters_applied` | Optional machine-readable summary of the policy families, sharing scope, retention or hold markers, and redaction decisions that materially shaped the visible outcome |
 | `safeguard` | Optional shared safeguard object for risky or mutating operations that need preview / blocked / degraded / rejected / destructive-action semantics |
 
 #### Error Kind Mappings
@@ -150,6 +151,50 @@ For risky or mutating operations whose blast radius can rewrite authoritative st
 Read-only operator and data-mobility surfaces such as `stats`, `health`, `doctor`, `audit`, `export`, and `import` should likewise preserve semantic parity with CLI and daemon/JSON-RPC around counters, warnings, remediation hints, availability posture, and data-manifest meaning instead of introducing MCP-only interpretations.
 
 When the caller sees `safeguard.outcome_class=blocked`, the request is still structurally valid but is missing readiness prerequisites such as confirmation, snapshot/generation freshness, or a required maintenance condition. When the caller sees `error_kind=validation_failure` or `error_kind=policy_denied`, the request is rejected at the domain level and local confirmation would not make it acceptable.
+
+## Governance explain, audit, and parity contract
+
+Governance-sensitive MCP responses must preserve inspectable evidence for denial, redaction, retention, legal-hold, approved sharing, and namespace-isolation outcomes instead of relying on transport-specific prose.
+
+### Required explain fields
+
+When a tool is denied, redacted, narrowed by retention or hold policy, or widened through approved sharing, the response must expose these machine-readable explain fields either inline or via `explain_handle`:
+
+- `policy_summary.effective_namespace`
+- `policy_summary.policy_family`
+- `policy_summary.outcome_class`
+- `policy_summary.blocked_stage`
+- `policy_summary.redaction_fields`
+- `policy_summary.retention_state`
+- `policy_summary.sharing_scope`
+
+These fields must preserve the same semantics as CLI JSON, daemon/JSON-RPC, IPC, inspect, explain, repair, and audit surfaces. MCP may format them differently, but it must not silently collapse them into generic warnings, empty results, or prose-only explanations.
+
+### Required audit correlation
+
+Every governance-sensitive MCP outcome must remain traceable into the authoritative audit trail. At minimum, responses and audit artifacts together must preserve:
+
+- `request_id` or equivalent correlation handle
+- `effective_namespace` and any source or target namespace involved in approved widening
+- `policy_family`, `outcome_class`, and `blocked_stage`
+- `retention_state` and hold markers when lifecycle policy shaped the result
+- `redaction_summary` when fields or payload slices were intentionally hidden
+- `related_run` or `related_snapshot` when repair, rebuild, restore, compaction, or incident handling materially shaped the outcome
+
+### Cross-interface parity obligation
+
+MCP is not allowed to invent wrapper-local governance semantics. For any scenario also exposed through CLI, daemon/JSON-RPC, IPC, inspect, explain, repair, or audit surfaces, the machine-readable governance outcome must stay parity-consistent across interfaces.
+
+Minimum parity coverage for governance-sensitive work includes:
+
+- validation failure versus policy denial
+- policy denial versus redacted success
+- approved widening versus same-namespace allow
+- archival versus hard deletion
+- ordinary retention pressure versus legal-hold or compliance-lock override
+- namespace-isolation enforcement during degraded, cache-bypassed, repair, or background execution
+
+Silent cross-surface divergence is a contract violation, not an acceptable transport difference.
 
 ## Daemon JSON-RPC Contract
 

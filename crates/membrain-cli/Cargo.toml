@@ -1,0 +1,16 @@
+[package]
+name = "membrain-cli"
+version.workspace = true
+edition.workspace = true
+publish = false
+
+[lib]
+name = "membrain_cli"
+path = "src/lib.rs"
+
+[[bin]]
+name = "membrain"
+path = "src/main.rs"
+
+[dependencies]
+membrain-core = { path = "../membrain-core" }

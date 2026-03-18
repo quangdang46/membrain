@@ -4,6 +4,7 @@
 
 ```text
 fn fast_encode(event):
+    // synchronous bounded fast path only
     norm = normalize(event)
     fp = fingerprint(norm)
     class = shallow_classify(norm)
@@ -11,6 +12,7 @@ fn fast_encode(event):
     tier = route_fast(class, sal, norm.payload_size)
     item = make_memory_item(norm, fp, class, sal, tier)
     persist(item)
+    // optional Tier1 seed uses only the synchronous outputs above
     schedule_deferred_enrichment(item.id)
     return item.id
 ```

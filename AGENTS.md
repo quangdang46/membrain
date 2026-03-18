@@ -31,6 +31,31 @@
 
 ---
 
+## Flywheel Swarm Required Operating Rules
+
+These rules are mandatory for every swarm agent working in this repository.
+
+1. **Rule 0 — Override:** Human instructions override `AGENTS.md`, backlog guidance, prior agent plans, and default workflow suggestions.
+2. **Rule 1 — No deletion:** Never delete files or directories without explicit human permission.
+3. **No destructive git:** Never run destructive git commands such as `git reset --hard`, `git clean -fd`, `git checkout -- <path>`, `git restore <path>`, `git push --force`, or equivalent history-rewriting shortcuts.
+4. **Branch policy:** Work on `main`; never target or create `master` for this repository.
+5. **No script edits:** Make code and documentation changes manually; do not mass-edit repository files with scripts unless the human explicitly asks for it.
+6. **No file proliferation:** Do not create duplicate variants like `mainV2.rs`, `main_improved.rs`, `foo_new.py`, or parallel doc copies; edit the canonical file instead.
+7. **Validation after changes:** Run validation appropriate to the changed surface before handoff. If you change Rust code, run `cargo check --all-targets` and then any bead-specific checks.
+8. **Multi-agent awareness:** Expect concurrent edits from other agents. Never stash, revert, overwrite, or otherwise disturb changes just because you did not author them.
+9. **Post-compaction reset:** After any compaction or major context loss, reread `AGENTS.md` before continuing.
+
+### Swarm Tool Blur Review
+
+- **`br`:** Canonical task state, dependencies, and status transitions.
+- **`bv`:** Graph-aware routing and prioritization; use only `--robot-*` flags in agent workflows.
+- **Agent Mail:** Agent identity, inbox/outbox threads, file reservations, and handoff coordination.
+- **`cass` / `cm`:** Reuse prior session knowledge and procedural memory; avoid interactive modes and prefer automation-safe commands like `cass ... --robot|--json` and `cm context ... --json`.
+- **`ubs`:** Bug-scan the changed surface before commit; fix real findings or document a justified deferral.
+- **`dcg`:** Destructive Command Guard; treat blocked commands as safety signals and find a safer path instead of bypassing the guard.
+
+---
+
 ## Documentation Precedence and Conflict Resolution
 
 Use this order whenever docs disagree or when backlog work needs a canonical interpretation:

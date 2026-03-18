@@ -135,6 +135,25 @@ A memory's canonical identity is the tuple of `namespace` + `id`.
 - `content_ref` and `payload_ref` are storage handles; changing them does not mint a new identity.
 - If a payload is detached, redacted, or compacted, the memory keeps the same `id` so long as lineage and policy semantics remain continuous.
 
+### Core-table and rebuild-authority contract
+
+The first schema baseline treats these durable records as the authoritative rebuild source for memory semantics and derived-state repair:
+
+- canonical memory rows in `memories` carry stable identity, lifecycle, provenance-bearing metadata, and the durable state that retrieval and maintenance flows must trust first
+- authoritative float embedding records in `memory_embeddings` back semantic rebuild; quantized vectors, ANN row ids, and hot-search projections are derived accelerators only
+- durable cluster and graph rows in `engrams`, `engram_members`, and `graph_edges` must stay inspectable and rebuildable without becoming a second identity system
+- durable process state such as logical counters or generation anchors belongs in `brain_state` and must survive restart or repair before derived services claim healthy state
+- caches, FTS projections, warmed routing mirrors, and other serving accelerators may be dropped, invalidated, or rebuilt at any time because they do not define canonical truth
+
+### Migration, rollback, and schema-test expectations
+
+Any schema work touching the canonical baseline must carry explicit migration and rollback expectations rather than leaving them implicit in prose.
+
+- migration notes must name the changed tables, columns, meanings, compatibility window, and the rebuild plan for any affected derived state
+- rollback notes must say how the prior authoritative shape is restored without losing stable identifiers or silently changing policy-bearing semantics
+- deterministic schema coverage should prove namespace-scoped identifier stability, foreign-key integrity, and rebuild-from-durable-truth behavior after restart, repair, or migration
+- repair or migration flows must preserve prior durable rows or emit explicit blocked/degraded artifacts; they must not silently widen authority to caches, sidecars, or other derived stores
+
 ### Canonical version contract
 
 `version` tracks accepted mutation of one canonical memory record.
@@ -199,6 +218,51 @@ Contradiction-aware writes must classify whether accepted new evidence is revisi
 - The provenance envelope must also be sufficient to explain whether attached context, emotional annotations, advisory tags, and provisional write-time scoring came from explicit input, trusted source mapping, parent lineage, or bounded local derivation.
 - `authoritativeness` carries source-trust semantics separately from confidence or salience so later ranking, governance, and explain surfaces do not flatten trust into one opaque importance number.
 - A stored memory is only canonical if it can be traced either directly to a source reference or indirectly through lineage to durable evidence.
+
+#### Durable family inheritance rules
+
+- Every durable memory-item family in the M1 schema baseline inherits `created_at_ms`, `updated_at_ms`, `source_kind`, and `source_ref` as the minimum first-order provenance floor even when a narrower type table focuses on type-specific fields.
+- Derived, repaired, consolidated, summarized, extracted, merged, and contradiction-related records must also carry `lineage`; first-order intake may leave `lineage` empty when `source_kind` plus `source_ref` already identify the durable evidence directly.
+- If policy requires source redaction, the system must preserve a stable opaque `source_ref` handle or an explicit tombstone record rather than dropping source traceability.
+- Schema, migration, rollback, compaction, and repair work must preserve provenance envelopes and lineage across every durable item family; accelerators and sidecars may mirror this data, but they cannot become the sole surviving ancestry record.
+
+#### Deterministic schema-proof expectations
+
+- schema fixtures should prove each durable item family either stores `source_kind` and `source_ref` directly or resolves them through explicit lineage to durable parent evidence
+- derivation fixtures should prove summarize, extract, merge, repair, contradiction, and consolidation flows preserve parent lineage rather than replacing it with opaque prose
+- migration and rollback fixtures should prove provenance handles, timestamps, and lineage survive schema motion unchanged unless policy explicitly emits a redaction or loss artifact
+- inspect and repair fixtures should prove caches, ANN projections, graph materializations, and other derived accelerators cannot satisfy provenance reconstruction on their own when the canonical durable record is absent
+
+#### Governance and isolation inheritance rules
+
+- Every durable memory-item family in the M1 schema baseline also inherits `namespace` as a mandatory field and must keep it valid before persistence, replay, repair, or migration.
+- `agent_id` is the producing actor handle when one exists; it may be absent for human-authored, imported, or system-originated artifacts, but if present it must come from authenticated execution metadata rather than content inference.
+- Shared-capable or policy-scoped families must preserve explicit `visibility` state using the bounded vocabulary `private`, `shared`, or `public`; wrappers and repair flows must not widen visibility implicitly.
+- Every durable family must be able to represent `retention_class` and `policy_flags` so retention, legal-hold, compliance, redaction, shareability, and deletion constraints are enforceable from stored metadata alone.
+- Namespace, visibility, retention, and policy markers must survive migration, rollback, archival, restore, and policy-driven deletion flows exactly or emit an explicit tombstone/loss artifact instead of silently disappearing.
+
+#### Deterministic governance-proof expectations
+
+- schema fixtures should prove every durable item family persists a valid `namespace` and can expose `retention_class` plus `policy_flags` without detached-payload hydration
+- scope-binding fixtures should prove `agent_id` is sourced from authenticated caller or job ownership metadata only
+- visibility fixtures should prove shared-capable families reject unknown labels, preserve `private/shared/public` state across migration, and fail closed instead of widening access during wrapper translation or repair
+- lifecycle and policy fixtures should prove archival, restore, redaction, legal-hold, and deletion flows preserve or explicitly tombstone prior governance metadata
+
+#### Schema migration, backfill, rollback, and doc propagation rules
+
+- Every schema-changing bead or PR must carry a migration note naming the changed tables, columns, meanings, compatibility window, rollout order, and any rebuild or reindex surfaces affected by the change.
+- A backfill plan is required whenever existing rows, derived stores, or governance metadata need reinterpretation; it must say whether the job is online or background, restart-safe, bounded, and how partial completion is surfaced.
+- Every schema-changing work packet must carry a rollback note that names the exact restore path, irreversible edges if any, containment behavior on failure, and how stable identifiers, lineage, namespace, retention, and policy semantics survive reversal.
+- Doc propagation is part of schema correctness: when a schema meaning changes, the owning work must update the canonical `docs/PLAN.md` contract when needed plus every affected elaboration surface such as `docs/DATA_SCHEMAS.md`, `docs/MEMORY_MODEL.md`, `docs/MCP_API.md`, and `docs/CLI.md`.
+- Backfill and rollback flows must rebuild from authoritative durable evidence rather than from caches, ANN projections, warmed mirrors, or graph-only copies.
+- If migration, backfill, or rollback cannot complete cleanly, the system must emit explicit degraded or blocked artifacts instead of silently presenting the new schema as healthy.
+
+#### Deterministic migration-proof expectations
+
+- migration fixtures should prove old and new shapes preserve stable identifiers, timestamps, lineage, namespace binding, and policy-bearing metadata exactly unless the contract explicitly emits a tombstone or loss artifact
+- backfill fixtures should prove existing rows and derived stores converge from authoritative durable evidence under the documented mapping rule
+- rollback fixtures should prove the documented restore path either re-establishes the prior authoritative semantics or fails closed with explicit degraded evidence
+- doc-propagation checks should prove every touched exposed schema surface updated its matching contract docs instead of leaving canonical or interface docs stale
 
 ### Utility, Retention, and Recall Metadata
 

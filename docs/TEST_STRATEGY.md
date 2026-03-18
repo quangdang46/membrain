@@ -16,6 +16,16 @@ The testing strategy must prove correctness, boundedness, durability, explainabi
 - Benchmark results without representative metadata are exploratory evidence, not gate-closing evidence.
 - Any benchmark-closing suite must record the benchmark harness or command entrypoint, dataset or fixture identity, build mode, warm/cold semantics, sample count, representativeness label, and artifact location needed to rerun or audit the measurement.
 
+### Benchmark reproducibility proof obligations
+
+Use these rules whenever tests or release evidence cite benchmark results as proof instead of as illustrative numbers:
+
+- benchmark-closing suites must emit enough metadata to let another contributor rerun the same harness on the same declared workload class without reverse-engineering hidden setup
+- the local loop may use smaller fixtures, but any claimed gate-closing benchmark still owes the same harness identity, dataset identity, build mode, warm/cold semantics, sample count, representativeness label, and artifact location as the larger run
+- CI should fail closed when benchmark metadata is missing, contradictory, or detached from the artifact bundle even if the raw numbers themselves look acceptable
+- release-tier or representative benchmark runs should reuse the same contract family and fixture naming as the smaller local or CI checks so reviewers can trace one proof chain across tiers instead of comparing unrelated benchmark prose
+- benchmark metadata validation is part of the shared contract: a run that cannot be rerun, audited, or classified as representative versus exploratory does not satisfy the touched evidence gate
+
 ## Deterministic time-control contract
 
 Use time as data, not ambient process state.
@@ -25,6 +35,18 @@ Use time as data, not ambient process state.
 - wall-clock sleeps, scheduler timing, or real elapsed time are acceptable only for benchmark or soak harnesses measuring performance characteristics; they do not close semantic correctness gates by themselves
 - when a benchmark also touches time-sensitive semantics, pair the wall-clock measurement with deterministic fixture coverage for the semantic rule
 - failure and repair artifacts for time-sensitive regressions should record the relevant tick or clock position so the scenario is replayable
+
+### Rejectable sleep-based semantic test patterns
+
+Treat the following patterns as rejectable for correctness, lifecycle, policy, or other semantic proof when deterministic fixtures could express the same rule:
+
+- sleeping to wait for decay, timeout, retry-budget, backoff, reconsolidation-window, or recency semantics instead of advancing an injected clock or logical tick source
+- polling wall-clock time until a state transition "probably" happened rather than asserting the exact guard, trigger, and expected artifact
+- using benchmark latency runs as the only evidence for semantic claims such as denial timing, retry exhaustion, or lifecycle-edge legality
+- depending on scheduler jitter, async race timing, or host load to make a test pass instead of naming the ordering contract explicitly
+- mixing one nondeterministic sleep-heavy integration test with otherwise deterministic fixtures and treating the combined result as equivalent to replayable semantic coverage
+
+A semantic test is incomplete when another contributor cannot rerun the same starting state, tick or clock sequence, and expected outcome without depending on ambient elapsed time.
 
 ## Namespace and isolation minimum matrix
 
@@ -118,6 +140,17 @@ Use when evidence depends on representative workloads, cross-platform/package be
 - produce the benchmark report, failure matrix, ops note, and related release artifacts required by the touched phase gate or change class
 - reserve this tier for stage-closing proof, hot-path claims, repair/governance-sensitive changes, distribution work, or other cases where CI-scale fixtures are intentionally smaller than production evidence
 
+### Review-proof collection checklist
+
+Use this checklist when assembling the validation payload for a PR, bead handoff, or release gate:
+
+- name the touched change classes before choosing suites
+- collect the smallest deterministic fixture set that proves semantic correctness for each touched class
+- add parity, restart, isolation, or boundedness suites whenever the changed contract crosses those surfaces
+- add benchmark or representative workload evidence only for the paths that need elapsed-performance proof
+- attach at least one logging-heavy end-to-end artifact when reviewers need to inspect route traces, denial or redaction evidence, degraded markers, migration safeguards, or other machine-readable operator signals
+- reject the proof bundle if any named gate is replaced by prose, screenshots without structured output, or CI status without a fixture or artifact identity
+
 ### Change-class to minimum tier mapping
 
 | Change class | Minimum local proof | Required shared gate | Heavyweight/release proof when... |
@@ -179,6 +212,25 @@ Any change to recall ranking, packaging, sharing, redaction, or namespace enforc
 - cache, prefetch, and repair-path recall preserving the same namespace, policy, omission, and explanation semantics as the colder canonical path
 - intent-routed `ask` fixtures proving visible intent class, low-confidence fallback, explicit `--override-intent` / `override_intent` behavior, and action-oriented safety downgrades preserve bounded candidate generation and machine-readable route metadata across CLI, daemon, IPC, and MCP surfaces
 - structured artifacts that record fixture identity, namespace or visibility setup, expected winners and omissions, policy decisions, and machine-readable explanation fields such as `result_reasons`, `omitted_summary`, `policy_summary`, `conflict_markers`, and `trace_stages` when available
+
+## Observability and regression-signal minimum matrix
+
+Any change that promises observability, boundedness, or regression detection must include dedicated coverage for:
+
+- operator-visible latency, route-trace, audit, explain, or inspect fields for the touched contract surface rather than prose-only claims
+- structured artifacts that preserve the exact signal names, outcome classes, and field families reviewers are expected to compare across runs
+- negative-path checks proving the signal changes when the contract is violated, capped, denied, degraded, retried, or timed out rather than staying silent
+- parity of the named regression signals across CLI, daemon, IPC, and MCP surfaces where the changed flow exists
+- benchmark or load evidence paired with deterministic semantic fixtures when the same change touches both elapsed-performance behavior and semantic correctness
+
+Minimum change-class coverage:
+
+- request-path changes: p50/p95/p99 plus candidate counts, tier-routing or escalation traces, and capped-route or degraded markers
+- encode-path routing changes: shortlist or nearest-neighbor evidence, duplicate-route outcome, cache state, and interference applied/skipped/deferred markers
+- policy or governance changes: denial or redaction outcome class, enforcement stage, filtered counts, audit-handle visibility, and no-leakage behavior
+- cache or warm-path changes: cache family, hit/miss/bypass/invalidation events, stale or bypass reasons, warm source, and distinguishable cold-versus-disabled-versus-stale outcomes
+- background-job changes: job duration, queue depth, affected-item counts, foreground latency delta, retry budget or escalation state when relevant, and degraded-mode markers
+- explain or inspect envelope changes: stable machine-readable route-trace, omission, denial, stale, and conflict field families that downstream checks can compare directly
 
 ## Cache observability regression minimum matrix
 

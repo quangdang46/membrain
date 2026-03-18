@@ -59,6 +59,27 @@ These restrictions translate `PLAN.md` into contributor-facing checks that must 
 - No graph traversal without hard depth and node caps, including inspect and explain paths
 - No policy bypass in CLI, daemon, MCP, or IPC wrappers; wrappers preserve namespace and policy checks instead of skipping them for convenience
 
+#### Frozen hot-path and forbidden-foreground checklist
+
+Use this checklist for any bead or PR that touches encode, recall, `on_recall`, explain, inspect, prefetch, reconsolidation-apply, forgetting eligibility, or request-path wrappers.
+
+| Forbidden behavior | Why it is forbidden | Regression signal that must move if violated |
+|---|---|---|
+| Full-store scan, archive scan, or any request-path expansion proportional to total corpus size | Breaks the bounded-work contract and makes latency grow with data size instead of with the declared query budget | candidate counts, planner/index stage timings, and p95/p99 request latency |
+| Graph traversal without hard depth, node, and continuation caps | Lets explain or retrieval paths turn into unbounded walks that can starve the hot path and make results non-reproducible under load | graph hop counts, visited-node counters, traversal-budget exhaust signals, and degraded-route traces |
+| Compaction, repair, rebuild, migration, lease sweeping, or other maintenance work on the foreground path | Turns user-visible recall or encode latency into maintenance latency and makes online behavior depend on background housekeeping | job-duration and affected-item metrics appearing on request traces, foreground latency delta, and degraded-mode or maintenance-on-request audit fields |
+| Remote model, LLM, hosted embedder, or hidden network retry work on latency-sensitive paths | Adds network variance, cost, privacy, and availability coupling to the canonical fast path | route traces showing local-only execution, remote-call counters staying at zero on request paths, and explicit denial or degraded events if a caller tries to force remote work |
+| Cold payload decompression, large payload fetch, or payload-heavy reconstruction before final candidate cut | Forces expensive work before bounded pruning, so low-value candidates can dominate request cost | pre-cut versus post-cut candidate counts, payload fetch counters, package-stage timings, and cache bypass or cold-fetch reasons |
+| Namespace or policy checks after expensive retrieval, traversal, or packaging work | Risks cross-namespace leakage and wastes hot-path budget on candidates that should have been denied early | denial or redaction traces naming the early enforcement point, filtered-candidate counts, and parity across CLI, daemon, IPC, and MCP wrappers |
+| Prefetch or warm-path activity that can delay live recall or encode | Allows speculative work to consume the same budget as foreground work and hide starvation regressions | queue depth, prefetch cancellation or drop counters, warm-source fields, and foreground latency delta during prefetch activity |
+
+Every touched request-path change must name the candidate budget, policy enforcement point, and explain or trace fields that prove the path stayed bounded.
+
+Required proof for this checklist:
+- unit or policy tests that fail when a path widens beyond its declared budget, skips early policy enforcement, or allows forbidden foreground maintenance
+- logging-heavy integration, explain, or inspect checks that expose the bounded-work and denial artifacts without re-reading code
+- benchmark or targeted latency evidence whenever the touched surface is hot-path-sensitive under the evidence matrix and rejection rules below
+
 ### Storage and lifecycle restrictions
 
 - Tier1 stores handles and hot metadata, not giant payloads
@@ -112,6 +133,34 @@ These are contract-level review inputs, not optional nice-to-haves. If a change 
 - Contradictory evidence across docs, tests, benchmarks, or rollout notes should be treated as unresolved rather than averaged together; the PR stays rejectable until the conflict is resolved explicitly.
 - If a change spans multiple classes, reviewers should apply the union of the relevant rows above rather than choosing the easiest row that happens to fit.
 
+### Executable PR review checklist
+
+Use this checklist when reviewing any major PR or handoff bundle. The reviewer should be able to mark every touched change class as `present`, `not applicable`, or `reject` without re-reading the whole guide.
+
+1. Identify every touched change class from the evidence matrix. If the PR spans multiple classes, apply the union of their proof obligations.
+2. For each touched class, name the exact proof artifact in the PR description, handoff, or attached bundle rather than gesturing at "tests passed" or "benchmarks attached" in the abstract.
+3. Reject the PR when any required artifact is missing, incomplete, contradictory, or points to a proof surface that does not actually cover the changed contract.
+4. Reject the PR when one interface changes user-visible semantics, denial behavior, or machine-readable fields silently relative to another exposed surface.
+
+| Review question | Reviewer must be able to point to | Reject when... |
+|---|---|---|
+| What changed at the contract level? | named change class, affected invariants or surface, and the updated canonical docs | the change class is unstated or the docs that freeze the contract were left ambiguous |
+| Where is the benchmark proof for hot-path work? | benchmark report, harness or command entrypoint, dataset or fixture identity, machine profile, build mode, warm/cold semantics, sample count, representativeness label, artifact path, and touched p50/p95/p99 plus bounded-work signals | benchmark evidence is missing; metadata is incomplete; p95/p99 is absent for the touched path; or the artifact cannot be rerun or audited |
+| Where is the schema proof? | migration note, rollback note when behavior changes, rebuild or backfill plan, and downstream doc propagation | migration notes are missing, rollback scope is undefined, rebuildability is unproven, or exposed docs drift silently |
+| Where is the governance proof? | governance analysis, dedicated policy coverage, named audit or explain artifacts, and rollback note when the semantics are externally visible | governance analysis is missing, policy coverage is absent, audit or explain evidence is not inspectable, or retention/deletion changes become silent or irreversible |
+| Where is the parity proof for namespace, denial, redaction, or interface work? | dedicated isolation or denial tests plus cross-surface parity artifacts for CLI, daemon, IPC, and MCP where the flow exists | parity is unverified, denial or redaction behavior differs silently, or one surface changed envelopes, flags, or errors without explicit contract notes |
+| Where is the observability proof? | named metric, trace, audit, explain, inspect, benchmark, or dashboard field that should move on regression | the change adds performance-sensitive or operator-sensitive behavior without a checkable signal |
+| Where is the logging-heavy end-to-end proof? | at least one command or script example plus captured machine-readable output showing the touched outcome class and regression signals | the PR claims boundedness, denial, redaction, migration safety, or parity behavior but offers only prose summaries or code references |
+
+### Proof naming contract for PRs and handoffs
+
+A valid PR description or handoff should name the proof artifacts explicitly enough that another contributor can fetch them without guesswork.
+
+- Use concrete labels such as `design note`, `benchmark report`, `migration note`, `rollback note`, `governance analysis`, `parity fixture`, `observability hook`, `failure matrix`, `ops note`, or `logging-heavy end-to-end artifact`.
+- Pair each named artifact with the command, fixture identity, dashboard, report path, or doc anchor where the proof lives.
+- If a touched class is intentionally not in scope, say `not applicable` and name why the class does not apply.
+- `tests passed`, `see CI`, or `benchmark attached` is not specific enough to satisfy review.
+
 ### Determinism review rules
 
 Time-sensitive review proof must stay as reproducible as the functional contract it is testing.
@@ -131,6 +180,21 @@ An observability hook is the operator-visible evidence that lets reviewers and m
 - Background-job or maintenance changes should expose job duration, queue depth, affected-item counts, and any foreground latency delta they impose.
 - The accompanying change notes should point reviewers to the command, dashboard, benchmark artifact, or machine-readable field where the signal can be checked.
 - If the only way to detect regression is to re-read code or attach a debugger, the change is not observable enough to satisfy this contract.
+
+### Regression-signal matrix
+
+Every performance-sensitive, semantics-changing, or operator-sensitive change must name the regression signals that should move if the contract is violated.
+
+| Change class | Minimum operator-visible regression signals |
+|---|---|
+| Request-path latency or routing | touched path p50/p95/p99, route outcome, tier escalation trace, candidate counts before and after each pruning stage, and any degraded or capped-route marker |
+| Encode-path routing or duplicate handling | encode latency, shortlist size, duplicate-route outcome, nearest-neighbor or novelty summary, cache hit or miss state, and interference applied/skipped/deferred markers |
+| Policy, denial, redaction, or governance behavior | denial or redaction outcome class, enforcement stage, filtered-candidate counts, audit artifact handle, and parity across CLI, daemon, IPC, and MCP surfaces where the flow exists |
+| Cache, prefetch, warmup, or invalidation behavior | cache family, cache event, cache reason, warm source, stale or bypass reason, candidate counts before and after cache-influenced stages, and distinguishable cold-versus-disabled-versus-stale outcomes |
+| Background repair, rebuild, consolidation, or migration work | job duration, queue depth, affected-item counts, retry budget or escalation state when relevant, foreground latency delta, and degraded-mode or containment markers |
+| Explain, inspect, or audit envelope changes | stable machine-readable fields for route traces, denial or omission summaries, conflict or stale markers, and any new or removed field families that operators are expected to inspect |
+
+Review notes, benchmark bundles, and test artifacts should point to the exact command, fixture, report field, or dashboard surface where each listed signal is checked.
 
 ## PR Rejection Rules
 

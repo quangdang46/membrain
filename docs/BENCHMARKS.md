@@ -31,6 +31,27 @@ Every benchmark-closing run must also record:
 - whether the run is representative or exploratory
 - the artifact location for the machine-readable report and any bounded-work counters needed to audit the result
 
+### Canonical benchmark metadata checklist
+
+Treat this checklist as the minimum metadata contract for any benchmark another contributor might cite, rerun, or reject:
+
+- **workload identity:** scenario name, touched path or stage, dataset or fixture ID, dataset cardinality, payload-shape summary, and synthetic-data generation recipe when applicable
+- **execution environment:** machine profile, OS/kernel where relevant, CPU and memory class, storage posture when it materially affects the result, and the exact build mode
+- **run semantics:** warm/cold declaration for process, cache, model, index, and other stateful surfaces; concurrency level; iteration/sample count; and whether percentile output is derived from steady-state, cold-start, or mixed runs
+- **result bundle:** p50/p95/p99 for touched request paths, pass/fail against the stated contract, bounded-work counters or routing traces relevant to the claim, and the artifact location for machine-readable output
+- **representativeness label:** explicit `representative` versus `exploratory` labeling, plus the reason when the run does not reflect the intended production envelope
+- **rerun handle:** the exact command or harness entrypoint and any fixture selector, config file, or seed needed for another contributor to reproduce the same run
+
+### Reproducibility rejection rules
+
+Treat benchmark evidence as incomplete and non-gate-closing when any of the following is missing or ambiguous:
+
+- the harness or command entrypoint cannot be rerun from the recorded metadata
+- dataset identity, cardinality, or payload shape is omitted for a workload-sensitive claim
+- machine profile, build mode, or warm/cold semantics are missing for a latency claim
+- percentiles are quoted without the sample count or representativeness label that explains what they mean
+- artifact paths or machine-readable outputs are absent, so reviewers cannot audit the reported numbers or bounded-work signals
+
 ## Global latency budgets
 
 | Path | Contract |
@@ -41,6 +62,15 @@ Every benchmark-closing run must also record:
 | Tier3 cold fallback | p95 < 50ms at declared cold cardinality |
 
 Any request-path benchmark that reports only averages is incomplete. Tail behavior must stay visible enough that p99 does not invalidate the advertised fast-path story.
+
+### Benchmark-versus-semantic-proof boundary
+
+Benchmarks may measure elapsed performance, but they do not replace deterministic semantic coverage.
+
+- Use benchmark or soak runs to measure latency, throughput, contention, queue growth, and other real-time performance characteristics.
+- Do not cite benchmark timing alone as proof of correctness for timeout semantics, retry exhaustion, lifecycle transitions, policy denial timing, recency windows, or other rules that deterministic clocks or logical ticks can express.
+- When a benchmark touches a time-sensitive semantic rule, pair it with a deterministic fixture that records the same starting state, clock or tick source, and expected semantic outcome.
+- Treat sleep-based benchmark harnesses as performance evidence only; they do not close semantic test gates by themselves.
 
 ## Stage-by-stage benchmark and gate expectations
 
@@ -209,6 +239,49 @@ Each benchmark artifact bundle should include:
 - workload metadata linking the run to the declared dataset or fixture identity, payload shape, and representativeness label
 - bounded-work or routing evidence relevant to the measured path, such as candidate counts, tier hits or escalations, cache hit or miss state, deferred payload-fetch counts, or foreground latency delta for background jobs
 - an explicit note when the run is exploratory and therefore cannot close a stage gate
+
+### Review checklist for benchmark proof
+
+Use this checklist when a PR or handoff cites benchmark evidence as part of its acceptance story:
+
+- name the exact benchmark report or artifact bundle rather than citing an unlabeled screenshot or prose summary
+- record the harness or command entrypoint, dataset or fixture identity, machine profile, build mode, warm/cold semantics, sample count, and representativeness label
+- show touched p50/p95/p99 path metrics when the benchmark covers a request path
+- preserve the bounded-work, route, cache, denial, omission, or background-job fields that explain why the number moved
+- reject the proof if another reviewer cannot rerun the command or trace the artifact path without reverse-engineering hidden setup
+
+### Logging-heavy end-to-end proof example
+
+Use a logging-heavy proof artifact when a PR needs to show more than a passing latency number. The artifact should preserve enough machine-readable output that a reviewer can inspect the route, bounded-work counters, and outcome class directly.
+
+```bash
+membrain recall --query "capital of france" --namespace demo --json \
+  | tee artifacts/mb-dve.5.4/recall_cli.json
+```
+
+A usable artifact from a command like this should let the reviewer inspect at minimum:
+
+- the exact command or harness that produced the artifact
+- the fixture or namespace identity used for the run
+- request-path p50/p95/p99 when the proof is benchmark-closing rather than a single smoke example
+- route outcome, tier selection or escalation, candidate counts, and capped/degraded markers when the touched contract is retrieval boundedness
+- denial, redaction, filtered-count, or omission fields when the touched contract is policy-sensitive
+- the artifact path checked into the PR bundle, release evidence bundle, or referenced ops location
+
+This kind of proof does not replace deterministic semantic fixtures. It complements them by showing the operator-visible trace and machine-readable fields that later regressions should preserve.
+
+### Regression-signal expectations by benchmark class
+
+Benchmarks are not only pass or fail latency snapshots. They must also preserve the operator-visible signals that would make regressions diagnosable after landing.
+
+- request-path benchmarks should emit the touched path latency percentiles together with route outcome, tier selection or escalation, candidate counts, and any capped or degraded-path markers
+- encode-path benchmarks should emit duplicate-route outcome, shortlist or nearest-neighbor evidence, cache hit or miss state, and whether interference work was applied, skipped, or deferred
+- cache or warm-path benchmarks should emit cache family, cache event, cache reason, warm source, and distinct cold-versus-disabled-versus-stale outcomes when those lanes are in scope
+- background-job benchmarks should emit job duration, queue depth or backlog growth, affected-item counts, retry or escalation state when applicable, and foreground latency delta rather than reporting only isolated throughput
+- denial, policy, or redaction-sensitive benchmarks should preserve the same denial or omission outcome class and filtered-count evidence that the explain or audit path would expose on the live surface
+- explainability-sensitive benchmarks should keep route-trace, omission, or audit fields machine-readable so later changes can compare contract fields instead of relying on prose summaries
+
+A benchmark result is incomplete when it reports acceptable latency but drops the trace, count, cache, denial, or background-job fields that would explain why the number moved.
 
 ## Benchmark artifact templates
 

@@ -8,6 +8,7 @@
 | Document | Purpose |
 |----------|---------|
 | [PLAN.md](PLAN.md) | Canonical mega-plan — architecture, schema, milestones, invariants, features |
+| [ARCHITECTURE.md](ARCHITECTURE.md) | System read/write paths, component boundaries, workspace skeleton, and module ownership seams |
 | [MEMORY_MODEL.md](MEMORY_MODEL.md) | Memory taxonomy, lifecycle states, core fields, contradiction handling |
 | [NEURO_MAPPING.md](NEURO_MAPPING.md) | Brain mechanism → computational primitive mapping |
 | [CLI.md](CLI.md) | Full CLI command reference with examples |
@@ -25,6 +26,17 @@
 5. Entry-point docs and indexes help readers navigate; they do not redefine the contract.
 
 Use this split intentionally: decide **what the system promises** and **what evidence a change owes** from `PLAN.md` plus the relevant subsystem doc and `CONTRIBUTING.md`; decide **how to execute, coordinate, and hand off work** from `../AGENTS.md`.
+
+### Safe local clarification vs. stop-and-escalate
+
+Use this rule set when docs appear incomplete, overlapping, or slightly out of sync:
+
+- **Safe local clarification:** you may patch `INDEX.md`, a subsystem doc, or workflow guidance directly when `PLAN.md` already makes the canonical meaning clear, the change only restates or sharpens that existing contract, and the edit does not introduce new product behavior, workflow rules, or evidence thresholds.
+- **Still safe:** navigation fixes, wording cleanups, cross-reference repairs, and explicit reminders that `PLAN.md` wins are local clarifications when they do not change scope.
+- **Stop and escalate:** do not guess when multiple plausible readings would change product behavior, contributor workflow, acceptance evidence, or dependency ordering.
+- **Also escalate:** stop when resolving the conflict would require inventing new contract language, creating a new exception, or deciding which of two non-canonical docs should win without direct support from `PLAN.md`.
+- **Escalation target:** capture the ambiguity or conflict in the active bead; if no bead cleanly owns it, create a focused follow-up bead that names the conflicting files or sections and the decision that remains blocked.
+- **Coordination rule:** when you stop for ambiguity, notify collaborators in the matching Agent Mail thread so parallel work does not silently diverge.
 
 ## PLAN.md Structure Reference
 

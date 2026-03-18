@@ -36,6 +36,60 @@
 - treat snapshot and time-travel inspection as trust/introspection follow-on work: useful for safer operations and historical comparison, but not a prerequisite for proving the bounded core retrieval path
 - treat belief versioning and inspectable history surfaces as trust/introspection follow-on work layered on top of the core contradiction/supersession contract rather than as a blocker for the bounded baseline retrieval spine
 
+## Milestone gates and go-no-go evidence thresholds
+
+Use these gates as explicit pass/fail review checkpoints. A phase is not complete because adjacent prose exists or a partial prototype runs; it is complete only when the named evidence exists, is inspectable, and matches the canonical `PLAN.md` and `CONTRIBUTING.md` contracts.
+
+### Phase 0 go/no-go gate
+
+Phase 0 may advance only when reviewers can point to all of the following:
+- frozen contract artifacts for canonical types, schema semantics, invariants, and namespace or policy enforcement before expensive work
+- a benchmark harness with rerunnable commands plus benchmark metadata covering dataset cardinality, machine profile, build mode, and warm/cold declaration
+- measurable Tier1 MVP evidence with bounded-work signals and operator-visible observability hooks
+- explicit rejection of any contract change that still lacks its required artifact set, such as missing migration notes, missing observability hooks, or unresolved doc inconsistency
+
+Do not promote Phase 0 if contract freezes are still ambiguous, benchmark proof is anecdotal, or the only way to detect a regression is to re-read code.
+
+### Phase 1 go/no-go gate
+
+Phase 1 may advance only when reviewers can point to all of the following:
+- Tier2 indexed retrieval evidence, session or entity query coverage, and a measurable ranking baseline
+- inspect or explain surfaces that expose retrieval behavior in debug or operator form rather than opaque score-only output
+- bounded-work validation proving request-path restrictions still hold, including no full scans, no uncapped graph traversal, no cold-payload fetch before the final candidate cut, and no policy bypass before expensive retrieval work
+- benchmark or targeted latency artifacts for the touched hot path, plus the observability hook that would reveal candidate-budget, cache, or routing regressions
+
+Do not promote Phase 1 if retrieval works but remains unexplainable, if ranking claims lack reproducible evidence, or if request-path restrictions are asserted without tests or inspectable signals.
+
+### Phase 2 go/no-go gate
+
+Phase 2 may advance only when reviewers can point to all of the following:
+- contradiction records and conflict-aware storage represented explicitly rather than silently overwritten
+- graph-assisted retrieval proof showing hard depth, node, and candidate budgets plus repairability of derived graph state
+- explainable packaging for recall output that surfaces score components, sources, policy filters, and routing context
+- dedicated isolation, denial, or audit evidence whenever namespace, sharing, visibility, or redaction behavior changes
+
+Do not promote Phase 2 if graph retrieval is merely available but not budgeted, if contradiction handling is hidden behind overwrite semantics, or if governance-facing behavior changed without explain or audit proof.
+
+### Phase 3 go/no-go gate
+
+Phase 3 may advance only when reviewers can point to all of the following:
+- benchmark-corpus evidence that consolidation improves utility and forgetting reduces noise without unacceptable fact loss
+- deterministic fixtures for lifecycle-sensitive behavior instead of sleep-based correctness tests
+- repair, rebuild, compaction, or maintenance coverage proving durable-truth-first recovery under failure injection
+- observability for maintenance-class work, including job duration, queue depth, affected-item counts, and any foreground latency delta
+
+Do not promote Phase 3 if maintenance behavior is safe only by convention, if rebuildability from durable evidence is unproven, or if lifecycle claims depend on nondeterministic timing.
+
+### Phase 4 go/no-go gate
+
+Phase 4 may advance only when reviewers can point to all of the following:
+- measured-demand evidence that single-node bounded operation is under sustained pressure and simpler bounded remedies are no longer sufficient
+- operations runbooks plus benchmarked shard movement, repair, and recovery artifacts when scale-out is proposed
+- governance and isolation proof showing policy enforcement, auditability, and repairability remain intact across the operational surface
+- explicit confirmation that later-stage features, operator ergonomics, and scale-out work remain non-blocking with respect to the core execution spine unless the canonical gate evidence says otherwise
+
+Do not promote Phase 4 on ambition alone, on isolated operator anecdotes, or by treating later-stage features as hidden prerequisites for the bounded core system.
+
 ### Measured-demand readiness gate for sharding and distribution
 
 Do not treat distribution as default roadmap direction. Promote it only when bounded single-node operation has credible evidence of strain that simpler optimizations cannot relieve.
@@ -54,6 +108,35 @@ Distribution should stay blocked when the observed problem could still be solved
 2. Retrieval becomes explainable before graph and advanced optimization layers become core behavior.
 3. Repair and rebuild paths exist before large-scale operations or distribution.
 4. Advanced features and sharding remain later-stage work; they never block the core architecture spine.
+
+## Canonical execution order and dependency spine
+
+Future beads should inherit this dependency spine directly rather than inventing local ordering:
+
+1. define canonical types, schema semantics, and invariants
+2. define policy model and namespace enforcement
+3. implement Tier1 fast encode and exact/recent retrieval
+4. implement Tier2 durable indexed storage and search
+5. implement ranking explanation and inspect/explain surfaces
+6. implement contradiction representation and conflict-aware storage
+7. implement graph-assisted retrieval under hard budgets
+8. implement consolidation pipelines
+9. implement forgetting and demotion pipelines
+10. implement repair and rebuild paths
+11. implement benchmark harnesses and regression artifacts
+12. implement operational tooling and doctor commands
+13. introduce sharding only if empirical workload demands it
+
+Treat this list as a prerequisite chain, not as a menu. Earlier steps unlock later work because the system must become measurable before complex, explainable before highly optimized, and repairable before operationally large.
+
+### Dependency-spine validation checklist
+
+Before a future bead adds or changes dependencies, confirm all of the following:
+- the bead does not pull later-stage feature, scale-out, or operator-maturity work ahead of unfinished core-path prerequisites
+- any retrieval, contradiction, graph, lifecycle, repair, or operations work still lands in the canonical order above
+- the bead’s dependency story matches the relevant phase gate and does not bypass the required evidence for promotion
+- if the bead changes ordering, the change is directly supported by `PLAN.md` rather than inferred from convenience or local prose
+- if the proposed dependency order would make a later step block an earlier canonical prerequisite, stop and open or update the owning bead instead of guessing through the conflict
 
 ## Later-stage work gating and non-blocking rules
 

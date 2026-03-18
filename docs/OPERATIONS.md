@@ -104,6 +104,7 @@ Preview, blocked, rejected, and apply responses for Classes B-D should expose on
 | `impact_summary` | What may move, rewrite, invalidate, redact, archive, delete, or temporarily degrade service, including any maintenance-window requirement, paused-job requirement, and explicit-loss risk. |
 | `blocked_reasons` | Machine-readable reasons such as `confirmation_required`, `snapshot_required`, `maintenance_window_required`, `scope_ambiguous`, `authoritative_input_unreadable`, `policy_denied`, `legal_hold`, or `stale_preflight`. |
 | `preflight_checks` | Structured results for policy, required-input, freshness, dependency, confidence, and generation/snapshot checks so the caller can see which gate passed, failed, or degraded. |
+| `check_results` | A stable per-check result structure keyed by check family. Each entry should preserve `check_name`, `status`, `reason_codes`, `checked_scope`, and any relevant snapshot, generation, dependency, or confidence handle needed to explain the outcome without prose-only interpretation. |
 | `warnings` | Non-fatal freshness, namespace, policy-redaction, degraded-fallback, or confidence warnings that materially change how safely the result may be used. |
 | `confidence_constraints` | Minimum evidence/confidence expectations for action-oriented guidance, including whether the current result is below a high-stakes threshold and what stronger evidence would be needed to upgrade it. |
 | `reversibility` | One of `repairable_from_durable_truth`, `rollback_via_snapshot`, `partially_reversible`, or `irreversible`, plus the backup, snapshot, or repair prerequisites needed to recover safely. |
@@ -116,8 +117,9 @@ Preview, blocked, rejected, and apply responses for Classes B-D should expose on
 - Confirmation must bind to the exact preflighted scope and generation. Widening namespace scope, changing selectors, or mutating after the underlying snapshot/generation moved invalidates the prior confirmation.
 - `outcome_class=preview` means no mutation occurred and the safeguard object is the authoritative description of planned work.
 - `outcome_class=blocked` means mutation did not proceed because a confirmation, freshness, scope, snapshot, maintenance-window, or similar readiness prerequisite is still missing. The response must include `blocked_reasons` plus the next missing prerequisite instead of relying on prose-only diagnostics.
-- `outcome_class=rejected` is reserved for malformed, impossible, or policy-denied requests that cannot proceed even with local confirmation; it is not a synonym for confirmation-missing or stale-preflight states.
+- `outcome_class=rejected` is reserved for malformed, impossible, or policy-denied requests that cannot proceed even with local confirmation; it is not a synonym for confirmation-missing, missing-input, or stale-preflight states.
 - `preview-only` and `force-confirmed` are preflight outcomes rather than separate top-level response classes: `preview-only` normally surfaces as `outcome_class=preview`, and `force-confirmed` surfaces through `confirmation` plus the remaining checks while policy, namespace, retention, and confidence constraints continue to apply.
+- Missing confirmation, stale preview, stale generation, missing snapshot, blocked dependency, and similar readiness failures should stay machine-readable as blocked-action states. They do not collapse into generic rejection just because the caller asked for apply.
 - Successful apply responses should echo the final safeguard state or at least the `audit` correlation fields and any explicit loss, degraded-mode, or rollback markers that materially shaped the run.
 
 ### Preflight semantics for risky operations and high-stakes queries
@@ -132,12 +134,29 @@ The preflight surface complements preview and confirmation rather than replacing
 - **confidence check** — for action-oriented guidance or high-stakes queries, verify the evidence quality, conflict state, and freshness are strong enough for the requested action level.
 - **generation check** — verify the scope and generation anchored by preview or prior confirmation still match current state.
 
+Each check family should report one of `passed`, `blocked`, `degraded`, or `rejected`, plus the reason codes and correlation handles needed to explain the result on every public transport.
+
 #### Shared preflight outcomes
 - **allowed / ready** — all required checks passed for the current scope; execution may proceed, subject to any confirmation requirement already declared.
 - **preview-only** — the operation may be described safely, but mutation or high-confidence action guidance cannot proceed until missing confirmation, stronger evidence, or another prerequisite is satisfied.
 - **blocked** — execution must not proceed; the response includes actionable `blocked_reasons` and the failing checks.
 - **degraded** — execution or answer construction may continue only through a lower-fidelity path that remains explicit about colder reads, repair-aware serving, stale visibility, or uncertainty.
 - **force-confirmed** — local confirmation has been supplied for the exact preflighted scope, but policy, namespace, retention, and confidence constraints still apply unchanged.
+
+#### Blocked-action reason vocabulary
+
+Use stable machine-readable reason codes so every transport can preserve the same blocked semantics:
+
+- `confirmation_required` — local confirmation for the exact previewed scope has not been supplied yet
+- `stale_preflight` — a previously previewed scope or readiness snapshot is no longer current
+- `generation_mismatch` — the current scope no longer matches the confirmed or previewed generation anchor
+- `snapshot_required` — an apply path requires a fresh or policy-approved snapshot before mutation
+- `maintenance_window_required` — the operation cannot proceed outside a declared maintenance window
+- `dependency_pending` — a required paused job, repair prerequisite, rollback precondition, or other dependency is still unmet
+- `scope_ambiguous` — selectors, namespace binding, or widened target scope are not precise enough to preview or confirm safely
+- `authoritative_input_unreadable` — durable truth or the required authoritative input set cannot be read safely enough for apply
+- `confidence_too_low` — action-oriented guidance or high-stakes output lacks the evidence quality required for the requested confidence level
+- `policy_denied` and `legal_hold` remain terminal governance blockers and should normally pair with `outcome_class=rejected` rather than a merely blocked readiness state
 
 #### High-stakes query rules
 - High-stakes actions should surface uncertainty by default. If evidence is stale, contradictory, too sparse, or policy-limited, the preflight should prefer `preview-only`, `blocked`, or `degraded` outcomes over silently emitting confident action guidance.
