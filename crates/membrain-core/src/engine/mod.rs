@@ -1,5 +1,7 @@
 /// Consolidation maintenance surfaces.
 pub mod consolidation;
+/// Contradiction records and conflict-aware storage surfaces.
+pub mod contradiction;
 /// Encode-path orchestration surfaces.
 pub mod encode;
 /// Forgetting and demotion maintenance surfaces.

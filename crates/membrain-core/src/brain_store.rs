@@ -2,6 +2,7 @@ use crate::api::ApiModule;
 use crate::config::RuntimeConfig;
 use crate::embed::EmbedModule;
 use crate::engine::consolidation::ConsolidationEngine;
+use crate::engine::contradiction::ContradictionEngine;
 use crate::engine::encode::EncodeEngine;
 use crate::engine::forgetting::ForgettingEngine;
 use crate::engine::ranking::RankingEngine;
@@ -27,6 +28,7 @@ pub struct BrainStore {
     encode: EncodeEngine,
     recall: RecallEngine,
     ranking: RankingEngine,
+    contradiction: ContradictionEngine,
     consolidation: ConsolidationEngine,
     forgetting: ForgettingEngine,
     repair: RepairEngine,
@@ -50,6 +52,7 @@ impl BrainStore {
             encode: EncodeEngine::new(config),
             recall: RecallEngine,
             ranking: RankingEngine,
+            contradiction: ContradictionEngine::new(),
             consolidation: ConsolidationEngine,
             forgetting: ForgettingEngine,
             repair: RepairEngine,
@@ -101,6 +104,16 @@ impl BrainStore {
     /// Returns the shared ranking engine surface used by wrappers.
     pub fn ranking_engine(&self) -> &RankingEngine {
         &self.ranking
+    }
+
+    /// Returns the shared contradiction engine surface used by wrappers.
+    pub fn contradiction_engine(&self) -> &ContradictionEngine {
+        &self.contradiction
+    }
+
+    /// Returns the mutable contradiction engine surface used by wrappers.
+    pub fn contradiction_engine_mut(&mut self) -> &mut ContradictionEngine {
+        &mut self.contradiction
     }
 
     /// Returns the shared consolidation surface owned by the core crate.
