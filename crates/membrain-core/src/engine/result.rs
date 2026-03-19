@@ -274,7 +274,7 @@ impl ResultBuilder {
 
         let result = RetrievalResult {
             memory_id,
-            namespace,
+            namespace: namespace.clone(),
             session_id,
             memory_type,
             compact_text,

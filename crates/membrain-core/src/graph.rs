@@ -7,7 +7,6 @@
 use std::collections::{HashSet, VecDeque};
 use crate::api::NamespaceId;
 use crate::types::MemoryId;
-use petgraph::graphmap::DiGraphMap;
 
 
 // ── Entity types ─────────────────────────────────────────────────────────────
