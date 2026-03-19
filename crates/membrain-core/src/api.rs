@@ -435,6 +435,18 @@ impl ContextValidationError {
     }
 }
 
+impl std::fmt::Display for ContextValidationError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::MissingNamespace => write!(f, "missing namespace"),
+            Self::MalformedNamespace => write!(f, "malformed namespace"),
+            Self::MissingRequestId => write!(f, "missing request id"),
+        }
+    }
+}
+
+impl std::error::Error for ContextValidationError {}
+
 /// Shared warning payload for non-fatal response annotations.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ResponseWarning {

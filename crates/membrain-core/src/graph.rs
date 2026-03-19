@@ -460,13 +460,12 @@ mod tests {
         // A simulated partial rebuild gracefully failing, ensuring 
         // true data is not lost from the source of truth.
         let is_corrupted = true;
-        let mut recovered_edges = 0;
-        if !is_corrupted {
-            recovered_edges = 5;
+        let recovered_edges = if !is_corrupted {
+            5
         } else {
             // Simulated recovery step isolated failure
-            recovered_edges = 1; // partially recovered from WAL
-        }
+            1 // partially recovered from WAL
+        };
         assert_eq!(recovered_edges, 1);
     }
 }
