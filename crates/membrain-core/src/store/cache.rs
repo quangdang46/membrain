@@ -1,0 +1,1295 @@
+//! Bounded cache families, admission, prefetch, invalidation, and observability
+//! for the retrieval hot path.
+//!
+//! Every cache is a derived accelerator — not a source of truth. Durable records,
+//! canonical embeddings, and policy-bearing metadata remain authoritative.
+//! Warm state may be dropped, bypassed, or rebuilt without changing retrieval
+//! semantics.
+//!
+//! Refs: docs/CACHE_AND_PREFETCH.md and docs/PLAN.md section 20.
+
+use crate::api::NamespaceId;
+use crate::types::MemoryId;
+use std::collections::{HashMap, VecDeque};
+
+// ──────────────────────────────────────────────────────────────────────────────
+// § 1  Cache family taxonomy  (mb-23u.9.1)
+// ──────────────────────────────────────────────────────────────────────────────
+
+/// Cache family tags aligned with docs/CACHE_AND_PREFETCH.md taxonomy.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum CacheFamily {
+    /// Exact and recent fetches for already-authorized items.
+    Tier1Item,
+    /// Repeated structurally valid misses under current policy scope.
+    NegativeCache,
+    /// Packaged recall results for normalized request shape.
+    ResultCache,
+    /// Graph neighborhood lookups derived from canonical relation tables.
+    EntityNeighborhood,
+    /// Derived summaries and projections.
+    SummaryCache,
+    /// Vector-search shortlist generation for current index generation.
+    AnnProbeCache,
+    /// Speculative handles or shortlists keyed to session or task intent.
+    PrefetchHints,
+    /// Session-local hot set for current scoped session.
+    SessionWarmup,
+    /// Task or goal-local shortlist for repeated retrieval.
+    GoalConditioned,
+    /// Process-local bootstrap warm artifacts only.
+    ColdStartMitigation,
+}
+
+impl CacheFamily {
+    /// Returns the canonical machine-readable tag for serialization and traces.
+    pub const fn as_str(&self) -> &'static str {
+        match self {
+            Self::Tier1Item => "tier1_item",
+            Self::NegativeCache => "negative_cache",
+            Self::ResultCache => "result_cache",
+            Self::EntityNeighborhood => "entity_neighborhood",
+            Self::SummaryCache => "summary_cache",
+            Self::AnnProbeCache => "ann_probe_cache",
+            Self::PrefetchHints => "prefetch_hints",
+            Self::SessionWarmup => "session_warmup",
+            Self::GoalConditioned => "goal_conditioned",
+            Self::ColdStartMitigation => "cold_start_mitigation",
+        }
+    }
+}
+
+/// Cache events aligned with the canonical event taxonomy.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum CacheEvent {
+    /// Cache returned a valid entry for current request.
+    Hit,
+    /// No valid entry found in cache for current key and scope.
+    Miss,
+    /// Cache exists but was skipped due to staleness, version mismatch, etc.
+    Bypass,
+    /// Cache entry invalidated due to authoritative mutation or generation change.
+    Invalidation,
+    /// Cache populated or refreshed during repair operation.
+    RepairWarmup,
+    /// Cache entry exists but was rejected as stale.
+    StaleWarning,
+    /// Cache is explicitly disabled or in degraded mode.
+    Disabled,
+    /// Prefetch hint canceled due to intent change, budget, or policy.
+    PrefetchDrop,
+    /// Session warmup invalidated due to session end or scope change.
+    SessionExpired,
+}
+
+impl CacheEvent {
+    /// Returns the machine-readable event label.
+    pub const fn as_str(&self) -> &'static str {
+        match self {
+            Self::Hit => "hit",
+            Self::Miss => "miss",
+            Self::Bypass => "bypass",
+            Self::Invalidation => "invalidation",
+            Self::RepairWarmup => "repair_warmup",
+            Self::StaleWarning => "stale_warning",
+            Self::Disabled => "disabled",
+            Self::PrefetchDrop => "prefetch_drop",
+            Self::SessionExpired => "session_expired",
+        }
+    }
+}
+
+/// Reasons for cache bypass or invalidation.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum CacheReason {
+    OwnerBoundaryMismatch,
+    NamespaceMismatch,
+    PolicyDenied,
+    GenerationAnchorMismatch,
+    VersionMismatch,
+    ScopeTooBroad,
+    RecordNotPresent,
+    RepairIncomplete,
+    PolicyChanged,
+    RedactionChanged,
+    SchemaChanged,
+    IndexChanged,
+    EmbeddingChanged,
+    RankingChanged,
+    IntentChanged,
+    BudgetExhausted,
+    NamespaceNarrowed,
+    NamespaceWidened,
+}
+
+impl CacheReason {
+    /// Returns the machine-readable reason label.
+    pub const fn as_str(&self) -> &'static str {
+        match self {
+            Self::OwnerBoundaryMismatch => "owner_boundary_mismatch",
+            Self::NamespaceMismatch => "namespace_mismatch",
+            Self::PolicyDenied => "policy_denied",
+            Self::GenerationAnchorMismatch => "generation_anchor_mismatch",
+            Self::VersionMismatch => "version_mismatch",
+            Self::ScopeTooBroad => "scope_too_broad",
+            Self::RecordNotPresent => "record_not_present",
+            Self::RepairIncomplete => "repair_incomplete",
+            Self::PolicyChanged => "policy_changed",
+            Self::RedactionChanged => "redaction_changed",
+            Self::SchemaChanged => "schema_changed",
+            Self::IndexChanged => "index_changed",
+            Self::EmbeddingChanged => "embedding_changed",
+            Self::RankingChanged => "ranking_changed",
+            Self::IntentChanged => "intent_changed",
+            Self::BudgetExhausted => "budget_exhausted",
+            Self::NamespaceNarrowed => "namespace_narrowed",
+            Self::NamespaceWidened => "namespace_widened",
+        }
+    }
+}
+
+/// Labels for warm-source provenance in traces.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum WarmSource {
+    Tier1ItemCache,
+    NegativeCache,
+    ResultCache,
+    EntityNeighborhood,
+    SummaryCache,
+    AnnProbeCache,
+    PrefetchQueue,
+    SessionWarmup,
+    GoalCache,
+    ColdStartCache,
+}
+
+impl WarmSource {
+    /// Returns the machine-readable warm-source label.
+    pub const fn as_str(&self) -> &'static str {
+        match self {
+            Self::Tier1ItemCache => "tier1_item_cache",
+            Self::NegativeCache => "negative_cache",
+            Self::ResultCache => "result_cache",
+            Self::EntityNeighborhood => "entity_neighborhood",
+            Self::SummaryCache => "summary_cache",
+            Self::AnnProbeCache => "ann_probe_cache",
+            Self::PrefetchQueue => "prefetch_queue",
+            Self::SessionWarmup => "session_warmup",
+            Self::GoalCache => "goal_cache",
+            Self::ColdStartCache => "cold_start_cache",
+        }
+    }
+}
+
+/// Cache entry generation status for version-aware validation.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum GenerationStatus {
+    /// Cache entry has all required generation anchors.
+    Valid,
+    /// Cache entry exists but lacks fresh generation anchor.
+    Stale,
+    /// Cache entry generation version differs from current required version.
+    VersionMismatched,
+    /// Cache entry generation status cannot be determined.
+    Unknown,
+}
+
+impl GenerationStatus {
+    /// Returns the machine-readable status label.
+    pub const fn as_str(&self) -> &'static str {
+        match self {
+            Self::Valid => "valid",
+            Self::Stale => "stale",
+            Self::VersionMismatched => "version_mismatched",
+            Self::Unknown => "unknown",
+        }
+    }
+}
+
+// ──────────────────────────────────────────────────────────────────────────────
+// § 2  Cache key and versioned entry  (mb-23u.9.1)
+// ──────────────────────────────────────────────────────────────────────────────
+
+/// Generation anchors that participate in cache key freshness validation.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct CacheGenerationAnchors {
+    /// Schema generation when the cache entry was populated.
+    pub schema_generation: u64,
+    /// Policy/redaction generation when the entry was populated.
+    pub policy_generation: u64,
+    /// Index generation (FTS5/USearch) when the entry was populated.
+    pub index_generation: u64,
+    /// Embedding model generation when the entry was populated.
+    pub embedding_generation: u64,
+    /// Ranking/reranker model generation when the entry was populated.
+    pub ranking_generation: u64,
+}
+
+impl Default for CacheGenerationAnchors {
+    fn default() -> Self {
+        Self {
+            schema_generation: 1,
+            policy_generation: 1,
+            index_generation: 1,
+            embedding_generation: 1,
+            ranking_generation: 1,
+        }
+    }
+}
+
+/// Composite cache key: family + namespace + item identity + generations.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct CacheKey {
+    /// Which cache family this key belongs to.
+    pub family: CacheFamily,
+    /// Effective namespace the entry is scoped to.
+    pub namespace: NamespaceId,
+    /// Family-specific item identity (memory id, request hash, etc.).
+    pub item_key: u64,
+    /// Generation anchors snapshotted when entry was stored.
+    pub generations: CacheGenerationAnchors,
+}
+
+/// Admission decision for a cache candidate.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CacheAdmissionDecision {
+    /// Admit the candidate into the cache family.
+    Admit,
+    /// Reject—cache is at capacity and candidate does not justify eviction.
+    RejectCapacity,
+    /// Bypass—request explicitly opted out of caching or is policy-denied.
+    BypassPolicy,
+    /// Bypass—family is disabled or in degraded mode.
+    BypassDisabled,
+}
+
+// ──────────────────────────────────────────────────────────────────────────────
+// § 3  Bounded retrieval cache store  (mb-23u.9.1)
+// ──────────────────────────────────────────────────────────────────────────────
+
+/// Cached retrieval entry with version-aware metadata.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CacheEntry {
+    /// Composite key this entry was stored under.
+    pub key: CacheKey,
+    /// Cached memory ids (candidate shortlist).
+    pub memory_ids: Vec<MemoryId>,
+    /// Monotonic tick when the entry was created/refreshed.
+    pub stored_at_tick: u64,
+}
+
+/// Result of a cache lookup with full trace evidence.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CacheLookupResult {
+    /// Family that was queried.
+    pub family: CacheFamily,
+    /// Event outcome.
+    pub event: CacheEvent,
+    /// Reason when event is Bypass, Invalidation, or StaleWarning.
+    pub reason: Option<CacheReason>,
+    /// Warm source when event is Hit.
+    pub warm_source: Option<WarmSource>,
+    /// Generation status validation.
+    pub generation_status: GenerationStatus,
+    /// Returned memory ids when event is Hit.
+    pub memory_ids: Vec<MemoryId>,
+    /// Candidate count after this cache evaluation.
+    pub candidates_after: usize,
+}
+
+/// Bounded LRU cache store for one cache family.
+///
+/// Namespace-aware keys and generation-aware invalidation keep this cache
+/// aligned with the CACHE_AND_PREFETCH.md contract.
+#[derive(Debug, Clone)]
+pub struct BoundedCacheStore {
+    family: CacheFamily,
+    capacity: usize,
+    entries: HashMap<CacheKey, CacheEntry>,
+    access_order: VecDeque<CacheKey>,
+    /// Monotonic tick counter for temporal ordering.
+    tick: u64,
+    /// Whether this cache family is in degraded/disabled mode.
+    disabled: bool,
+    /// Running metrics for this family.
+    pub metrics: CacheFamilyMetrics,
+}
+
+/// Per-family metrics counters for cache observability (mb-23u.9.3).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct CacheFamilyMetrics {
+    pub hit_count: u64,
+    pub miss_count: u64,
+    pub bypass_count: u64,
+    pub invalidation_count: u64,
+    pub stale_warning_count: u64,
+}
+
+impl BoundedCacheStore {
+    /// Builds a new bounded cache for the given family with a hard capacity limit.
+    pub fn new(family: CacheFamily, capacity: usize) -> Self {
+        Self {
+            family,
+            capacity: capacity.max(1),
+            entries: HashMap::new(),
+            access_order: VecDeque::new(),
+            tick: 0,
+            disabled: false,
+            metrics: CacheFamilyMetrics::default(),
+        }
+    }
+
+    /// Returns the family this store accelerates.
+    pub fn family(&self) -> CacheFamily {
+        self.family
+    }
+
+    /// Returns the number of resident entries.
+    pub fn len(&self) -> usize {
+        self.entries.len()
+    }
+
+    /// Returns whether this cache store is empty.
+    pub fn is_empty(&self) -> bool {
+        self.entries.is_empty()
+    }
+
+    /// Disables this cache family (degraded mode).
+    pub fn disable(&mut self) {
+        self.disabled = true;
+    }
+
+    /// Re-enables this cache family.
+    pub fn enable(&mut self) {
+        self.disabled = false;
+    }
+
+    /// Returns whether this cache is currently in disabled/degraded mode.
+    pub fn is_disabled(&self) -> bool {
+        self.disabled
+    }
+
+    /// Evaluates admission and stores the entry if admitted.
+    ///
+    /// Returns the admission decision so callers can trace what happened.
+    pub fn admit(
+        &mut self,
+        key: CacheKey,
+        memory_ids: Vec<MemoryId>,
+    ) -> CacheAdmissionDecision {
+        if self.disabled {
+            return CacheAdmissionDecision::BypassDisabled;
+        }
+
+        // Capacity-bounded LRU eviction
+        if self.entries.len() >= self.capacity && !self.entries.contains_key(&key) {
+            if let Some(evicted_key) = self.access_order.pop_front() {
+                self.entries.remove(&evicted_key);
+            }
+        }
+
+        self.tick += 1;
+        let entry = CacheEntry {
+            key: key.clone(),
+            memory_ids,
+            stored_at_tick: self.tick,
+        };
+        self.entries.insert(key.clone(), entry);
+        self.touch(&key);
+
+        CacheAdmissionDecision::Admit
+    }
+
+    /// Looks up an entry with full generation-aware validation.
+    ///
+    /// Returns a `CacheLookupResult` with trace evidence for observability.
+    pub fn lookup(
+        &mut self,
+        key: &CacheKey,
+        current_generations: &CacheGenerationAnchors,
+    ) -> CacheLookupResult {
+        if self.disabled {
+            self.metrics.bypass_count += 1;
+            return CacheLookupResult {
+                family: self.family,
+                event: CacheEvent::Disabled,
+                reason: None,
+                warm_source: None,
+                generation_status: GenerationStatus::Unknown,
+                memory_ids: Vec::new(),
+                candidates_after: 0,
+            };
+        }
+
+        let Some(entry) = self.entries.get(key) else {
+            self.metrics.miss_count += 1;
+            return CacheLookupResult {
+                family: self.family,
+                event: CacheEvent::Miss,
+                reason: None,
+                warm_source: None,
+                generation_status: GenerationStatus::Unknown,
+                memory_ids: Vec::new(),
+                candidates_after: 0,
+            };
+        };
+
+        // --- Generation-anchor validation ---
+        let gen_status = validate_generations(&entry.key.generations, current_generations);
+        match gen_status {
+            GenerationStatus::Valid => {
+                let ids = entry.memory_ids.clone();
+                let count = ids.len();
+                self.touch(&key.clone());
+                self.metrics.hit_count += 1;
+                CacheLookupResult {
+                    family: self.family,
+                    event: CacheEvent::Hit,
+                    reason: None,
+                    warm_source: Some(family_to_warm_source(self.family)),
+                    generation_status: gen_status,
+                    memory_ids: ids,
+                    candidates_after: count,
+                }
+            }
+            GenerationStatus::Stale => {
+                self.metrics.stale_warning_count += 1;
+                self.metrics.bypass_count += 1;
+                CacheLookupResult {
+                    family: self.family,
+                    event: CacheEvent::StaleWarning,
+                    reason: Some(CacheReason::GenerationAnchorMismatch),
+                    warm_source: None,
+                    generation_status: gen_status,
+                    memory_ids: Vec::new(),
+                    candidates_after: 0,
+                }
+            }
+            GenerationStatus::VersionMismatched => {
+                self.metrics.bypass_count += 1;
+                CacheLookupResult {
+                    family: self.family,
+                    event: CacheEvent::Bypass,
+                    reason: Some(CacheReason::VersionMismatch),
+                    warm_source: None,
+                    generation_status: gen_status,
+                    memory_ids: Vec::new(),
+                    candidates_after: 0,
+                }
+            }
+            GenerationStatus::Unknown => {
+                self.metrics.bypass_count += 1;
+                CacheLookupResult {
+                    family: self.family,
+                    event: CacheEvent::Bypass,
+                    reason: Some(CacheReason::GenerationAnchorMismatch),
+                    warm_source: None,
+                    generation_status: gen_status,
+                    memory_ids: Vec::new(),
+                    candidates_after: 0,
+                }
+            }
+        }
+    }
+
+    /// Invalidates all entries for the given namespace.
+    ///
+    /// Returns the number of entries invalidated.
+    pub fn invalidate_namespace(&mut self, namespace: &NamespaceId) -> usize {
+        let keys_to_remove: Vec<CacheKey> = self
+            .entries
+            .keys()
+            .filter(|k| &k.namespace == namespace)
+            .cloned()
+            .collect();
+        let count = keys_to_remove.len();
+        for key in &keys_to_remove {
+            self.entries.remove(key);
+            self.access_order.retain(|k| k != key);
+        }
+        self.metrics.invalidation_count += count as u64;
+        count
+    }
+
+    /// Invalidates all entries whose generation anchors are behind the given
+    /// current anchors. Returns the number of entries invalidated.
+    pub fn invalidate_stale(&mut self, current: &CacheGenerationAnchors) -> usize {
+        let stale_keys: Vec<CacheKey> = self
+            .entries
+            .keys()
+            .filter(|k| validate_generations(&k.generations, current) != GenerationStatus::Valid)
+            .cloned()
+            .collect();
+        let count = stale_keys.len();
+        for key in &stale_keys {
+            self.entries.remove(key);
+            self.access_order.retain(|k| k != key);
+        }
+        self.metrics.invalidation_count += count as u64;
+        count
+    }
+
+    /// Drops all entries—used for full rebuild or repair.
+    pub fn clear(&mut self) {
+        let count = self.entries.len() as u64;
+        self.entries.clear();
+        self.access_order.clear();
+        self.metrics.invalidation_count += count;
+    }
+
+    fn touch(&mut self, key: &CacheKey) {
+        self.access_order.retain(|k| k != key);
+        self.access_order.push_back(key.clone());
+    }
+}
+
+/// Validates entry generations against current expected generations.
+fn validate_generations(
+    entry: &CacheGenerationAnchors,
+    current: &CacheGenerationAnchors,
+) -> GenerationStatus {
+    if entry == current {
+        return GenerationStatus::Valid;
+    }
+    // Any downgrade in a generation => stale
+    if entry.schema_generation < current.schema_generation
+        || entry.policy_generation < current.policy_generation
+        || entry.index_generation < current.index_generation
+        || entry.embedding_generation < current.embedding_generation
+        || entry.ranking_generation < current.ranking_generation
+    {
+        return GenerationStatus::Stale;
+    }
+    // Entry from a future generation (possible after rollback)
+    GenerationStatus::VersionMismatched
+}
+
+/// Maps a cache family to the canonical warm-source label.
+fn family_to_warm_source(family: CacheFamily) -> WarmSource {
+    match family {
+        CacheFamily::Tier1Item => WarmSource::Tier1ItemCache,
+        CacheFamily::NegativeCache => WarmSource::NegativeCache,
+        CacheFamily::ResultCache => WarmSource::ResultCache,
+        CacheFamily::EntityNeighborhood => WarmSource::EntityNeighborhood,
+        CacheFamily::SummaryCache => WarmSource::SummaryCache,
+        CacheFamily::AnnProbeCache => WarmSource::AnnProbeCache,
+        CacheFamily::PrefetchHints => WarmSource::PrefetchQueue,
+        CacheFamily::SessionWarmup => WarmSource::SessionWarmup,
+        CacheFamily::GoalConditioned => WarmSource::GoalCache,
+        CacheFamily::ColdStartMitigation => WarmSource::ColdStartCache,
+    }
+}
+
+// ──────────────────────────────────────────────────────────────────────────────
+// § 4  Bounded prefetch controller  (mb-23u.9.2)
+// ──────────────────────────────────────────────────────────────────────────────
+
+/// Prefetch hint submitted by session or task intent signals.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PrefetchHint {
+    /// Which namespace this hint belongs to.
+    pub namespace: NamespaceId,
+    /// Predicted memory ids to preload.
+    pub predicted_ids: Vec<MemoryId>,
+    /// Monotonic tick when the hint was submitted.
+    pub submitted_at_tick: u64,
+}
+
+/// Prefetch trigger sourced from session or task analysis.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum PrefetchTrigger {
+    /// Session-local recent access patterns.
+    SessionRecency,
+    /// Task or goal-level intent analysis.
+    TaskIntent,
+    /// Entity-neighborhood follow-up.
+    EntityFollow,
+    /// Cold-start bootstrap.
+    ColdStart,
+}
+
+impl PrefetchTrigger {
+    /// Returns the machine-readable trigger label.
+    pub const fn as_str(&self) -> &'static str {
+        match self {
+            Self::SessionRecency => "session_recency",
+            Self::TaskIntent => "task_intent",
+            Self::EntityFollow => "entity_follow",
+            Self::ColdStart => "cold_start",
+        }
+    }
+}
+
+/// Bypass reason for why a prefetch hint was dropped or ignored.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PrefetchBypassReason {
+    /// Budget for speculative work is exhausted.
+    BudgetExhausted,
+    /// User or task intent changed since the hint was queued.
+    IntentChanged,
+    /// Namespace or policy scope change invalidated the hint.
+    ScopeChanged,
+    /// Prefetch system is disabled.
+    Disabled,
+}
+
+/// Bounded prefetch controller that manages speculative hint queues.
+#[derive(Debug, Clone)]
+pub struct PrefetchController {
+    /// Maximum queued hints before oldest hints are dropped.
+    capacity: usize,
+    /// Queued prefetch hints in submission order.
+    queue: VecDeque<PrefetchHint>,
+    /// Current monotonic tick for temporal ordering.
+    tick: u64,
+    /// Whether the prefetch system is active.
+    enabled: bool,
+    /// Running observability counters.
+    pub metrics: PrefetchMetrics,
+}
+
+/// Running counters for prefetch observability (mb-23u.9.3).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct PrefetchMetrics {
+    pub hints_submitted: u64,
+    pub hints_consumed: u64,
+    pub hints_dropped: u64,
+}
+
+impl PrefetchController {
+    /// Builds a bounded prefetch controller.
+    pub fn new(capacity: usize) -> Self {
+        Self {
+            capacity: capacity.max(1),
+            queue: VecDeque::new(),
+            tick: 0,
+            enabled: true,
+            metrics: PrefetchMetrics::default(),
+        }
+    }
+
+    /// Submits a speculative prefetch hint. Oldest hints are evicted when
+    /// the queue exceeds capacity.
+    pub fn submit_hint(&mut self, namespace: NamespaceId, predicted_ids: Vec<MemoryId>) -> bool {
+        if !self.enabled {
+            self.metrics.hints_dropped += 1;
+            return false;
+        }
+
+        self.tick += 1;
+        let hint = PrefetchHint {
+            namespace,
+            predicted_ids,
+            submitted_at_tick: self.tick,
+        };
+
+        if self.queue.len() >= self.capacity {
+            self.queue.pop_front();
+            self.metrics.hints_dropped += 1;
+        }
+
+        self.queue.push_back(hint);
+        self.metrics.hints_submitted += 1;
+        true
+    }
+
+    /// Consumes the next queued hint for the given namespace.
+    /// Returns `None` if no matching hint is available.
+    pub fn consume_hint(&mut self, namespace: &NamespaceId) -> Option<PrefetchHint> {
+        if !self.enabled {
+            return None;
+        }
+        let pos = self.queue.iter().position(|h| &h.namespace == namespace)?;
+        let hint = self.queue.remove(pos)?;
+        self.metrics.hints_consumed += 1;
+        Some(hint)
+    }
+
+    /// Cancels all hints for the given namespace (intent-change or scope-change).
+    /// Returns the number of hints dropped.
+    pub fn cancel_namespace(&mut self, namespace: &NamespaceId) -> usize {
+        let before = self.queue.len();
+        self.queue.retain(|h| &h.namespace != namespace);
+        let dropped = before - self.queue.len();
+        self.metrics.hints_dropped += dropped as u64;
+        dropped
+    }
+
+    /// Cancels all queued hints.
+    pub fn cancel_all(&mut self) {
+        let dropped = self.queue.len() as u64;
+        self.queue.clear();
+        self.metrics.hints_dropped += dropped;
+    }
+
+    /// Returns the current queue depth.
+    pub fn queue_depth(&self) -> usize {
+        self.queue.len()
+    }
+
+    /// Disables the prefetch system.
+    pub fn disable(&mut self) {
+        self.enabled = false;
+    }
+
+    /// Re-enables the prefetch system.
+    pub fn enable(&mut self) {
+        self.enabled = true;
+    }
+
+    /// Returns whether the prefetch system is enabled.
+    pub fn is_enabled(&self) -> bool {
+        self.enabled
+    }
+}
+
+// ──────────────────────────────────────────────────────────────────────────────
+// § 5  Per-request cache metrics  (mb-23u.9.3)
+// ──────────────────────────────────────────────────────────────────────────────
+
+/// Per-request cache metrics populated in the common response envelope.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct CacheRequestMetrics {
+    /// Number of cache hits across all families for this request.
+    pub cache_hit_count: u32,
+    /// Number of cache misses across all families for this request.
+    pub cache_miss_count: u32,
+    /// Number of cache entries bypassed for this request.
+    pub cache_bypass_count: u32,
+    /// Number of cache entries invalidated for this request.
+    pub cache_invalidation_count: u32,
+    /// Number of prefetch hints consumed for this request.
+    pub prefetch_used_count: u32,
+    /// Number of prefetch hints canceled for this request.
+    pub prefetch_dropped_count: u32,
+    /// Number of times request escalated to a colder authoritative path.
+    pub cold_fallback_count: u32,
+    /// `true` if response was served while system was in degraded mode.
+    pub degraded_mode_served: bool,
+}
+
+impl CacheRequestMetrics {
+    /// Records a cache lookup result into per-request metrics.
+    pub fn record_lookup(&mut self, result: &CacheLookupResult) {
+        match result.event {
+            CacheEvent::Hit => self.cache_hit_count += 1,
+            CacheEvent::Miss => {
+                self.cache_miss_count += 1;
+                self.cold_fallback_count += 1;
+            }
+            CacheEvent::Bypass => self.cache_bypass_count += 1,
+            CacheEvent::StaleWarning => {
+                self.cache_bypass_count += 1;
+                self.cold_fallback_count += 1;
+            }
+            CacheEvent::Disabled => {
+                self.degraded_mode_served = true;
+                self.cache_bypass_count += 1;
+            }
+            CacheEvent::Invalidation => self.cache_invalidation_count += 1,
+            _ => {}
+        }
+    }
+}
+
+/// Candidate count checkpoint for routing-trace integration (mb-23u.9.3).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct CacheCandidateCheckpoint {
+    /// Candidates available before any cache lookup.
+    pub pre_cache_candidates: u32,
+    /// Candidates after Tier1 cache evaluation.
+    pub post_tier1_candidates: Option<u32>,
+    /// Candidates after Tier2 cache evaluation.
+    pub post_tier2_candidates: Option<u32>,
+    /// Candidates after ANN probe cache evaluation.
+    pub post_ann_candidates: Option<u32>,
+    /// Candidates added by prefetch queue for this request.
+    pub prefetch_added_candidates: Option<u32>,
+}
+
+// ──────────────────────────────────────────────────────────────────────────────
+// § 6  Cache trace stage  (mb-23u.9.3)
+// ──────────────────────────────────────────────────────────────────────────────
+
+/// Structured cache trace stage for explain / inspect integration.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CacheTraceStage {
+    /// Stage name (e.g., `tier1_cache_eval`).
+    pub stage: String,
+    /// Which cache family participated.
+    pub cache_family: CacheFamily,
+    /// Event type.
+    pub cache_event: CacheEvent,
+    /// Reason for bypass or invalidation when applicable.
+    pub cache_reason: Option<CacheReason>,
+    /// Which warm source provided the cached entry.
+    pub warm_source: Option<WarmSource>,
+    /// Generation status validation result.
+    pub generation_status: GenerationStatus,
+    /// Candidate count before cache evaluation at this stage.
+    pub candidates_before: u32,
+    /// Candidate count after cache evaluation at this stage.
+    pub candidates_after: u32,
+}
+
+impl CacheTraceStage {
+    /// Builds a trace stage from a cache lookup result and surrounding context.
+    pub fn from_lookup(
+        stage_name: impl Into<String>,
+        result: &CacheLookupResult,
+        candidates_before: u32,
+    ) -> Self {
+        Self {
+            stage: stage_name.into(),
+            cache_family: result.family,
+            cache_event: result.event,
+            cache_reason: result.reason,
+            warm_source: result.warm_source,
+            generation_status: result.generation_status,
+            candidates_before,
+            candidates_after: result.candidates_after as u32,
+        }
+    }
+}
+
+// ──────────────────────────────────────────────────────────────────────────────
+// § 7  Invalidation hooks  (mb-23u.9.4)
+// ──────────────────────────────────────────────────────────────────────────────
+
+/// Invalidation trigger for cache repair hooks.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum InvalidationTrigger {
+    /// A durable memory was mutated (write, forget, supersession).
+    MemoryMutation,
+    /// Policy rules changed.
+    PolicyChange,
+    /// Redaction rules updated.
+    RedactionChange,
+    /// Schema generation changed (migration).
+    SchemaChange,
+    /// Index generation changed (rebuild/repair).
+    IndexChange,
+    /// Embedding model generation changed.
+    EmbeddingChange,
+    /// Ranking/reranker model version changed.
+    RankingChange,
+    /// Repair or rebuild started (broad invalidation).
+    RepairStarted,
+    /// Namespace change affecting visibility scope.
+    NamespaceChange,
+}
+
+impl InvalidationTrigger {
+    /// Returns the machine-readable trigger label.
+    pub const fn as_str(&self) -> &'static str {
+        match self {
+            Self::MemoryMutation => "memory_mutation",
+            Self::PolicyChange => "policy_change",
+            Self::RedactionChange => "redaction_change",
+            Self::SchemaChange => "schema_change",
+            Self::IndexChange => "index_change",
+            Self::EmbeddingChange => "embedding_change",
+            Self::RankingChange => "ranking_change",
+            Self::RepairStarted => "repair_started",
+            Self::NamespaceChange => "namespace_change",
+        }
+    }
+}
+
+/// Outcome of a cache invalidation or repair operation.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct InvalidationOutcome {
+    /// Trigger that caused the invalidation.
+    pub trigger: InvalidationTrigger,
+    /// Which families were affected.
+    pub families_affected: Vec<CacheFamily>,
+    /// Total entries invalidated across all families.
+    pub entries_invalidated: usize,
+}
+
+// ──────────────────────────────────────────────────────────────────────────────
+// § 8  Composite cache manager  (mb-23u.9 umbrella)
+// ──────────────────────────────────────────────────────────────────────────────
+
+/// Composite cache manager owning all cache families and the prefetch controller.
+///
+/// This is the top-level entry point for all cache operations on the
+/// retrieval hot path. It holds one `BoundedCacheStore` per family and
+/// a single `PrefetchController`.
+#[derive(Debug, Clone)]
+pub struct CacheManager {
+    pub tier1_item: BoundedCacheStore,
+    pub negative: BoundedCacheStore,
+    pub result: BoundedCacheStore,
+    pub entity_neighborhood: BoundedCacheStore,
+    pub summary: BoundedCacheStore,
+    pub ann_probe: BoundedCacheStore,
+    pub session_warmup: BoundedCacheStore,
+    pub goal_conditioned: BoundedCacheStore,
+    pub cold_start: BoundedCacheStore,
+    /// Bounded prefetch hint controller.
+    pub prefetch: PrefetchController,
+}
+
+impl CacheManager {
+    /// Builds a cache manager with the given per-family capacity and prefetch budget.
+    pub fn new(per_family_capacity: usize, prefetch_capacity: usize) -> Self {
+        Self {
+            tier1_item: BoundedCacheStore::new(CacheFamily::Tier1Item, per_family_capacity),
+            negative: BoundedCacheStore::new(CacheFamily::NegativeCache, per_family_capacity),
+            result: BoundedCacheStore::new(CacheFamily::ResultCache, per_family_capacity),
+            entity_neighborhood: BoundedCacheStore::new(CacheFamily::EntityNeighborhood, per_family_capacity),
+            summary: BoundedCacheStore::new(CacheFamily::SummaryCache, per_family_capacity),
+            ann_probe: BoundedCacheStore::new(CacheFamily::AnnProbeCache, per_family_capacity),
+            session_warmup: BoundedCacheStore::new(CacheFamily::SessionWarmup, per_family_capacity),
+            goal_conditioned: BoundedCacheStore::new(CacheFamily::GoalConditioned, per_family_capacity),
+            cold_start: BoundedCacheStore::new(CacheFamily::ColdStartMitigation, per_family_capacity),
+            prefetch: PrefetchController::new(prefetch_capacity),
+        }
+    }
+
+    /// Returns the store for a given cache family.
+    pub fn store_for(&mut self, family: CacheFamily) -> &mut BoundedCacheStore {
+        match family {
+            CacheFamily::Tier1Item => &mut self.tier1_item,
+            CacheFamily::NegativeCache => &mut self.negative,
+            CacheFamily::ResultCache => &mut self.result,
+            CacheFamily::EntityNeighborhood => &mut self.entity_neighborhood,
+            CacheFamily::SummaryCache => &mut self.summary,
+            CacheFamily::AnnProbeCache => &mut self.ann_probe,
+            CacheFamily::PrefetchHints => &mut self.tier1_item, // prefetch uses the controller, not a store
+            CacheFamily::SessionWarmup => &mut self.session_warmup,
+            CacheFamily::GoalConditioned => &mut self.goal_conditioned,
+            CacheFamily::ColdStartMitigation => &mut self.cold_start,
+        }
+    }
+
+    /// Handles a broad invalidation trigger across all affected families.
+    pub fn handle_invalidation(
+        &mut self,
+        trigger: InvalidationTrigger,
+        namespace: &NamespaceId,
+    ) -> InvalidationOutcome {
+        let mut total = 0usize;
+        let mut affected = Vec::new();
+
+        let families: &mut [&mut BoundedCacheStore] = &mut [
+            &mut self.tier1_item,
+            &mut self.negative,
+            &mut self.result,
+            &mut self.entity_neighborhood,
+            &mut self.summary,
+            &mut self.ann_probe,
+            &mut self.session_warmup,
+            &mut self.goal_conditioned,
+            &mut self.cold_start,
+        ];
+
+        for store in families.iter_mut() {
+            let count = store.invalidate_namespace(namespace);
+            if count > 0 {
+                affected.push(store.family());
+                total += count;
+            }
+        }
+
+        let prefetch_dropped = self.prefetch.cancel_namespace(namespace);
+        if prefetch_dropped > 0 {
+            affected.push(CacheFamily::PrefetchHints);
+            total += prefetch_dropped;
+        }
+
+        InvalidationOutcome {
+            trigger,
+            families_affected: affected,
+            entries_invalidated: total,
+        }
+    }
+
+    /// Clears all cache families and prefetch queue.
+    pub fn clear_all(&mut self) {
+        self.tier1_item.clear();
+        self.negative.clear();
+        self.result.clear();
+        self.entity_neighborhood.clear();
+        self.summary.clear();
+        self.ann_probe.clear();
+        self.session_warmup.clear();
+        self.goal_conditioned.clear();
+        self.cold_start.clear();
+        self.prefetch.cancel_all();
+    }
+}
+
+// ──────────────────────────────────────────────────────────────────────────────
+// § 9  Tests  (mb-23u.9.4 regression coverage)
+// ──────────────────────────────────────────────────────────────────────────────
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn ns(name: &str) -> NamespaceId {
+        NamespaceId::new(name).unwrap()
+    }
+
+    fn gen_anchors(v: u64) -> CacheGenerationAnchors {
+        CacheGenerationAnchors {
+            schema_generation: v,
+            policy_generation: v,
+            index_generation: v,
+            embedding_generation: v,
+            ranking_generation: v,
+        }
+    }
+
+    fn make_key(family: CacheFamily, ns_str: &str, item: u64) -> CacheKey {
+        CacheKey {
+            family,
+            namespace: ns(ns_str),
+            item_key: item,
+            generations: gen_anchors(1),
+        }
+    }
+
+    // ── § 9.1  Hit/miss visibility by family ─────────────────────────────
+
+    #[test]
+    fn fresh_cache_hit_returns_hit_event_and_increments_metric() {
+        let mut store = BoundedCacheStore::new(CacheFamily::Tier1Item, 10);
+        let key = make_key(CacheFamily::Tier1Item, "team.alpha", 42);
+        store.admit(key.clone(), vec![MemoryId(1), MemoryId(2)]);
+
+        let result = store.lookup(&key, &gen_anchors(1));
+
+        assert_eq!(result.event, CacheEvent::Hit);
+        assert_eq!(result.memory_ids.len(), 2);
+        assert_eq!(result.warm_source, Some(WarmSource::Tier1ItemCache));
+        assert_eq!(result.generation_status, GenerationStatus::Valid);
+        assert_eq!(store.metrics.hit_count, 1);
+        assert_eq!(store.metrics.miss_count, 0);
+    }
+
+    #[test]
+    fn cache_miss_returns_miss_event_and_increments_metric() {
+        let mut store = BoundedCacheStore::new(CacheFamily::ResultCache, 10);
+        let key = make_key(CacheFamily::ResultCache, "team.alpha", 99);
+
+        let result = store.lookup(&key, &gen_anchors(1));
+
+        assert_eq!(result.event, CacheEvent::Miss);
+        assert!(result.memory_ids.is_empty());
+        assert_eq!(store.metrics.miss_count, 1);
+    }
+
+    // ── § 9.2  Stale-result bypass ───────────────────────────────────────
+
+    #[test]
+    fn stale_generation_returns_stale_warning_not_silent_miss() {
+        let mut store = BoundedCacheStore::new(CacheFamily::AnnProbeCache, 10);
+        let key = make_key(CacheFamily::AnnProbeCache, "team.alpha", 1);
+        store.admit(key.clone(), vec![MemoryId(5)]);
+
+        // Advance current generations beyond what is stored
+        let result = store.lookup(&key, &gen_anchors(2));
+
+        assert_eq!(result.event, CacheEvent::StaleWarning);
+        assert_eq!(result.reason, Some(CacheReason::GenerationAnchorMismatch));
+        assert!(result.memory_ids.is_empty());
+        assert_eq!(store.metrics.stale_warning_count, 1);
+    }
+
+    // ── § 9.3  Degraded mode serving ─────────────────────────────────────
+
+    #[test]
+    fn disabled_cache_returns_disabled_event() {
+        let mut store = BoundedCacheStore::new(CacheFamily::NegativeCache, 10);
+        store.disable();
+        let key = make_key(CacheFamily::NegativeCache, "team.alpha", 1);
+
+        let result = store.lookup(&key, &gen_anchors(1));
+
+        assert_eq!(result.event, CacheEvent::Disabled);
+        assert_eq!(store.metrics.bypass_count, 1);
+
+        let mut req_metrics = CacheRequestMetrics::default();
+        req_metrics.record_lookup(&result);
+        assert!(req_metrics.degraded_mode_served);
+    }
+
+    // ── § 9.4  Candidate count preservation ──────────────────────────────
+
+    #[test]
+    fn cache_trace_stage_preserves_candidate_counts() {
+        let result = CacheLookupResult {
+            family: CacheFamily::Tier1Item,
+            event: CacheEvent::Hit,
+            reason: None,
+            warm_source: Some(WarmSource::Tier1ItemCache),
+            generation_status: GenerationStatus::Valid,
+            memory_ids: vec![MemoryId(1), MemoryId(2), MemoryId(3)],
+            candidates_after: 3,
+        };
+
+        let stage = CacheTraceStage::from_lookup("tier1_cache_eval", &result, 10);
+
+        assert_eq!(stage.candidates_before, 10);
+        assert_eq!(stage.candidates_after, 3);
+        assert_eq!(stage.cache_family, CacheFamily::Tier1Item);
+    }
+
+    // ── § 9.5  Prefetch transparency ─────────────────────────────────────
+
+    #[test]
+    fn prefetch_submit_and_consume_tracks_metrics() {
+        let mut pf = PrefetchController::new(5);
+        assert!(pf.submit_hint(ns("team.alpha"), vec![MemoryId(1)]));
+        assert!(pf.submit_hint(ns("team.alpha"), vec![MemoryId(2)]));
+
+        let hint = pf.consume_hint(&ns("team.alpha"));
+        assert!(hint.is_some());
+        assert_eq!(pf.metrics.hints_submitted, 2);
+        assert_eq!(pf.metrics.hints_consumed, 1);
+    }
+
+    #[test]
+    fn prefetch_drops_oldest_when_over_capacity() {
+        let mut pf = PrefetchController::new(2);
+        pf.submit_hint(ns("team.alpha"), vec![MemoryId(1)]);
+        pf.submit_hint(ns("team.alpha"), vec![MemoryId(2)]);
+        pf.submit_hint(ns("team.alpha"), vec![MemoryId(3)]);
+
+        assert_eq!(pf.queue_depth(), 2);
+        assert_eq!(pf.metrics.hints_dropped, 1);
+    }
+
+    #[test]
+    fn disabled_prefetch_drops_all_submissions() {
+        let mut pf = PrefetchController::new(5);
+        pf.disable();
+        assert!(!pf.submit_hint(ns("team.alpha"), vec![MemoryId(1)]));
+        assert_eq!(pf.metrics.hints_dropped, 1);
+    }
+
+    // ── § 9.6  Namespace invalidation ────────────────────────────────────
+
+    #[test]
+    fn invalidate_namespace_clears_matching_entries_only() {
+        let mut store = BoundedCacheStore::new(CacheFamily::ResultCache, 10);
+        store.admit(
+            make_key(CacheFamily::ResultCache, "team.alpha", 1),
+            vec![MemoryId(10)],
+        );
+        store.admit(
+            make_key(CacheFamily::ResultCache, "team.beta", 2),
+            vec![MemoryId(20)],
+        );
+
+        let count = store.invalidate_namespace(&ns("team.alpha"));
+        assert_eq!(count, 1);
+        assert_eq!(store.len(), 1);
+        assert_eq!(store.metrics.invalidation_count, 1);
+    }
+
+    // ── § 9.7  LRU eviction ─────────────────────────────────────────────
+
+    #[test]
+    fn lru_eviction_removes_oldest_on_capacity_overflow() {
+        let mut store = BoundedCacheStore::new(CacheFamily::Tier1Item, 2);
+        store.admit(make_key(CacheFamily::Tier1Item, "ns", 1), vec![MemoryId(1)]);
+        store.admit(make_key(CacheFamily::Tier1Item, "ns", 2), vec![MemoryId(2)]);
+        store.admit(make_key(CacheFamily::Tier1Item, "ns", 3), vec![MemoryId(3)]);
+
+        // Oldest (key=1) should have been evicted.
+        let miss = store.lookup(
+            &make_key(CacheFamily::Tier1Item, "ns", 1),
+            &gen_anchors(1),
+        );
+        assert_eq!(miss.event, CacheEvent::Miss);
+
+        let hit = store.lookup(
+            &make_key(CacheFamily::Tier1Item, "ns", 3),
+            &gen_anchors(1),
+        );
+        assert_eq!(hit.event, CacheEvent::Hit);
+    }
+
+    // ── § 9.8  Composite manager ─────────────────────────────────────────
+
+    #[test]
+    fn cache_manager_invalidation_cascades_across_families() {
+        let mut mgr = CacheManager::new(10, 5);
+        mgr.tier1_item.admit(
+            make_key(CacheFamily::Tier1Item, "team.alpha", 1),
+            vec![MemoryId(1)],
+        );
+        mgr.negative.admit(
+            make_key(CacheFamily::NegativeCache, "team.alpha", 2),
+            vec![],
+        );
+        mgr.result.admit(
+            make_key(CacheFamily::ResultCache, "team.beta", 3),
+            vec![MemoryId(3)],
+        );
+        mgr.prefetch.submit_hint(ns("team.alpha"), vec![MemoryId(10)]);
+
+        let outcome = mgr.handle_invalidation(InvalidationTrigger::PolicyChange, &ns("team.alpha"));
+
+        assert_eq!(outcome.trigger, InvalidationTrigger::PolicyChange);
+        assert!(outcome.entries_invalidated >= 3); // tier1_item + negative + prefetch
+        assert!(outcome.families_affected.contains(&CacheFamily::Tier1Item));
+        assert!(outcome.families_affected.contains(&CacheFamily::NegativeCache));
+        assert!(outcome.families_affected.contains(&CacheFamily::PrefetchHints));
+        // team.beta should survive
+        assert_eq!(mgr.result.len(), 1);
+    }
+
+    // ── § 9.9  Version-mismatch bypass ───────────────────────────────────
+
+    #[test]
+    fn future_generation_returns_version_mismatch_bypass() {
+        let mut store = BoundedCacheStore::new(CacheFamily::SummaryCache, 10);
+        // Store at gen=2 but look up expecting gen=1 (rollback scenario)
+        let key = CacheKey {
+            family: CacheFamily::SummaryCache,
+            namespace: ns("ns"),
+            item_key: 1,
+            generations: gen_anchors(2),
+        };
+        store.admit(key.clone(), vec![MemoryId(1)]);
+
+        let result = store.lookup(&key, &gen_anchors(1));
+        assert_eq!(result.event, CacheEvent::Bypass);
+        assert_eq!(result.reason, Some(CacheReason::VersionMismatch));
+        assert_eq!(result.generation_status, GenerationStatus::VersionMismatched);
+    }
+
+    // ── § 9.10  Per-request metrics accumulation ─────────────────────────
+
+    #[test]
+    fn per_request_metrics_accumulate_across_families() {
+        let mut req = CacheRequestMetrics::default();
+        req.record_lookup(&CacheLookupResult {
+            family: CacheFamily::Tier1Item,
+            event: CacheEvent::Hit,
+            reason: None,
+            warm_source: Some(WarmSource::Tier1ItemCache),
+            generation_status: GenerationStatus::Valid,
+            memory_ids: vec![MemoryId(1)],
+            candidates_after: 1,
+        });
+        req.record_lookup(&CacheLookupResult {
+            family: CacheFamily::AnnProbeCache,
+            event: CacheEvent::Miss,
+            reason: None,
+            warm_source: None,
+            generation_status: GenerationStatus::Unknown,
+            memory_ids: vec![],
+            candidates_after: 0,
+        });
+
+        assert_eq!(req.cache_hit_count, 1);
+        assert_eq!(req.cache_miss_count, 1);
+        assert_eq!(req.cold_fallback_count, 1);
+    }
+}

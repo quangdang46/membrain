@@ -122,3 +122,26 @@ impl ObservabilityModule {
         "observability"
     }
 }
+
+/// Machine-readable cache lookup outcome for the observability trace stream.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CacheLookupOutcome {
+    Hit,
+    Miss,
+    Bypass,
+    StaleWarning,
+    Disabled,
+}
+
+/// Stable trace artifact for one cache-family evaluation on the request path.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct CacheEvalTrace {
+    /// Which cache family was evaluated.
+    pub outcome: CacheLookupOutcome,
+    /// Candidate count before this cache evaluation.
+    pub candidates_before: usize,
+    /// Candidate count after this cache evaluation.
+    pub candidates_after: usize,
+    /// Whether the result came from a warm source.
+    pub warm_reuse: bool,
+}

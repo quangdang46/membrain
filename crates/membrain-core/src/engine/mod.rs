@@ -12,5 +12,7 @@ pub mod maintenance;
 pub mod ranking;
 /// Recall-path orchestration surfaces.
 pub mod recall;
+/// Retrieval result envelope and packaging surfaces.
+pub mod result;
 /// Repair and rebuild maintenance surfaces.
 pub mod repair;

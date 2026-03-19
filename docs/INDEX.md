@@ -15,6 +15,7 @@
 | [MCP_API.md](MCP_API.md) | MCP tool contract — inputs, outputs, rules |
 | [OPERATIONS.md](OPERATIONS.md) | Production runbooks, failure modes, incident response |
 | [CONTRIBUTING.md](CONTRIBUTING.md) | Contributor-facing contract: evidence requirements, PR rules, quality gates |
+| [WORKFLOW_HANDOFF.md](WORKFLOW_HANDOFF.md) | Contributor execution golden path, handoff requirements, and doc propagation |
 | [../AGENTS.md](../AGENTS.md) | Active repository workflow: coordination, reservations, handoff, and execution discipline |
 
 ## Documentation Precedence and Scope
@@ -23,7 +24,8 @@
 2. Subsystem docs under `docs/` elaborate the relevant surface; they do not override the plan.
 3. `ARCHITECTURE.md` freezes workspace shape, module ownership seams, and read/write-path boundaries derived from the plan.
 4. `CONTRIBUTING.md` freezes contributor-facing evidence requirements, quality gates, and PR rejection triggers.
-5. `../AGENTS.md` translates those contracts into day-to-day workflow, coordination, and troubleshooting guidance for active contributors.
+5. `WORKFLOW_HANDOFF.md` formalizes the contributor execution golden path, handoff requirements, and doc propagation rules.
+6. `../AGENTS.md` translates those contracts into day-to-day workflow, coordination, and troubleshooting guidance for active contributors.
 6. Entry-point docs and indexes help readers navigate; they do not redefine the contract.
 
 Use this split intentionally: decide **what the system promises** from `PLAN.md` plus the relevant subsystem doc; use `ARCHITECTURE.md` when the question is workspace shape, module ownership, or boundary placement; use `CONTRIBUTING.md` to decide **what evidence a change owes**; use `../AGENTS.md` to decide **how to execute, coordinate, and hand off work**.

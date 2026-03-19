@@ -5,8 +5,8 @@
 
 use crate::api::NamespaceId;
 use crate::engine::contradiction::ContradictionExplain;
-use crate::engine::ranking::{RankingExplain, RankingResult, ScoreFamily};
-use crate::engine::recall::{RecallPlan, RecallPlanKind, RecallRouteSummary, Tier1PlanTrace};
+use crate::engine::ranking::{RankingExplain, RankingResult};
+use crate::engine::recall::{RecallPlan, RecallPlanKind};
 use crate::types::{CanonicalMemoryType, MemoryId, SessionId};
 
 // ── Result envelope ──────────────────────────────────────────────────────────
@@ -53,47 +53,134 @@ impl AnsweredFrom {
     }
 }
 
+// ── Packaging & Sub-Summaries ────────────────────────────────────────────────
+
+/// Omitted result summary (filtered by policy or threshold).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct OmissionSummary {
+    pub policy_redacted: usize,
+    pub threshold_dropped: usize,
+    pub dedup_dropped: usize,
+}
+
+/// Policy evaluation summary.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PolicySummary {
+    pub namespace_applied: NamespaceId,
+    pub redactions_applied: bool,
+    pub restrictions_active: Vec<&'static str>,
+}
+
+/// Freshness markers for the result set.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct FreshnessMarkers {
+    pub oldest_item_days: u32,
+    pub newest_item_days: u32,
+    pub volatile_items_included: bool,
+}
+
+/// Provenance trace for an item.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ProvenanceSummary {
+    pub source_agent: &'static str,
+    pub original_namespace: NamespaceId,
+    pub derived_from: Option<MemoryId>,
+}
+
+/// Bounded evidence item in the evidence pack.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct EvidenceItem {
+    pub result: RetrievalResult,
+    pub provenance: ProvenanceSummary,
+    pub omitted_fields: Vec<&'static str>,
+}
+
+/// Action artifact linking back to evidence.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ActionArtifact {
+    pub action_type: &'static str,
+    pub suggestion: String,
+    pub supporting_evidence: Vec<MemoryId>,
+    pub confidence_score: u16,
+}
+
+/// Operating mode for dual memory output.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum DualOutputMode {
+    Strict,
+    Balanced,
+    Fast,
+}
+
 // ── Result set ───────────────────────────────────────────────────────────────
 
 /// Packaged result set returned by the retrieval pipeline.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RetrievalResultSet {
-    /// Ordered results (highest score first).
-    pub results: Vec<RetrievalResult>,
+    /// Bounded evidence items (what the system knows).
+    pub evidence_pack: Vec<EvidenceItem>,
+    /// Derived action suggestions (what the system suggests doing).
+    pub action_pack: Option<Vec<ActionArtifact>>,
     /// Explain summary for the entire retrieval operation.
     pub explain: RetrievalExplain,
+    /// Policy evaluation context.
+    pub policy_summary: PolicySummary,
+    /// Omission statistics.
+    pub omitted_summary: OmissionSummary,
+    /// Freshness state.
+    pub freshness_markers: FreshnessMarkers,
+    /// Output mode applied.
+    pub output_mode: DualOutputMode,
     /// Whether the result set was truncated by budget or time limits.
     pub truncated: bool,
     /// Total candidates considered before ranking.
     pub total_candidates: usize,
 }
 
+
 impl RetrievalResultSet {
     /// Builds an empty result set (no matches found).
-    pub fn empty(explain: RetrievalExplain) -> Self {
+    pub fn empty(explain: RetrievalExplain, namespace: NamespaceId) -> Self {
         Self {
-            results: Vec::new(),
+            evidence_pack: Vec::new(),
+            action_pack: None,
             explain,
+            policy_summary: PolicySummary {
+                namespace_applied: namespace,
+                redactions_applied: false,
+                restrictions_active: Vec::new(),
+            },
+            omitted_summary: OmissionSummary {
+                policy_redacted: 0,
+                threshold_dropped: 0,
+                dedup_dropped: 0,
+            },
+            freshness_markers: FreshnessMarkers {
+                oldest_item_days: 0,
+                newest_item_days: 0,
+                volatile_items_included: false,
+            },
+            output_mode: DualOutputMode::Balanced,
             truncated: false,
             total_candidates: 0,
         }
     }
 
-    /// Returns the top result if any matches were found.
-    pub fn top(&self) -> Option<&RetrievalResult> {
-        self.results.first()
+    /// Returns the top evidence item if any exist.
+    pub fn top(&self) -> Option<&EvidenceItem> {
+        self.evidence_pack.first()
     }
 
-    /// Returns how many results were returned.
+    /// Returns how many evidence items were returned.
     pub fn count(&self) -> usize {
-        self.results.len()
+        self.evidence_pack.len()
     }
 
-    /// Returns whether any results had contradictions.
+    /// Returns whether any evidence items had contradictions.
     pub fn has_contradictions(&self) -> bool {
-        self.results
+        self.evidence_pack
             .iter()
-            .any(|r| !r.contradiction_explains.is_empty())
+            .any(|e| !e.result.contradiction_explains.is_empty())
     }
 }
 
@@ -153,18 +240,22 @@ impl RetrievalExplain {
 /// Builder for assembling retrieval results from ranked candidates.
 #[derive(Debug, Clone)]
 pub struct ResultBuilder {
-    results: Vec<RetrievalResult>,
+    evidence_pack: Vec<EvidenceItem>,
+    pub action_pack: Option<Vec<ActionArtifact>>,
     max_results: usize,
     total_candidates: usize,
+    namespace_applied: NamespaceId,
 }
 
 impl ResultBuilder {
     /// Creates a new builder with a maximum result count.
-    pub fn new(max_results: usize) -> Self {
+    pub fn new(max_results: usize, namespace_applied: NamespaceId) -> Self {
         Self {
-            results: Vec::new(),
+            evidence_pack: Vec::new(),
+            action_pack: None,
             max_results,
             total_candidates: 0,
+            namespace_applied,
         }
     }
 
@@ -192,19 +283,47 @@ impl ResultBuilder {
             contradiction_explains: ranking_result.contradiction_explains.clone(),
             answered_from,
         };
+        
+        // Basic provenance for now
+        let provenance = ProvenanceSummary {
+            source_agent: "core_engine",
+            original_namespace: namespace,
+            derived_from: None,
+        };
 
-        self.results.push(result);
+        self.evidence_pack.push(EvidenceItem {
+            result,
+            provenance,
+            omitted_fields: Vec::new(),
+        });
     }
 
     /// Builds the final result set, sorting by score and truncating.
     pub fn build(mut self, explain: RetrievalExplain) -> RetrievalResultSet {
-        self.results.sort_by(|a, b| b.score.cmp(&a.score));
-        let truncated = self.results.len() > self.max_results;
-        self.results.truncate(self.max_results);
+        self.evidence_pack.sort_by(|a, b| b.result.score.cmp(&a.result.score));
+        let truncated = self.evidence_pack.len() > self.max_results;
+        self.evidence_pack.truncate(self.max_results);
 
         RetrievalResultSet {
-            results: self.results,
+            evidence_pack: self.evidence_pack,
+            action_pack: self.action_pack,
             explain,
+            policy_summary: PolicySummary {
+                namespace_applied: self.namespace_applied,
+                redactions_applied: false,
+                restrictions_active: Vec::new(),
+            },
+            omitted_summary: OmissionSummary {
+                policy_redacted: 0,
+                threshold_dropped: 0,
+                dedup_dropped: 0,
+            },
+            freshness_markers: FreshnessMarkers {
+                oldest_item_days: 0,
+                newest_item_days: 0,
+                volatile_items_included: false,
+            },
+            output_mode: DualOutputMode::Balanced,
             truncated,
             total_candidates: self.total_candidates,
         }
@@ -222,7 +341,7 @@ mod tests {
 
     #[test]
     fn result_builder_sorts_by_score_and_truncates() {
-        let mut builder = ResultBuilder::new(2);
+        let mut builder = ResultBuilder::new(2, ns("test"));
 
         let low = fuse_scores(
             RankingInput {
@@ -285,8 +404,8 @@ mod tests {
         assert!(result_set.truncated);
         assert_eq!(result_set.total_candidates, 3);
         // Highest score first
-        assert!(result_set.results[0].score >= result_set.results[1].score);
-        assert_eq!(result_set.results[0].memory_id, MemoryId(2));
+        assert!(result_set.evidence_pack[0].result.score >= result_set.evidence_pack[1].result.score);
+        assert_eq!(result_set.evidence_pack[0].result.memory_id, MemoryId(2));
     }
 
     #[test]
@@ -302,7 +421,7 @@ mod tests {
             contradictions_found: 0,
         };
 
-        let result_set = RetrievalResultSet::empty(explain);
+        let result_set = RetrievalResultSet::empty(explain, ns("test"));
         assert_eq!(result_set.count(), 0);
         assert!(!result_set.truncated);
         assert!(!result_set.has_contradictions());
