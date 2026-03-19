@@ -1,5 +1,6 @@
 use membrain_core::engine::encode::EncodeEngine;
 use membrain_core::observability::EncodeFastPathStage;
+use membrain_core::policy::{IngestMode, PassiveObservationDecision};
 use membrain_core::types::{
     CanonicalMemoryType, FastPathRouteFamily, RawEncodeInput, RawIntakeKind,
 };
@@ -35,6 +36,8 @@ fn normalization_and_fingerprint_are_stable_for_equivalent_whitespace() {
         ]
     );
     assert_eq!(first.trace.duplicate_hint_candidate_count, 0);
+    assert_eq!(first.write_decision, PassiveObservationDecision::Capture);
+    assert!(!first.captured_as_observation);
     assert!(first.trace.stayed_within_latency_budget);
 }
 
@@ -90,4 +93,50 @@ fn provisional_salience_stays_bounded_and_inspectable() {
         preference.trace.route_family,
         FastPathRouteFamily::UserPreference
     );
+}
+
+#[test]
+fn passive_observation_capture_stays_explicit_when_policy_allows() {
+    let engine = test_engine();
+
+    let observed = engine.prepare_ingest_candidate(
+        RawEncodeInput::new(RawIntakeKind::Observation, "fresh passive signal"),
+        IngestMode::PassiveObservation,
+        true,
+        false,
+    );
+
+    assert_eq!(observed.write_decision, PassiveObservationDecision::Capture);
+    assert!(observed.captured_as_observation);
+}
+
+#[test]
+fn passive_observation_denial_blocks_capture_when_namespace_is_not_bound() {
+    let engine = test_engine();
+
+    let denied = engine.prepare_ingest_candidate(
+        RawEncodeInput::new(RawIntakeKind::Observation, "denied passive observation"),
+        IngestMode::PassiveObservation,
+        false,
+        false,
+    );
+
+    assert_eq!(denied.write_decision, PassiveObservationDecision::Deny);
+    assert!(!denied.captured_as_observation);
+}
+
+#[test]
+fn passive_observation_duplicate_hints_are_suppressed() {
+    let engine = test_engine();
+
+    let suppressed = engine.prepare_ingest_candidate(
+        RawEncodeInput::new(RawIntakeKind::Observation, "passive duplicate hint"),
+        IngestMode::PassiveObservation,
+        true,
+        true,
+    );
+
+    assert_eq!(suppressed.write_decision, PassiveObservationDecision::Suppress);
+    assert_eq!(suppressed.trace.duplicate_hint_candidate_count, 1);
+    assert!(!suppressed.captured_as_observation);
 }

@@ -2,6 +2,9 @@ use crate::config::RuntimeConfig;
 use crate::observability::{
     AdmissionOutcomeKind, EncodeFastPathStage, EncodeFastPathTrace, WorkingMemoryTrace,
 };
+use crate::policy::{
+    IngestMode, ObservationWriteOutcome, PassiveObservationDecision, PolicyGateway,
+};
 use crate::types::{
     CanonicalMemoryType, FastPathRouteFamily, NormalizedMemoryEnvelope, RawEncodeInput,
     WorkingMemoryId, WorkingMemoryItem,
@@ -45,6 +48,10 @@ pub struct PreparedEncodeCandidate {
     pub classification: ShallowClassification,
     /// First-pass salience scalar used for initial routing inputs.
     pub provisional_salience: u16,
+    /// Whether this input should be captured, suppressed, or denied before persistence.
+    pub write_decision: PassiveObservationDecision,
+    /// Whether this candidate was admitted through passive-observation capture.
+    pub captured_as_observation: bool,
     /// Structured trace proving the ordered fast-path stages.
     pub trace: EncodeFastPathTrace,
 }
@@ -190,6 +197,21 @@ impl EncodeEngine {
         }
     }
 
+    fn write_gate(
+        &self,
+        policy: &impl PolicyGateway,
+        ingest_mode: IngestMode,
+        namespace_bound: bool,
+        duplicate_hint: bool,
+    ) -> ObservationWriteOutcome {
+        policy.evaluate_observation_write(crate::policy::ObservationWriteRequest {
+            ingest_mode,
+            namespace_bound,
+            policy_allowed: namespace_bound,
+            duplicate_hint,
+        })
+    }
+
     /// Returns the bounded working-memory controller.
     pub fn working_memory(&self) -> &WorkingMemoryController {
         &self.working_memory
@@ -259,17 +281,37 @@ impl EncodeEngine {
 
     /// Runs the ordered synchronous encode fast path before persistence.
     pub fn prepare_fast_path(&self, input: RawEncodeInput) -> PreparedEncodeCandidate {
+        self.prepare_ingest_candidate(input, IngestMode::Active, true, false)
+    }
+
+    /// Runs the bounded encode fast path with explicit ingest-mode write gating.
+    pub fn prepare_ingest_candidate(
+        &self,
+        input: RawEncodeInput,
+        ingest_mode: IngestMode,
+        namespace_bound: bool,
+        duplicate_hint: bool,
+    ) -> PreparedEncodeCandidate {
         let normalized = self.normalize_input(input);
         let fingerprint = self.fingerprint(&normalized);
         let classification = self.shallow_classify(&normalized);
         let provisional_salience = self.provisional_salience(&normalized, classification);
+        let write_gate = self.write_gate(
+            &crate::policy::PolicyModule,
+            ingest_mode,
+            namespace_bound,
+            duplicate_hint,
+        );
         let trace = EncodeFastPathTrace {
             stages: FAST_PATH_STAGES,
             normalization_generation: normalized.normalization_generation,
             memory_type: normalized.memory_type,
             route_family: classification.route_family,
             provisional_salience,
-            duplicate_hint_candidate_count: 0,
+            duplicate_hint_candidate_count: usize::from(matches!(
+                write_gate.decision,
+                PassiveObservationDecision::Suppress
+            )),
             stayed_within_latency_budget: true,
         };
 
@@ -278,6 +320,8 @@ impl EncodeEngine {
             fingerprint,
             classification,
             provisional_salience,
+            write_decision: write_gate.decision,
+            captured_as_observation: write_gate.captured_as_observation,
             trace,
         }
     }
@@ -296,5 +340,65 @@ impl EncodeRuntime for EncodeEngine {
 
     fn prepare_fast_path(&self, input: RawEncodeInput) -> PreparedEncodeCandidate {
         self.prepare_fast_path(input)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::EncodeEngine;
+    use crate::policy::IngestMode;
+    use crate::policy::PassiveObservationDecision;
+    use crate::types::{RawEncodeInput, RawIntakeKind};
+    use crate::RuntimeConfig;
+
+    fn test_engine() -> EncodeEngine {
+        EncodeEngine::new(RuntimeConfig::default())
+    }
+
+    #[test]
+    fn active_ingest_capture_and_denial_remain_explicit() {
+        let engine = test_engine();
+
+        let captured = engine.prepare_ingest_candidate(
+            RawEncodeInput::new(RawIntakeKind::Event, "active ingest"),
+            IngestMode::Active,
+            true,
+            false,
+        );
+        let denied = engine.prepare_ingest_candidate(
+            RawEncodeInput::new(RawIntakeKind::Event, "denied active ingest"),
+            IngestMode::Active,
+            false,
+            false,
+        );
+
+        assert_eq!(captured.write_decision, PassiveObservationDecision::Capture);
+        assert!(!captured.captured_as_observation);
+        assert_eq!(denied.write_decision, PassiveObservationDecision::Deny);
+        assert!(!denied.captured_as_observation);
+    }
+
+    #[test]
+    fn passive_observation_capture_and_suppression_remain_distinct() {
+        let engine = test_engine();
+
+        let captured = engine.prepare_ingest_candidate(
+            RawEncodeInput::new(RawIntakeKind::Observation, "fresh passive signal"),
+            IngestMode::PassiveObservation,
+            true,
+            false,
+        );
+        let suppressed = engine.prepare_ingest_candidate(
+            RawEncodeInput::new(RawIntakeKind::Observation, "passive duplicate hint"),
+            IngestMode::PassiveObservation,
+            true,
+            true,
+        );
+
+        assert_eq!(captured.write_decision, PassiveObservationDecision::Capture);
+        assert!(captured.captured_as_observation);
+        assert_eq!(suppressed.write_decision, PassiveObservationDecision::Suppress);
+        assert!(!suppressed.captured_as_observation);
+        assert_eq!(suppressed.trace.duplicate_hint_candidate_count, 1);
     }
 }

@@ -224,13 +224,20 @@ impl LocalTextEmbedder for FastembedTextEmbedder {
             .embed(texts, Some(1))
             .map_err(|error| EmbedError::LocalBackendUnavailable(error.to_string()))?;
 
-        match vectors.into_iter().next() {
-            Some(vector) => Ok(vector),
-            None => Err(EmbedError::UnexpectedEmbeddingCount {
+        if vectors.len() != 1 {
+            return Err(EmbedError::UnexpectedEmbeddingCount {
+                expected: 1,
+                actual: vectors.len(),
+            });
+        }
+
+        vectors
+            .into_iter()
+            .next()
+            .ok_or(EmbedError::UnexpectedEmbeddingCount {
                 expected: 1,
                 actual: 0,
-            }),
-        }
+            })
     }
 
     fn embed_texts(
@@ -518,6 +525,7 @@ mod tests {
         dimensions: usize,
         single_calls: usize,
         batch_calls: usize,
+        extra_single_result: bool,
     }
 
     impl FakeEmbedder {
@@ -527,7 +535,13 @@ mod tests {
                 dimensions,
                 single_calls: 0,
                 batch_calls: 0,
+                extra_single_result: false,
             }
+        }
+
+        fn with_extra_single_result(mut self) -> Self {
+            self.extra_single_result = true;
+            self
         }
 
         fn vector_for(&self, purpose: EmbeddingPurpose, normalized_text: &str) -> Vec<f32> {
@@ -574,7 +588,17 @@ mod tests {
             normalized_text: &str,
         ) -> Result<Vec<f32>, EmbedError> {
             self.single_calls += 1;
-            Ok(self.vector_for(purpose, normalized_text))
+            let mut vectors = vec![self.vector_for(purpose, normalized_text)];
+            if self.extra_single_result {
+                vectors.push(self.vector_for(purpose, "unexpected extra result"));
+            }
+            match vectors.len() {
+                1 => Ok(vectors.remove(0)),
+                actual => Err(EmbedError::UnexpectedEmbeddingCount {
+                    expected: 1,
+                    actual,
+                }),
+            }
         }
 
         fn embed_texts(
@@ -668,5 +692,24 @@ mod tests {
         assert_eq!(second.trace.cache_miss_count, 0);
         assert_eq!(embedder.backend().batch_calls, 1);
         Ok(())
+    }
+
+    #[test]
+    fn single_embedding_path_rejects_multiple_results() {
+        let backend = FakeEmbedder::new("generation-a", 4).with_extra_single_result();
+        let mut embedder = CachedTextEmbedder::new(backend, 8);
+
+        let error = embedder
+            .get_or_embed(EmbeddingPurpose::Content, "normalized text")
+            .unwrap_err();
+        assert_eq!(
+            error,
+            EmbedError::UnexpectedEmbeddingCount {
+                expected: 1,
+                actual: 2,
+            }
+        );
+        assert_eq!(embedder.backend().single_calls, 1);
+        assert!(embedder.cache().is_empty());
     }
 }

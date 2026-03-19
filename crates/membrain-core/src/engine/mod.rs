@@ -4,6 +4,8 @@ pub mod consolidation;
 pub mod encode;
 /// Forgetting and demotion maintenance surfaces.
 pub mod forgetting;
+/// Shared cancellable maintenance control surfaces.
+pub mod maintenance;
 /// Ranking and score-fusion surfaces.
 pub mod ranking;
 /// Recall-path orchestration surfaces.

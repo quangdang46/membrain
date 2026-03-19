@@ -1,3 +1,4 @@
+use crate::api::ApiModule;
 use crate::config::RuntimeConfig;
 use crate::embed::EmbedModule;
 use crate::engine::consolidation::ConsolidationEngine;
@@ -20,6 +21,7 @@ use crate::types::CoreApiVersion;
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct BrainStore {
     config: RuntimeConfig,
+    api: ApiModule,
     policy: PolicyModule,
     observability: ObservabilityModule,
     encode: EncodeEngine,
@@ -42,6 +44,7 @@ impl BrainStore {
     pub fn new(config: RuntimeConfig) -> Self {
         Self {
             config,
+            api: ApiModule,
             policy: PolicyModule,
             observability: ObservabilityModule,
             encode: EncodeEngine::new(config),
@@ -63,6 +66,11 @@ impl BrainStore {
     /// Returns the runtime configuration carried by this facade.
     pub fn config(&self) -> RuntimeConfig {
         self.config
+    }
+
+    /// Returns the shared API envelope and validation surface used by wrappers.
+    pub fn api(&self) -> &ApiModule {
+        &self.api
     }
 
     /// Returns the shared policy surface used by wrappers.

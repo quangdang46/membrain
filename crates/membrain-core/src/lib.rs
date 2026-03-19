@@ -1,6 +1,7 @@
 //! Canonical core crate boundaries for the initial workspace bootstrap.
 
 /// Stable top-level core facade and module composition.
+pub mod api;
 pub mod brain_store;
 /// Shared runtime configuration and bounded-work budgets.
 pub mod config;

@@ -1,6 +1,6 @@
 use membrain_core::engine::encode::EncodeRuntime;
 use membrain_core::engine::ranking::RankingRuntime;
-use membrain_core::engine::recall::RecallRuntime;
+use membrain_core::engine::recall::{RecallRuntime, RecallTraceStage};
 use membrain_core::observability::OutcomeClass;
 use membrain_core::policy::{PolicyDecision, PolicyGateway};
 use membrain_core::store::hot::Tier1HotMetadataStore;
@@ -96,6 +96,48 @@ fn cli_can_prepare_the_synchronous_encode_fast_path_through_core() {
 }
 
 #[test]
+fn cli_can_exercise_recall_route_explain_contract_through_core() {
+    let store = BrainStore::new(RuntimeConfig::default());
+
+    let exact_plan = store
+        .recall_engine()
+        .plan_recall(membrain_core::engine::recall::RecallRequest::exact(MemoryId(42)), store.config());
+    let small_lookup_plan = store.recall_engine().plan_recall(
+        membrain_core::engine::recall::RecallRequest::small_session_lookup(SessionId(7)),
+        store.config(),
+    );
+
+    assert!(exact_plan.terminates_in_tier1());
+    assert!(exact_plan.route_summary.tier1_answers_directly);
+    assert!(exact_plan.route_summary.tier1_consulted_first);
+    assert!(!exact_plan.route_summary.routes_to_deeper_tiers);
+    assert_eq!(
+        exact_plan.route_summary.reason,
+        "exact memory id selects the direct Tier1 handle lane"
+    );
+    assert_eq!(
+        exact_plan.route_summary.trace_stages,
+        &[RecallTraceStage::Tier1ExactHandle]
+    );
+
+    assert!(!small_lookup_plan.terminates_in_tier1());
+    assert!(!small_lookup_plan.route_summary.tier1_answers_directly);
+    assert!(small_lookup_plan.route_summary.tier1_consulted_first);
+    assert!(small_lookup_plan.route_summary.routes_to_deeper_tiers);
+    assert_eq!(
+        small_lookup_plan.route_summary.reason,
+        "small session lookup scans the Tier1 recent window before Tier2 exact"
+    );
+    assert_eq!(
+        small_lookup_plan.route_summary.trace_stages,
+        &[
+            RecallTraceStage::Tier1RecentWindow,
+            RecallTraceStage::Tier2Exact,
+        ]
+    );
+}
+
+#[test]
 fn cli_can_drive_tier1_hot_metadata_store_session_windows() {
     let store = BrainStore::new(RuntimeConfig::default());
     let mut hot: Tier1HotMetadataStore = store.hot_store().new_metadata_store(3);
@@ -133,4 +175,28 @@ fn cli_can_drive_tier1_hot_metadata_store_session_windows() {
     assert_eq!(recent.trace.payload_fetch_count, 0);
     assert!(recent.trace.session_window_hit);
     assert_eq!(exact.trace.payload_fetch_count, 0);
+}
+
+#[test]
+fn cli_zero_limit_recent_windows_stay_empty() {
+    let store = BrainStore::new(RuntimeConfig::default());
+    let mut hot: Tier1HotMetadataStore = store.hot_store().new_metadata_store(3);
+
+    hot.seed(Tier1HotRecord::metadata_only(
+        MemoryId(1),
+        SessionId(7),
+        CanonicalMemoryType::Event,
+        FastPathRouteFamily::Event,
+        "only record",
+        11,
+        300,
+        16_384,
+    ));
+
+    let recent = hot.recent_for_session(SessionId(7), 0);
+
+    assert!(recent.records.is_empty());
+    assert_eq!(recent.trace.payload_fetch_count, 0);
+    assert_eq!(recent.trace.recent_candidates_inspected, 0);
+    assert!(!recent.trace.session_window_hit);
 }
