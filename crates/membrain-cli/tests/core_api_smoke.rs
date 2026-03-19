@@ -1,3 +1,4 @@
+use membrain_core::api::NamespaceId;
 use membrain_core::engine::encode::EncodeRuntime;
 use membrain_core::engine::ranking::RankingRuntime;
 use membrain_core::engine::recall::{RecallRuntime, RecallTraceStage};
@@ -140,9 +141,11 @@ fn cli_can_exercise_recall_route_explain_contract_through_core() {
 #[test]
 fn cli_can_drive_tier1_hot_metadata_store_session_windows() {
     let store = BrainStore::new(RuntimeConfig::default());
+    let namespace = NamespaceId::new("cli.team").unwrap();
     let mut hot: Tier1HotMetadataStore = store.hot_store().new_metadata_store(3);
 
     hot.seed(Tier1HotRecord::metadata_only(
+        namespace.clone(),
         MemoryId(1),
         SessionId(7),
         CanonicalMemoryType::Event,
@@ -153,6 +156,7 @@ fn cli_can_drive_tier1_hot_metadata_store_session_windows() {
         16_384,
     ));
     hot.seed(Tier1HotRecord::metadata_only(
+        namespace.clone(),
         MemoryId(2),
         SessionId(7),
         CanonicalMemoryType::Event,
@@ -163,8 +167,8 @@ fn cli_can_drive_tier1_hot_metadata_store_session_windows() {
         16_384,
     ));
 
-    let recent = hot.recent_for_session(SessionId(7), 2);
-    let exact = hot.exact_lookup(MemoryId(2));
+    let recent = hot.recent_for_session(&namespace, SessionId(7), 2);
+    let exact = hot.exact_lookup(&namespace, MemoryId(2));
 
     assert_eq!(recent.records.len(), 2);
     assert_eq!(recent.records[0].memory_id, MemoryId(2));
@@ -180,9 +184,11 @@ fn cli_can_drive_tier1_hot_metadata_store_session_windows() {
 #[test]
 fn cli_zero_limit_recent_windows_stay_empty() {
     let store = BrainStore::new(RuntimeConfig::default());
+    let namespace = NamespaceId::new("cli.team").unwrap();
     let mut hot: Tier1HotMetadataStore = store.hot_store().new_metadata_store(3);
 
     hot.seed(Tier1HotRecord::metadata_only(
+        namespace.clone(),
         MemoryId(1),
         SessionId(7),
         CanonicalMemoryType::Event,
@@ -193,7 +199,7 @@ fn cli_zero_limit_recent_windows_stay_empty() {
         16_384,
     ));
 
-    let recent = hot.recent_for_session(SessionId(7), 0);
+    let recent = hot.recent_for_session(&namespace, SessionId(7), 0);
 
     assert!(recent.records.is_empty());
     assert_eq!(recent.trace.payload_fetch_count, 0);

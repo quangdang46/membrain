@@ -44,7 +44,27 @@ fn admitted_item_is_buffered_without_durable_write_before_overflow() {
     assert_eq!(admission.outcome, AdmissionOutcomeKind::Buffered);
     assert!(admission.promoted_item.is_none());
     assert!(admission.evicted_item.is_none());
+    assert_eq!(admission.trace.slot_pressure, 0);
+    assert_eq!(admission.trace.threshold, 200);
+    assert!(!admission.trace.overflowed);
     assert_eq!(controller.slots(), &[item]);
+}
+
+#[test]
+fn buffered_admission_reports_pre_decision_slot_pressure() {
+    let mut controller = WorkingMemoryController::new(test_config());
+    controller
+        .admit(WorkingMemoryItem::new(WorkingMemoryId(60), 400))
+        .expect("seed item should admit");
+
+    let admission = controller
+        .admit(WorkingMemoryItem::new(WorkingMemoryId(61), 450))
+        .expect("second buffered item should admit");
+
+    assert_eq!(admission.outcome, AdmissionOutcomeKind::Buffered);
+    assert_eq!(admission.trace.slot_pressure, 1);
+    assert_eq!(admission.trace.threshold, 200);
+    assert!(!admission.trace.overflowed);
 }
 
 #[test]

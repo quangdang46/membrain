@@ -266,5 +266,6 @@ Contract precedence and scope ownership work as follows:
 1. `PLAN.md` is the canonical design contract and tie-breaker.
 2. Subsystem docs under `docs/` elaborate one surface at a time and must stay consistent with the plan.
 3. `CONTRIBUTING.md` freezes contributor-facing evidence requirements, review gates, and PR rejection triggers derived from the canonical plan.
-4. `INDEX.md` is a navigation aid; it helps readers find the right contract surface but does not redefine it.
-5. `../AGENTS.md` translates these contracts into day-to-day execution, coordination, and handoff guidance; it clarifies workflow but does not change product behavior or evidence thresholds.
+4. `ARCHITECTURE.md` freezes workspace shape, module ownership seams, and read/write-path boundaries for implementation work derived from the canonical plan.
+5. `INDEX.md` is a navigation aid; it helps readers find the right contract surface but does not redefine it.
+6. `../AGENTS.md` translates these contracts into day-to-day execution, coordination, and handoff guidance; it clarifies workflow but does not change product behavior, module ownership, or evidence thresholds.

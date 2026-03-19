@@ -21,11 +21,12 @@
 
 1. `PLAN.md` is the canonical design contract and wins when another document drifts.
 2. Subsystem docs under `docs/` elaborate the relevant surface; they do not override the plan.
-3. `CONTRIBUTING.md` freezes contributor-facing evidence requirements, quality gates, and PR rejection triggers.
-4. `../AGENTS.md` translates those contracts into day-to-day workflow, coordination, and troubleshooting guidance for active contributors.
-5. Entry-point docs and indexes help readers navigate; they do not redefine the contract.
+3. `ARCHITECTURE.md` freezes workspace shape, module ownership seams, and read/write-path boundaries derived from the plan.
+4. `CONTRIBUTING.md` freezes contributor-facing evidence requirements, quality gates, and PR rejection triggers.
+5. `../AGENTS.md` translates those contracts into day-to-day workflow, coordination, and troubleshooting guidance for active contributors.
+6. Entry-point docs and indexes help readers navigate; they do not redefine the contract.
 
-Use this split intentionally: decide **what the system promises** and **what evidence a change owes** from `PLAN.md` plus the relevant subsystem doc and `CONTRIBUTING.md`; decide **how to execute, coordinate, and hand off work** from `../AGENTS.md`.
+Use this split intentionally: decide **what the system promises** from `PLAN.md` plus the relevant subsystem doc; use `ARCHITECTURE.md` when the question is workspace shape, module ownership, or boundary placement; use `CONTRIBUTING.md` to decide **what evidence a change owes**; use `../AGENTS.md` to decide **how to execute, coordinate, and hand off work**.
 
 ### Safe local clarification vs. stop-and-escalate
 

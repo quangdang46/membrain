@@ -51,6 +51,7 @@ fn tier2_prefilter_view_exposes_namespace_safe_metadata_fields() {
 
     let layout = store.layout_item(namespace, MemoryId(99), SessionId(13), 12345, &envelope);
     let prefilter = layout.prefilter_view();
+    let trace = layout.prefilter_trace();
 
     assert_eq!(prefilter.namespace.as_str(), "team.alpha");
     assert_eq!(prefilter.memory_id, MemoryId(99));
@@ -59,6 +60,9 @@ fn tier2_prefilter_view_exposes_namespace_safe_metadata_fields() {
     assert_eq!(prefilter.fingerprint, 12345);
     assert_eq!(prefilter.payload_size_bytes, "raw source evidence".len());
     assert_eq!(prefilter.payload_locator, layout.metadata.payload_locator);
+    assert!(layout.prefilter_stays_metadata_only());
+    assert_eq!(trace.metadata_candidate_count, 1);
+    assert_eq!(trace.payload_fetch_count, 0);
 }
 
 #[test]
@@ -79,6 +83,7 @@ fn tier2_metadata_index_key_matches_namespace_safe_identity_fields() {
     assert_eq!(key.compact_text, layout.metadata.compact_text);
     assert_eq!(key.normalization_generation, layout.metadata.normalization_generation);
     assert_eq!(key.payload_locator, layout.metadata.payload_locator);
+    assert!(layout.index_key_stays_metadata_only());
 }
 
 #[test]
@@ -103,4 +108,33 @@ fn tier2_payload_locator_changes_with_namespace_for_same_memory_id() {
 
     assert_ne!(alpha.payload.payload_locator.namespace, beta.payload.payload_locator.namespace);
     assert_eq!(alpha.payload.payload_locator.slot, beta.payload.payload_locator.slot);
+    assert_eq!(alpha.payload.payload_locator.shard, beta.payload.payload_locator.shard);
+}
+
+#[test]
+fn tier2_payload_body_stays_outside_prefilter_and_index_views() {
+    let store = Tier2Store;
+    let envelope = normalized_event(
+        "full payload with detail that should stay detached",
+        "compact summary",
+    );
+
+    let layout = store.layout_item(
+        NamespaceId::new("team.alpha").unwrap(),
+        MemoryId(17),
+        SessionId(2),
+        88,
+        &envelope,
+    );
+    let prefilter = layout.prefilter_view();
+    let key = layout.metadata_index_key();
+    let payload = layout.payload_record();
+
+    assert_eq!(prefilter.compact_text, "compact summary");
+    assert_eq!(key.compact_text, "compact summary");
+    assert_eq!(prefilter.payload_locator, payload.payload_locator);
+    assert_eq!(key.payload_locator, payload.payload_locator);
+    assert_ne!(payload.raw_text, prefilter.compact_text);
+    assert_ne!(payload.raw_text, key.compact_text);
+    assert_eq!(layout.prefilter_trace().payload_fetch_count, 0);
 }

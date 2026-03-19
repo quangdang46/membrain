@@ -1,3 +1,4 @@
+use crate::api::NamespaceId;
 use crate::observability::{Tier1LookupLane, Tier1LookupOutcome, Tier1LookupTrace};
 use crate::store::HotStoreApi;
 use crate::types::{MemoryId, SessionId, Tier1HotRecord};
@@ -38,8 +39,8 @@ pub struct Tier1RecentLookup {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Tier1HotMetadataStore {
     capacity: usize,
-    exact: HashMap<MemoryId, Tier1HotRecord>,
-    recent: VecDeque<MemoryId>,
+    exact: HashMap<(NamespaceId, MemoryId), Tier1HotRecord>,
+    recent: VecDeque<(NamespaceId, MemoryId)>,
 }
 
 impl Tier1HotMetadataStore {
@@ -64,10 +65,10 @@ impl Tier1HotMetadataStore {
 
     /// Seeds or refreshes one hot metadata record without loading a heavyweight payload.
     pub fn seed(&mut self, record: Tier1HotRecord) {
-        let id = record.memory_id;
-        if self.exact.contains_key(&id) {
-            self.exact.insert(id, record);
-            self.touch_recent(id);
+        let key = (record.namespace.clone(), record.memory_id);
+        if self.exact.contains_key(&key) {
+            self.exact.insert(key.clone(), record);
+            self.touch_recent(key);
             return;
         }
 
@@ -77,18 +78,19 @@ impl Tier1HotMetadataStore {
             }
         }
 
-        self.exact.insert(id, record);
-        self.recent.push_back(id);
+        self.exact.insert(key.clone(), record);
+        self.recent.push_back(key);
     }
 
-    /// Performs a bounded Tier1 exact lookup by stable memory id.
-    pub fn exact_lookup(&mut self, memory_id: MemoryId) -> Tier1ExactLookup {
-        self.exact_lookup_with_budget(memory_id, 1)
+    /// Performs a bounded Tier1 exact lookup by stable namespace and memory id.
+    pub fn exact_lookup(&mut self, namespace: &NamespaceId, memory_id: MemoryId) -> Tier1ExactLookup {
+        self.exact_lookup_with_budget(namespace, memory_id, 1)
     }
 
-    /// Performs a bounded Tier1 exact lookup by stable memory id with an explicit candidate budget.
+    /// Performs a bounded Tier1 exact lookup by stable namespace and memory id with an explicit candidate budget.
     pub fn exact_lookup_with_budget(
         &mut self,
+        namespace: &NamespaceId,
         memory_id: MemoryId,
         candidate_budget: usize,
     ) -> Tier1ExactLookup {
@@ -105,9 +107,10 @@ impl Tier1HotMetadataStore {
             };
         }
 
-        let record = self.exact.get(&memory_id).cloned();
+        let key = (namespace.clone(), memory_id);
+        let record = self.exact.get(&key).cloned();
         if record.is_some() {
-            self.touch_recent(memory_id);
+            self.touch_recent(key);
         }
         Tier1ExactLookup {
             trace: Tier1LookupTrace {
@@ -125,14 +128,20 @@ impl Tier1HotMetadataStore {
         }
     }
 
-    /// Performs a bounded recent-window scan for one session.
-    pub fn recent_for_session(&self, session_id: SessionId, limit: usize) -> Tier1RecentLookup {
-        self.recent_for_session_with_budget(session_id, limit, self.capacity)
+    /// Performs a bounded recent-window scan for one namespace-local session.
+    pub fn recent_for_session(
+        &self,
+        namespace: &NamespaceId,
+        session_id: SessionId,
+        limit: usize,
+    ) -> Tier1RecentLookup {
+        self.recent_for_session_with_budget(namespace, session_id, limit, self.capacity)
     }
 
-    /// Performs a bounded recent-window scan for one session with an explicit candidate budget.
+    /// Performs a bounded recent-window scan for one namespace-local session with an explicit candidate budget.
     pub fn recent_for_session_with_budget(
         &self,
+        namespace: &NamespaceId,
         session_id: SessionId,
         limit: usize,
         candidate_budget: usize,
@@ -154,16 +163,16 @@ impl Tier1HotMetadataStore {
             };
         }
 
-        for memory_id in self.recent.iter().rev() {
+        for key in self.recent.iter().rev() {
             if inspected >= candidate_budget {
                 break;
             }
 
-            let Some(record) = self.exact.get(memory_id) else {
+            let Some(record) = self.exact.get(key) else {
                 continue;
             };
             inspected += 1;
-            if record.session_id == session_id {
+            if &record.namespace == namespace && record.session_id == session_id {
                 records.push(record.clone());
                 if records.len() >= bounded_limit {
                     break;
@@ -187,27 +196,34 @@ impl Tier1HotMetadataStore {
         }
     }
 
-    fn touch_recent(&mut self, memory_id: MemoryId) {
+    fn touch_recent(&mut self, key: (NamespaceId, MemoryId)) {
         if let Some(position) = self
             .recent
             .iter()
-            .position(|candidate| candidate == &memory_id)
+            .position(|candidate| candidate == &key)
         {
             self.recent.remove(position);
         }
-        self.recent.push_back(memory_id);
+        self.recent.push_back(key);
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::Tier1HotMetadataStore;
+    use crate::api::NamespaceId;
     use crate::types::{
         CanonicalMemoryType, FastPathRouteFamily, MemoryId, SessionId, Tier1HotRecord,
     };
 
-    fn seed_record(memory_id: u64, session_id: u64, compact_text: &str) -> Tier1HotRecord {
+    fn seed_record(
+        namespace: &str,
+        memory_id: u64,
+        session_id: u64,
+        compact_text: &str,
+    ) -> Tier1HotRecord {
         Tier1HotRecord::metadata_only(
+            NamespaceId::new(namespace).unwrap(),
             MemoryId(memory_id),
             SessionId(session_id),
             CanonicalMemoryType::Event,
@@ -221,33 +237,66 @@ mod tests {
 
     #[test]
     fn exact_lookup_refreshes_recency_before_eviction() {
+        let namespace = NamespaceId::new("team.alpha").unwrap();
         let mut store = Tier1HotMetadataStore::new(2);
-        store.seed(seed_record(1, 10, "older"));
-        store.seed(seed_record(2, 10, "newer"));
+        store.seed(seed_record("team.alpha", 1, 10, "older"));
+        store.seed(seed_record("team.alpha", 2, 10, "newer"));
 
-        let exact = store.exact_lookup(MemoryId(1));
-        store.seed(seed_record(3, 10, "newest"));
+        let exact = store.exact_lookup(&namespace, MemoryId(1));
+        store.seed(seed_record("team.alpha", 3, 10, "newest"));
 
         assert_eq!(exact.record.as_ref().map(|record| record.memory_id), Some(MemoryId(1)));
-        assert!(store.exact_lookup(MemoryId(1)).record.is_some());
-        assert!(store.exact_lookup(MemoryId(2)).record.is_none());
-        assert!(store.exact_lookup(MemoryId(3)).record.is_some());
+        assert!(store.exact_lookup(&namespace, MemoryId(1)).record.is_some());
+        assert!(store.exact_lookup(&namespace, MemoryId(2)).record.is_none());
+        assert!(store.exact_lookup(&namespace, MemoryId(3)).record.is_some());
     }
 
     #[test]
     fn default_recent_lookup_scans_past_interleaved_foreign_session_entries() {
+        let namespace = NamespaceId::new("team.alpha").unwrap();
         let mut store = Tier1HotMetadataStore::new(4);
-        store.seed(seed_record(1, 10, "target older"));
-        store.seed(seed_record(2, 20, "foreign newest"));
-        store.seed(seed_record(3, 10, "target newer"));
-        store.seed(seed_record(4, 30, "foreign newest-most"));
+        store.seed(seed_record("team.alpha", 1, 10, "target older"));
+        store.seed(seed_record("team.alpha", 2, 20, "foreign newest"));
+        store.seed(seed_record("team.alpha", 3, 10, "target newer"));
+        store.seed(seed_record("team.alpha", 4, 30, "foreign newest-most"));
 
-        let recent = store.recent_for_session(SessionId(10), 2);
+        let recent = store.recent_for_session(&namespace, SessionId(10), 2);
 
         assert_eq!(recent.records.len(), 2);
         assert_eq!(recent.records[0].memory_id, MemoryId(3));
         assert_eq!(recent.records[1].memory_id, MemoryId(1));
         assert_eq!(recent.trace.recent_candidates_inspected, 4);
         assert!(recent.trace.session_window_hit);
+    }
+
+    #[test]
+    fn exact_lookup_does_not_cross_namespace_on_colliding_memory_ids() {
+        let namespace = NamespaceId::new("team.alpha").unwrap();
+        let mut store = Tier1HotMetadataStore::new(3);
+        store.seed(seed_record("team.alpha", 7, 10, "alpha record"));
+        store.seed(seed_record("team.beta", 7, 10, "beta record"));
+
+        let exact = store.exact_lookup(&namespace, MemoryId(7));
+
+        assert_eq!(exact.record.as_ref().map(|record| record.compact_text.as_str()), Some("alpha record"));
+        assert_eq!(exact.record.as_ref().map(|record| record.namespace.as_str()), Some("team.alpha"));
+    }
+
+    #[test]
+    fn recent_lookup_only_returns_records_for_the_requested_namespace() {
+        let namespace = NamespaceId::new("team.alpha").unwrap();
+        let mut store = Tier1HotMetadataStore::new(4);
+        store.seed(seed_record("team.alpha", 1, 10, "alpha older"));
+        store.seed(seed_record("team.beta", 2, 10, "beta newer"));
+        store.seed(seed_record("team.alpha", 3, 10, "alpha newest"));
+        store.seed(seed_record("team.beta", 4, 10, "beta newest-most"));
+
+        let recent = store.recent_for_session(&namespace, SessionId(10), 2);
+
+        assert_eq!(recent.records.len(), 2);
+        assert!(recent.records.iter().all(|record| record.namespace == namespace));
+        assert_eq!(recent.records[0].memory_id, MemoryId(3));
+        assert_eq!(recent.records[1].memory_id, MemoryId(1));
+        assert_eq!(recent.trace.recent_candidates_inspected, 4);
     }
 }

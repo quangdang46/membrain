@@ -1,4 +1,4 @@
-use membrain_core::engine::encode::EncodeEngine;
+use membrain_core::engine::encode::{EncodeEngine, EncodeRuntime};
 use membrain_core::observability::EncodeFastPathStage;
 use membrain_core::policy::{IngestMode, PassiveObservationDecision};
 use membrain_core::types::{
@@ -139,4 +139,19 @@ fn passive_observation_duplicate_hints_are_suppressed() {
     assert_eq!(suppressed.write_decision, PassiveObservationDecision::Suppress);
     assert_eq!(suppressed.trace.duplicate_hint_candidate_count, 1);
     assert!(!suppressed.captured_as_observation);
+}
+
+#[test]
+fn encode_runtime_trait_delegates_to_the_inherent_fast_path() {
+    let engine = test_engine();
+    let runtime: &dyn EncodeRuntime = &engine;
+
+    let prepared = runtime.prepare_fast_path(RawEncodeInput::new(
+        RawIntakeKind::Event,
+        "trait dispatched encode",
+    ));
+
+    assert_eq!(prepared.normalized.compact_text, "trait dispatched encode");
+    assert_eq!(prepared.write_decision, PassiveObservationDecision::Capture);
+    assert!(!prepared.captured_as_observation);
 }

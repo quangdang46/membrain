@@ -70,6 +70,24 @@ pub struct Tier1LookupTrace {
     pub payload_fetch_count: usize,
 }
 
+/// Machine-readable Tier2 outcomes for metadata-first durable item planning.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Tier2PrefilterOutcome {
+    Ready,
+    Bypass,
+}
+
+/// Stable trace artifact for Tier2 metadata-first prefilter and index planning.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Tier2PrefilterTrace {
+    /// Whether the operation stayed on metadata-only durable rows.
+    pub outcome: Tier2PrefilterOutcome,
+    /// Number of durable metadata candidates exposed to the planner.
+    pub metadata_candidate_count: usize,
+    /// Number of heavyweight payload fetches triggered before the final cut.
+    pub payload_fetch_count: usize,
+}
+
 /// Machine-readable admission outcomes for the working-memory controller.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum AdmissionOutcomeKind {

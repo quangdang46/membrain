@@ -144,6 +144,8 @@ pub struct NormalizedMemoryEnvelope {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct MemoryId(pub u64);
 
+use crate::api::NamespaceId;
+
 /// Stable identifier for one session-local hot window.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct SessionId(pub u64);
@@ -158,6 +160,8 @@ pub enum Tier1PayloadState {
 /// Bounded Tier1 hot metadata entry used for exact and recent lookups.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Tier1HotRecord {
+    /// Effective namespace the hot memory is bound to.
+    pub namespace: NamespaceId,
     /// Stable durable identity of the hot memory.
     pub memory_id: MemoryId,
     /// Session-local hot window this record belongs to.
@@ -181,6 +185,7 @@ pub struct Tier1HotRecord {
 impl Tier1HotRecord {
     /// Builds a metadata-only Tier1 record.
     pub fn metadata_only(
+        namespace: NamespaceId,
         memory_id: MemoryId,
         session_id: SessionId,
         memory_type: CanonicalMemoryType,
@@ -191,6 +196,7 @@ impl Tier1HotRecord {
         payload_size_bytes: usize,
     ) -> Self {
         Self {
+            namespace,
             memory_id,
             session_id,
             memory_type,

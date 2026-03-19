@@ -1,3 +1,4 @@
+use crate::observability::OutcomeClass;
 use crate::policy::{PolicyGateway, PolicySummary, SafeguardOutcome as PolicySafeguardOutcome};
 use crate::types::SessionId;
 
@@ -151,7 +152,11 @@ impl BoundRequestContext {
 
     /// Evaluates the shared namespace gate before expensive work begins.
     pub fn evaluate_policy(&self, gateway: &impl PolicyGateway) -> PolicySummary {
-        gateway.evaluate_namespace(true)
+        if self.request.policy_context.caller_identity_bound {
+            gateway.evaluate_namespace(true)
+        } else {
+            PolicySummary::deny(true)
+        }
     }
 }
 
@@ -454,6 +459,7 @@ pub struct ResponseContext<T> {
     pub request_id: RequestId,
     pub namespace: NamespaceId,
     pub result: Option<T>,
+    pub outcome_class: OutcomeClass,
     pub error_kind: Option<ErrorKind>,
     pub retryable: bool,
     pub partial_success: bool,
@@ -472,6 +478,7 @@ impl<T> ResponseContext<T> {
             request_id,
             namespace,
             result: Some(result),
+            outcome_class: OutcomeClass::Accepted,
             error_kind: None,
             retryable: false,
             partial_success: false,
@@ -495,6 +502,7 @@ impl<T> ResponseContext<T> {
             request_id,
             namespace,
             result: None,
+            outcome_class: OutcomeClass::Rejected,
             retryable: error_kind.retryable(),
             error_kind: Some(error_kind),
             partial_success: false,
@@ -512,6 +520,7 @@ impl<T> ResponseContext<T> {
     /// Marks a successful response as partial without changing the result payload.
     pub fn with_partial_success(mut self) -> Self {
         self.partial_success = true;
+        self.outcome_class = OutcomeClass::Partial;
         self
     }
 
@@ -523,6 +532,12 @@ impl<T> ResponseContext<T> {
 
     /// Attaches machine-readable availability posture to this response.
     pub fn with_availability(mut self, availability: AvailabilitySummary) -> Self {
+        self.outcome_class = match availability.posture {
+            AvailabilityPosture::Full => self.outcome_class,
+            AvailabilityPosture::Degraded | AvailabilityPosture::ReadOnly | AvailabilityPosture::Offline => {
+                OutcomeClass::Degraded
+            }
+        };
         self.availability = Some(availability);
         self
     }
@@ -535,6 +550,7 @@ impl<T> ResponseContext<T> {
 
     /// Attaches a machine-readable safeguard summary to this response.
     pub fn with_safeguard(mut self, safeguard: PolicySafeguardOutcome) -> Self {
+        self.outcome_class = safeguard.outcome_class;
         self.safeguard = Some(safeguard);
         self
     }
@@ -561,9 +577,9 @@ mod tests {
     };
     use crate::observability::OutcomeClass;
     use crate::policy::{
-        ConfirmationState, OperationClass, PolicyDecision, PolicyGateway, PolicyModule,
-        PreflightState, ReversibilityKind, SafeguardOutcome as PolicySafeguardOutcome,
-        SafeguardReasonCode,
+        ConfidenceConstraint, ConfirmationState, OperationClass, PolicyDecision, PolicyGateway,
+        PolicyModule, PreflightState, ReversibilityKind, SafeguardAudit, SafeguardRequest,
+        SafeguardOutcome as PolicySafeguardOutcome, SafeguardReasonCode,
     };
     use crate::types::SessionId;
 
@@ -576,7 +592,10 @@ mod tests {
             session_id: Some(SessionId(7)),
             task_id: None,
             request_id: RequestId::new("req-1").unwrap(),
-            policy_context: PolicyContext::default(),
+            policy_context: PolicyContext {
+                include_public: false,
+                caller_identity_bound: true,
+            },
             time_budget_ms: Some(50),
         };
 
@@ -586,6 +605,27 @@ mod tests {
         assert_eq!(bound.namespace().as_str(), "team.alpha");
         assert_eq!(bound.request().session_id, Some(SessionId(7)));
         assert_eq!(policy.decision, PolicyDecision::Allow);
+    }
+
+    #[test]
+    fn namespace_policy_denies_when_caller_identity_is_not_bound() {
+        let request = RequestContext {
+            namespace: Some(NamespaceId::new("team.alpha").unwrap()),
+            workspace_id: None,
+            agent_id: None,
+            session_id: None,
+            task_id: None,
+            request_id: RequestId::new("req-1b").unwrap(),
+            policy_context: PolicyContext::default(),
+            time_budget_ms: None,
+        };
+
+        let bound = request.bind_namespace(None).unwrap();
+        let policy = bound.evaluate_policy(&PolicyModule);
+
+        assert_eq!(policy.decision, PolicyDecision::Deny);
+        assert!(policy.namespace_bound);
+        assert_eq!(policy.outcome_class, OutcomeClass::Rejected);
     }
 
     #[test]
@@ -652,17 +692,33 @@ mod tests {
             outcome_class: OutcomeClass::Blocked,
             preflight_state: PreflightState::Blocked,
             operation_class: OperationClass::AuthoritativeRewrite,
+            affected_scope: "effective_namespace",
+            impact_summary: "authoritative_rewrite_requires_window",
             blocked_reasons: vec![
                 SafeguardReasonCode::ConfirmationRequired,
                 SafeguardReasonCode::SnapshotRequired,
             ],
             preflight_checks: Vec::new(),
+            check_results: Vec::new(),
+            warnings: vec!["stale_generation"],
+            confidence_constraints: Some(ConfidenceConstraint {
+                minimum_level: "high",
+                change_my_mind_conditions: vec!["fresh_authoritative_inputs"],
+            }),
             reversibility: ReversibilityKind::RollbackViaSnapshot,
             confirmation: ConfirmationState {
                 required: true,
                 force_allowed: false,
                 confirmed: false,
                 generation_bound: None,
+            },
+            audit: SafeguardAudit {
+                event_kind: "safeguard_evaluation",
+                actor_source: "core_policy",
+                request_id: "policy-eval",
+                preview_id: None,
+                related_run: Some("authoritative-rewrite-run"),
+                scope_handle: "effective_namespace",
             },
             policy_summary: PolicyModule.evaluate_namespace(true),
         };
@@ -679,6 +735,7 @@ mod tests {
         assert!(success.ok);
         assert!(success.partial_success);
         assert_eq!(success.result, Some(7));
+        assert_eq!(success.outcome_class, OutcomeClass::Blocked);
         assert_eq!(success.error_kind, None);
         assert_eq!(success.availability, Some(availability));
         assert_eq!(success.policy_filters_applied.len(), 1);
@@ -687,6 +744,22 @@ mod tests {
         assert_eq!(
             success.safeguard.as_ref().unwrap().outcome_class,
             OutcomeClass::Blocked,
+        );
+        assert_eq!(
+            success.safeguard.as_ref().unwrap().affected_scope,
+            "effective_namespace",
+        );
+        assert_eq!(
+            success.safeguard.as_ref().unwrap().impact_summary,
+            "authoritative_rewrite_requires_window",
+        );
+        assert_eq!(
+            success.safeguard.as_ref().unwrap().warnings,
+            vec!["stale_generation"],
+        );
+        assert_eq!(
+            success.safeguard.as_ref().unwrap().audit.scope_handle,
+            "effective_namespace",
         );
         assert_eq!(
             success.policy_filters_applied[0].sharing_scope.state_name(),
@@ -704,6 +777,7 @@ mod tests {
             vec![ResponseWarning::new("budget", "time budget exhausted")],
         );
         assert!(!failure.ok);
+        assert_eq!(failure.outcome_class, OutcomeClass::Rejected);
         assert_eq!(failure.error_kind, Some(ErrorKind::TimeoutFailure));
         assert!(failure.retryable);
         assert_eq!(failure.warnings.len(), 1);
@@ -749,6 +823,63 @@ mod tests {
         assert_eq!(
             availability.recovery_condition_names(),
             vec!["run_doctor", "inspect_state"],
+        );
+
+        let degraded = ResponseContext::success(
+            NamespaceId::new("team.beta").unwrap(),
+            RequestId::new("req-5a").unwrap(),
+            9u8,
+        )
+        .with_availability(availability);
+        assert!(degraded.ok);
+        assert_eq!(degraded.error_kind, None);
+        assert_eq!(degraded.outcome_class, OutcomeClass::Degraded);
+    }
+
+    #[test]
+    fn safeguard_blocked_readiness_stays_distinct_from_policy_denied_failure() {
+        let namespace = NamespaceId::new("team.alpha").unwrap();
+        let request_id = RequestId::new("req-5").unwrap();
+        let gateway = PolicyModule;
+        let mut request = SafeguardRequest::ready(OperationClass::AuthoritativeRewrite);
+        request.requires_confirmation = true;
+
+        let blocked = gateway.evaluate_safeguard(request);
+        assert_eq!(blocked.outcome_class, OutcomeClass::Blocked);
+        assert_eq!(blocked.preflight_state, PreflightState::Blocked);
+        assert!(blocked
+            .blocked_reasons
+            .contains(&SafeguardReasonCode::ConfirmationRequired));
+
+        let blocked_response = ResponseContext::success(namespace.clone(), request_id.clone(), "preview")
+            .with_safeguard(blocked);
+        assert!(blocked_response.ok);
+        assert_eq!(blocked_response.error_kind, None);
+        assert_eq!(blocked_response.outcome_class, OutcomeClass::Blocked);
+        assert!(blocked_response.partial_success == false);
+        assert!(blocked_response
+            .safeguard
+            .as_ref()
+            .unwrap()
+            .blocked_reasons
+            .contains(&SafeguardReasonCode::ConfirmationRequired));
+
+        let denied_response = ResponseContext::<&str>::failure(
+            namespace,
+            request_id,
+            ErrorKind::PolicyDenied,
+            vec![ResponseWarning::new("policy", "namespace policy denied")],
+        );
+        assert!(!denied_response.ok);
+        assert_eq!(denied_response.outcome_class, OutcomeClass::Rejected);
+        assert_eq!(denied_response.error_kind, Some(ErrorKind::PolicyDenied));
+        assert!(denied_response.safeguard.is_none());
+        assert_eq!(
+            denied_response.remediation,
+            Some(RemediationHint::new(
+                "policy_denied",
+                vec![RemediationStep::ChangeScope],
+            )),
         );
     }
 

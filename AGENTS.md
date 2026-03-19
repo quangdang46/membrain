@@ -62,9 +62,10 @@ Use this order whenever docs disagree or when backlog work needs a canonical int
 
 1. `docs/PLAN.md` is the canonical design contract.
 2. Subsystem docs under `docs/` elaborate `PLAN.md`; they do not override it.
-3. `docs/INDEX.md` and `docs/CONTRIBUTING.md` define doc hierarchy, contributor workflow, and PR discipline that must stay aligned with `PLAN.md`.
-4. `AGENTS.md` translates repository workflow, coordination, and execution discipline for active contributors; it should clarify how to operate within the canon, not invent competing product behavior.
-5. Historical artifacts, legacy command references, logs, scratch plans, and older snapshot prose are informative only; they do not override the canonical contract.
+3. `docs/ARCHITECTURE.md` freezes workspace shape, module ownership seams, and read/write-path boundaries derived from `PLAN.md`.
+4. `docs/INDEX.md` and `docs/CONTRIBUTING.md` define doc hierarchy, contributor evidence rules, and PR discipline that must stay aligned with `PLAN.md`.
+5. `AGENTS.md` translates repository workflow, coordination, and execution discipline for active contributors; it should clarify how to operate within the canon, not invent competing product behavior, module ownership, or evidence thresholds.
+6. Historical artifacts, legacy command references, logs, scratch plans, and older snapshot prose are informative only; they do not override the canonical contract.
 
 ### Conflict-Resolution Procedure
 

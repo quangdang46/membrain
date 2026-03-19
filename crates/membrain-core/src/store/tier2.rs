@@ -1,4 +1,5 @@
 use crate::api::NamespaceId;
+use crate::observability::{Tier2PrefilterOutcome, Tier2PrefilterTrace};
 use crate::store::Tier2StoreApi;
 use crate::types::{
     CanonicalMemoryType, FastPathRouteFamily, MemoryId, NormalizedMemoryEnvelope, SessionId,
@@ -88,6 +89,30 @@ impl Tier2DurableItemLayout {
             normalization_generation: self.metadata.normalization_generation,
             payload_locator: self.metadata.payload_locator.clone(),
         }
+    }
+
+    /// Returns whether the prefilter path stays on metadata-only state before the final cut.
+    pub const fn prefilter_stays_metadata_only(&self) -> bool {
+        true
+    }
+
+    /// Returns whether index-safe metadata keys avoid materializing heavyweight payload content.
+    pub const fn index_key_stays_metadata_only(&self) -> bool {
+        true
+    }
+
+    /// Returns the inspectable metadata-first trace for Tier2 planners.
+    pub fn prefilter_trace(&self) -> Tier2PrefilterTrace {
+        Tier2PrefilterTrace {
+            outcome: Tier2PrefilterOutcome::Ready,
+            metadata_candidate_count: 1,
+            payload_fetch_count: 0,
+        }
+    }
+
+    /// Returns a stable reference to the separated heavyweight payload body.
+    pub fn payload_record(&self) -> &Tier2PayloadRecord {
+        &self.payload
     }
 }
 

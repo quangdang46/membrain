@@ -185,10 +185,47 @@ fn cancel_after_explicit_start_preserves_prior_durable_state_without_polling_wor
 }
 
 #[test]
+fn snapshot_reports_state_transitions_without_consuming_extra_work() {
+    let operation = ScriptedMaintenance::new(
+        vec![MaintenanceStep::Pending(MaintenanceProgress::new(1, 2))],
+        DurableStateToken(73),
+    );
+    let mut handle = MaintenanceJobHandle::new(operation, 3);
+
+    assert_eq!(handle.snapshot().state, MaintenanceJobState::Ready);
+    assert_eq!(handle.snapshot().polls_used, 0);
+
+    let started = handle.start();
+    assert_eq!(started.state, MaintenanceJobState::Running { progress: None });
+    assert_eq!(started.polls_used, 0);
+    assert_eq!(handle.snapshot(), started);
+
+    let running = handle.poll();
+    assert_eq!(
+        running.state,
+        MaintenanceJobState::Running {
+            progress: Some(MaintenanceProgress::new(1, 2)),
+        }
+    );
+    assert_eq!(running.polls_used, 1);
+    assert_eq!(handle.snapshot(), running);
+
+    let requested = handle.cancel();
+    assert_eq!(
+        requested.state,
+        MaintenanceJobState::CancelRequested {
+            progress: Some(MaintenanceProgress::new(1, 2)),
+        }
+    );
+    assert_eq!(requested.polls_used, 1);
+    assert_eq!(handle.snapshot(), requested);
+}
+
+#[test]
 fn terminal_states_remain_stable_across_repeated_control_calls() {
     let operation = ScriptedMaintenance::new(
         vec![MaintenanceStep::Completed("done")],
-        DurableStateToken(73),
+        DurableStateToken(74),
     );
     let mut handle = MaintenanceJobHandle::new(operation, 2);
 
@@ -199,6 +236,43 @@ fn terminal_states_remain_stable_across_repeated_control_calls() {
     assert_eq!(handle.start(), completed);
     assert_eq!(handle.poll(), completed);
     assert_eq!(handle.cancel(), completed);
+}
+
+#[test]
+fn interrupted_terminal_states_remain_stable_across_repeated_control_calls() {
+    let cancelled_operation = ScriptedMaintenance::new(
+        vec![MaintenanceStep::Completed("should never run")],
+        DurableStateToken(75),
+    );
+    let mut cancelled_handle = MaintenanceJobHandle::new(cancelled_operation, 2);
+    let cancelled = cancelled_handle.cancel();
+    assert_eq!(
+        cancelled.state,
+        MaintenanceJobState::Cancelled(InterruptedMaintenance {
+            reason: InterruptionReason::Cancelled,
+            preserved_durable_state: DurableStateToken(75),
+        })
+    );
+    assert_eq!(cancelled_handle.start(), cancelled);
+    assert_eq!(cancelled_handle.poll(), cancelled);
+    assert_eq!(cancelled_handle.cancel(), cancelled);
+
+    let timed_out_operation = ScriptedMaintenance::new(
+        vec![MaintenanceStep::Pending(MaintenanceProgress::new(1, 3))],
+        DurableStateToken(76),
+    );
+    let mut timed_out_handle = MaintenanceJobHandle::new(timed_out_operation, 0);
+    let timed_out = timed_out_handle.poll();
+    assert_eq!(
+        timed_out.state,
+        MaintenanceJobState::TimedOut(InterruptedMaintenance {
+            reason: InterruptionReason::TimedOut,
+            preserved_durable_state: DurableStateToken(76),
+        })
+    );
+    assert_eq!(timed_out_handle.start(), timed_out);
+    assert_eq!(timed_out_handle.poll(), timed_out);
+    assert_eq!(timed_out_handle.cancel(), timed_out);
 }
 
 #[test]

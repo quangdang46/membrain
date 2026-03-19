@@ -142,16 +142,40 @@ pub struct ConfirmationState {
     pub generation_bound: Option<u64>,
 }
 
+/// Shared confidence threshold metadata for high-stakes or action-oriented guidance.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ConfidenceConstraint {
+    pub minimum_level: &'static str,
+    pub change_my_mind_conditions: Vec<&'static str>,
+}
+
+/// Stable audit correlation payload for safeguard preview, apply, and rollback review.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SafeguardAudit {
+    pub event_kind: &'static str,
+    pub actor_source: &'static str,
+    pub request_id: &'static str,
+    pub preview_id: Option<&'static str>,
+    pub related_run: Option<&'static str>,
+    pub scope_handle: &'static str,
+}
+
 /// Shared safeguard payload reused by preview, blocked, degraded, rejected, and accepted flows.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SafeguardOutcome {
     pub outcome_class: OutcomeClass,
     pub preflight_state: PreflightState,
     pub operation_class: OperationClass,
+    pub affected_scope: &'static str,
+    pub impact_summary: &'static str,
     pub blocked_reasons: Vec<SafeguardReasonCode>,
     pub preflight_checks: Vec<PreflightCheck>,
+    pub check_results: Vec<PreflightCheck>,
+    pub warnings: Vec<&'static str>,
+    pub confidence_constraints: Option<ConfidenceConstraint>,
     pub reversibility: ReversibilityKind,
     pub confirmation: ConfirmationState,
+    pub audit: SafeguardAudit,
     pub policy_summary: PolicySummary,
 }
 
@@ -229,6 +253,76 @@ impl PolicyModule {
             OperationClass::DerivedSurfaceMutation => ReversibilityKind::RepairableFromDurableTruth,
             OperationClass::AuthoritativeRewrite => ReversibilityKind::RollbackViaSnapshot,
             OperationClass::IrreversibleMutation => ReversibilityKind::Irreversible,
+        }
+    }
+
+    fn affected_scope(request: SafeguardRequest) -> &'static str {
+        if request.namespace_bound {
+            "effective_namespace"
+        } else {
+            "unbound_namespace"
+        }
+    }
+
+    fn impact_summary(request: SafeguardRequest) -> &'static str {
+        match request.operation_class {
+            OperationClass::ReadOnlyAssessment => "read_only_assessment",
+            OperationClass::DerivedSurfaceMutation => {
+                if request.can_degrade {
+                    "derived_surface_mutation_with_degraded_fallback"
+                } else {
+                    "derived_surface_mutation"
+                }
+            }
+            OperationClass::AuthoritativeRewrite => {
+                if request.maintenance_window_required {
+                    "authoritative_rewrite_requires_window"
+                } else {
+                    "authoritative_rewrite"
+                }
+            }
+            OperationClass::IrreversibleMutation => "irreversible_mutation",
+        }
+    }
+
+    fn warning_messages(request: SafeguardRequest) -> Vec<&'static str> {
+        let mut warnings = Vec::new();
+        if !request.confidence_ready {
+            warnings.push("low_confidence");
+        }
+        if !request.authoritative_input_readable {
+            warnings.push("authoritative_input_unreadable");
+        }
+        if !request.generation_matches {
+            warnings.push("stale_generation");
+        }
+        warnings
+    }
+
+    fn confidence_constraints(request: SafeguardRequest) -> Option<ConfidenceConstraint> {
+        (!request.confidence_ready).then_some(ConfidenceConstraint {
+            minimum_level: "high",
+            change_my_mind_conditions: vec![
+                "fresh_authoritative_inputs",
+                "resolved_policy_scope",
+                "stable_generation_anchor",
+            ],
+        })
+    }
+
+    fn audit(request: SafeguardRequest) -> SafeguardAudit {
+        SafeguardAudit {
+            event_kind: "safeguard_evaluation",
+            actor_source: "core_policy",
+            request_id: "policy-eval",
+            preview_id: request.preview_only.then_some("preview"),
+            related_run: match request.operation_class {
+                OperationClass::ReadOnlyAssessment => None,
+                OperationClass::DerivedSurfaceMutation => Some("derived-surface-run"),
+                OperationClass::AuthoritativeRewrite => Some("authoritative-rewrite-run"),
+                OperationClass::IrreversibleMutation => Some("irreversible-mutation-run"),
+            },
+            scope_handle: Self::affected_scope(request),
         }
     }
 
@@ -434,10 +528,16 @@ impl PolicyGateway for PolicyModule {
                 outcome_class: OutcomeClass::Rejected,
                 preflight_state: PreflightState::Blocked,
                 operation_class: request.operation_class,
+                affected_scope: Self::affected_scope(request),
+                impact_summary: Self::impact_summary(request),
                 blocked_reasons,
-                preflight_checks,
+                preflight_checks: preflight_checks.clone(),
+                check_results: preflight_checks,
+                warnings: Self::warning_messages(request),
+                confidence_constraints: Self::confidence_constraints(request),
                 reversibility,
                 confirmation,
+                audit: Self::audit(request),
                 policy_summary,
             };
         }
@@ -473,10 +573,16 @@ impl PolicyGateway for PolicyModule {
                 outcome_class: OutcomeClass::Preview,
                 preflight_state,
                 operation_class: request.operation_class,
+                affected_scope: Self::affected_scope(request),
+                impact_summary: Self::impact_summary(request),
                 blocked_reasons,
-                preflight_checks,
+                preflight_checks: preflight_checks.clone(),
+                check_results: preflight_checks,
+                warnings: Self::warning_messages(request),
+                confidence_constraints: Self::confidence_constraints(request),
                 reversibility,
                 confirmation,
+                audit: Self::audit(request),
                 policy_summary,
             };
         }
@@ -494,10 +600,16 @@ impl PolicyGateway for PolicyModule {
                     preflight_state
                 },
                 operation_class: request.operation_class,
+                affected_scope: Self::affected_scope(request),
+                impact_summary: Self::impact_summary(request),
                 blocked_reasons,
-                preflight_checks,
+                preflight_checks: preflight_checks.clone(),
+                check_results: preflight_checks,
+                warnings: Self::warning_messages(request),
+                confidence_constraints: Self::confidence_constraints(request),
                 reversibility,
                 confirmation,
+                audit: Self::audit(request),
                 policy_summary,
             };
         }
@@ -512,10 +624,16 @@ impl PolicyGateway for PolicyModule {
             outcome_class,
             preflight_state: PreflightState::Ready,
             operation_class: request.operation_class,
+            affected_scope: Self::affected_scope(request),
+            impact_summary: Self::impact_summary(request),
             blocked_reasons,
-            preflight_checks,
+            preflight_checks: preflight_checks.clone(),
+            check_results: preflight_checks,
+            warnings: Self::warning_messages(request),
+            confidence_constraints: Self::confidence_constraints(request),
             reversibility,
             confirmation,
+            audit: Self::audit(request),
             policy_summary,
         }
     }
@@ -650,6 +768,25 @@ mod tests {
 
         assert_eq!(outcome.outcome_class, OutcomeClass::Degraded);
         assert!(outcome.blocked_reasons.is_empty());
+        assert_eq!(outcome.affected_scope, "effective_namespace");
+        assert_eq!(
+            outcome.impact_summary,
+            "derived_surface_mutation_with_degraded_fallback"
+        );
+        assert_eq!(outcome.warnings, vec!["low_confidence"]);
+        assert_eq!(outcome.preflight_checks, outcome.check_results);
+        assert_eq!(outcome.audit.related_run, Some("derived-surface-run"));
+        assert_eq!(
+            outcome.confidence_constraints,
+            Some(super::ConfidenceConstraint {
+                minimum_level: "high",
+                change_my_mind_conditions: vec![
+                    "fresh_authoritative_inputs",
+                    "resolved_policy_scope",
+                    "stable_generation_anchor",
+                ],
+            })
+        );
         assert!(outcome.preflight_checks.iter().any(|check| {
             check.check_name == "confidence" && check.status == PreflightCheckStatus::Degraded
         }));

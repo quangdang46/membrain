@@ -130,7 +130,7 @@ impl WorkingMemoryController {
                 evicted_item: None,
                 trace: WorkingMemoryTrace {
                     outcome: AdmissionOutcomeKind::Buffered,
-                    slot_pressure: self.slots.len(),
+                    slot_pressure: initial_pressure,
                     threshold: self.config.working_memory_attention_threshold,
                     overflowed: false,
                 },
@@ -339,7 +339,7 @@ impl EncodeRuntime for EncodeEngine {
     }
 
     fn prepare_fast_path(&self, input: RawEncodeInput) -> PreparedEncodeCandidate {
-        self.prepare_fast_path(input)
+        EncodeEngine::prepare_fast_path(self, input)
     }
 }
 

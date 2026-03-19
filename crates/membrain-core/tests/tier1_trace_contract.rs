@@ -1,3 +1,4 @@
+use membrain_core::api::NamespaceId;
 use membrain_core::engine::recall::{RecallEngine, RecallRequest, RecallRuntime};
 use membrain_core::observability::{Tier1LookupLane, Tier1LookupOutcome};
 use membrain_core::store::hot::Tier1HotMetadataStore;
@@ -8,6 +9,7 @@ use membrain_core::RuntimeConfig;
 
 fn seed_record(memory_id: u64, session_id: u64, compact_text: &str) -> Tier1HotRecord {
     Tier1HotRecord::metadata_only(
+        NamespaceId::new("tests/tier1").unwrap(),
         MemoryId(memory_id),
         SessionId(session_id),
         CanonicalMemoryType::Event,
@@ -21,10 +23,11 @@ fn seed_record(memory_id: u64, session_id: u64, compact_text: &str) -> Tier1HotR
 
 #[test]
 fn exact_lookup_respects_zero_candidate_budget() {
+    let namespace = NamespaceId::new("tests/tier1").unwrap();
     let mut store = Tier1HotMetadataStore::new(4);
     store.seed(seed_record(1, 10, "recent note"));
 
-    let exact = store.exact_lookup_with_budget(MemoryId(1), 0);
+    let exact = store.exact_lookup_with_budget(&namespace, MemoryId(1), 0);
 
     assert!(exact.record.is_none());
     assert_eq!(exact.trace.lane, Tier1LookupLane::ExactHandle);
@@ -35,10 +38,11 @@ fn exact_lookup_respects_zero_candidate_budget() {
 
 #[test]
 fn exact_lookup_reports_one_candidate_when_budget_allows_probe() {
+    let namespace = NamespaceId::new("tests/tier1").unwrap();
     let mut store = Tier1HotMetadataStore::new(4);
     store.seed(seed_record(1, 10, "recent note"));
 
-    let exact = store.exact_lookup_with_budget(MemoryId(1), 1);
+    let exact = store.exact_lookup_with_budget(&namespace, MemoryId(1), 1);
 
     assert_eq!(exact.trace.outcome, Tier1LookupOutcome::Hit);
     assert_eq!(exact.trace.recent_candidates_inspected, 1);
@@ -47,12 +51,13 @@ fn exact_lookup_reports_one_candidate_when_budget_allows_probe() {
 
 #[test]
 fn recent_lookup_respects_candidate_budget_before_finding_session_hit() {
+    let namespace = NamespaceId::new("tests/tier1").unwrap();
     let mut store = Tier1HotMetadataStore::new(5);
     store.seed(seed_record(1, 10, "session-a old"));
     store.seed(seed_record(2, 10, "session-a new"));
     store.seed(seed_record(3, 20, "session-b newest"));
 
-    let recent = store.recent_for_session_with_budget(SessionId(10), 2, 1);
+    let recent = store.recent_for_session_with_budget(&namespace, SessionId(10), 2, 1);
 
     assert!(recent.records.is_empty());
     assert_eq!(recent.trace.lane, Tier1LookupLane::RecentWindow);
@@ -64,11 +69,12 @@ fn recent_lookup_respects_candidate_budget_before_finding_session_hit() {
 
 #[test]
 fn recent_lookup_zero_budget_bypasses_tier1_scan() {
+    let namespace = NamespaceId::new("tests/tier1").unwrap();
     let mut store = Tier1HotMetadataStore::new(5);
     store.seed(seed_record(1, 10, "session-a old"));
     store.seed(seed_record(2, 10, "session-a new"));
 
-    let recent = store.recent_for_session_with_budget(SessionId(10), 2, 0);
+    let recent = store.recent_for_session_with_budget(&namespace, SessionId(10), 2, 0);
 
     assert!(recent.records.is_empty());
     assert_eq!(recent.trace.lane, Tier1LookupLane::RecentWindow);
