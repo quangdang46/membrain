@@ -16,3 +16,5 @@ pub mod recall;
 pub mod result;
 /// Repair and rebuild maintenance surfaces.
 pub mod repair;
+/// Episode formation and grouping rules.
+pub mod episode;
