@@ -10,6 +10,8 @@ fn test_config() -> RuntimeConfig {
         working_memory_capacity: 2,
         working_memory_attention_threshold: 200,
         working_memory_promote_threshold: 700,
+        cache_per_family_capacity: 1000,
+        prefetch_queue_capacity: 50,
     }
 }
 

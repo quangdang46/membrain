@@ -11,6 +11,10 @@ pub struct RuntimeConfig {
     pub working_memory_attention_threshold: u16,
     /// Minimum attention score required to promote an evicted item into encode.
     pub working_memory_promote_threshold: u16,
+    /// Maximum entries per cache family before LRU eviction.
+    pub cache_per_family_capacity: usize,
+    /// Maximum queued prefetch hints before oldest hints are dropped.
+    pub prefetch_queue_capacity: usize,
 }
 
 impl Default for RuntimeConfig {
@@ -21,6 +25,8 @@ impl Default for RuntimeConfig {
             working_memory_capacity: 7,
             working_memory_attention_threshold: 200,
             working_memory_promote_threshold: 700,
+            cache_per_family_capacity: crate::constants::DEFAULT_CACHE_PER_FAMILY_CAPACITY,
+            prefetch_queue_capacity: crate::constants::DEFAULT_PREFETCH_QUEUE_CAPACITY,
         }
     }
 }

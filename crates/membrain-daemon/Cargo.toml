@@ -1,21 +1,21 @@
 [package]
-name = "membrain-cli"
+name = "membrain-daemon"
 version.workspace = true
 edition.workspace = true
 publish = false
 
 [lib]
-name = "membrain_cli"
+name = "membrain_daemon"
 path = "src/lib.rs"
 
 [[bin]]
-name = "membrain"
+name = "membrain-daemon"
 path = "src/main.rs"
 
 [dependencies]
 membrain-core = { path = "../membrain-core" }
-clap = { version = "4.5", features = ["derive"] }
-tokio = { version = "1.40", features = ["full"] }
-anyhow = "1.0"
+tokio = { version = "1.40", features = ["full", "sync", "rt", "net"] }
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
+anyhow = "1.0"
+async-trait = "0.1"

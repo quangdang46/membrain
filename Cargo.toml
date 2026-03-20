@@ -2,6 +2,7 @@
 members = [
   "crates/membrain-core",
   "crates/membrain-cli",
+  "crates/membrain-daemon",
 ]
 resolver = "2"
 

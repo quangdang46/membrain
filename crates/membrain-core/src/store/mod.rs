@@ -1,7 +1,10 @@
+/// Bounded cache families, admission, prefetch, invalidation, and observability.
+pub mod cache;
 pub mod cold;
 pub mod hot;
 pub mod tier2;
 
+pub use cache::CacheManager;
 pub use cold::ColdStore;
 pub use hot::HotStore;
 pub use tier2::Tier2Store;

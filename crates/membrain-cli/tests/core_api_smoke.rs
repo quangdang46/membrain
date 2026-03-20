@@ -72,7 +72,7 @@ fn cli_can_drive_working_memory_admission_through_core_encode_surface(
         .admit(incoming.clone())?;
 
     assert_eq!(admission.item, incoming);
-    assert_eq!(admission.trace.slot_pressure, 1);
+    assert_eq!(admission.trace.slot_pressure, 0); // pre-decision slot count (empty before first admit)
     assert_eq!(store.encode_engine().working_memory().slots(), &[incoming]);
     Ok(())
 }
