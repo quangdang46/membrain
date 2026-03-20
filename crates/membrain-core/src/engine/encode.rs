@@ -568,6 +568,53 @@ mod tests {
     }
 
     #[test]
+    fn passive_observation_preserves_tier2_provenance_fields() {
+        let engine = test_engine();
+
+        let prepared = engine.prepare_ingest_candidate(
+            RawEncodeInput::new(
+                RawIntakeKind::Observation,
+                "camera summary noted a recurring hallway blockage",
+            ),
+            IngestMode::PassiveObservation,
+            true,
+            false,
+        );
+
+        assert_eq!(
+            prepared.normalized.observation_source.as_deref(),
+            Some("passive_observation")
+        );
+        assert_eq!(prepared.write_decision, PassiveObservationDecision::Capture);
+        assert!(prepared.captured_as_observation);
+        assert_eq!(prepared.passive_observation_inspect.source_kind, "observation");
+        assert_eq!(
+            prepared.passive_observation_inspect.write_decision,
+            PassiveObservationDecision::Capture.as_str()
+        );
+        assert!(prepared
+            .passive_observation_inspect
+            .captured_as_observation);
+        assert_eq!(
+            prepared.passive_observation_inspect.retention_marker,
+            "volatile_observation"
+        );
+        assert_eq!(
+            prepared.passive_observation_inspect.observation_source.as_deref(),
+            prepared.normalized.observation_source.as_deref()
+        );
+        assert_eq!(
+            prepared.passive_observation_inspect.observation_chunk_id.as_deref(),
+            prepared.normalized.observation_chunk_id.as_deref()
+        );
+        assert!(prepared
+            .normalized
+            .observation_chunk_id
+            .as_deref()
+            .is_some_and(|chunk_id| chunk_id.starts_with("obs-")));
+    }
+
+    #[test]
     fn landmark_metadata_is_additive_when_signals_clear_thresholds() {
         let engine = test_engine();
 

@@ -74,6 +74,28 @@ impl RepairStatus {
     }
 }
 
+/// Stable operator entrypoints for index verification and rebuild work.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum IndexRepairEntrypoint {
+    /// Verify index parity against durable truth without rewriting derived state.
+    VerifyOnly,
+    /// Rebuild stale or missing index state from durable truth before verifying parity.
+    RebuildIfNeeded,
+    /// Drop and rebuild the full derived index surface from durable truth.
+    ForceRebuild,
+}
+
+impl IndexRepairEntrypoint {
+    /// Stable machine-readable name.
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::VerifyOnly => "verify_only",
+            Self::RebuildIfNeeded => "rebuild_if_needed",
+            Self::ForceRebuild => "force_rebuild",
+        }
+    }
+}
+
 /// Result of verifying one repair target.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RepairCheckResult {
@@ -103,6 +125,16 @@ pub struct VerificationArtifact {
     pub derived_rows: u64,
     pub authoritative_generation: &'static str,
     pub derived_generation: &'static str,
+}
+
+/// Canonical index rebuild plan derived from durable truth.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct IndexRepairPlan {
+    pub target: RepairTarget,
+    pub entrypoint: IndexRepairEntrypoint,
+    pub durable_sources: Vec<&'static str>,
+    pub rebuilt_outputs: Vec<&'static str>,
+    pub verification_artifact: VerificationArtifact,
 }
 
 // ── Repair operation ─────────────────────────────────────────────────────────
@@ -258,6 +290,65 @@ impl RepairEngine {
         "engine.repair"
     }
 
+    /// Returns the durable truth sources and rebuilt outputs for one repair target.
+    pub fn plan_index_rebuild(
+        &self,
+        target: RepairTarget,
+        entrypoint: IndexRepairEntrypoint,
+    ) -> Option<IndexRepairPlan> {
+        let (durable_sources, rebuilt_outputs) = match target {
+            RepairTarget::LexicalIndex => (
+                vec![
+                    "durable_memory_records",
+                    "namespace_policy_metadata",
+                    "canonical_content_handles",
+                ],
+                vec!["fts5_lexical_projection", "lexical_lookup_table"],
+            ),
+            RepairTarget::MetadataIndex => (
+                vec!["durable_memory_records", "namespace_policy_metadata"],
+                vec!["tier2_metadata_projection", "namespace_lookup_table"],
+            ),
+            RepairTarget::SemanticHotIndex => (
+                vec![
+                    "durable_memory_records",
+                    "canonical_embeddings",
+                    "namespace_policy_metadata",
+                ],
+                vec!["usearch_hot_ann", "hot_embedding_lookup"],
+            ),
+            RepairTarget::SemanticColdIndex => (
+                vec![
+                    "durable_memory_records",
+                    "canonical_embeddings",
+                    "namespace_policy_metadata",
+                ],
+                vec!["usearch_cold_ann", "cold_embedding_lookup"],
+            ),
+            RepairTarget::EngramIndex => (
+                vec![
+                    "durable_memory_records",
+                    "engrams_table",
+                    "engram_membership_table",
+                ],
+                vec![
+                    "engram_helper_index",
+                    "engram_centroid_projection",
+                    "engram_adjacency_accelerator",
+                ],
+            ),
+            _ => return None,
+        };
+
+        Some(IndexRepairPlan {
+            target,
+            entrypoint,
+            durable_sources,
+            rebuilt_outputs,
+            verification_artifact: self.mock_verification_artifact(target),
+        })
+    }
+
     /// Creates a full-scan repair run for a namespace.
     pub fn create_full_scan(&self, namespace: NamespaceId) -> RepairRun {
         RepairRun::full_scan(namespace)
@@ -266,6 +357,27 @@ impl RepairEngine {
     /// Creates a targeted repair run for specific targets.
     pub fn create_targeted(&self, namespace: NamespaceId, targets: Vec<RepairTarget>) -> RepairRun {
         RepairRun::new(namespace, targets)
+    }
+
+    fn mock_verification_artifact(&self, target: RepairTarget) -> VerificationArtifact {
+        let rows = match target {
+            RepairTarget::LexicalIndex => 128,
+            RepairTarget::MetadataIndex => 128,
+            RepairTarget::SemanticHotIndex => 64,
+            RepairTarget::SemanticColdIndex => 64,
+            RepairTarget::HotStoreConsistency => 32,
+            RepairTarget::PayloadIntegrity => 128,
+            RepairTarget::GraphConsistency => 96,
+            RepairTarget::EngramIndex => 24,
+            RepairTarget::ContradictionConsistency => 8,
+        };
+
+        VerificationArtifact {
+            authoritative_rows: rows,
+            derived_rows: rows,
+            authoritative_generation: "durable.v1",
+            derived_generation: "durable.v1",
+        }
     }
 }
 
@@ -365,5 +477,91 @@ mod tests {
             "semantic_cold_index"
         );
         assert_eq!(RepairTarget::EngramIndex.as_str(), "engram_index");
+    }
+
+    #[test]
+    fn index_rebuild_plan_covers_durable_sources_and_outputs() {
+        let engine = RepairEngine;
+        let plan = engine
+            .plan_index_rebuild(
+                RepairTarget::LexicalIndex,
+                IndexRepairEntrypoint::RebuildIfNeeded,
+            )
+            .expect("lexical index should expose rebuild plan");
+
+        assert_eq!(plan.target, RepairTarget::LexicalIndex);
+        assert_eq!(plan.entrypoint, IndexRepairEntrypoint::RebuildIfNeeded);
+        assert_eq!(
+            plan.durable_sources,
+            vec![
+                "durable_memory_records",
+                "namespace_policy_metadata",
+                "canonical_content_handles",
+            ]
+        );
+        assert_eq!(
+            plan.rebuilt_outputs,
+            vec!["fts5_lexical_projection", "lexical_lookup_table"]
+        );
+        assert_eq!(plan.verification_artifact.authoritative_rows, 128);
+        assert_eq!(plan.verification_artifact.derived_generation, "durable.v1");
+    }
+
+    #[test]
+    fn index_rebuild_plan_covers_engram_derived_surfaces() {
+        let engine = RepairEngine;
+        let plan = engine
+            .plan_index_rebuild(
+                RepairTarget::EngramIndex,
+                IndexRepairEntrypoint::ForceRebuild,
+            )
+            .expect("engram index should expose rebuild plan");
+
+        assert_eq!(plan.target, RepairTarget::EngramIndex);
+        assert_eq!(plan.entrypoint, IndexRepairEntrypoint::ForceRebuild);
+        assert_eq!(
+            plan.durable_sources,
+            vec![
+                "durable_memory_records",
+                "engrams_table",
+                "engram_membership_table",
+            ]
+        );
+        assert_eq!(
+            plan.rebuilt_outputs,
+            vec![
+                "engram_helper_index",
+                "engram_centroid_projection",
+                "engram_adjacency_accelerator",
+            ]
+        );
+        assert_eq!(plan.verification_artifact.authoritative_rows, 24);
+        assert_eq!(plan.verification_artifact.derived_generation, "durable.v1");
+    }
+
+    #[test]
+    fn engram_rebuild_plan_keeps_graph_edges_out_of_authoritative_sources() {
+        let engine = RepairEngine;
+        let plan = engine
+            .plan_index_rebuild(
+                RepairTarget::EngramIndex,
+                IndexRepairEntrypoint::VerifyOnly,
+            )
+            .expect("engram index should expose rebuild plan");
+
+        assert!(!plan.durable_sources.contains(&"graph_edge_table"));
+        assert!(plan.durable_sources.contains(&"engrams_table"));
+        assert!(plan.durable_sources.contains(&"engram_membership_table"));
+    }
+
+    #[test]
+    fn non_index_targets_do_not_expose_index_rebuild_plans() {
+        let engine = RepairEngine;
+        assert!(engine
+            .plan_index_rebuild(
+                RepairTarget::GraphConsistency,
+                IndexRepairEntrypoint::VerifyOnly,
+            )
+            .is_none());
     }
 }

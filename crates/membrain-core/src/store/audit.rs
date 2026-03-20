@@ -31,6 +31,12 @@ pub struct AuditLogEntry {
     pub session_id: Option<SessionId>,
     /// Stable machine-readable actor source for correlation.
     pub actor_source: &'static str,
+    /// Optional request-scoped correlation handle for cross-surface audit parity.
+    pub request_id: Option<String>,
+    /// Optional maintenance, migration, or incident correlation handle.
+    pub related_run: Option<String>,
+    /// Whether policy redaction affected the visible entry.
+    pub redacted: bool,
     /// Human-readable detail preserved for explain and export surfaces.
     pub detail: String,
 }
@@ -52,6 +58,9 @@ impl AuditLogEntry {
             memory_id: None,
             session_id: None,
             actor_source,
+            request_id: None,
+            related_run: None,
+            redacted: false,
             detail: detail.into(),
         }
     }
@@ -65,6 +74,24 @@ impl AuditLogEntry {
     /// Attaches an optional session correlation id.
     pub fn with_session_id(mut self, session_id: SessionId) -> Self {
         self.session_id = Some(session_id);
+        self
+    }
+
+    /// Attaches an optional request-scoped correlation handle.
+    pub fn with_request_id(mut self, request_id: impl Into<String>) -> Self {
+        self.request_id = Some(request_id.into());
+        self
+    }
+
+    /// Attaches an optional maintenance, migration, or incident correlation handle.
+    pub fn with_related_run(mut self, related_run: impl Into<String>) -> Self {
+        self.related_run = Some(related_run.into());
+        self
+    }
+
+    /// Marks the entry as policy-redacted while preserving the row.
+    pub fn with_redaction(mut self) -> Self {
+        self.redacted = true;
         self
     }
 }
@@ -108,6 +135,7 @@ impl AppendOnlyAuditLog {
     /// Appends one audit entry and returns the stored row.
     pub fn append(&mut self, mut entry: AuditLogEntry) -> AuditLogEntry {
         entry.sequence = self.next_sequence;
+        entry.category = entry.kind.category();
         self.next_sequence += 1;
 
         if self.entries.len() >= self.capacity {
@@ -140,6 +168,24 @@ impl AppendOnlyAuditLog {
             .cloned()
             .collect()
     }
+
+    /// Returns retained audit rows for one memory in append order.
+    pub fn entries_for_memory(&self, memory_id: MemoryId) -> Vec<AuditLogEntry> {
+        self.entries
+            .iter()
+            .filter(|entry| entry.memory_id == Some(memory_id))
+            .cloned()
+            .collect()
+    }
+
+    /// Returns retained audit rows for one event kind in append order.
+    pub fn entries_for_kind(&self, kind: AuditEventKind) -> Vec<AuditLogEntry> {
+        self.entries
+            .iter()
+            .filter(|entry| entry.kind == kind)
+            .cloned()
+            .collect()
+    }
 }
 
 #[cfg(test)]
@@ -149,10 +195,14 @@ mod tests {
     use crate::observability::{AuditEventCategory, AuditEventKind};
     use crate::types::{MemoryId, SessionId};
 
+    fn team_alpha() -> NamespaceId {
+        NamespaceId::new("team.alpha").expect("team.alpha should be a valid namespace id")
+    }
+
     #[test]
     fn audit_log_appends_in_monotonic_order() {
         let mut log = AppendOnlyAuditLog::new(8);
-        let namespace = NamespaceId::new("team.alpha").unwrap();
+        let namespace = team_alpha();
 
         let first = log.append(
             AuditLogEntry::new(
@@ -163,7 +213,8 @@ mod tests {
                 "accepted encode candidate",
             )
             .with_memory_id(MemoryId(11))
-            .with_session_id(SessionId(3)),
+            .with_session_id(SessionId(3))
+            .with_request_id("req-encode-11"),
         );
         let second = log.append(AuditLogEntry::new(
             AuditEventCategory::Policy,
@@ -175,6 +226,7 @@ mod tests {
 
         assert_eq!(first.sequence, 1);
         assert_eq!(second.sequence, 2);
+        assert_eq!(first.request_id.as_deref(), Some("req-encode-11"));
         assert_eq!(log.len(), 2);
         assert_eq!(log.entries()[0].kind, AuditEventKind::EncodeAccepted);
         assert_eq!(log.entries()[1].kind, AuditEventKind::PolicyDenied);
@@ -183,7 +235,7 @@ mod tests {
     #[test]
     fn audit_log_retains_representative_encode_policy_and_maintenance_events() {
         let mut log = AuditLogStore.new_log(8);
-        let namespace = NamespaceId::new("team.alpha").unwrap();
+        let namespace = team_alpha();
 
         log.append(
             AuditLogEntry::new(
@@ -221,9 +273,84 @@ mod tests {
     }
 
     #[test]
+    fn audit_log_filters_by_memory_kind_and_redaction_metadata() {
+        let mut log = AppendOnlyAuditLog::new(8);
+        let namespace = team_alpha();
+
+        log.append(
+            AuditLogEntry::new(
+                AuditEventCategory::Policy,
+                AuditEventKind::PolicyRedacted,
+                namespace.clone(),
+                "policy_module",
+                "redacted actor for external view",
+            )
+            .with_memory_id(MemoryId(41))
+            .with_request_id("req-policy-41")
+            .with_related_run("incident-2026-03-20")
+            .with_redaction(),
+        );
+        log.append(
+            AuditLogEntry::new(
+                AuditEventCategory::Maintenance,
+                AuditEventKind::MaintenanceMigrationApplied,
+                namespace.clone(),
+                "migration_runner",
+                "applied sqlite migration for audit-log rows",
+            )
+            .with_memory_id(MemoryId(41))
+            .with_related_run("migration-0042"),
+        );
+        log.append(AuditLogEntry::new(
+            AuditEventCategory::Archive,
+            AuditEventKind::ArchiveRecorded,
+            namespace,
+            "cold_store",
+            "archived superseded evidence",
+        ));
+
+        let memory_entries = log.entries_for_memory(MemoryId(41));
+        let migration_entries = log.entries_for_kind(AuditEventKind::MaintenanceMigrationApplied);
+
+        assert_eq!(memory_entries.len(), 2);
+        assert!(memory_entries[0].redacted);
+        assert_eq!(
+            memory_entries[0].request_id.as_deref(),
+            Some("req-policy-41")
+        );
+        assert_eq!(
+            memory_entries[0].related_run.as_deref(),
+            Some("incident-2026-03-20")
+        );
+        assert_eq!(migration_entries.len(), 1);
+        assert_eq!(migration_entries[0].actor_source, "migration_runner");
+        assert_eq!(
+            migration_entries[0].related_run.as_deref(),
+            Some("migration-0042")
+        );
+    }
+
+    #[test]
+    fn append_recomputes_category_from_kind() {
+        let mut log = AppendOnlyAuditLog::new(4);
+        let namespace = team_alpha();
+
+        let stored = log.append(AuditLogEntry::new(
+            AuditEventCategory::Encode,
+            AuditEventKind::PolicyDenied,
+            namespace,
+            "policy_module",
+            "mismatched caller-provided category should not persist",
+        ));
+
+        assert_eq!(stored.category, AuditEventCategory::Policy);
+        assert_eq!(log.entries()[0].category, AuditEventCategory::Policy);
+    }
+
+    #[test]
     fn audit_log_drops_oldest_rows_when_capacity_is_reached() {
         let mut log = AppendOnlyAuditLog::new(2);
-        let namespace = NamespaceId::new("team.alpha").unwrap();
+        let namespace = team_alpha();
 
         log.append(AuditLogEntry::new(
             AuditEventCategory::Encode,

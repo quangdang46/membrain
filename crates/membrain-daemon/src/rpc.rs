@@ -139,6 +139,61 @@ impl RuntimeMethodRequest {
         match self.method.as_str() {
             "ping" => Ok(RuntimeRequest::Ping),
             "status" => Ok(RuntimeRequest::Status),
+            "recall" => {
+                let query = self
+                    .params
+                    .get("query")
+                    .and_then(Value::as_str)
+                    .ok_or_else(|| JsonRpcError {
+                        code: -32602,
+                        message: "missing query".to_string(),
+                        data: None,
+                    })?;
+                let namespace = self
+                    .params
+                    .get("namespace")
+                    .and_then(Value::as_str)
+                    .ok_or_else(|| JsonRpcError {
+                        code: -32602,
+                        message: "missing namespace".to_string(),
+                        data: None,
+                    })?;
+                let limit = match self.params.get("limit") {
+                    None | Some(Value::Null) => None,
+                    Some(Value::Number(value)) => {
+                        let parsed = value.as_u64().and_then(|value| usize::try_from(value).ok());
+                        match parsed {
+                            Some(0) => {
+                                return Err(JsonRpcError {
+                                    code: -32602,
+                                    message: "limit must be at least 1".to_string(),
+                                    data: None,
+                                });
+                            }
+                            Some(limit) => Some(limit),
+                            None => {
+                                return Err(JsonRpcError {
+                                    code: -32602,
+                                    message: "limit must be a positive integer".to_string(),
+                                    data: None,
+                                });
+                            }
+                        }
+                    }
+                    Some(_) => {
+                        return Err(JsonRpcError {
+                            code: -32602,
+                            message: "limit must be a positive integer".to_string(),
+                            data: None,
+                        });
+                    }
+                };
+                Ok(RuntimeRequest::Recall {
+                    query: query.to_string(),
+                    namespace: namespace.to_string(),
+                    limit,
+                })
+            }
             "sleep" => {
                 let millis = self
                     .params
@@ -157,18 +212,26 @@ impl RuntimeMethodRequest {
                         message: "missing posture".to_string(),
                         data: None,
                     })?;
-                let reasons = self
-                    .params
-                    .get("reasons")
-                    .and_then(Value::as_array)
-                    .map(|items| {
-                        items
-                            .iter()
-                            .filter_map(Value::as_str)
-                            .map(ToOwned::to_owned)
-                            .collect::<Vec<_>>()
-                    })
-                    .unwrap_or_default();
+                let reasons = match self.params.get("reasons") {
+                    None | Some(Value::Null) => Vec::new(),
+                    Some(Value::Array(items)) => items
+                        .iter()
+                        .map(|item| {
+                            item.as_str().map(ToOwned::to_owned).ok_or_else(|| JsonRpcError {
+                                code: -32602,
+                                message: "reasons must be an array of strings".to_string(),
+                                data: None,
+                            })
+                        })
+                        .collect::<Result<Vec<_>, _>>()?,
+                    Some(_) => {
+                        return Err(JsonRpcError {
+                            code: -32602,
+                            message: "reasons must be an array of strings".to_string(),
+                            data: None,
+                        });
+                    }
+                };
                 Ok(RuntimeRequest::SetPosture {
                     posture: posture.to_string(),
                     reasons,
@@ -200,6 +263,11 @@ impl RuntimeMethodRequest {
 pub enum RuntimeRequest {
     Ping,
     Status,
+    Recall {
+        query: String,
+        namespace: String,
+        limit: Option<usize>,
+    },
     Sleep {
         millis: u64,
     },
@@ -281,5 +349,70 @@ mod tests {
                 step_delay_ms: Some(15),
             }
         );
+    }
+
+    #[test]
+    fn parse_method_accepts_named_recall_params() {
+        let request = RuntimeMethodRequest {
+            jsonrpc: "2.0".to_string(),
+            method: "recall".to_string(),
+            params: json!({ "query": "memory:42", "namespace": "team.alpha", "limit": 3 }),
+            id: Some(json!(1)),
+        };
+
+        assert_eq!(
+            request.parse_method().unwrap(),
+            RuntimeRequest::Recall {
+                query: "memory:42".to_string(),
+                namespace: "team.alpha".to_string(),
+                limit: Some(3),
+            }
+        );
+    }
+
+    #[test]
+    fn parse_method_recall_requires_query_and_namespace() {
+        let missing_query = RuntimeMethodRequest {
+            jsonrpc: "2.0".to_string(),
+            method: "recall".to_string(),
+            params: json!({ "namespace": "team.alpha" }),
+            id: Some(json!(1)),
+        };
+        let error = missing_query.parse_method().unwrap_err();
+        assert_eq!(error.code, -32602);
+        assert_eq!(error.message, "missing query");
+
+        let missing_namespace = RuntimeMethodRequest {
+            jsonrpc: "2.0".to_string(),
+            method: "recall".to_string(),
+            params: json!({ "query": "memory:42" }),
+            id: Some(json!(2)),
+        };
+        let error = missing_namespace.parse_method().unwrap_err();
+        assert_eq!(error.code, -32602);
+        assert_eq!(error.message, "missing namespace");
+    }
+
+    #[test]
+    fn parse_method_recall_rejects_non_positive_or_non_integer_limits() {
+        let zero_limit = RuntimeMethodRequest {
+            jsonrpc: "2.0".to_string(),
+            method: "recall".to_string(),
+            params: json!({ "query": "memory:42", "namespace": "team.alpha", "limit": 0 }),
+            id: Some(json!(3)),
+        };
+        let error = zero_limit.parse_method().unwrap_err();
+        assert_eq!(error.code, -32602);
+        assert_eq!(error.message, "limit must be at least 1");
+
+        let fractional_limit = RuntimeMethodRequest {
+            jsonrpc: "2.0".to_string(),
+            method: "recall".to_string(),
+            params: json!({ "query": "memory:42", "namespace": "team.alpha", "limit": 1.5 }),
+            id: Some(json!(4)),
+        };
+        let error = fractional_limit.parse_method().unwrap_err();
+        assert_eq!(error.code, -32602);
+        assert_eq!(error.message, "limit must be a positive integer");
     }
 }

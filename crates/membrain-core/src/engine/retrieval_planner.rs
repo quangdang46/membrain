@@ -21,7 +21,7 @@ use crate::types::{CanonicalMemoryType, MemoryId, SessionId};
 // ── Planner input ─────────────────────────────────────────────────────────────
 
 /// Query path selection for retrieval planning.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
 pub enum QueryPath {
     /// Direct ID lookup (exact handle).
     ExactId,
@@ -92,6 +92,13 @@ pub struct QueryExampleSeed {
     pub polarity: QueryExamplePolarity,
 }
 
+impl QueryExampleSeed {
+    /// Returns the stable machine-readable polarity for this seed.
+    pub const fn polarity_name(&self) -> &'static str {
+        self.polarity.as_str()
+    }
+}
+
 /// Declared primary cue after request normalization.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum PrimaryCue {
@@ -123,6 +130,31 @@ pub struct QueryByExampleNormalization {
     pub primary_cue: PrimaryCue,
     /// Ordered seed memories referenced by the request.
     pub seeds: Vec<QueryExampleSeed>,
+}
+
+impl QueryByExampleNormalization {
+    /// Returns true when query text remains the canonical primary cue.
+    pub const fn uses_query_text_as_primary_cue(&self) -> bool {
+        matches!(self.primary_cue, PrimaryCue::QueryText)
+    }
+
+    /// Returns true when any stored memory seed participates in the request.
+    pub fn has_example_seeds(&self) -> bool {
+        !self.seeds.is_empty()
+    }
+
+    /// Returns ordered machine-readable seed polarity names for explain and smoke surfaces.
+    pub fn seed_polarities(&self) -> Vec<&'static str> {
+        self.seeds
+            .iter()
+            .map(QueryExampleSeed::polarity_name)
+            .collect()
+    }
+
+    /// Returns ordered seed memory ids exactly as normalized from the request.
+    pub fn seed_memory_ids(&self) -> Vec<MemoryId> {
+        self.seeds.iter().map(|seed| seed.memory_id).collect()
+    }
 }
 
 /// Validation failures for canonical retrieval cues.
@@ -545,6 +577,8 @@ pub struct StageTrace {
     pub candidates_in: usize,
     /// Candidates after this stage.
     pub candidates_out: usize,
+    /// Bounded candidate cap or budget applied to this stage.
+    pub stage_budget: usize,
     /// Whether this stage was bypassed (zero budget).
     pub was_bypassed: bool,
     /// Execution hint for logging.
@@ -553,22 +587,29 @@ pub struct StageTrace {
 
 impl StageTrace {
     /// Creates a trace for an executed stage.
-    pub fn executed(stage: PlannerStage, candidates_in: usize, candidates_out: usize) -> Self {
+    pub fn executed(
+        stage: PlannerStage,
+        candidates_in: usize,
+        candidates_out: usize,
+        stage_budget: usize,
+    ) -> Self {
         Self {
             stage,
             candidates_in,
             candidates_out,
+            stage_budget,
             was_bypassed: false,
             execution_hint: "normal",
         }
     }
 
     /// Creates a trace for a bypassed stage.
-    pub fn bypassed(stage: PlannerStage) -> Self {
+    pub fn bypassed(stage: PlannerStage, stage_budget: usize) -> Self {
         Self {
             stage,
             candidates_in: 0,
             candidates_out: 0,
+            stage_budget,
             was_bypassed: true,
             execution_hint: "bypassed",
         }
@@ -577,13 +618,18 @@ impl StageTrace {
     /// Returns a human-readable summary.
     pub fn summary(&self) -> String {
         if self.was_bypassed {
-            format!("[{}] BYPASSED", self.stage.as_str())
+            format!(
+                "[{}] BYPASSED (budget cap {})",
+                self.stage.as_str(),
+                self.stage_budget
+            )
         } else {
             format!(
-                "[{}] {} → {} candidates",
+                "[{}] {} → {} candidates (budget cap {})",
                 self.stage.as_str(),
                 self.candidates_in,
-                self.candidates_out
+                self.candidates_out,
+                self.stage_budget
             )
         }
     }
@@ -885,9 +931,16 @@ mod tests {
             Some("example cue")
         );
         assert_eq!(normalized.primary_cue, PrimaryCue::QueryText);
+        assert!(normalized.uses_query_text_as_primary_cue());
+        assert!(normalized.has_example_seeds());
         assert_eq!(normalized.seeds.len(), 2);
         assert_eq!(normalized.seeds[0].polarity, QueryExamplePolarity::Like);
         assert_eq!(normalized.seeds[1].polarity, QueryExamplePolarity::Unlike);
+        assert_eq!(normalized.seed_polarities(), vec!["like", "unlike"]);
+        assert_eq!(
+            normalized.seed_memory_ids(),
+            vec![MemoryId(11), MemoryId(12)]
+        );
     }
 
     #[test]
@@ -899,6 +952,21 @@ mod tests {
 
         assert_eq!(error, RetrievalRequestValidationError::MissingPrimaryCue);
         assert_eq!(error.as_str(), "missing_primary_cue");
+    }
+
+    #[test]
+    fn normalization_uses_unlike_seed_as_primary_cue_when_query_text_is_absent() {
+        let ns = test_namespace();
+        let request = RetrievalRequest::exact_id(ns, MemoryId(44)).with_unlike_memory(MemoryId(17));
+
+        let normalized = request.normalize_query_by_example().unwrap();
+
+        assert_eq!(normalized.normalized_query_text, None);
+        assert_eq!(normalized.primary_cue, PrimaryCue::UnlikeId);
+        assert!(!normalized.uses_query_text_as_primary_cue());
+        assert!(normalized.has_example_seeds());
+        assert_eq!(normalized.seed_polarities(), vec!["unlike"]);
+        assert_eq!(normalized.seed_memory_ids(), vec![MemoryId(17)]);
     }
 
     #[test]
@@ -1093,11 +1161,15 @@ mod tests {
 
     #[test]
     fn stage_trace_summary() {
-        let trace = StageTrace::executed(PlannerStage::LexicalPrefilter, 1000, 50);
+        let trace = StageTrace::executed(PlannerStage::LexicalPrefilter, 1000, 50, 5_000);
         assert!(trace.summary().contains("1000 → 50"));
+        assert!(trace.summary().contains("budget cap 5000"));
+        assert_eq!(trace.stage_budget, 5_000);
 
-        let bypassed = StageTrace::bypassed(PlannerStage::HotSemanticSearch);
+        let bypassed = StageTrace::bypassed(PlannerStage::HotSemanticSearch, 100);
         assert!(bypassed.summary().contains("BYPASSED"));
+        assert!(bypassed.summary().contains("budget cap 100"));
+        assert_eq!(bypassed.stage_budget, 100);
     }
 
     #[test]
@@ -1110,11 +1182,13 @@ mod tests {
             PlannerStage::LexicalPrefilter,
             1000,
             50,
+            5_000,
         ));
         trace.add_stage(StageTrace::executed(
             PlannerStage::HotSemanticSearch,
             50,
             20,
+            100,
         ));
         trace.set_final_candidates(10);
         trace.set_tier3_triggered(EscalationReason::Tier2Underfill);
@@ -1122,6 +1196,8 @@ mod tests {
         let summary = trace.summary();
         assert!(summary.contains("hybrid"));
         assert!(summary.contains("lexical_prefilter"));
+        assert!(summary.contains("budget cap 5000"));
+        assert!(summary.contains("budget cap 100"));
         assert!(summary.contains("tier2_underfill"));
     }
 

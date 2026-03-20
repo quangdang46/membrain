@@ -1,6 +1,10 @@
 use clap::{Parser, Subcommand};
 use membrain_core::api::NamespaceId;
+use membrain_core::observability::{AuditEventCategory, AuditEventKind};
+use membrain_core::store::audit::{AppendOnlyAuditLog, AuditLogEntry, AuditLogStore};
+use membrain_core::types::{MemoryId, SessionId};
 use membrain_daemon::daemon::{DaemonRuntime, DaemonRuntimeConfig};
+use serde::Serialize;
 use std::path::PathBuf;
 
 #[derive(Parser, Debug)]
@@ -74,6 +78,27 @@ enum Commands {
     },
     /// Validate system configuration and index health
     Doctor,
+    /// Query and export bounded audit history slices
+    Audit {
+        /// Namespace to inspect
+        #[arg(long)]
+        namespace: String,
+        /// Optional memory id filter
+        #[arg(long)]
+        id: Option<u64>,
+        /// Optional minimum sequence filter
+        #[arg(long)]
+        since: Option<u64>,
+        /// Optional event or category filter
+        #[arg(long)]
+        op: Option<String>,
+        /// Optional tail count after filtering
+        #[arg(long)]
+        recent: Option<usize>,
+        /// Emit JSON instead of text
+        #[arg(long, default_value_t = false)]
+        json: bool,
+    },
     /// Run the local daemon inside the CLI process
     Daemon {
         /// Unix socket path to bind
@@ -86,6 +111,153 @@ enum Commands {
         #[arg(long, default_value_t = 32)]
         max_queue_depth: usize,
     },
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+struct AuditRow {
+    sequence: u64,
+    category: &'static str,
+    kind: &'static str,
+    namespace: String,
+    memory_id: Option<u64>,
+    session_id: Option<u64>,
+    triggered_by: &'static str,
+    related_run: Option<String>,
+    redacted: bool,
+    note: String,
+}
+
+impl From<AuditLogEntry> for AuditRow {
+    fn from(entry: AuditLogEntry) -> Self {
+        Self {
+            sequence: entry.sequence,
+            category: entry.category.as_str(),
+            kind: entry.kind.as_str(),
+            namespace: entry.namespace.as_str().to_owned(),
+            memory_id: entry.memory_id.map(|id| id.0),
+            session_id: entry.session_id.map(|id| id.0),
+            triggered_by: entry.actor_source,
+            related_run: entry.related_run,
+            redacted: entry.redacted,
+            note: entry.detail,
+        }
+    }
+}
+
+fn sample_audit_log(namespace: &NamespaceId) -> AppendOnlyAuditLog {
+    let mut log = AuditLogStore.new_log(8);
+    log.append(
+        AuditLogEntry::new(
+            AuditEventCategory::Encode,
+            AuditEventKind::EncodeAccepted,
+            namespace.clone(),
+            "encode_engine",
+            "encoded memory into durable flow",
+        )
+        .with_memory_id(MemoryId(21))
+        .with_session_id(SessionId(5)),
+    );
+    log.append(
+        AuditLogEntry::new(
+            AuditEventCategory::Policy,
+            AuditEventKind::PolicyRedacted,
+            namespace.clone(),
+            "policy_module",
+            "redacted protected actor details for export",
+        )
+        .with_memory_id(MemoryId(21))
+        .with_related_run("incident-2026-03-20")
+        .with_redaction(),
+    );
+    log.append(
+        AuditLogEntry::new(
+            AuditEventCategory::Maintenance,
+            AuditEventKind::MaintenanceMigrationApplied,
+            namespace.clone(),
+            "migration_runner",
+            "applied audit-log schema migration",
+        )
+        .with_memory_id(MemoryId(21))
+        .with_related_run("migration-0042"),
+    );
+    log.append(AuditLogEntry::new(
+        AuditEventCategory::Archive,
+        AuditEventKind::ArchiveRecorded,
+        namespace.clone(),
+        "cold_store",
+        "archived superseded evidence",
+    ));
+    log.append(AuditLogEntry::new(
+        AuditEventCategory::Recall,
+        AuditEventKind::RecallServed,
+        namespace.clone(),
+        "recall_engine",
+        "served filtered audit history preview",
+    ));
+    log
+}
+
+fn filter_audit_rows(
+    log: &AppendOnlyAuditLog,
+    namespace: &NamespaceId,
+    memory_id: Option<u64>,
+    since: Option<u64>,
+    op: Option<&str>,
+    recent: Option<usize>,
+) -> Vec<AuditRow> {
+    let op = op.map(str::trim).filter(|value| !value.is_empty());
+    let mut rows: Vec<_> = log
+        .entries_for_namespace(namespace)
+        .into_iter()
+        .filter(|entry| since.is_none_or(|min_sequence| entry.sequence >= min_sequence))
+        .filter(|entry| {
+            memory_id.is_none_or(|expected| entry.memory_id == Some(MemoryId(expected)))
+        })
+        .filter(|entry| {
+            op.is_none_or(|needle| {
+                entry.kind.as_str() == needle || entry.category.as_str() == needle
+            })
+        })
+        .map(AuditRow::from)
+        .collect();
+
+    if let Some(limit) = recent {
+        if rows.len() > limit {
+            rows = rows.split_off(rows.len() - limit);
+        }
+    }
+
+    rows
+}
+
+fn print_audit_rows(rows: &[AuditRow], json: bool) -> anyhow::Result<()> {
+    if json {
+        println!("{}", serde_json::to_string_pretty(rows)?);
+        return Ok(());
+    }
+
+    if rows.is_empty() {
+        println!("No audit rows matched the requested filters.");
+        return Ok(());
+    }
+
+    for row in rows {
+        println!(
+            "#{} {} {} ns={} memory={:?} session={:?} actor={} redacted={} run={:?} note={}",
+            row.sequence,
+            row.category,
+            row.kind,
+            row.namespace,
+            row.memory_id,
+            row.session_id,
+            row.triggered_by,
+            row.redacted,
+            row.related_run,
+            row.note,
+        );
+    }
+
+    Ok(())
 }
 
 #[tokio::main]
@@ -134,15 +306,35 @@ async fn main() -> anyhow::Result<()> {
                 "Running maintenance action '{}' on scope '{}'",
                 action, ns_str
             );
-            println!("Output: {{\"status\": \"success\", \"action\": \"maintenance\", \"target\": \"{}\"}}", action);
+            println!(
+                "Output: {{\"status\": \"success\", \"action\": \"maintenance\", \"target\": \"{}\"}}",
+                action
+            );
         }
         Commands::Benchmark { target, iters } => {
             println!("Benchmarking '{}' over {} iterations", target, iters);
-            println!("Output: {{\"status\": \"success\", \"action\": \"benchmark\", \"duration_ms\": 0}}");
+            println!(
+                "Output: {{\"status\": \"success\", \"action\": \"benchmark\", \"duration_ms\": 0}}"
+            );
         }
         Commands::Doctor => {
             println!("Running system diagnostic...");
-            println!("Output: {{\"status\": \"success\", \"action\": \"doctor\", \"health\": \"healthy\"}}");
+            println!(
+                "Output: {{\"status\": \"success\", \"action\": \"doctor\", \"health\": \"healthy\"}}"
+            );
+        }
+        Commands::Audit {
+            namespace,
+            id,
+            since,
+            op,
+            recent,
+            json,
+        } => {
+            let ns = NamespaceId::new(namespace)?;
+            let log = sample_audit_log(&ns);
+            let rows = filter_audit_rows(&log, &ns, *id, *since, op.as_deref(), *recent);
+            print_audit_rows(&rows, *json)?;
         }
         Commands::Daemon {
             socket_path,

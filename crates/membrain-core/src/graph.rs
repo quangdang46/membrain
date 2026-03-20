@@ -6,7 +6,7 @@
 
 use crate::api::NamespaceId;
 use crate::types::MemoryId;
-use std::collections::{HashSet, VecDeque};
+use std::collections::{HashMap, HashSet, VecDeque};
 
 // ── Entity types ─────────────────────────────────────────────────────────────
 
@@ -176,20 +176,283 @@ pub struct GraphExplain {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct EngramId(pub u64);
 
-/// Explicit schema for Engrams.
-#[derive(Debug, Clone)]
+/// Durable formation metadata carried by authoritative engram rows.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct EngramFormation {
+    pub formed_at_tick: u64,
+    pub seed_memory_id: MemoryId,
+    pub embedding_generation: &'static str,
+}
+
+/// Explicit schema for authoritative engram rows.
+#[derive(Debug, Clone, PartialEq)]
 pub struct EngramCluster {
     pub id: EngramId,
     pub centroid: Vec<f32>,
     pub member_count: usize,
     pub last_activated: u64,
+    pub formation: EngramFormation,
 }
 
-#[derive(Debug, Clone)]
+/// Durable membership row linking a memory to one engram cluster.
+#[derive(Debug, Clone, PartialEq)]
 pub struct EngramMember {
     pub engram_id: EngramId,
     pub memory_id: MemoryId,
     pub distance_to_centroid: f32,
+    pub joined_at_tick: u64,
+}
+
+/// Bounded encode-time candidate discovered during similar-engram lookup.
+#[derive(Debug, Clone, PartialEq)]
+pub struct SimilarEngramCandidate {
+    pub engram_id: EngramId,
+    pub similarity: f32,
+}
+
+/// Deterministic encode-time outcome for engram assignment.
+#[derive(Debug, Clone, PartialEq)]
+pub struct EngramAssignment {
+    pub engram_id: EngramId,
+    pub created_new_cluster: bool,
+    pub similar_candidates: Vec<SimilarEngramCandidate>,
+}
+
+/// Deterministic authoritative engram store that keeps cluster membership rebuildable
+/// from durable `engrams` and `engram_members` facts rather than helper-index state.
+#[derive(Debug, Clone, PartialEq)]
+pub struct EngramStore {
+    clusters: HashMap<EngramId, EngramCluster>,
+    members_by_engram: HashMap<EngramId, Vec<EngramMember>>,
+    memory_to_engram: HashMap<MemoryId, EngramId>,
+    memory_embeddings: HashMap<MemoryId, Vec<f32>>,
+    next_engram_id: u64,
+    similarity_threshold: f32,
+    similar_lookup_cap: usize,
+}
+
+impl Default for EngramStore {
+    fn default() -> Self {
+        Self::new(0.9)
+    }
+}
+
+impl EngramStore {
+    pub const DEFAULT_SIMILAR_LOOKUP_CAP: usize = 3;
+
+    pub fn new(similarity_threshold: f32) -> Self {
+        Self {
+            clusters: HashMap::new(),
+            members_by_engram: HashMap::new(),
+            memory_to_engram: HashMap::new(),
+            memory_embeddings: HashMap::new(),
+            next_engram_id: 1,
+            similarity_threshold,
+            similar_lookup_cap: Self::DEFAULT_SIMILAR_LOOKUP_CAP,
+        }
+    }
+
+    pub fn with_lookup_cap(mut self, similar_lookup_cap: usize) -> Self {
+        self.similar_lookup_cap = similar_lookup_cap.max(1);
+        self
+    }
+
+    pub fn assign_memory(
+        &mut self,
+        memory_id: MemoryId,
+        embedding: Vec<f32>,
+        formed_at_tick: u64,
+        embedding_generation: &'static str,
+    ) -> EngramAssignment {
+        let similar_candidates = self.similar_engrams(&embedding);
+        let selected = similar_candidates
+            .iter()
+            .find(|candidate| candidate.similarity >= self.similarity_threshold)
+            .map(|candidate| candidate.engram_id);
+
+        let (engram_id, created_new_cluster) = if let Some(engram_id) = selected {
+            (engram_id, false)
+        } else {
+            let engram_id = EngramId(self.next_engram_id);
+            self.next_engram_id += 1;
+            self.clusters.insert(
+                engram_id,
+                EngramCluster {
+                    id: engram_id,
+                    centroid: embedding.clone(),
+                    member_count: 0,
+                    last_activated: formed_at_tick,
+                    formation: EngramFormation {
+                        formed_at_tick,
+                        seed_memory_id: memory_id,
+                        embedding_generation,
+                    },
+                },
+            );
+            (engram_id, true)
+        };
+
+        let distance_to_centroid = self
+            .clusters
+            .get(&engram_id)
+            .map(|cluster| cosine_distance(&embedding, &cluster.centroid))
+            .unwrap_or(0.0);
+
+        self.memory_embeddings.insert(memory_id, embedding);
+        self.memory_to_engram.insert(memory_id, engram_id);
+        self.members_by_engram
+            .entry(engram_id)
+            .or_default()
+            .push(EngramMember {
+                engram_id,
+                memory_id,
+                distance_to_centroid,
+                joined_at_tick: formed_at_tick,
+            });
+        self.refresh_cluster(engram_id, formed_at_tick);
+
+        EngramAssignment {
+            engram_id,
+            created_new_cluster,
+            similar_candidates,
+        }
+    }
+
+    pub fn similar_engrams(&self, embedding: &[f32]) -> Vec<SimilarEngramCandidate> {
+        let mut candidates = self
+            .clusters
+            .values()
+            .map(|cluster| SimilarEngramCandidate {
+                engram_id: cluster.id,
+                similarity: cosine_similarity(embedding, &cluster.centroid),
+            })
+            .collect::<Vec<_>>();
+        candidates.sort_by(|left, right| right.similarity.total_cmp(&left.similarity));
+        candidates.truncate(self.similar_lookup_cap);
+        candidates
+    }
+
+    pub fn refresh_cluster(&mut self, engram_id: EngramId, activated_at_tick: u64) {
+        let member_memory_ids = self
+            .members_by_engram
+            .get(&engram_id)
+            .map(|members| members.iter().map(|member| member.memory_id).collect::<Vec<_>>())
+            .unwrap_or_default();
+        let member_embeddings = member_memory_ids
+            .iter()
+            .filter_map(|memory_id| self.memory_embeddings.get(memory_id))
+            .cloned()
+            .collect::<Vec<_>>();
+        let centroid = average_embedding(&member_embeddings).unwrap_or_default();
+        let member_count = member_memory_ids.len();
+
+        if let Some(cluster) = self.clusters.get_mut(&engram_id) {
+            cluster.centroid = centroid.clone();
+            cluster.member_count = member_count;
+            cluster.last_activated = activated_at_tick;
+        }
+
+        if let Some(members) = self.members_by_engram.get_mut(&engram_id) {
+            for member in members.iter_mut() {
+                member.distance_to_centroid = self
+                    .memory_embeddings
+                    .get(&member.memory_id)
+                    .map(|embedding| cosine_distance(embedding, &centroid))
+                    .unwrap_or(0.0);
+            }
+        }
+    }
+
+    pub fn rebuild_from_memberships(&self) -> Self {
+        let mut rebuilt = Self::new(self.similarity_threshold).with_lookup_cap(self.similar_lookup_cap);
+        rebuilt.next_engram_id = self.next_engram_id;
+        rebuilt.memory_embeddings = self.memory_embeddings.clone();
+        rebuilt.memory_to_engram = self.memory_to_engram.clone();
+
+        for (engram_id, cluster) in &self.clusters {
+            rebuilt.clusters.insert(
+                *engram_id,
+                EngramCluster {
+                    id: *engram_id,
+                    centroid: Vec::new(),
+                    member_count: 0,
+                    last_activated: cluster.last_activated,
+                    formation: cluster.formation.clone(),
+                },
+            );
+        }
+
+        for (engram_id, members) in &self.members_by_engram {
+            rebuilt.members_by_engram.insert(*engram_id, members.clone());
+        }
+
+        let refresh_order = rebuilt.clusters.keys().copied().collect::<Vec<_>>();
+        for engram_id in refresh_order {
+            let last_activated = rebuilt
+                .clusters
+                .get(&engram_id)
+                .map(|cluster| cluster.last_activated)
+                .unwrap_or(0);
+            rebuilt.refresh_cluster(engram_id, last_activated);
+        }
+
+        rebuilt
+    }
+
+    pub fn lookup_for_memory(&self, memory_id: MemoryId) -> Option<EngramId> {
+        self.memory_to_engram.get(&memory_id).copied()
+    }
+
+    pub fn cluster(&self, engram_id: EngramId) -> Option<&EngramCluster> {
+        self.clusters.get(&engram_id)
+    }
+
+    pub fn members(&self, engram_id: EngramId) -> &[EngramMember] {
+        self.members_by_engram
+            .get(&engram_id)
+            .map(Vec::as_slice)
+            .unwrap_or(&[])
+    }
+}
+
+fn average_embedding(embeddings: &[Vec<f32>]) -> Option<Vec<f32>> {
+    let first = embeddings.first()?;
+    let mut sums = vec![0.0; first.len()];
+    for embedding in embeddings {
+        if embedding.len() != sums.len() {
+            return None;
+        }
+        for (sum, value) in sums.iter_mut().zip(embedding) {
+            *sum += *value;
+        }
+    }
+    let divisor = embeddings.len() as f32;
+    Some(sums.into_iter().map(|sum| sum / divisor).collect())
+}
+
+fn cosine_similarity(left: &[f32], right: &[f32]) -> f32 {
+    if left.len() != right.len() || left.is_empty() {
+        return 0.0;
+    }
+
+    let mut dot = 0.0;
+    let mut left_norm = 0.0;
+    let mut right_norm = 0.0;
+    for (l, r) in left.iter().zip(right) {
+        dot += l * r;
+        left_norm += l * l;
+        right_norm += r * r;
+    }
+
+    if left_norm == 0.0 || right_norm == 0.0 {
+        0.0
+    } else {
+        dot / (left_norm.sqrt() * right_norm.sqrt())
+    }
+}
+
+fn cosine_distance(left: &[f32], right: &[f32]) -> f32 {
+    1.0 - cosine_similarity(left, right)
 }
 
 // ── Bounded BFS Expansion Planner (mb-23u.8.2) ───────────────────────────────
@@ -460,18 +723,89 @@ mod tests {
     }
 
     #[test]
-    fn test_engram_centroid_maintenance() {
-        // mb-23u.8.5
-        let mut cluster = EngramCluster {
-            id: EngramId(1),
-            centroid: vec![0.1, 0.2, 0.3],
-            member_count: 1,
-            last_activated: 100,
-        };
-        // Simulated centroid refresh
-        cluster.member_count += 1;
-        cluster.centroid = vec![0.15, 0.25, 0.35];
-        assert_eq!(cluster.member_count, 2);
+    fn engram_assignment_creates_then_joins_using_bounded_similarity_lookup() {
+        let mut store = EngramStore::new(0.95).with_lookup_cap(3);
+
+        let created = store.assign_memory(MemoryId(1), vec![1.0, 0.0], 10, "embed.v1");
+        let joined = store.assign_memory(MemoryId(2), vec![0.99, 0.01], 11, "embed.v1");
+
+        assert!(created.created_new_cluster);
+        assert!(!joined.created_new_cluster);
+        assert_eq!(joined.engram_id, created.engram_id);
+        assert_eq!(joined.similar_candidates.len(), 1);
+        assert_eq!(store.lookup_for_memory(MemoryId(2)), Some(created.engram_id));
+    }
+
+    #[test]
+    fn engram_assignment_mints_new_cluster_below_threshold() {
+        let mut store = EngramStore::new(0.98).with_lookup_cap(3);
+
+        let first = store.assign_memory(MemoryId(1), vec![1.0, 0.0], 10, "embed.v1");
+        let second = store.assign_memory(MemoryId(2), vec![0.0, 1.0], 11, "embed.v1");
+
+        assert!(first.created_new_cluster);
+        assert!(second.created_new_cluster);
+        assert_ne!(first.engram_id, second.engram_id);
+        assert_eq!(second.similar_candidates.len(), 1);
+    }
+
+    #[test]
+    fn centroid_refresh_and_member_count_stay_deterministic() {
+        let mut store = EngramStore::new(0.90);
+
+        let assignment = store.assign_memory(MemoryId(1), vec![1.0, 0.0], 10, "embed.v1");
+        store.assign_memory(MemoryId(2), vec![0.95, 0.05], 11, "embed.v1");
+        store.assign_memory(MemoryId(3), vec![0.90, 0.10], 12, "embed.v1");
+        store.refresh_cluster(assignment.engram_id, 13);
+
+        let cluster = store.cluster(assignment.engram_id).unwrap();
+        assert_eq!(cluster.member_count, 3);
+        assert_eq!(cluster.last_activated, 13);
+        assert_eq!(cluster.centroid, vec![0.95, 0.05]);
+        assert_eq!(store.members(assignment.engram_id).len(), 3);
+    }
+
+    #[test]
+    fn rebuild_restores_centroid_after_partial_divergence_without_losing_membership_truth() {
+        let mut store = EngramStore::new(0.90);
+        let assignment = store.assign_memory(MemoryId(1), vec![1.0, 0.0], 10, "embed.v1");
+        store.assign_memory(MemoryId(2), vec![0.95, 0.05], 11, "embed.v1");
+
+        let cluster = store.clusters.get_mut(&assignment.engram_id).unwrap();
+        cluster.centroid = vec![9.0, 9.0];
+        cluster.member_count = 99;
+
+        let rebuilt = store.rebuild_from_memberships();
+        let rebuilt_cluster = rebuilt.cluster(assignment.engram_id).unwrap();
+
+        assert_eq!(rebuilt_cluster.member_count, 2);
+        assert_eq!(rebuilt_cluster.centroid, vec![0.975, 0.025]);
+        assert_eq!(rebuilt.lookup_for_memory(MemoryId(1)), Some(assignment.engram_id));
+        assert_eq!(rebuilt.lookup_for_memory(MemoryId(2)), Some(assignment.engram_id));
+    }
+
+    #[test]
+    fn lookup_for_memory_avoids_full_store_scan() {
+        let mut store = EngramStore::new(0.90);
+        let assignment = store.assign_memory(MemoryId(77), vec![0.7, 0.3], 10, "embed.v1");
+
+        assert_eq!(store.lookup_for_memory(MemoryId(77)), Some(assignment.engram_id));
+        assert_eq!(store.lookup_for_memory(MemoryId(999)), None);
+    }
+
+    #[test]
+    fn similar_engram_lookup_stays_capped_to_top_three() {
+        let mut store = EngramStore::new(0.999).with_lookup_cap(3);
+        store.assign_memory(MemoryId(1), vec![1.0, 0.0], 10, "embed.v1");
+        store.assign_memory(MemoryId(2), vec![0.0, 1.0], 11, "embed.v1");
+        store.assign_memory(MemoryId(3), vec![-1.0, 0.0], 12, "embed.v1");
+        store.assign_memory(MemoryId(4), vec![0.0, -1.0], 13, "embed.v1");
+
+        let candidates = store.similar_engrams(&[0.8, 0.2]);
+
+        assert_eq!(candidates.len(), 3);
+        assert!(candidates[0].similarity >= candidates[1].similarity);
+        assert!(candidates[1].similarity >= candidates[2].similarity);
     }
 
     #[test]

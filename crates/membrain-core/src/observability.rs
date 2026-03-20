@@ -34,6 +34,9 @@ pub enum AuditEventKind {
     PolicyRedacted,
     MaintenanceRepairStarted,
     MaintenanceRepairCompleted,
+    MaintenanceMigrationApplied,
+    MaintenanceCompactionApplied,
+    IncidentRecorded,
     ArchiveRecorded,
 }
 
@@ -49,6 +52,9 @@ impl AuditEventKind {
             Self::PolicyRedacted => "policy_redacted",
             Self::MaintenanceRepairStarted => "maintenance_repair_started",
             Self::MaintenanceRepairCompleted => "maintenance_repair_completed",
+            Self::MaintenanceMigrationApplied => "maintenance_migration_applied",
+            Self::MaintenanceCompactionApplied => "maintenance_compaction_applied",
+            Self::IncidentRecorded => "incident_recorded",
             Self::ArchiveRecorded => "archive_recorded",
         }
     }
@@ -59,9 +65,11 @@ impl AuditEventKind {
             Self::EncodeAccepted | Self::EncodeRejected => AuditEventCategory::Encode,
             Self::RecallServed | Self::RecallDenied => AuditEventCategory::Recall,
             Self::PolicyDenied | Self::PolicyRedacted => AuditEventCategory::Policy,
-            Self::MaintenanceRepairStarted | Self::MaintenanceRepairCompleted => {
-                AuditEventCategory::Maintenance
-            }
+            Self::MaintenanceRepairStarted
+            | Self::MaintenanceRepairCompleted
+            | Self::MaintenanceMigrationApplied
+            | Self::MaintenanceCompactionApplied
+            | Self::IncidentRecorded => AuditEventCategory::Maintenance,
             Self::ArchiveRecorded => AuditEventCategory::Archive,
         }
     }
@@ -78,6 +86,20 @@ pub enum OutcomeClass {
     Degraded,
 }
 
+impl OutcomeClass {
+    /// Returns the stable machine-readable retrieval outcome label.
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Accepted => "accepted",
+            Self::Rejected => "rejected",
+            Self::Partial => "partial",
+            Self::Preview => "preview",
+            Self::Blocked => "blocked",
+            Self::Degraded => "degraded",
+        }
+    }
+}
+
 /// Ordered synchronous stages on the encode fast path.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum EncodeFastPathStage {
@@ -86,6 +108,19 @@ pub enum EncodeFastPathStage {
     ShallowClassify,
     ProvisionalSalience,
     LandmarkTagging,
+}
+
+impl EncodeFastPathStage {
+    /// Returns the stable machine-readable fast-path stage label.
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Normalize => "normalize",
+            Self::Fingerprint => "fingerprint",
+            Self::ShallowClassify => "shallow_classify",
+            Self::ProvisionalSalience => "provisional_salience",
+            Self::LandmarkTagging => "landmark_tagging",
+        }
+    }
 }
 
 /// Stable trace artifact for the synchronous encode fast path.
@@ -118,6 +153,16 @@ pub enum Tier1LookupLane {
     RecentWindow,
 }
 
+impl Tier1LookupLane {
+    /// Returns the stable machine-readable Tier1 lane label.
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::ExactHandle => "exact_handle",
+            Self::RecentWindow => "recent_window",
+        }
+    }
+}
+
 /// Machine-readable Tier1 outcomes for exact and recent hot-set reuse.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Tier1LookupOutcome {
@@ -125,6 +170,18 @@ pub enum Tier1LookupOutcome {
     Miss,
     Bypass,
     StaleBypass,
+}
+
+impl Tier1LookupOutcome {
+    /// Returns the stable machine-readable Tier1 outcome label.
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Hit => "hit",
+            Self::Miss => "miss",
+            Self::Bypass => "bypass",
+            Self::StaleBypass => "stale_bypass",
+        }
+    }
 }
 
 /// Stable trace artifact for Tier1 exact and recent lookups.
@@ -149,6 +206,16 @@ pub enum Tier2PrefilterOutcome {
     Bypass,
 }
 
+impl Tier2PrefilterOutcome {
+    /// Returns the stable machine-readable Tier2 prefilter outcome label.
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Ready => "ready",
+            Self::Bypass => "bypass",
+        }
+    }
+}
+
 /// Stable trace artifact for Tier2 metadata-first prefilter and index planning.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Tier2PrefilterTrace {
@@ -169,6 +236,17 @@ pub enum AdmissionOutcomeKind {
     Buffered,
     /// The candidate or an overflow victim should be promoted to encode.
     Promoted,
+}
+
+impl AdmissionOutcomeKind {
+    /// Returns the stable machine-readable working-memory outcome label.
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Discarded => "discarded",
+            Self::Buffered => "buffered",
+            Self::Promoted => "promoted",
+        }
+    }
 }
 
 /// Stable trace artifact for working-memory admission decisions.
@@ -205,6 +283,19 @@ pub enum CacheLookupOutcome {
     Disabled,
 }
 
+impl CacheLookupOutcome {
+    /// Returns the stable machine-readable cache lookup outcome label.
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Hit => "hit",
+            Self::Miss => "miss",
+            Self::Bypass => "bypass",
+            Self::StaleWarning => "stale_warning",
+            Self::Disabled => "disabled",
+        }
+    }
+}
+
 /// Stable trace artifact for one cache-family evaluation on the request path.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct CacheEvalTrace {
@@ -216,4 +307,51 @@ pub struct CacheEvalTrace {
     pub candidates_after: usize,
     /// Whether the result came from a warm source.
     pub warm_reuse: bool,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{
+        AdmissionOutcomeKind, CacheLookupOutcome, EncodeFastPathStage, OutcomeClass,
+        Tier1LookupLane, Tier1LookupOutcome, Tier2PrefilterOutcome,
+    };
+
+    #[test]
+    fn retrieval_outcome_class_labels_match_contract() {
+        assert_eq!(OutcomeClass::Accepted.as_str(), "accepted");
+        assert_eq!(OutcomeClass::Rejected.as_str(), "rejected");
+        assert_eq!(OutcomeClass::Partial.as_str(), "partial");
+        assert_eq!(OutcomeClass::Preview.as_str(), "preview");
+        assert_eq!(OutcomeClass::Blocked.as_str(), "blocked");
+        assert_eq!(OutcomeClass::Degraded.as_str(), "degraded");
+    }
+
+    #[test]
+    fn trace_lane_and_outcome_labels_remain_machine_readable() {
+        assert_eq!(EncodeFastPathStage::Normalize.as_str(), "normalize");
+        assert_eq!(
+            EncodeFastPathStage::ProvisionalSalience.as_str(),
+            "provisional_salience"
+        );
+        assert_eq!(Tier1LookupLane::ExactHandle.as_str(), "exact_handle");
+        assert_eq!(Tier1LookupLane::RecentWindow.as_str(), "recent_window");
+        assert_eq!(Tier1LookupOutcome::Hit.as_str(), "hit");
+        assert_eq!(Tier1LookupOutcome::Miss.as_str(), "miss");
+        assert_eq!(Tier1LookupOutcome::Bypass.as_str(), "bypass");
+        assert_eq!(Tier1LookupOutcome::StaleBypass.as_str(), "stale_bypass");
+        assert_eq!(Tier2PrefilterOutcome::Ready.as_str(), "ready");
+        assert_eq!(Tier2PrefilterOutcome::Bypass.as_str(), "bypass");
+    }
+
+    #[test]
+    fn working_memory_and_cache_labels_remain_stable() {
+        assert_eq!(AdmissionOutcomeKind::Discarded.as_str(), "discarded");
+        assert_eq!(AdmissionOutcomeKind::Buffered.as_str(), "buffered");
+        assert_eq!(AdmissionOutcomeKind::Promoted.as_str(), "promoted");
+        assert_eq!(CacheLookupOutcome::Hit.as_str(), "hit");
+        assert_eq!(CacheLookupOutcome::Miss.as_str(), "miss");
+        assert_eq!(CacheLookupOutcome::Bypass.as_str(), "bypass");
+        assert_eq!(CacheLookupOutcome::StaleWarning.as_str(), "stale_warning");
+        assert_eq!(CacheLookupOutcome::Disabled.as_str(), "disabled");
+    }
 }

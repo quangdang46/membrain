@@ -12,6 +12,8 @@ pub use cache::CacheManager;
 pub use cold::ColdStore;
 pub use hot::HotStore;
 pub use tier2::Tier2Store;
+
+use crate::migrate::DurableSchemaObject;
 pub use tier_router::{
     LifecycleState, TierOwnership, TierRouter, TierRoutingConfig, TierRoutingDecision,
     TierRoutingInput, TierRoutingReason, TierRoutingTrace,
@@ -27,6 +29,11 @@ pub trait HotStoreApi {
 pub trait Tier2StoreApi {
     /// Returns the stable component identifier for this Tier2 surface.
     fn component_name(&self) -> &'static str;
+
+    /// Returns the authoritative durable schema objects this store owns.
+    fn authoritative_schema_objects(&self) -> Vec<DurableSchemaObject> {
+        vec![DurableSchemaObject::DurableMemoryRecords]
+    }
 }
 
 /// Shared cold-store boundary for archive and repair flows.
@@ -39,6 +46,17 @@ pub trait ColdStoreApi {
 pub trait AuditLogStoreApi {
     /// Returns the stable component identifier for this audit-log surface.
     fn component_name(&self) -> &'static str;
+}
+
+/// Shared engram durability boundary for stores that own authoritative engram rows.
+pub trait EngramStoreSchemaApi {
+    /// Returns the authoritative durable engram schema objects owned by this store surface.
+    fn engram_schema_objects(&self) -> Vec<DurableSchemaObject> {
+        vec![
+            DurableSchemaObject::EngramsTable,
+            DurableSchemaObject::EngramMembershipTable,
+        ]
+    }
 }
 
 /// Stable store set composed by the core facade.
@@ -84,5 +102,10 @@ impl CoreStores {
     /// Returns the append-only audit-log store boundary.
     pub fn audit(&self) -> &AuditLogStore {
         &self.audit
+    }
+
+    /// Returns the authoritative durable schema objects exposed by the Tier2 store.
+    pub fn tier2_authoritative_schema_objects(&self) -> Vec<DurableSchemaObject> {
+        self.tier2.authoritative_schema_objects()
     }
 }

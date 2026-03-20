@@ -34,7 +34,7 @@ impl NamespaceId {
 }
 
 /// Stable idempotency and trace identifier carried by all interface wrappers.
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
 pub struct RequestId(String);
 
 impl RequestId {
@@ -501,7 +501,7 @@ impl std::fmt::Display for ContextValidationError {
 impl std::error::Error for ContextValidationError {}
 
 /// Shared warning payload for non-fatal response annotations.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct ResponseWarning {
     pub code: &'static str,
     pub detail: String,
@@ -518,7 +518,7 @@ impl ResponseWarning {
 }
 
 /// Machine-readable top-level route summary preserved across interfaces.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct RouteSummary {
     pub route_family: &'static str,
     pub route_reason: &'static str,
@@ -527,7 +527,7 @@ pub struct RouteSummary {
 }
 
 /// Stable trace-stage vocabulary for cross-surface explain payloads.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum TraceStage {
     Tier1ExactHandle,
     Tier1RecentWindow,
@@ -561,7 +561,7 @@ impl TraceStage {
 }
 
 /// Machine-readable reason describing why an item appeared or was omitted.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct ResultReason {
     pub memory_id: Option<MemoryId>,
     pub reason_code: &'static str,
@@ -569,7 +569,7 @@ pub struct ResultReason {
 }
 
 /// Shared policy summary for explain surfaces.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct TracePolicySummary {
     pub effective_namespace: String,
     pub policy_family: &'static str,
@@ -581,7 +581,7 @@ pub struct TracePolicySummary {
 }
 
 /// Shared provenance summary for explain surfaces.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct TraceProvenanceSummary {
     pub source_kind: &'static str,
     pub source_reference: &'static str,
@@ -589,7 +589,7 @@ pub struct TraceProvenanceSummary {
 }
 
 /// Shared inspect summary for passive-observation provenance and retention semantics.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct PassiveObservationInspectSummary {
     pub source_kind: &'static str,
     pub write_decision: &'static str,
@@ -626,21 +626,21 @@ impl PassiveObservationInspectSummary {
 }
 
 /// Shared freshness marker for explain surfaces.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct FreshnessMarker {
     pub code: &'static str,
     pub detail: &'static str,
 }
 
 /// Shared conflict marker for explain surfaces.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct ConflictMarker {
     pub code: &'static str,
     pub detail: &'static str,
 }
 
 /// Shared uncertainty marker for explain surfaces.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct UncertaintyMarker {
     pub code: &'static str,
     pub detail: &'static str,

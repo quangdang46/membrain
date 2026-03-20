@@ -153,6 +153,7 @@ impl Tier1HotMetadataStore {
         let bounded_limit = limit.min(self.capacity).min(candidate_budget);
         let mut inspected = 0usize;
         let mut records = Vec::new();
+        let mut stale_candidates_skipped = 0usize;
 
         if bounded_limit == 0 {
             return Tier1RecentLookup {
@@ -173,6 +174,7 @@ impl Tier1HotMetadataStore {
             }
 
             let Some(record) = self.exact.get(key) else {
+                stale_candidates_skipped += 1;
                 continue;
             };
             inspected += 1;
@@ -187,7 +189,9 @@ impl Tier1HotMetadataStore {
         Tier1RecentLookup {
             trace: Tier1LookupTrace {
                 lane: Tier1LookupLane::RecentWindow,
-                outcome: if records.is_empty() {
+                outcome: if records.is_empty() && stale_candidates_skipped > 0 {
+                    Tier1LookupOutcome::StaleBypass
+                } else if records.is_empty() {
                     Tier1LookupOutcome::Miss
                 } else {
                     Tier1LookupOutcome::Hit
@@ -209,9 +213,18 @@ impl Tier1HotMetadataStore {
 }
 
 #[cfg(test)]
+impl Tier1HotMetadataStore {
+    fn inject_stale_recent_reference(&mut self, namespace: &str, memory_id: u64) {
+        self.recent
+            .push_back((NamespaceId::new(namespace).unwrap(), MemoryId(memory_id)));
+    }
+}
+
+#[cfg(test)]
 mod tests {
     use super::Tier1HotMetadataStore;
     use crate::api::NamespaceId;
+    use crate::observability::Tier1LookupOutcome;
     use crate::types::{
         CanonicalMemoryType, FastPathRouteFamily, MemoryId, SessionId, Tier1HotRecord,
     };
@@ -316,5 +329,41 @@ mod tests {
         assert_eq!(recent.records[0].memory_id, MemoryId(3));
         assert_eq!(recent.records[1].memory_id, MemoryId(1));
         assert_eq!(recent.trace.recent_candidates_inspected, 4);
+    }
+
+    #[test]
+    fn recent_lookup_reports_stale_bypass_when_only_stale_recency_entries_remain() {
+        let namespace = NamespaceId::new("team.alpha").unwrap();
+        let mut store = Tier1HotMetadataStore::new(2);
+        store.seed(seed_record("team.alpha", 1, 10, "older"));
+        store.seed(seed_record("team.alpha", 2, 10, "newer"));
+        store.seed(seed_record("team.alpha", 3, 20, "evicts older"));
+
+        store.inject_stale_recent_reference("team.alpha", 99);
+
+        let recent = store.recent_for_session(&namespace, SessionId(30), 1);
+
+        assert!(recent.records.is_empty());
+        assert_eq!(recent.trace.outcome, Tier1LookupOutcome::StaleBypass);
+        assert!(!recent.trace.session_window_hit);
+        assert_eq!(recent.trace.recent_candidates_inspected, 2);
+    }
+
+    #[test]
+    fn recent_lookup_keeps_hit_outcome_when_stale_entries_exist_but_valid_records_answer() {
+        let namespace = NamespaceId::new("team.alpha").unwrap();
+        let mut store = Tier1HotMetadataStore::new(2);
+        store.seed(seed_record("team.alpha", 1, 10, "older"));
+        store.seed(seed_record("team.alpha", 2, 10, "newer"));
+        store.seed(seed_record("team.alpha", 3, 10, "evicts older"));
+
+        store.inject_stale_recent_reference("team.alpha", 99);
+
+        let recent = store.recent_for_session(&namespace, SessionId(10), 1);
+
+        assert_eq!(recent.records.len(), 1);
+        assert_eq!(recent.records[0].memory_id, MemoryId(3));
+        assert_eq!(recent.trace.outcome, Tier1LookupOutcome::Hit);
+        assert!(recent.trace.session_window_hit);
     }
 }

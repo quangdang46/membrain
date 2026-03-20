@@ -5,8 +5,8 @@ use membrain_core::engine::encode::{EncodeEngine, EncodeRuntime, EncodeWriteBran
 use membrain_core::observability::EncodeFastPathStage;
 use membrain_core::policy::{IngestMode, PassiveObservationDecision};
 use membrain_core::types::{
-    CanonicalMemoryType, FastPathRouteFamily, LandmarkMetadata, MemoryId, RawEncodeInput,
-    RawIntakeKind,
+    CanonicalMemoryType, FastPathRouteFamily, LandmarkMetadata, LandmarkSignals, MemoryId,
+    RawEncodeInput, RawIntakeKind,
 };
 use membrain_core::RuntimeConfig;
 
@@ -202,6 +202,40 @@ fn encode_runtime_trait_delegates_to_the_inherent_fast_path() {
     assert_eq!(prepared.normalized.compact_text, "trait dispatched encode");
     assert_eq!(prepared.write_decision, PassiveObservationDecision::Capture);
     assert!(!prepared.captured_as_observation);
+}
+
+#[test]
+fn qualified_landmark_signals_stay_visible_in_fast_path_trace_for_temporal_consumers() {
+    let engine = test_engine();
+    let signals = LandmarkSignals::new(0.93, 0.86, 0.22, 144);
+
+    let prepared = engine.prepare_fast_path(
+        RawEncodeInput::new(
+            RawIntakeKind::Event,
+            "quarter closed after launch milestone and contract renewal",
+        )
+        .with_landmark_signals(signals),
+    );
+
+    assert!(prepared.normalized.landmark.is_landmark);
+    assert_eq!(prepared.trace.landmark_signals, Some(signals));
+    assert_eq!(prepared.trace.landmark, prepared.normalized.landmark);
+    assert_eq!(
+        prepared.normalized.landmark.landmark_label.as_deref(),
+        Some("quarter closed after launch milestone and contract renewal")
+    );
+    assert_eq!(
+        prepared.normalized.landmark.era_id.as_deref(),
+        Some("era-quarterclose-0144")
+    );
+    assert_eq!(prepared.normalized.landmark, prepared.trace.landmark);
+    assert_eq!(
+        prepared.classification.route_family,
+        FastPathRouteFamily::Event
+    );
+    assert_eq!(prepared.write_decision, PassiveObservationDecision::Capture);
+    assert!(!prepared.captured_as_observation);
+    assert!(prepared.trace.stayed_within_latency_budget);
 }
 
 #[test]

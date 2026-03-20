@@ -8,6 +8,8 @@ pub mod encode;
 pub mod episode;
 /// Forgetting and demotion maintenance surfaces.
 pub mod forgetting;
+/// Query-intent classification and routing-input taxonomy surfaces.
+pub mod intent;
 /// Shared cancellable maintenance control surfaces.
 pub mod maintenance;
 /// Ranking and score-fusion surfaces.

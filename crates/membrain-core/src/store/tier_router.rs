@@ -378,6 +378,19 @@ impl TierRouter {
         }
     }
 
+    /// Returns whether a cold-owned item should still be surfaced directly to explicit cold-tier recall flows.
+    pub const fn cold_recall_visibility(&self, lifecycle_state: LifecycleState) -> bool {
+        matches!(
+            lifecycle_state,
+            LifecycleState::Archived | LifecycleState::Dormant | LifecycleState::Active
+        )
+    }
+
+    /// Returns whether a cold-owned item can be restored to hot ownership.
+    pub const fn cold_restore_allowed(&self, lifecycle_state: LifecycleState) -> bool {
+        self.cold_recall_visibility(lifecycle_state)
+    }
+
     /// Evaluates a routing decision and returns a trace record.
     pub fn evaluate_with_trace(&self, input: &TierRoutingInput) -> TierRoutingTrace {
         let decision = self.evaluate(input);
@@ -736,5 +749,21 @@ mod tests {
             reason: TierRoutingReason::TierAppropriate,
         };
         assert!(!keep.is_transition());
+    }
+
+    #[test]
+    fn archived_dormant_and_active_cold_items_remain_recall_visible_and_restorable() {
+        let router = TierRouter::with_defaults();
+        assert!(router.cold_recall_visibility(LifecycleState::Archived));
+        assert!(router.cold_restore_allowed(LifecycleState::Archived));
+    }
+
+    #[test]
+    fn dormant_and_active_cold_items_remain_recall_visible_and_restorable() {
+        let router = TierRouter::with_defaults();
+        assert!(router.cold_recall_visibility(LifecycleState::Dormant));
+        assert!(router.cold_restore_allowed(LifecycleState::Dormant));
+        assert!(router.cold_recall_visibility(LifecycleState::Active));
+        assert!(router.cold_restore_allowed(LifecycleState::Active));
     }
 }

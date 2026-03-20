@@ -2,7 +2,8 @@ use crate::api::NamespaceId;
 use crate::observability::{Tier2PrefilterOutcome, Tier2PrefilterTrace};
 use crate::store::Tier2StoreApi;
 use crate::types::{
-    CanonicalMemoryType, FastPathRouteFamily, MemoryId, NormalizedMemoryEnvelope, SessionId,
+    CanonicalMemoryType, FastPathRouteFamily, LandmarkMetadata, MemoryId, NormalizedMemoryEnvelope,
+    SessionId,
 };
 
 /// Durable Tier2 indexed store boundary owned by `membrain-core`.
@@ -33,6 +34,9 @@ impl Tier2Store {
                 fingerprint,
                 normalization_generation: envelope.normalization_generation,
                 payload_size_bytes: envelope.payload_size_bytes,
+                landmark: envelope.landmark.clone(),
+                observation_source: envelope.observation_source.clone(),
+                observation_chunk_id: envelope.observation_chunk_id.clone(),
                 payload_locator: payload_locator.clone(),
             },
             payload: Tier2PayloadRecord {
@@ -72,6 +76,9 @@ impl Tier2DurableItemLayout {
             fingerprint: self.metadata.fingerprint,
             normalization_generation: self.metadata.normalization_generation,
             payload_size_bytes: self.metadata.payload_size_bytes,
+            landmark: &self.metadata.landmark,
+            observation_source: self.metadata.observation_source.as_deref(),
+            observation_chunk_id: self.metadata.observation_chunk_id.as_deref(),
             payload_locator: self.metadata.payload_locator.clone(),
         }
     }
@@ -87,6 +94,7 @@ impl Tier2DurableItemLayout {
             fingerprint: self.metadata.fingerprint,
             compact_text: &self.metadata.compact_text,
             normalization_generation: self.metadata.normalization_generation,
+            landmark: &self.metadata.landmark,
             payload_locator: self.metadata.payload_locator.clone(),
         }
     }
@@ -147,6 +155,9 @@ pub struct Tier2MetadataRecord {
     pub fingerprint: u64,
     pub normalization_generation: &'static str,
     pub payload_size_bytes: usize,
+    pub landmark: LandmarkMetadata,
+    pub observation_source: Option<String>,
+    pub observation_chunk_id: Option<String>,
     pub payload_locator: Tier2PayloadLocator,
 }
 
@@ -172,6 +183,9 @@ pub struct Tier2PrefilterView<'a> {
     pub fingerprint: u64,
     pub normalization_generation: &'static str,
     pub payload_size_bytes: usize,
+    pub landmark: &'a LandmarkMetadata,
+    pub observation_source: Option<&'a str>,
+    pub observation_chunk_id: Option<&'a str>,
     pub payload_locator: Tier2PayloadLocator,
 }
 
@@ -186,5 +200,6 @@ pub struct Tier2MetadataIndexKey<'a> {
     pub fingerprint: u64,
     pub compact_text: &'a str,
     pub normalization_generation: &'static str,
+    pub landmark: &'a LandmarkMetadata,
     pub payload_locator: Tier2PayloadLocator,
 }

@@ -846,6 +846,10 @@ fn family_to_warm_source(family: CacheFamily) -> WarmSource {
 pub struct PrefetchHint {
     /// Which namespace this hint belongs to.
     pub namespace: NamespaceId,
+    /// Why this hint was queued.
+    pub trigger: PrefetchTrigger,
+    /// Canonical warm-source provenance for this hint.
+    pub warm_source: WarmSource,
     /// Predicted memory ids to preload.
     pub predicted_ids: Vec<MemoryId>,
     /// Monotonic tick when the hint was submitted.
@@ -890,6 +894,18 @@ pub enum PrefetchBypassReason {
     Disabled,
 }
 
+impl PrefetchBypassReason {
+    /// Returns the machine-readable bypass reason label.
+    pub const fn as_str(&self) -> &'static str {
+        match self {
+            Self::BudgetExhausted => "budget_exhausted",
+            Self::IntentChanged => "intent_changed",
+            Self::ScopeChanged => "scope_changed",
+            Self::Disabled => "disabled",
+        }
+    }
+}
+
 /// Bounded prefetch controller that manages speculative hint queues.
 #[derive(Debug, Clone)]
 pub struct PrefetchController {
@@ -911,6 +927,10 @@ pub struct PrefetchMetrics {
     pub hints_submitted: u64,
     pub hints_consumed: u64,
     pub hints_dropped: u64,
+    pub dropped_budget_exhausted: u64,
+    pub dropped_intent_changed: u64,
+    pub dropped_scope_changed: u64,
+    pub dropped_disabled: u64,
 }
 
 impl PrefetchController {
@@ -925,24 +945,49 @@ impl PrefetchController {
         }
     }
 
+    fn record_drop(&mut self, reason: PrefetchBypassReason, count: u64) {
+        self.metrics.hints_dropped += count;
+        match reason {
+            PrefetchBypassReason::BudgetExhausted => {
+                self.metrics.dropped_budget_exhausted += count;
+            }
+            PrefetchBypassReason::IntentChanged => {
+                self.metrics.dropped_intent_changed += count;
+            }
+            PrefetchBypassReason::ScopeChanged => {
+                self.metrics.dropped_scope_changed += count;
+            }
+            PrefetchBypassReason::Disabled => {
+                self.metrics.dropped_disabled += count;
+            }
+        }
+    }
+
     /// Submits a speculative prefetch hint. Oldest hints are evicted when
     /// the queue exceeds capacity.
-    pub fn submit_hint(&mut self, namespace: NamespaceId, predicted_ids: Vec<MemoryId>) -> bool {
+    pub fn submit_hint(
+        &mut self,
+        namespace: NamespaceId,
+        trigger: PrefetchTrigger,
+        predicted_ids: Vec<MemoryId>,
+    ) -> bool {
         if !self.enabled {
-            self.metrics.hints_dropped += 1;
+            self.record_drop(PrefetchBypassReason::Disabled, 1);
             return false;
         }
 
         self.tick += 1;
         let hint = PrefetchHint {
             namespace,
+            trigger,
+            warm_source: WarmSource::PrefetchQueue,
             predicted_ids,
             submitted_at_tick: self.tick,
         };
 
         if self.queue.len() >= self.capacity {
             self.queue.pop_front();
-            self.metrics.hints_dropped += 1;
+            self.record_drop(PrefetchBypassReason::BudgetExhausted, 1);
         }
 
         self.queue.push_back(hint);
@@ -964,11 +1009,15 @@ impl PrefetchController {
 
     /// Cancels all hints for the given namespace (intent-change or scope-change).
     /// Returns the number of hints dropped.
-    pub fn cancel_namespace(&mut self, namespace: &NamespaceId) -> usize {
+    pub fn cancel_namespace(
+        &mut self,
+        namespace: &NamespaceId,
+        reason: PrefetchBypassReason,
+    ) -> usize {
         let before = self.queue.len();
         self.queue.retain(|h| &h.namespace != namespace);
         let dropped = before - self.queue.len();
-        self.metrics.hints_dropped += dropped as u64;
+        self.record_drop(reason, dropped as u64);
         dropped
     }
 
@@ -976,7 +1025,7 @@ impl PrefetchController {
     pub fn cancel_all(&mut self) {
         let dropped = self.queue.len() as u64;
         self.queue.clear();
-        self.metrics.hints_dropped += dropped;
+        self.record_drop(PrefetchBypassReason::ScopeChanged, dropped);
     }
 
     /// Returns the current queue depth.
@@ -1023,13 +1072,44 @@ pub struct CacheRequestMetrics {
     pub cold_fallback_count: u32,
     /// `true` if response was served while system was in degraded mode.
     pub degraded_mode_served: bool,
+    /// Hits served from the Tier1 item cache.
+    pub tier1_item_hit_count: u32,
+    /// Hits served from the negative cache.
+    pub negative_cache_hit_count: u32,
+    /// Hits served from the result cache.
+    pub result_cache_hit_count: u32,
+    /// Hits served from the entity-neighborhood cache.
+    pub entity_neighborhood_hit_count: u32,
+    /// Hits served from the summary cache.
+    pub summary_cache_hit_count: u32,
+    /// Hits served from the ANN probe cache.
+    pub ann_probe_hit_count: u32,
+    /// Hits served from the prefetch queue.
+    pub prefetch_hit_count: u32,
 }
 
 impl CacheRequestMetrics {
     /// Records a cache lookup result into per-request metrics.
     pub fn record_lookup(&mut self, result: &CacheLookupResult) {
         match result.event {
-            CacheEvent::Hit => self.cache_hit_count += 1,
+            CacheEvent::Hit => {
+                self.cache_hit_count += 1;
+                match result.family {
+                    CacheFamily::Tier1Item => self.tier1_item_hit_count += 1,
+                    CacheFamily::NegativeCache => self.negative_cache_hit_count += 1,
+                    CacheFamily::ResultCache => self.result_cache_hit_count += 1,
+                    CacheFamily::EntityNeighborhood => self.entity_neighborhood_hit_count += 1,
+                    CacheFamily::SummaryCache => self.summary_cache_hit_count += 1,
+                    CacheFamily::AnnProbeCache => self.ann_probe_hit_count += 1,
+                    CacheFamily::PrefetchHints => {
+                        self.prefetch_hit_count += 1;
+                        self.prefetch_used_count += 1;
+                    }
+                    CacheFamily::SessionWarmup
+                    | CacheFamily::GoalConditioned
+                    | CacheFamily::ColdStartMitigation => {}
+                }
+            }
             CacheEvent::Miss => {
                 self.cache_miss_count += 1;
                 self.cold_fallback_count += 1;
@@ -1044,7 +1124,12 @@ impl CacheRequestMetrics {
                 self.cache_bypass_count += 1;
             }
             CacheEvent::Invalidation => self.cache_invalidation_count += 1,
-            _ => {}
+            CacheEvent::PrefetchDrop => self.prefetch_dropped_count += 1,
+            CacheEvent::SessionExpired => {
+                self.cache_bypass_count += 1;
+                self.prefetch_dropped_count += 1;
+            }
+            CacheEvent::RepairWarmup => {}
         }
     }
 }
@@ -1280,7 +1365,9 @@ impl CacheManager {
             }
         }
 
-        let prefetch_dropped = self.prefetch.cancel_namespace(namespace);
+        let prefetch_dropped = self
+            .prefetch
+            .cancel_namespace(namespace, PrefetchBypassReason::ScopeChanged);
         if prefetch_dropped > 0 {
             affected.push(CacheFamily::PrefetchHints);
             total += prefetch_dropped;
@@ -1559,11 +1646,20 @@ mod tests {
     #[test]
     fn prefetch_submit_and_consume_tracks_metrics() {
         let mut pf = PrefetchController::new(5);
-        assert!(pf.submit_hint(ns("team.alpha"), vec![MemoryId(1)]));
-        assert!(pf.submit_hint(ns("team.alpha"), vec![MemoryId(2)]));
+        assert!(pf.submit_hint(
+            ns("team.alpha"),
+            PrefetchTrigger::SessionRecency,
+            vec![MemoryId(1)]
+        ));
+        assert!(pf.submit_hint(
+            ns("team.alpha"),
+            PrefetchTrigger::TaskIntent,
+            vec![MemoryId(2)]
+        ));
 
-        let hint = pf.consume_hint(&ns("team.alpha"));
-        assert!(hint.is_some());
+        let hint = pf.consume_hint(&ns("team.alpha")).expect("matching hint");
+        assert_eq!(hint.trigger, PrefetchTrigger::SessionRecency);
+        assert_eq!(hint.warm_source, WarmSource::PrefetchQueue);
         assert_eq!(pf.metrics.hints_submitted, 2);
         assert_eq!(pf.metrics.hints_consumed, 1);
     }
@@ -1571,20 +1667,80 @@ mod tests {
     #[test]
     fn prefetch_drops_oldest_when_over_capacity() {
         let mut pf = PrefetchController::new(2);
-        pf.submit_hint(ns("team.alpha"), vec![MemoryId(1)]);
-        pf.submit_hint(ns("team.alpha"), vec![MemoryId(2)]);
-        pf.submit_hint(ns("team.alpha"), vec![MemoryId(3)]);
+        pf.submit_hint(
+            ns("team.alpha"),
+            PrefetchTrigger::SessionRecency,
+            vec![MemoryId(1)],
+        );
+        pf.submit_hint(
+            ns("team.alpha"),
+            PrefetchTrigger::TaskIntent,
+            vec![MemoryId(2)],
+        );
+        pf.submit_hint(
+            ns("team.alpha"),
+            PrefetchTrigger::EntityFollow,
+            vec![MemoryId(3)],
+        );
 
         assert_eq!(pf.queue_depth(), 2);
         assert_eq!(pf.metrics.hints_dropped, 1);
+        assert_eq!(pf.metrics.dropped_budget_exhausted, 1);
     }
 
     #[test]
     fn disabled_prefetch_drops_all_submissions() {
         let mut pf = PrefetchController::new(5);
         pf.disable();
-        assert!(!pf.submit_hint(ns("team.alpha"), vec![MemoryId(1)]));
+        assert!(!pf.submit_hint(
+            ns("team.alpha"),
+            PrefetchTrigger::SessionRecency,
+            vec![MemoryId(1)]
+        ));
         assert_eq!(pf.metrics.hints_dropped, 1);
+        assert_eq!(pf.metrics.dropped_disabled, 1);
+    }
+
+    #[test]
+    fn cancel_namespace_tracks_scope_change_reason() {
+        let mut pf = PrefetchController::new(5);
+        pf.submit_hint(
+            ns("team.alpha"),
+            PrefetchTrigger::SessionRecency,
+            vec![MemoryId(1)],
+        );
+        pf.submit_hint(
+            ns("team.alpha"),
+            PrefetchTrigger::TaskIntent,
+            vec![MemoryId(2)],
+        );
+        pf.submit_hint(
+            ns("team.beta"),
+            PrefetchTrigger::EntityFollow,
+            vec![MemoryId(3)],
+        );
+
+        let dropped = pf.cancel_namespace(&ns("team.alpha"), PrefetchBypassReason::ScopeChanged);
+
+        assert_eq!(dropped, 2);
+        assert_eq!(pf.queue_depth(), 1);
+        assert_eq!(pf.metrics.hints_dropped, 2);
+        assert_eq!(pf.metrics.dropped_scope_changed, 2);
+    }
+
+    #[test]
+    fn cancel_namespace_tracks_intent_changed_reason() {
+        let mut pf = PrefetchController::new(5);
+        pf.submit_hint(
+            ns("team.alpha"),
+            PrefetchTrigger::TaskIntent,
+            vec![MemoryId(1)],
+        );
+
+        let dropped = pf.cancel_namespace(&ns("team.alpha"), PrefetchBypassReason::IntentChanged);
+
+        assert_eq!(dropped, 1);
+        assert_eq!(pf.metrics.dropped_intent_changed, 1);
     }
 
     // ── § 9.6  Namespace invalidation ────────────────────────────────────
@@ -1670,8 +1826,11 @@ mod tests {
                 ..CacheAdmissionRequest::default()
             },
         );
-        mgr.prefetch
-            .submit_hint(ns("team.alpha"), vec![MemoryId(10)]);
+        mgr.prefetch.submit_hint(
+            ns("team.alpha"),
+            PrefetchTrigger::SessionRecency,
+            vec![MemoryId(10)],
+        );
 
         let outcome = mgr.handle_invalidation(InvalidationTrigger::PolicyChange, &ns("team.alpha"));
 
@@ -1745,5 +1904,81 @@ mod tests {
         assert_eq!(req.cache_hit_count, 1);
         assert_eq!(req.cache_miss_count, 1);
         assert_eq!(req.cold_fallback_count, 1);
+        assert_eq!(req.tier1_item_hit_count, 1);
+        assert_eq!(req.ann_probe_hit_count, 0);
+    }
+
+    #[test]
+    fn per_request_metrics_track_prefetch_drops_and_prefetch_hits() {
+        let mut req = CacheRequestMetrics::default();
+        req.record_lookup(&CacheLookupResult {
+            family: CacheFamily::PrefetchHints,
+            event: CacheEvent::Hit,
+            reason: None,
+            warm_source: Some(WarmSource::PrefetchQueue),
+            generation_status: GenerationStatus::Valid,
+            memory_ids: vec![MemoryId(7)],
+            candidates_after: 1,
+        });
+        req.record_lookup(&CacheLookupResult {
+            family: CacheFamily::PrefetchHints,
+            event: CacheEvent::PrefetchDrop,
+            reason: Some(CacheReason::BudgetExhausted),
+            warm_source: None,
+            generation_status: GenerationStatus::Unknown,
+            memory_ids: vec![],
+            candidates_after: 0,
+        });
+        req.record_lookup(&CacheLookupResult {
+            family: CacheFamily::SessionWarmup,
+            event: CacheEvent::SessionExpired,
+            reason: Some(CacheReason::NamespaceNarrowed),
+            warm_source: None,
+            generation_status: GenerationStatus::Unknown,
+            memory_ids: vec![],
+            candidates_after: 0,
+        });
+
+        assert_eq!(req.cache_hit_count, 1);
+        assert_eq!(req.prefetch_hit_count, 1);
+        assert_eq!(req.prefetch_used_count, 1);
+        assert_eq!(req.prefetch_dropped_count, 2);
+        assert_eq!(req.cache_bypass_count, 1);
+    }
+
+    #[test]
+    fn per_request_metrics_preserve_per_family_hit_breakdown() {
+        let mut req = CacheRequestMetrics::default();
+        for family in [
+            CacheFamily::NegativeCache,
+            CacheFamily::ResultCache,
+            CacheFamily::EntityNeighborhood,
+            CacheFamily::SummaryCache,
+            CacheFamily::AnnProbeCache,
+        ] {
+            req.record_lookup(&CacheLookupResult {
+                family,
+                event: CacheEvent::Hit,
+                reason: None,
+                warm_source: Some(match family {
+                    CacheFamily::NegativeCache => WarmSource::NegativeCache,
+                    CacheFamily::ResultCache => WarmSource::ResultCache,
+                    CacheFamily::EntityNeighborhood => WarmSource::EntityNeighborhood,
+                    CacheFamily::SummaryCache => WarmSource::SummaryCache,
+                    CacheFamily::AnnProbeCache => WarmSource::AnnProbeCache,
+                    _ => unreachable!(),
+                }),
+                generation_status: GenerationStatus::Valid,
+                memory_ids: vec![MemoryId(9)],
+                candidates_after: 1,
+            });
+        }
+
+        assert_eq!(req.cache_hit_count, 5);
+        assert_eq!(req.negative_cache_hit_count, 1);
+        assert_eq!(req.result_cache_hit_count, 1);
+        assert_eq!(req.entity_neighborhood_hit_count, 1);
+        assert_eq!(req.summary_cache_hit_count, 1);
+        assert_eq!(req.ann_probe_hit_count, 1);
     }
 }

@@ -4,6 +4,7 @@
 //! produces before any wrapper formats it for CLI, daemon, or MCP output.
 
 use crate::api::{FieldPresence, NamespaceId, PolicyFilterSummary};
+use crate::brain_store::PreparedTier2Layout;
 use crate::engine::contradiction::{ContradictionExplain, ResolutionState};
 use crate::engine::ranking::{RankingExplain, RankingResult};
 use crate::engine::recall::{RecallPlan, RecallPlanKind, RecallTraceStage};
@@ -93,7 +94,9 @@ impl ScoreSummary {
             signal_breakdown: explain
                 .signal_breakdown
                 .iter()
-                .map(|(family, raw_value, weight)| (family.as_str().to_string(), *raw_value, *weight))
+                .map(|(family, raw_value, weight)| {
+                    (family.as_str().to_string(), *raw_value, *weight)
+                })
                 .collect(),
             profile: explain.profile.clone(),
         }
@@ -424,12 +427,15 @@ impl RetrievalExplain {
             .route_summary
             .trace_stages
             .iter()
-            .map(|stage| match stage {
-                crate::engine::recall::RecallTraceStage::Tier1ExactHandle => "tier1_exact",
-                crate::engine::recall::RecallTraceStage::Tier1RecentWindow => "tier1_recent",
-                crate::engine::recall::RecallTraceStage::Tier2Exact => "tier2_exact",
-                crate::engine::recall::RecallTraceStage::Tier3Fallback => "tier3_fallback",
-            }.to_string())
+            .map(|stage| {
+                match stage {
+                    crate::engine::recall::RecallTraceStage::Tier1ExactHandle => "tier1_exact",
+                    crate::engine::recall::RecallTraceStage::Tier1RecentWindow => "tier1_recent",
+                    crate::engine::recall::RecallTraceStage::Tier2Exact => "tier2_exact",
+                    crate::engine::recall::RecallTraceStage::Tier3Fallback => "tier3_fallback",
+                }
+                .to_string()
+            })
             .collect();
 
         Self {
@@ -443,6 +449,53 @@ impl RetrievalExplain {
             ranking_profile: ranking_profile.to_string(),
             contradictions_found: 0,
             result_reasons: Vec::new(),
+        }
+    }
+
+    /// Appends bounded temporal-landmark explain reasons derived from a prepared Tier2 layout.
+    pub fn push_temporal_landmark_reasons_from_prepared_layout(
+        &mut self,
+        prepared: &PreparedTier2Layout,
+    ) {
+        let memory_id = Some(prepared.layout.metadata.memory_id);
+        let landmark = &prepared.layout.metadata.landmark;
+        let metadata_detail = format!(
+            "tier2 prefilter kept {} metadata candidate(s) and fetched {} payload(s) before the final cut",
+            prepared.prefilter_trace.metadata_candidate_count,
+            prepared.prefilter_trace.payload_fetch_count,
+        );
+        self.result_reasons.push(ResultReason {
+            memory_id,
+            reason_code: "temporal_prefilter_metadata_only".to_string(),
+            detail: metadata_detail,
+        });
+
+        if landmark.is_landmark {
+            let mut detail = match (&landmark.landmark_label, &landmark.era_id) {
+                (Some(label), Some(era_id)) => {
+                    format!("landmark \"{label}\" opened era \"{era_id}\"")
+                }
+                (Some(label), None) => {
+                    format!("landmark \"{label}\" remained active without opening a new era")
+                }
+                (None, Some(era_id)) => format!("landmark opened era \"{era_id}\""),
+                (None, None) => "memory remained an unlabeled landmark".to_string(),
+            };
+            if prepared.prefilter_stays_metadata_only() {
+                detail.push_str(" while staying on metadata-only Tier2 planning");
+            }
+            self.result_reasons.push(ResultReason {
+                memory_id,
+                reason_code: "temporal_landmark_selected".to_string(),
+                detail,
+            });
+        } else {
+            self.result_reasons.push(ResultReason {
+                memory_id,
+                reason_code: "temporal_landmark_not_selected".to_string(),
+                detail: "memory stayed recallable without landmark promotion or era creation"
+                    .to_string(),
+            });
         }
     }
 }
@@ -636,7 +689,10 @@ impl ResultBuilder {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::brain_store::BrainStore;
+    use crate::config::RuntimeConfig;
     use crate::engine::ranking::{fuse_scores, RankingInput, RankingProfile};
+    use crate::types::{LandmarkSignals, RawEncodeInput, RawIntakeKind};
 
     fn ns(s: &str) -> NamespaceId {
         NamespaceId::new(s).unwrap()
@@ -783,6 +839,140 @@ mod tests {
             "evidence_only"
         );
         assert_eq!(result_set.omitted_summary.budget_capped, 0);
+    }
+
+    #[test]
+    fn retrieval_result_set_round_trips_through_transport_json() {
+        let mut builder = ResultBuilder::new(1, ns("test"));
+        let ranked = fuse_scores(
+            RankingInput {
+                recency: 700,
+                salience: 650,
+                relevance: 800,
+                conflict: 500,
+                access: 600,
+            },
+            RankingProfile::balanced(),
+        );
+
+        builder.add(
+            MemoryId(7),
+            ns("test"),
+            SessionId(3),
+            CanonicalMemoryType::Event,
+            "round trip".into(),
+            &ranked,
+            AnsweredFrom::Tier2Indexed,
+        );
+
+        let original = builder.build(RetrievalExplain {
+            recall_plan: RecallPlanKind::Tier2ExactThenTier3Fallback,
+            route_reason: "tier2 path".to_string(),
+            tiers_consulted: vec!["tier1_recent".to_string(), "tier2_exact".to_string()],
+            trace_stages: vec![
+                RecallTraceStage::Tier1RecentWindow,
+                RecallTraceStage::Tier2Exact,
+            ],
+            tier1_answered_directly: false,
+            candidate_budget: 8,
+            time_consumed_ms: Some(12),
+            ranking_profile: "balanced".to_string(),
+            contradictions_found: 0,
+            result_reasons: vec![ResultReason {
+                memory_id: Some(MemoryId(7)),
+                reason_code: "tier2_exact_match".to_string(),
+                detail: "candidate survived bounded ranking and packaging".to_string(),
+            }],
+        });
+
+        let json = original.to_json().unwrap();
+        let decoded = RetrievalResultSet::from_json(&json).unwrap();
+
+        assert_eq!(decoded, original);
+        assert_eq!(decoded.count(), 1);
+        assert_eq!(decoded.top().unwrap().result.memory_id, MemoryId(7));
+        assert_eq!(
+            decoded.explain.result_reasons[0].reason_code,
+            "tier2_exact_match"
+        );
+    }
+
+    #[test]
+    fn retrieval_explain_adds_temporal_landmark_reasons_from_prepared_layout() {
+        let store = BrainStore::new(RuntimeConfig::default());
+        let prepared = store.prepare_tier2_layout_with_trace_from_encode(
+            ns("timeline"),
+            MemoryId(21),
+            SessionId(8),
+            RawEncodeInput::new(RawIntakeKind::Event, "Launch day")
+                .with_landmark_signals(LandmarkSignals::new(0.95, 0.91, 0.12, 88)),
+        );
+        let mut explain = RetrievalExplain {
+            recall_plan: RecallPlanKind::Tier2ExactThenTier3Fallback,
+            route_reason: "temporal lookup".to_string(),
+            tiers_consulted: vec!["tier2_exact".to_string()],
+            trace_stages: vec![RecallTraceStage::Tier2Exact],
+            tier1_answered_directly: false,
+            candidate_budget: 4,
+            time_consumed_ms: None,
+            ranking_profile: "balanced".to_string(),
+            contradictions_found: 0,
+            result_reasons: Vec::new(),
+        };
+
+        explain.push_temporal_landmark_reasons_from_prepared_layout(&prepared);
+
+        assert_eq!(explain.result_reasons.len(), 2);
+        assert_eq!(explain.result_reasons[0].memory_id, Some(MemoryId(21)));
+        assert_eq!(
+            explain.result_reasons[0].reason_code,
+            "temporal_prefilter_metadata_only"
+        );
+        assert!(explain.result_reasons[0]
+            .detail
+            .contains("fetched 0 payload(s)"));
+        assert_eq!(
+            explain.result_reasons[1].reason_code,
+            "temporal_landmark_selected"
+        );
+        assert!(explain.result_reasons[1]
+            .detail
+            .contains("metadata-only Tier2 planning"));
+        assert!(explain.result_reasons[1].detail.contains("launch"));
+    }
+
+    #[test]
+    fn retrieval_explain_marks_non_landmarks_without_era_creation() {
+        let store = BrainStore::new(RuntimeConfig::default());
+        let prepared = store.prepare_tier2_layout_with_trace_from_encode(
+            ns("timeline"),
+            MemoryId(34),
+            SessionId(9),
+            RawEncodeInput::new(RawIntakeKind::Observation, "Routine checkin"),
+        );
+        let mut explain = RetrievalExplain {
+            recall_plan: RecallPlanKind::Tier2ExactThenTier3Fallback,
+            route_reason: "temporal lookup".to_string(),
+            tiers_consulted: vec!["tier2_exact".to_string()],
+            trace_stages: vec![RecallTraceStage::Tier2Exact],
+            tier1_answered_directly: false,
+            candidate_budget: 4,
+            time_consumed_ms: None,
+            ranking_profile: "balanced".to_string(),
+            contradictions_found: 0,
+            result_reasons: Vec::new(),
+        };
+
+        explain.push_temporal_landmark_reasons_from_prepared_layout(&prepared);
+
+        assert_eq!(explain.result_reasons.len(), 2);
+        assert_eq!(
+            explain.result_reasons[1].reason_code,
+            "temporal_landmark_not_selected"
+        );
+        assert!(explain.result_reasons[1]
+            .detail
+            .contains("without landmark promotion or era creation"));
     }
 
     #[test]

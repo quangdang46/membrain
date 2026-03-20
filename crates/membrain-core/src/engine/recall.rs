@@ -337,4 +337,45 @@ mod tests {
             ],
         );
     }
+
+    #[test]
+    fn session_scoped_deeper_fallback_preserves_explain_trace_for_temporal_consumers() {
+        let engine = RecallEngine;
+
+        let plan = engine.plan_recall(
+            RecallRequest {
+                exact_memory_id: None,
+                session_id: Some(SessionId(11)),
+                small_lookup: false,
+            },
+            RuntimeConfig::default(),
+        );
+
+        assert_eq!(plan.kind, RecallPlanKind::Tier2ExactThenTier3Fallback);
+        assert_eq!(plan.session_id, Some(SessionId(11)));
+        assert!(!plan.terminates_in_tier1());
+        assert!(!plan.route_summary.tier1_answers_directly);
+        assert!(!plan.route_summary.tier1_consulted_first);
+        assert!(plan.route_summary.routes_to_deeper_tiers);
+        assert_eq!(
+            plan.route_summary.reason,
+            "request lacks a direct Tier1 answer and escalates to deeper indexed retrieval"
+        );
+        assert_eq!(
+            plan.route_summary.trace_stages,
+            &[
+                RecallTraceStage::Tier2Exact,
+                RecallTraceStage::Tier3Fallback
+            ]
+        );
+        assert_eq!(plan.trace.route_name, "tier2.exact_then_tier3_fallback");
+        assert!(!plan.trace.tier1_answered_directly);
+        assert!(plan.trace.stayed_within_latency_budget);
+        assert_eq!(
+            plan.trace.candidate_budget,
+            RuntimeConfig::default().tier1_candidate_budget
+        );
+        assert_eq!(plan.trace.pre_tier1_candidates, 0);
+        assert_eq!(plan.trace.post_tier1_candidates, 0);
+    }
 }

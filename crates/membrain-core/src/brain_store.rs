@@ -6,19 +6,34 @@ use crate::engine::consolidation::ConsolidationEngine;
 use crate::engine::contradiction::{ContradictionEngine, ContradictionError, ContradictionKind};
 use crate::engine::encode::{ContradictionWriteOutcome, EncodeEngine};
 use crate::engine::forgetting::ForgettingEngine;
+use crate::engine::intent::IntentEngine;
 use crate::engine::ranking::RankingEngine;
 use crate::engine::recall::RecallEngine;
 use crate::engine::repair::RepairEngine;
 use crate::graph::GraphModule;
 use crate::index::IndexModule;
 use crate::migrate::MigrationModule;
-use crate::observability::ObservabilityModule;
+use crate::observability::{ObservabilityModule, Tier2PrefilterTrace};
 use crate::policy::PolicyModule;
 use crate::store::audit::AuditLogStore;
 use crate::store::cold::ColdStore;
 use crate::store::hot::HotStore;
-use crate::store::tier2::Tier2Store;
-use crate::types::{CoreApiVersion, MemoryId};
+use crate::store::tier2::{Tier2DurableItemLayout, Tier2Store};
+use crate::types::{CoreApiVersion, MemoryId, RawEncodeInput, SessionId};
+
+/// Inspectable result returned when the core facade prepares a Tier2 layout from encode output.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PreparedTier2Layout {
+    pub layout: Tier2DurableItemLayout,
+    pub prefilter_trace: Tier2PrefilterTrace,
+}
+
+impl PreparedTier2Layout {
+    /// Returns whether the prepared layout remained metadata-only during prefilter planning.
+    pub const fn prefilter_stays_metadata_only(&self) -> bool {
+        self.prefilter_trace.payload_fetch_count == 0
+    }
+}
 
 /// Stable top-level core facade for the initial workspace bootstrap.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -29,6 +44,7 @@ pub struct BrainStore {
     observability: ObservabilityModule,
     encode: EncodeEngine,
     recall: RecallEngine,
+    intent: IntentEngine,
     ranking: RankingEngine,
     contradiction: ContradictionEngine,
     consolidation: ConsolidationEngine,
@@ -54,6 +70,7 @@ impl BrainStore {
             observability: ObservabilityModule,
             encode: EncodeEngine::new(config),
             recall: RecallEngine,
+            intent: IntentEngine,
             ranking: RankingEngine,
             contradiction: ContradictionEngine::new(),
             consolidation: ConsolidationEngine,
@@ -103,6 +120,11 @@ impl BrainStore {
     /// Returns the shared recall engine surface used by wrappers.
     pub fn recall_engine(&self) -> &RecallEngine {
         &self.recall
+    }
+
+    /// Returns the shared intent-classification surface used by wrappers.
+    pub fn intent_engine(&self) -> &IntentEngine {
+        &self.intent
     }
 
     /// Returns the shared ranking engine surface used by wrappers.
@@ -164,6 +186,43 @@ impl BrainStore {
         &self.tier2_store
     }
 
+    /// Runs the encode fast path and materializes a durable Tier2 layout that preserves additive
+    /// landmark and era metadata alongside metadata-first storage keys.
+    pub fn prepare_tier2_layout_from_encode(
+        &self,
+        namespace: NamespaceId,
+        memory_id: MemoryId,
+        session_id: SessionId,
+        input: RawEncodeInput,
+    ) -> Tier2DurableItemLayout {
+        let prepared = self.encode.prepare_fast_path(input);
+        self.tier2_store.layout_item(
+            namespace,
+            memory_id,
+            session_id,
+            prepared.fingerprint,
+            &prepared.normalized,
+        )
+    }
+
+    /// Runs the encode fast path, materializes a durable Tier2 layout, and preserves the
+    /// metadata-first prefilter trace alongside the prepared result.
+    pub fn prepare_tier2_layout_with_trace_from_encode(
+        &self,
+        namespace: NamespaceId,
+        memory_id: MemoryId,
+        session_id: SessionId,
+        input: RawEncodeInput,
+    ) -> PreparedTier2Layout {
+        let layout = self.prepare_tier2_layout_from_encode(namespace, memory_id, session_id, input);
+        let prefilter_trace = layout.prefilter_trace();
+
+        PreparedTier2Layout {
+            layout,
+            prefilter_trace,
+        }
+    }
+
     /// Returns the canonical cold storage surface owned by the core crate.
     pub fn cold_store(&self) -> &ColdStore {
         &self.cold_store
@@ -203,5 +262,89 @@ impl BrainStore {
 impl Default for BrainStore {
     fn default() -> Self {
         Self::new(RuntimeConfig::default())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{BrainStore, PreparedTier2Layout};
+    use crate::api::NamespaceId;
+    use crate::types::{MemoryId, RawEncodeInput, RawIntakeKind, SessionId};
+
+    #[test]
+    fn prepare_tier2_layout_from_encode_preserves_landmark_metadata() {
+        let store = BrainStore::default();
+        let layout = store.prepare_tier2_layout_from_encode(
+            NamespaceId::new("tests/landmarks").unwrap(),
+            MemoryId(77),
+            SessionId(4),
+            RawEncodeInput::new(RawIntakeKind::Event, "project launch deadline was moved")
+                .with_landmark_signals(crate::types::LandmarkSignals::new(0.91, 0.83, 0.31, 88)),
+        );
+
+        assert!(layout.metadata.landmark.is_landmark);
+        assert_eq!(
+            layout.metadata.landmark.landmark_label.as_deref(),
+            Some("project launch deadline was moved")
+        );
+        assert_eq!(
+            layout.metadata.landmark.era_id.as_deref(),
+            Some("era-projectlaunc-0088")
+        );
+        assert_eq!(layout.prefilter_view().landmark, &layout.metadata.landmark);
+        assert_eq!(
+            layout.metadata_index_key().landmark,
+            &layout.metadata.landmark
+        );
+        assert_eq!(layout.prefilter_trace().payload_fetch_count, 0);
+    }
+
+    #[test]
+    fn prepare_tier2_layout_from_encode_keeps_non_landmarks_explicit() {
+        let store = BrainStore::default();
+        let layout = store.prepare_tier2_layout_from_encode(
+            NamespaceId::new("tests/landmarks").unwrap(),
+            MemoryId(78),
+            SessionId(5),
+            RawEncodeInput::new(RawIntakeKind::Event, "routine standup note"),
+        );
+
+        assert_eq!(
+            layout.metadata.landmark,
+            crate::types::LandmarkMetadata::non_landmark()
+        );
+        assert_eq!(layout.prefilter_view().landmark, &layout.metadata.landmark);
+        assert_eq!(
+            layout.metadata_index_key().landmark,
+            &layout.metadata.landmark
+        );
+    }
+
+    #[test]
+    fn prepare_tier2_layout_with_trace_from_encode_keeps_prefilter_metadata_only() {
+        let store = BrainStore::default();
+        let prepared: PreparedTier2Layout = store.prepare_tier2_layout_with_trace_from_encode(
+            NamespaceId::new("tests/landmarks").unwrap(),
+            MemoryId(79),
+            SessionId(6),
+            RawEncodeInput::new(
+                RawIntakeKind::Event,
+                "launch retro captured a turning point",
+            )
+            .with_landmark_signals(crate::types::LandmarkSignals::new(0.92, 0.84, 0.29, 91)),
+        );
+
+        assert!(prepared.layout.metadata.landmark.is_landmark);
+        assert_eq!(
+            prepared.layout.metadata.namespace.as_str(),
+            "tests/landmarks"
+        );
+        assert_eq!(
+            prepared.layout.payload.namespace.as_str(),
+            "tests/landmarks"
+        );
+        assert_eq!(prepared.prefilter_trace.metadata_candidate_count, 1);
+        assert_eq!(prepared.prefilter_trace.payload_fetch_count, 0);
+        assert!(prepared.prefilter_stays_metadata_only());
     }
 }

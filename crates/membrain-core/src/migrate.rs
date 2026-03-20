@@ -3,6 +3,27 @@
 //! Owns migration versioning, compatibility checks between core
 //! schema generations, and upgrade/downgrade path validation.
 
+/// Stable durable schema objects owned by the canonical storage contract.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum DurableSchemaObject {
+    DurableMemoryRecords,
+    EngramsTable,
+    EngramMembershipTable,
+    GraphEdgeTable,
+}
+
+impl DurableSchemaObject {
+    /// Stable machine-readable table/object name.
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::DurableMemoryRecords => "durable_memory_records",
+            Self::EngramsTable => "engrams_table",
+            Self::EngramMembershipTable => "engram_membership_table",
+            Self::GraphEdgeTable => "graph_edge_table",
+        }
+    }
+}
+
 /// Schema version identifier for durable storage.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct SchemaVersion {
@@ -52,6 +73,13 @@ pub struct CompatibilityReport {
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
 pub struct MigrationModule;
 
+/// Durable schema manifest for one runtime generation.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DurableSchemaManifest {
+    pub version: SchemaVersion,
+    pub authoritative_tables: Vec<DurableSchemaObject>,
+}
+
 impl MigrationModule {
     /// Returns the stable component identifier for this migration surface.
     pub const fn component_name(&self) -> &'static str {
@@ -61,6 +89,19 @@ impl MigrationModule {
     /// Returns the current runtime schema version.
     pub const fn current_version(&self) -> SchemaVersion {
         SchemaVersion::CURRENT
+    }
+
+    /// Returns the current durable schema manifest.
+    pub fn durable_schema_manifest(&self) -> DurableSchemaManifest {
+        DurableSchemaManifest {
+            version: SchemaVersion::CURRENT,
+            authoritative_tables: vec![
+                DurableSchemaObject::DurableMemoryRecords,
+                DurableSchemaObject::EngramsTable,
+                DurableSchemaObject::EngramMembershipTable,
+                DurableSchemaObject::GraphEdgeTable,
+            ],
+        }
     }
 
     /// Checks compatibility between on-disk and runtime schema versions.
@@ -129,5 +170,38 @@ mod tests {
         let report = module.check_compatibility(SchemaVersion::new(1, 0));
         assert_eq!(report.direction, MigrationDirection::Downgrade);
         assert!(!report.auto_safe);
+    }
+
+    #[test]
+    fn durable_schema_manifest_exposes_engram_tables_as_first_class_objects() {
+        let module = MigrationModule;
+        let manifest = module.durable_schema_manifest();
+
+        assert_eq!(manifest.version, SchemaVersion::CURRENT);
+        assert!(manifest
+            .authoritative_tables
+            .contains(&DurableSchemaObject::EngramsTable));
+        assert!(manifest
+            .authoritative_tables
+            .contains(&DurableSchemaObject::EngramMembershipTable));
+        assert!(manifest
+            .authoritative_tables
+            .contains(&DurableSchemaObject::GraphEdgeTable));
+    }
+
+    #[test]
+    fn durable_schema_object_names_stay_machine_readable() {
+        assert_eq!(
+            DurableSchemaObject::EngramsTable.as_str(),
+            "engrams_table"
+        );
+        assert_eq!(
+            DurableSchemaObject::EngramMembershipTable.as_str(),
+            "engram_membership_table"
+        );
+        assert_eq!(
+            DurableSchemaObject::GraphEdgeTable.as_str(),
+            "graph_edge_table"
+        );
     }
 }

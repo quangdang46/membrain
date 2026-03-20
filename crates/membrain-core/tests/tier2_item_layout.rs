@@ -5,7 +5,49 @@ use membrain_core::types::{
 };
 
 fn normalized_event(raw_text: &str, compact_text: &str) -> NormalizedMemoryEnvelope {
-    let input = RawEncodeInput::new(RawIntakeKind::Event, raw_text);
+    normalized_event_with_landmark(raw_text, compact_text, LandmarkMetadata::non_landmark())
+}
+
+fn normalized_event_with_landmark(
+    raw_text: &str,
+    compact_text: &str,
+    landmark: LandmarkMetadata,
+) -> NormalizedMemoryEnvelope {
+    normalized_envelope(
+        RawIntakeKind::Event,
+        raw_text,
+        compact_text,
+        landmark,
+        None,
+        None,
+    )
+}
+
+fn normalized_observation(
+    raw_text: &str,
+    compact_text: &str,
+    observation_source: &str,
+    observation_chunk_id: &str,
+) -> NormalizedMemoryEnvelope {
+    normalized_envelope(
+        RawIntakeKind::Observation,
+        raw_text,
+        compact_text,
+        LandmarkMetadata::non_landmark(),
+        Some(observation_source),
+        Some(observation_chunk_id),
+    )
+}
+
+fn normalized_envelope(
+    kind: RawIntakeKind,
+    raw_text: &str,
+    compact_text: &str,
+    landmark: LandmarkMetadata,
+    observation_source: Option<&str>,
+    observation_chunk_id: Option<&str>,
+) -> NormalizedMemoryEnvelope {
+    let input = RawEncodeInput::new(kind, raw_text);
     NormalizedMemoryEnvelope {
         memory_type: input.kind.canonical_memory_type(),
         source_kind: input.kind,
@@ -13,9 +55,9 @@ fn normalized_event(raw_text: &str, compact_text: &str) -> NormalizedMemoryEnvel
         compact_text: compact_text.to_string(),
         normalization_generation: "norm-v1",
         payload_size_bytes: raw_text.len(),
-        landmark: LandmarkMetadata::non_landmark(),
-        observation_source: None,
-        observation_chunk_id: None,
+        landmark,
+        observation_source: observation_source.map(str::to_string),
+        observation_chunk_id: observation_chunk_id.map(str::to_string),
     }
 }
 
@@ -167,4 +209,130 @@ fn tier2_payload_body_stays_outside_prefilter_and_index_views() {
     assert_ne!(payload.raw_text, prefilter.compact_text);
     assert_ne!(payload.raw_text, key.compact_text);
     assert_eq!(layout.prefilter_trace().payload_fetch_count, 0);
+}
+
+#[test]
+fn tier2_metadata_preserves_landmark_and_era_fields_for_durable_recall() {
+    let store = Tier2Store;
+    let envelope = normalized_event_with_landmark(
+        "project launch deadline was moved",
+        "project launch deadline was moved",
+        LandmarkMetadata {
+            is_landmark: true,
+            landmark_label: Some("project launch deadline was moved".to_string()),
+            era_id: Some("era-projectlaunc-0088".to_string()),
+        },
+    );
+
+    let layout = store.layout_item(
+        NamespaceId::new("team.alpha").unwrap(),
+        MemoryId(77),
+        SessionId(4),
+        123,
+        &envelope,
+    );
+
+    assert!(layout.metadata.landmark.is_landmark);
+    assert_eq!(layout.metadata.landmark, envelope.landmark);
+    assert_eq!(layout.prefilter_view().landmark, &envelope.landmark);
+    assert_eq!(layout.metadata_index_key().landmark, &envelope.landmark);
+}
+
+#[test]
+fn tier2_non_landmarks_remain_explicitly_non_landmarks_in_metadata_views() {
+    let store = Tier2Store;
+    let envelope = normalized_event("routine standup note", "routine standup note");
+
+    let layout = store.layout_item(
+        NamespaceId::new("team.alpha").unwrap(),
+        MemoryId(78),
+        SessionId(5),
+        124,
+        &envelope,
+    );
+
+    assert_eq!(layout.metadata.landmark, LandmarkMetadata::non_landmark());
+    assert_eq!(
+        layout.prefilter_view().landmark,
+        &LandmarkMetadata::non_landmark()
+    );
+    assert_eq!(
+        layout.metadata_index_key().landmark,
+        &LandmarkMetadata::non_landmark()
+    );
+}
+
+#[test]
+fn tier2_metadata_preserves_passive_observation_provenance_without_payload_fetches() {
+    let store = Tier2Store;
+    let envelope = normalized_observation(
+        "file watcher noticed a new artifact",
+        "new artifact observed",
+        "passive_observation",
+        "obs-0000000000000042",
+    );
+
+    let layout = store.layout_item(
+        NamespaceId::new("team.alpha").unwrap(),
+        MemoryId(79),
+        SessionId(6),
+        125,
+        &envelope,
+    );
+    let prefilter = layout.prefilter_view();
+
+    assert_eq!(
+        layout.metadata.observation_source.as_deref(),
+        Some("passive_observation")
+    );
+    assert_eq!(
+        layout.metadata.observation_chunk_id.as_deref(),
+        Some("obs-0000000000000042")
+    );
+    assert_eq!(prefilter.observation_source, Some("passive_observation"));
+    assert_eq!(prefilter.observation_chunk_id, Some("obs-0000000000000042"));
+    assert_eq!(layout.prefilter_trace().payload_fetch_count, 0);
+}
+
+#[test]
+fn tier2_landmark_prefilter_trace_stays_metadata_first_for_temporal_recall_consumers() {
+    let store = Tier2Store;
+    let envelope = normalized_event_with_landmark(
+        "quarter closed after launch milestone",
+        "quarter closed after launch milestone",
+        LandmarkMetadata {
+            is_landmark: true,
+            landmark_label: Some("launch milestone".to_string()),
+            era_id: Some("era-launch-milestone-0001".to_string()),
+        },
+    );
+
+    let layout = store.layout_item(
+        NamespaceId::new("team.alpha").unwrap(),
+        MemoryId(80),
+        SessionId(8),
+        126,
+        &envelope,
+    );
+    let prefilter = layout.prefilter_view();
+    let trace = layout.prefilter_trace();
+
+    assert_eq!(
+        trace.outcome,
+        membrain_core::observability::Tier2PrefilterOutcome::Ready
+    );
+    assert_eq!(trace.metadata_candidate_count, 1);
+    assert_eq!(trace.payload_fetch_count, 0);
+    assert!(layout.prefilter_stays_metadata_only());
+    assert!(prefilter.landmark.is_landmark);
+    assert_eq!(
+        prefilter.landmark.landmark_label.as_deref(),
+        Some("launch milestone")
+    );
+    assert_eq!(
+        prefilter.landmark.era_id.as_deref(),
+        Some("era-launch-milestone-0001")
+    );
+    assert_eq!(prefilter.payload_locator, layout.metadata.payload_locator);
+    assert_eq!(layout.metadata_index_key().landmark, &envelope.landmark);
 }

@@ -102,6 +102,36 @@ fn planner_trace_names_direct_tier1_route_and_latency_evidence() {
 }
 
 #[test]
+fn tier1_trace_consumers_can_rely_on_stable_machine_labels() {
+    assert_eq!(Tier1LookupLane::ExactHandle.as_str(), "exact_handle");
+    assert_eq!(Tier1LookupLane::RecentWindow.as_str(), "recent_window");
+    assert_eq!(Tier1LookupOutcome::Hit.as_str(), "hit");
+    assert_eq!(Tier1LookupOutcome::Miss.as_str(), "miss");
+    assert_eq!(Tier1LookupOutcome::Bypass.as_str(), "bypass");
+    assert_eq!(Tier1LookupOutcome::StaleBypass.as_str(), "stale_bypass");
+
+    let engine = RecallEngine;
+    let direct_plan =
+        engine.plan_recall(RecallRequest::exact(MemoryId(7)), RuntimeConfig::default());
+    let fallback_plan = engine.plan_recall(
+        RecallRequest::small_session_lookup(SessionId(11)),
+        RuntimeConfig::default(),
+    );
+
+    assert_eq!(
+        direct_plan.trace.route_name,
+        format!("tier1.{}", Tier1LookupLane::ExactHandle.as_str())
+    );
+    assert_eq!(
+        fallback_plan.trace.route_name,
+        format!(
+            "tier1.{}_then_tier2_exact",
+            Tier1LookupLane::RecentWindow.as_str()
+        )
+    );
+}
+
+#[test]
 fn planner_trace_names_fallback_route_and_preserves_candidate_budget_evidence() {
     let engine = RecallEngine;
 
@@ -143,6 +173,63 @@ fn planner_trace_names_fallback_route_and_preserves_candidate_budget_evidence() 
     );
     assert!(!fallback_plan.trace.tier1_answered_directly);
     assert!(fallback_plan.trace.stayed_within_latency_budget);
+    assert_eq!(fallback_plan.trace.pre_tier1_candidates, 0);
+    assert_eq!(fallback_plan.trace.post_tier1_candidates, 0);
+}
+
+#[test]
+fn tier1_trace_consumer_budget_evidence_stays_explicit_across_routes() {
+    let engine = RecallEngine;
+    let config = RuntimeConfig::default();
+
+    let exact_plan = engine.plan_recall(RecallRequest::exact(MemoryId(7)), config);
+    let recent_plan =
+        engine.plan_recall(RecallRequest::small_session_lookup(SessionId(11)), config);
+    let fallback_plan = engine.plan_recall(
+        RecallRequest {
+            exact_memory_id: None,
+            session_id: Some(SessionId(12)),
+            small_lookup: false,
+        },
+        config,
+    );
+
+    assert_eq!(
+        exact_plan.tier1_candidate_budget,
+        config.tier1_candidate_budget
+    );
+    assert_eq!(
+        exact_plan.trace.candidate_budget,
+        exact_plan.tier1_candidate_budget
+    );
+    assert_eq!(exact_plan.trace.pre_tier1_candidates, 1);
+    assert_eq!(exact_plan.trace.post_tier1_candidates, 1);
+
+    assert_eq!(
+        recent_plan.tier1_candidate_budget,
+        config.tier1_candidate_budget
+    );
+    assert_eq!(
+        recent_plan.trace.candidate_budget,
+        recent_plan.tier1_candidate_budget
+    );
+    assert_eq!(
+        recent_plan.trace.pre_tier1_candidates,
+        recent_plan.tier1_candidate_budget
+    );
+    assert_eq!(
+        recent_plan.trace.post_tier1_candidates,
+        recent_plan.tier1_candidate_budget
+    );
+
+    assert_eq!(
+        fallback_plan.tier1_candidate_budget,
+        config.tier1_candidate_budget
+    );
+    assert_eq!(
+        fallback_plan.trace.candidate_budget,
+        fallback_plan.tier1_candidate_budget
+    );
     assert_eq!(fallback_plan.trace.pre_tier1_candidates, 0);
     assert_eq!(fallback_plan.trace.post_tier1_candidates, 0);
 }

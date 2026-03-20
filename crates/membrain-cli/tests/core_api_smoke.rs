@@ -2,8 +2,10 @@ use membrain_core::api::{
     NamespaceId, PassiveObservationInspectSummary, RequestId, ResponseContext,
 };
 use membrain_core::engine::encode::EncodeRuntime;
+use membrain_core::engine::intent::{IntentEngine, QueryIntent};
 use membrain_core::engine::ranking::RankingRuntime;
 use membrain_core::engine::recall::{RecallRuntime, RecallTraceStage};
+use membrain_core::engine::retrieval_planner::{PrimaryCue, RetrievalRequest};
 use membrain_core::observability::OutcomeClass;
 use membrain_core::policy::{PolicyDecision, PolicyGateway};
 use membrain_core::store::hot::Tier1HotMetadataStore;
@@ -21,6 +23,7 @@ fn cli_depends_on_core_api() {
 
 fn requires_policy<E: PolicyGateway>(_surface: &E) {}
 fn requires_encode<E: EncodeRuntime>(_surface: &E) {}
+fn requires_intent(_surface: &IntentEngine) {}
 fn requires_recall<E: RecallRuntime>(_surface: &E) {}
 fn requires_ranking<E: RankingRuntime>(_surface: &E) {}
 fn requires_hot_store<E: HotStoreApi>(_surface: &E) {}
@@ -33,6 +36,7 @@ fn cli_depends_on_shared_core_boundaries() {
 
     requires_policy(store.policy());
     requires_encode(store.encode_engine());
+    requires_intent(store.intent_engine());
     requires_recall(store.recall_engine());
     requires_ranking(store.ranking_engine());
     requires_hot_store(store.hot_store());
@@ -142,6 +146,30 @@ fn cli_can_exercise_recall_route_explain_contract_through_core() {
 }
 
 #[test]
+fn cli_can_exercise_intent_taxonomy_and_classification_logs_through_core() {
+    let store = BrainStore::new(RuntimeConfig::default());
+
+    let procedural = store
+        .intent_engine()
+        .classify("how to deploy the service after the last incident?");
+    let fallback = store.intent_engine().classify("rust lifetime notes");
+    let log = procedural.log_record();
+
+    assert_eq!(procedural.intent, QueryIntent::ProceduralLookup);
+    assert_eq!(procedural.route_inputs.query_path.as_str(), "entity_heavy");
+    assert_eq!(procedural.route_inputs.ranking_profile.as_str(), "balanced");
+    assert!(procedural.route_inputs.prefer_small_lookup);
+    assert!(procedural.route_inputs.prefer_preview_only_on_low_confidence);
+    assert!(procedural.route_inputs.high_stakes);
+    assert_eq!(log.intent, "procedural_lookup");
+    assert_eq!(log.query_path, "entity_heavy");
+    assert!(log.matched_patterns.contains(&"how to"));
+    assert_eq!(fallback.intent, QueryIntent::SemanticBroad);
+    assert!(fallback.low_confidence_fallback);
+    assert_eq!(fallback.log_record().matched_patterns, vec!["default_semantic_broad"]);
+}
+
+#[test]
 fn cli_can_drive_tier1_hot_metadata_store_session_windows() {
     let store = BrainStore::new(RuntimeConfig::default());
     let namespace = NamespaceId::new("cli.team").unwrap();
@@ -236,6 +264,29 @@ fn cli_can_surface_passive_observation_inspect_provenance_and_retention() {
     assert_eq!(passive.observation_source.state_name(), "present");
     assert_eq!(passive.observation_chunk_id.state_name(), "present");
     assert_eq!(passive.retention_marker.state_name(), "present");
+}
+
+#[test]
+fn cli_can_observe_query_by_example_normalization_and_seed_order() {
+    let namespace = NamespaceId::new("cli.team").unwrap();
+    let normalized = RetrievalRequest::hybrid(namespace, "  example cue  ", 4)
+        .with_like_memory(MemoryId(21))
+        .with_unlike_memory(MemoryId(22))
+        .normalize_query_by_example()
+        .unwrap();
+
+    assert_eq!(normalized.primary_cue, PrimaryCue::QueryText);
+    assert!(normalized.uses_query_text_as_primary_cue());
+    assert!(normalized.has_example_seeds());
+    assert_eq!(normalized.seed_polarities(), vec!["like", "unlike"]);
+    assert_eq!(
+        normalized.seed_memory_ids(),
+        vec![MemoryId(21), MemoryId(22)]
+    );
+    assert_eq!(
+        normalized.normalized_query_text.as_deref(),
+        Some("example cue")
+    );
 }
 
 #[test]
