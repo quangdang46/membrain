@@ -4,6 +4,8 @@ pub mod consolidation;
 pub mod contradiction;
 /// Encode-path orchestration surfaces.
 pub mod encode;
+/// Episode formation and grouping rules.
+pub mod episode;
 /// Forgetting and demotion maintenance surfaces.
 pub mod forgetting;
 /// Shared cancellable maintenance control surfaces.
@@ -12,9 +14,9 @@ pub mod maintenance;
 pub mod ranking;
 /// Recall-path orchestration surfaces.
 pub mod recall;
-/// Retrieval result envelope and packaging surfaces.
-pub mod result;
 /// Repair and rebuild maintenance surfaces.
 pub mod repair;
-/// Episode formation and grouping rules.
-pub mod episode;
+/// Bounded Tier2/Tier3 retrieval planners with escalation logic.
+pub mod retrieval_planner;
+/// Retrieval result envelope and packaging surfaces.
+pub mod result;

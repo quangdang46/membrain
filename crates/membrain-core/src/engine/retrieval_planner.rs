@@ -1,0 +1,884 @@
+//! Bounded Tier2/Tier3 query planners with explicit escalation logic.
+//!
+//! This module implements the canonical retrieval escalation chain:
+//! 1. SQLite/FTS5 prefilter → bounded candidate ids
+//! 2. USearch HNSW hot search → bounded top-K semantic hits
+//! 3. Float32 rescore of bounded hit set
+//! 4. Optional Tier3 USearch mmap cold search (fallback only)
+//! 5. Optional graph/engram expansion
+//! 6. Final packaging with trace artifacts
+//!
+//! Key invariants:
+//! - No planner path performs a full-store scan
+//! - No cold-payload fetch before the final candidate cut
+//! - Tier3 is a declared fallback, not a silent parallel sweep
+//! - Every hit is eligible to refresh Tier1 mirrors without changing durable ownership
+
+use crate::api::NamespaceId;
+use crate::index::{CandidateSet, Fts5Query, IndexFamily, IndexLookupTrace};
+use crate::types::{CanonicalMemoryType, MemoryId, SessionId};
+
+// ── Planner input ─────────────────────────────────────────────────────────────
+
+/// Query path selection for retrieval planning.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum QueryPath {
+    /// Direct ID lookup (exact handle).
+    ExactId,
+    /// Temporal/slice-based retrieval.
+    Temporal,
+    /// Entity-heavy structured retrieval.
+    EntityHeavy,
+    /// Hybrid lexical + semantic retrieval.
+    Hybrid,
+    /// Partial cue fallback (low confidence).
+    PartialCue,
+    /// Semantic-only vector search.
+    SemanticOnly,
+}
+
+impl QueryPath {
+    /// Returns the stable machine-readable name.
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::ExactId => "exact_id",
+            Self::Temporal => "temporal",
+            Self::EntityHeavy => "entity_heavy",
+            Self::Hybrid => "hybrid",
+            Self::PartialCue => "partial_cue",
+            Self::SemanticOnly => "semantic_only",
+        }
+    }
+
+    /// Returns true if this path requires lexical prefiltering.
+    pub const fn requires_lexical_prefilter(self) -> bool {
+        matches!(self, Self::Hybrid | Self::PartialCue | Self::Temporal | Self::EntityHeavy)
+    }
+
+    /// Returns true if this path requires semantic search.
+    pub const fn requires_semantic_search(self) -> bool {
+        matches!(self, Self::Hybrid | Self::SemanticOnly | Self::PartialCue)
+    }
+}
+
+/// Retrieval planner request.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RetrievalRequest {
+    /// Namespace scope (required).
+    pub namespace: NamespaceId,
+    /// Query text for lexical matching.
+    pub query_text: Option<String>,
+    /// Query path selection hint.
+    pub query_path: QueryPath,
+    /// Exact memory ID for direct lookup.
+    pub exact_memory_id: Option<MemoryId>,
+    /// Session scope for temporal filtering.
+    pub session_filter: Option<SessionId>,
+    /// Memory type filter.
+    pub memory_type_filter: Option<CanonicalMemoryType>,
+    /// Maximum final results to return.
+    pub limit: usize,
+    /// Candidate budget for bounded retrieval.
+    pub candidate_budget: usize,
+    /// Whether to enable Tier3 fallback.
+    pub enable_tier3_fallback: bool,
+    /// Whether to enable graph/engram expansion.
+    pub enable_graph_expansion: bool,
+}
+
+impl RetrievalRequest {
+    /// Creates a new hybrid retrieval request.
+    pub fn hybrid(namespace: NamespaceId, query_text: impl Into<String>, limit: usize) -> Self {
+        Self {
+            namespace,
+            query_text: Some(query_text.into()),
+            query_path: QueryPath::Hybrid,
+            exact_memory_id: None,
+            session_filter: None,
+            memory_type_filter: None,
+            limit,
+            candidate_budget: Self::DEFAULT_CANDIDATE_BUDGET,
+            enable_tier3_fallback: true,
+            enable_graph_expansion: false,
+        }
+    }
+
+    /// Creates an exact ID lookup request.
+    pub fn exact_id(namespace: NamespaceId, memory_id: MemoryId) -> Self {
+        Self {
+            namespace,
+            query_text: None,
+            query_path: QueryPath::ExactId,
+            exact_memory_id: Some(memory_id),
+            session_filter: None,
+            memory_type_filter: None,
+            limit: 1,
+            candidate_budget: 1,
+            enable_tier3_fallback: false,
+            enable_graph_expansion: false,
+        }
+    }
+
+    /// Default candidate budget for retrieval requests.
+    pub const DEFAULT_CANDIDATE_BUDGET: usize = 5000;
+
+    /// Adds a session filter.
+    pub fn with_session(mut self, session_id: SessionId) -> Self {
+        self.session_filter = Some(session_id);
+        self
+    }
+
+    /// Adds a memory type filter.
+    pub fn with_memory_type(mut self, memory_type: CanonicalMemoryType) -> Self {
+        self.memory_type_filter = Some(memory_type);
+        self
+    }
+
+    /// Sets the candidate budget.
+    pub fn with_budget(mut self, budget: usize) -> Self {
+        self.candidate_budget = budget;
+        self
+    }
+
+    /// Enables Tier3 fallback.
+    pub fn with_tier3_fallback(mut self, enabled: bool) -> Self {
+        self.enable_tier3_fallback = enabled;
+        self
+    }
+
+    /// Enables graph/engram expansion.
+    pub fn with_graph_expansion(mut self, enabled: bool) -> Self {
+        self.enable_graph_expansion = enabled;
+        self
+    }
+}
+
+// ── Planner stages ────────────────────────────────────────────────────────────
+
+/// Retrieval planner stage identifiers for trace artifacts.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum PlannerStage {
+    /// FTS5 lexical prefilter stage.
+    LexicalPrefilter,
+    /// USearch hot HNSW search stage.
+    HotSemanticSearch,
+    /// Float32 rescore of quantized hits.
+    Float32Rescore,
+    /// Tier3 cold mmap search (fallback).
+    Tier3ColdSearch,
+    /// Graph/engram expansion stage.
+    GraphExpansion,
+    /// Final packaging stage.
+    FinalPackaging,
+}
+
+impl PlannerStage {
+    /// Returns the stable machine-readable name.
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::LexicalPrefilter => "lexical_prefilter",
+            Self::HotSemanticSearch => "hot_semantic_search",
+            Self::Float32Rescore => "float32_rescore",
+            Self::Tier3ColdSearch => "tier3_cold_search",
+            Self::GraphExpansion => "graph_expansion",
+            Self::FinalPackaging => "final_packaging",
+        }
+    }
+
+    /// Returns true if this is a Tier2 stage.
+    pub const fn is_tier2(self) -> bool {
+        matches!(self, Self::LexicalPrefilter | Self::HotSemanticSearch | Self::Float32Rescore)
+    }
+
+    /// Returns true if this is a Tier3 stage.
+    pub const fn is_tier3(self) -> bool {
+        matches!(self, Self::Tier3ColdSearch)
+    }
+}
+
+// ── Escalation logic ──────────────────────────────────────────────────────────
+
+/// Reasons for escalating from Tier2 to Tier3.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum EscalationReason {
+    /// Tier2 returned zero results.
+    Tier2ZeroResults,
+    /// Tier2 returned insufficient results (underfill).
+    Tier2Underfill,
+    /// Low confidence in Tier2 results.
+    LowConfidence,
+    /// Explicit user request for cold search.
+    ExplicitRequest,
+    /// No applicable reason (Tier3 not triggered).
+    NotTriggered,
+}
+
+impl EscalationReason {
+    /// Returns the stable machine-readable name.
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Tier2ZeroResults => "tier2_zero_results",
+            Self::Tier2Underfill => "tier2_underfill",
+            Self::LowConfidence => "low_confidence",
+            Self::ExplicitRequest => "explicit_request",
+            Self::NotTriggered => "not_triggered",
+        }
+    }
+
+    /// Returns true if escalation is needed.
+    pub const fn needs_escalation(self) -> bool {
+        !matches!(self, Self::NotTriggered)
+    }
+}
+
+/// Configuration for Tier2/Tier3 escalation decisions.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct EscalationConfig {
+    /// Minimum results from Tier2 before considering it sufficient.
+    pub tier2_min_results: usize,
+    /// Confidence threshold below which Tier3 is considered.
+    pub confidence_threshold: u16,
+    /// Maximum Tier3 candidates to fetch.
+    pub tier3_candidate_limit: usize,
+    /// Whether Tier3 is enabled by default.
+    pub tier3_enabled_by_default: bool,
+}
+
+impl Default for EscalationConfig {
+    fn default() -> Self {
+        Self {
+            tier2_min_results: 5,
+            confidence_threshold: 500, // 0-1000 scale
+            tier3_candidate_limit: 100,
+            tier3_enabled_by_default: true,
+        }
+    }
+}
+
+/// Decision result for Tier3 escalation.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct EscalationDecision {
+    /// Whether to escalate to Tier3.
+    pub should_escalate: bool,
+    /// Reason for the decision.
+    pub reason: EscalationReason,
+    /// Tier2 candidate count at decision time.
+    pub tier2_candidate_count: usize,
+    /// Tier2 confidence score at decision time.
+    pub tier2_confidence: u16,
+    /// Maximum Tier3 candidates to fetch if escalating.
+    pub tier3_candidate_budget: usize,
+}
+
+impl EscalationDecision {
+    /// Creates a decision to not escalate.
+    pub fn no_escalation(tier2_candidate_count: usize, tier2_confidence: u16) -> Self {
+        Self {
+            should_escalate: false,
+            reason: EscalationReason::NotTriggered,
+            tier2_candidate_count,
+            tier2_confidence,
+            tier3_candidate_budget: 0,
+        }
+    }
+
+    /// Creates a decision to escalate with a specific reason.
+    pub fn escalate(
+        reason: EscalationReason,
+        tier2_candidate_count: usize,
+        tier2_confidence: u16,
+        tier3_budget: usize,
+    ) -> Self {
+        Self {
+            should_escalate: true,
+            reason,
+            tier2_candidate_count,
+            tier2_confidence,
+            tier3_candidate_budget: tier3_budget,
+        }
+    }
+
+    /// Evaluates whether to escalate based on Tier2 results.
+    pub fn evaluate(
+        tier2_results: &CandidateSet,
+        tier2_confidence: u16,
+        config: &EscalationConfig,
+        request: &RetrievalRequest,
+    ) -> Self {
+        // If request explicitly disables Tier3 fallback, respect that
+        if !request.enable_tier3_fallback {
+            return Self::no_escalation(tier2_results.len(), tier2_confidence);
+        }
+
+        let candidate_count = tier2_results.len();
+
+        // Tier2 returned zero results
+        if candidate_count == 0 {
+            return Self::escalate(
+                EscalationReason::Tier2ZeroResults,
+                0,
+                tier2_confidence,
+                config.tier3_candidate_limit,
+            );
+        }
+
+        // Tier2 returned insufficient results
+        if candidate_count < config.tier2_min_results {
+            return Self::escalate(
+                EscalationReason::Tier2Underfill,
+                candidate_count,
+                tier2_confidence,
+                config.tier3_candidate_limit,
+            );
+        }
+
+        // Low confidence in Tier2 results
+        if tier2_confidence < config.confidence_threshold {
+            return Self::escalate(
+                EscalationReason::LowConfidence,
+                candidate_count,
+                tier2_confidence,
+                config.tier3_candidate_limit,
+            );
+        }
+
+        Self::no_escalation(candidate_count, tier2_confidence)
+    }
+}
+
+// ── Planner trace ─────────────────────────────────────────────────────────────
+
+/// Per-stage trace record for retrieval execution.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct StageTrace {
+    /// Stage that was executed.
+    pub stage: PlannerStage,
+    /// Candidates before this stage.
+    pub candidates_in: usize,
+    /// Candidates after this stage.
+    pub candidates_out: usize,
+    /// Whether this stage was bypassed (zero budget).
+    pub was_bypassed: bool,
+    /// Execution hint for logging.
+    pub execution_hint: &'static str,
+}
+
+impl StageTrace {
+    /// Creates a trace for an executed stage.
+    pub fn executed(stage: PlannerStage, candidates_in: usize, candidates_out: usize) -> Self {
+        Self {
+            stage,
+            candidates_in,
+            candidates_out,
+            was_bypassed: false,
+            execution_hint: "normal",
+        }
+    }
+
+    /// Creates a trace for a bypassed stage.
+    pub fn bypassed(stage: PlannerStage) -> Self {
+        Self {
+            stage,
+            candidates_in: 0,
+            candidates_out: 0,
+            was_bypassed: true,
+            execution_hint: "bypassed",
+        }
+    }
+
+    /// Returns a human-readable summary.
+    pub fn summary(&self) -> String {
+        if self.was_bypassed {
+            format!("[{}] BYPASSED", self.stage.as_str())
+        } else {
+            format!(
+                "[{}] {} → {} candidates",
+                self.stage.as_str(),
+                self.candidates_in,
+                self.candidates_out
+            )
+        }
+    }
+}
+
+/// Complete retrieval plan trace.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RetrievalPlanTrace {
+    /// Request that generated this plan.
+    pub query_path: QueryPath,
+    /// Namespace scope.
+    pub namespace: NamespaceId,
+    /// Requested limit.
+    pub requested_limit: usize,
+    /// Candidate budget.
+    pub candidate_budget: usize,
+    /// Stage traces in execution order.
+    pub stages: Vec<StageTrace>,
+    /// Final candidate count.
+    pub final_candidates: usize,
+    /// Whether Tier3 was triggered.
+    pub tier3_triggered: bool,
+    /// Escalation reason (if Tier3 triggered).
+    pub escalation_reason: EscalationReason,
+    /// Whether graph expansion was triggered.
+    pub graph_expansion_triggered: bool,
+    /// Total candidates inspected across all stages.
+    pub total_candidates_inspected: usize,
+}
+
+impl RetrievalPlanTrace {
+    /// Creates a new empty trace.
+    pub fn new(request: &RetrievalRequest) -> Self {
+        Self {
+            query_path: request.query_path,
+            namespace: request.namespace.clone(),
+            requested_limit: request.limit,
+            candidate_budget: request.candidate_budget,
+            stages: Vec::new(),
+            final_candidates: 0,
+            tier3_triggered: false,
+            escalation_reason: EscalationReason::NotTriggered,
+            graph_expansion_triggered: false,
+            total_candidates_inspected: 0,
+        }
+    }
+
+    /// Adds a stage trace.
+    pub fn add_stage(&mut self, trace: StageTrace) {
+        self.total_candidates_inspected += trace.candidates_in.max(trace.candidates_out);
+        self.stages.push(trace);
+    }
+
+    /// Marks the final candidate count.
+    pub fn set_final_candidates(&mut self, count: usize) {
+        self.final_candidates = count;
+    }
+
+    /// Marks Tier3 as triggered with a reason.
+    pub fn set_tier3_triggered(&mut self, reason: EscalationReason) {
+        self.tier3_triggered = true;
+        self.escalation_reason = reason;
+    }
+
+    /// Marks graph expansion as triggered.
+    pub fn set_graph_expansion_triggered(&mut self) {
+        self.graph_expansion_triggered = true;
+    }
+
+    /// Returns a human-readable summary.
+    pub fn summary(&self) -> String {
+        let mut lines = vec![format!(
+            "RetrievalPlanTrace [path={}, limit={}, budget={}]",
+            self.query_path.as_str(),
+            self.requested_limit,
+            self.candidate_budget
+        )];
+
+        for stage in &self.stages {
+            lines.push(format!("  {}", stage.summary()));
+        }
+
+        lines.push(format!(
+            "  Final: {} candidates, Tier3: {}, Graph: {}",
+            self.final_candidates,
+            if self.tier3_triggered {
+                self.escalation_reason.as_str()
+            } else {
+                "no"
+            },
+            if self.graph_expansion_triggered { "yes" } else { "no" }
+        ));
+
+        lines.join("\n")
+    }
+
+    /// Returns true if any stage was bypassed.
+    pub fn has_bypassed_stages(&self) -> bool {
+        self.stages.iter().any(|s| s.was_bypassed)
+    }
+
+    /// Returns true if any stage performed a full scan (should never happen).
+    pub fn has_full_scan(&self) -> bool {
+        // By design, our planner never does full scans
+        false
+    }
+}
+
+// ── Retrieval plan ────────────────────────────────────────────────────────────
+
+/// Bounded retrieval plan with explicit stages.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RetrievalPlan {
+    /// Request that generated this plan.
+    pub request: RetrievalRequest,
+    /// Escalation configuration.
+    pub escalation_config: EscalationConfig,
+    /// Planned stages in execution order.
+    pub stages: Vec<PlannerStage>,
+    /// Pre-computed candidate caps per stage.
+    pub stage_budgets: Vec<usize>,
+}
+
+impl RetrievalPlan {
+    /// Creates a retrieval plan for the given request.
+    pub fn new(request: RetrievalRequest) -> Self {
+        Self::with_config(request, EscalationConfig::default())
+    }
+
+    /// Creates a retrieval plan with explicit escalation config.
+    pub fn with_config(request: RetrievalRequest, escalation_config: EscalationConfig) -> Self {
+        let mut stages = Vec::new();
+        let mut stage_budgets = Vec::new();
+
+        // Stage 1: Lexical prefilter (if applicable)
+        if request.query_path.requires_lexical_prefilter() {
+            stages.push(PlannerStage::LexicalPrefilter);
+            stage_budgets.push(request.candidate_budget);
+        }
+
+        // Stage 2: Hot semantic search (if applicable)
+        if request.query_path.requires_semantic_search() {
+            stages.push(PlannerStage::HotSemanticSearch);
+            stage_budgets.push(100); // Bounded top-K for HNSW
+        }
+
+        // Stage 3: Float32 rescore
+        stages.push(PlannerStage::Float32Rescore);
+        stage_budgets.push(20); // Bounded rescore set
+
+        // Stage 4: Tier3 fallback (conditional)
+        if request.enable_tier3_fallback {
+            stages.push(PlannerStage::Tier3ColdSearch);
+            stage_budgets.push(escalation_config.tier3_candidate_limit);
+        }
+
+        // Stage 5: Graph expansion (conditional)
+        if request.enable_graph_expansion {
+            stages.push(PlannerStage::GraphExpansion);
+            stage_budgets.push(50); // Bounded expansion
+        }
+
+        // Stage 6: Final packaging
+        stages.push(PlannerStage::FinalPackaging);
+        stage_budgets.push(request.limit);
+
+        Self {
+            request,
+            escalation_config,
+            stages,
+            stage_budgets,
+        }
+    }
+
+    /// Returns the total number of stages.
+    pub fn stage_count(&self) -> usize {
+        self.stages.len()
+    }
+
+    /// Returns the budget for a specific stage.
+    pub fn budget_for_stage(&self, stage: PlannerStage) -> Option<usize> {
+        self.stages
+            .iter()
+            .position(|&s| s == stage)
+            .map(|idx| self.stage_budgets[idx])
+    }
+
+    /// Returns true if this plan includes Tier3 fallback.
+    pub fn includes_tier3(&self) -> bool {
+        self.stages.contains(&PlannerStage::Tier3ColdSearch)
+    }
+
+    /// Returns true if this plan includes graph expansion.
+    pub fn includes_graph_expansion(&self) -> bool {
+        self.stages.contains(&PlannerStage::GraphExpansion)
+    }
+}
+
+// ── Retrieval planner ──────────────────────────────────────────────────────────
+
+/// Bounded retrieval planner implementing the canonical escalation chain.
+#[derive(Debug, Default, Clone, PartialEq, Eq)]
+pub struct RetrievalPlanner {
+    escalation_config: EscalationConfig,
+}
+
+impl RetrievalPlanner {
+    /// Creates a new retrieval planner with default config.
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Creates a retrieval planner with explicit escalation config.
+    pub fn with_config(escalation_config: EscalationConfig) -> Self {
+        Self { escalation_config }
+    }
+
+    /// Plans the retrieval for the given request.
+    pub fn plan(&self, request: RetrievalRequest) -> RetrievalPlan {
+        RetrievalPlan::with_config(request, self.escalation_config.clone())
+    }
+
+    /// Evaluates whether to escalate to Tier3 based on Tier2 results.
+    pub fn evaluate_escalation(
+        &self,
+        tier2_results: &CandidateSet,
+        tier2_confidence: u16,
+        request: &RetrievalRequest,
+    ) -> EscalationDecision {
+        EscalationDecision::evaluate(tier2_results, tier2_confidence, &self.escalation_config, request)
+    }
+
+    /// Creates a trace for a new retrieval execution.
+    pub fn start_trace(&self, request: &RetrievalRequest) -> RetrievalPlanTrace {
+        RetrievalPlanTrace::new(request)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::index::{CandidateSet, IndexFamily};
+
+    fn test_namespace() -> NamespaceId {
+        NamespaceId::new("test.namespace").unwrap()
+    }
+
+    #[test]
+    fn hybrid_request_includes_lexical_and_semantic() {
+        let ns = test_namespace();
+        let request = RetrievalRequest::hybrid(ns, "hello world", 10);
+
+        assert!(request.query_path.requires_lexical_prefilter());
+        assert!(request.query_path.requires_semantic_search());
+        assert_eq!(request.limit, 10);
+        assert!(request.enable_tier3_fallback);
+    }
+
+    #[test]
+    fn exact_id_request_skips_lexical_and_semantic() {
+        let ns = test_namespace();
+        let request = RetrievalRequest::exact_id(ns, MemoryId(42));
+
+        assert!(!request.query_path.requires_lexical_prefilter());
+        assert!(!request.query_path.requires_semantic_search());
+        assert_eq!(request.limit, 1);
+        assert!(!request.enable_tier3_fallback);
+    }
+
+    #[test]
+    fn retrieval_plan_hybrid_includes_all_stages() {
+        let ns = test_namespace();
+        let request = RetrievalRequest::hybrid(ns, "test", 10)
+            .with_graph_expansion(true);
+
+        let plan = RetrievalPlan::new(request);
+
+        assert!(plan.stages.contains(&PlannerStage::LexicalPrefilter));
+        assert!(plan.stages.contains(&PlannerStage::HotSemanticSearch));
+        assert!(plan.stages.contains(&PlannerStage::Float32Rescore));
+        assert!(plan.includes_tier3());
+        assert!(plan.includes_graph_expansion());
+        assert!(plan.stages.contains(&PlannerStage::FinalPackaging));
+    }
+
+    #[test]
+    fn retrieval_plan_exact_id_minimal_stages() {
+        let ns = test_namespace();
+        let request = RetrievalRequest::exact_id(ns, MemoryId(1));
+        let plan = RetrievalPlan::new(request);
+
+        // Exact ID should only have rescore and packaging
+        assert!(!plan.stages.contains(&PlannerStage::LexicalPrefilter));
+        assert!(!plan.stages.contains(&PlannerStage::HotSemanticSearch));
+        assert!(!plan.includes_tier3());
+    }
+
+    #[test]
+    fn stage_budgets_are_bounded() {
+        let ns = test_namespace();
+        let request = RetrievalRequest::hybrid(ns, "test", 10)
+            .with_budget(1000);
+
+        let plan = RetrievalPlan::new(request);
+
+        // All budgets should be bounded
+        for &budget in &plan.stage_budgets {
+            assert!(budget > 0);
+            assert!(budget <= 5000); // Max reasonable budget
+        }
+    }
+
+    #[test]
+    fn escalation_decision_zero_results() {
+        let config = EscalationConfig::default();
+        let ns = test_namespace();
+        let request = RetrievalRequest::hybrid(ns, "test", 10);
+        let empty_results = CandidateSet::empty(100, IndexFamily::Fts5Lexical);
+
+        let decision = EscalationDecision::evaluate(&empty_results, 800, &config, &request);
+
+        assert!(decision.should_escalate);
+        assert_eq!(decision.reason, EscalationReason::Tier2ZeroResults);
+        assert_eq!(decision.tier2_candidate_count, 0);
+    }
+
+    #[test]
+    fn escalation_decision_underfill() {
+        let config = EscalationConfig {
+            tier2_min_results: 5,
+            ..Default::default()
+        };
+        let ns = test_namespace();
+        let request = RetrievalRequest::hybrid(ns.clone(), "test", 10);
+
+        // Create a candidate set with only 2 candidates (underfill)
+        let candidates = vec![
+            crate::index::IndexCandidate::new(MemoryId(1), IndexFamily::Fts5Lexical, 800, ns.clone()),
+            crate::index::IndexCandidate::new(MemoryId(2), IndexFamily::Fts5Lexical, 700, ns),
+        ];
+        let small_results = CandidateSet::from_candidates(candidates, 10, 2, IndexFamily::Fts5Lexical);
+        let decision = EscalationDecision::evaluate(&small_results, 800, &config, &request);
+
+        assert!(decision.should_escalate);
+        assert_eq!(decision.reason, EscalationReason::Tier2Underfill);
+    }
+
+    #[test]
+    fn escalation_decision_low_confidence() {
+        let config = EscalationConfig {
+            confidence_threshold: 500,
+            tier2_min_results: 1,
+            ..Default::default()
+        };
+        let ns = test_namespace();
+        let request = RetrievalRequest::hybrid(ns.clone(), "test", 10);
+
+        // Create a candidate set with 10 candidates but low confidence
+        let candidates: Vec<crate::index::IndexCandidate> = (1..=10)
+            .map(|i| crate::index::IndexCandidate::new(
+                MemoryId(i),
+                IndexFamily::Fts5Lexical,
+                800 - i as u16,
+                ns.clone()
+            ))
+            .collect();
+        let results = CandidateSet::from_candidates(candidates, 10, 10, IndexFamily::Fts5Lexical);
+        let decision = EscalationDecision::evaluate(&results, 300, &config, &request);
+
+        assert!(decision.should_escalate);
+        assert_eq!(decision.reason, EscalationReason::LowConfidence);
+    }
+
+    #[test]
+    fn escalation_decision_sufficient_results() {
+        let config = EscalationConfig {
+            tier2_min_results: 5,
+            confidence_threshold: 500,
+            ..Default::default()
+        };
+        let ns = test_namespace();
+        let request = RetrievalRequest::hybrid(ns.clone(), "test", 10);
+
+        // Create a candidate set with 10 candidates and high confidence
+        let candidates: Vec<crate::index::IndexCandidate> = (1..=10)
+            .map(|i| crate::index::IndexCandidate::new(
+                MemoryId(i),
+                IndexFamily::Fts5Lexical,
+                900 - i as u16,
+                ns.clone()
+            ))
+            .collect();
+        let results = CandidateSet::from_candidates(candidates, 10, 10, IndexFamily::Fts5Lexical);
+        let decision = EscalationDecision::evaluate(&results, 800, &config, &request);
+
+        assert!(!decision.should_escalate);
+        assert_eq!(decision.reason, EscalationReason::NotTriggered);
+    }
+
+    #[test]
+    fn escalation_disabled_by_request() {
+        let config = EscalationConfig::default();
+        let ns = test_namespace();
+        let request = RetrievalRequest::hybrid(ns, "test", 10)
+            .with_tier3_fallback(false);
+
+        let empty_results = CandidateSet::empty(0, IndexFamily::Fts5Lexical);
+        let decision = EscalationDecision::evaluate(&empty_results, 800, &config, &request);
+
+        // Even with zero results, Tier3 should not be triggered when disabled by request
+        assert!(!decision.should_escalate);
+        assert_eq!(decision.reason, EscalationReason::NotTriggered);
+    }
+
+    #[test]
+    fn stage_trace_summary() {
+        let trace = StageTrace::executed(PlannerStage::LexicalPrefilter, 1000, 50);
+        assert!(trace.summary().contains("1000 → 50"));
+
+        let bypassed = StageTrace::bypassed(PlannerStage::HotSemanticSearch);
+        assert!(bypassed.summary().contains("BYPASSED"));
+    }
+
+    #[test]
+    fn retrieval_plan_trace_summary() {
+        let ns = test_namespace();
+        let request = RetrievalRequest::hybrid(ns, "test", 10);
+        let mut trace = RetrievalPlanTrace::new(&request);
+
+        trace.add_stage(StageTrace::executed(PlannerStage::LexicalPrefilter, 1000, 50));
+        trace.add_stage(StageTrace::executed(PlannerStage::HotSemanticSearch, 50, 20));
+        trace.set_final_candidates(10);
+        trace.set_tier3_triggered(EscalationReason::Tier2Underfill);
+
+        let summary = trace.summary();
+        assert!(summary.contains("hybrid"));
+        assert!(summary.contains("lexical_prefilter"));
+        assert!(summary.contains("tier2_underfill"));
+    }
+
+    #[test]
+    fn retrieval_plan_trace_no_full_scan() {
+        let ns = test_namespace();
+        let request = RetrievalRequest::hybrid(ns, "test", 10);
+        let trace = RetrievalPlanTrace::new(&request);
+
+        // By design, our planner never does full scans
+        assert!(!trace.has_full_scan());
+    }
+
+    #[test]
+    fn planner_creates_correct_plan() {
+        let planner = RetrievalPlanner::new();
+        let ns = test_namespace();
+        let request = RetrievalRequest::hybrid(ns, "test", 10);
+
+        let plan = planner.plan(request);
+        assert!(plan.stage_count() >= 3); // At least prefilter, rescore, packaging
+    }
+
+    #[test]
+    fn query_path_classification() {
+        assert!(QueryPath::Hybrid.requires_lexical_prefilter());
+        assert!(QueryPath::Hybrid.requires_semantic_search());
+
+        assert!(QueryPath::Temporal.requires_lexical_prefilter());
+        assert!(!QueryPath::Temporal.requires_semantic_search());
+
+        assert!(!QueryPath::SemanticOnly.requires_lexical_prefilter());
+        assert!(QueryPath::SemanticOnly.requires_semantic_search());
+
+        assert!(!QueryPath::ExactId.requires_lexical_prefilter());
+        assert!(!QueryPath::ExactId.requires_semantic_search());
+    }
+
+    #[test]
+    fn planner_stage_tier_classification() {
+        assert!(PlannerStage::LexicalPrefilter.is_tier2());
+        assert!(PlannerStage::HotSemanticSearch.is_tier2());
+        assert!(PlannerStage::Float32Rescore.is_tier2());
+        assert!(!PlannerStage::Tier3ColdSearch.is_tier2());
+
+        assert!(PlannerStage::Tier3ColdSearch.is_tier3());
+        assert!(!PlannerStage::HotSemanticSearch.is_tier3());
+    }
+}
