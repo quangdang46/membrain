@@ -3,11 +3,17 @@ pub mod cache;
 pub mod cold;
 pub mod hot;
 pub mod tier2;
+/// Tier routing, promotion, demotion, and lifecycle-aware placement decisions.
+pub mod tier_router;
 
 pub use cache::CacheManager;
 pub use cold::ColdStore;
 pub use hot::HotStore;
 pub use tier2::Tier2Store;
+pub use tier_router::{
+    LifecycleState, TierOwnership, TierRouter, TierRoutingConfig, TierRoutingDecision,
+    TierRoutingInput, TierRoutingReason, TierRoutingTrace,
+};
 
 /// Shared hot-store boundary for request-path planners.
 pub trait HotStoreApi {
