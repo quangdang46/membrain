@@ -48,7 +48,10 @@ pub enum ForgettingAction {
     /// Soft-delete: mark as forgotten but keep in cold storage for restore.
     SoftForget,
     /// Demote from hot → tier2, or tier2 → cold.
-    Demote { from_tier: &'static str, to_tier: &'static str },
+    Demote {
+        from_tier: &'static str,
+        to_tier: &'static str,
+    },
     /// Archive to cold storage for long-term retention.
     Archive,
     /// Restore a previously forgotten memory.
@@ -137,7 +140,8 @@ impl MaintenanceOperation for ForgettingRun {
             });
         }
 
-        let batch_end = (self.processed + self.policy.batch_size as u32).min(self.total);
+        let batch_size = (self.policy.batch_size as u32).max(1);
+        let batch_end = (self.processed + batch_size).min(self.total);
         let batch_count = batch_end - self.processed;
 
         // In a real implementation, each memory would be scored and evaluated
@@ -254,5 +258,32 @@ mod tests {
             engine.evaluate_memory(MemoryId(3), 500, &policy),
             ForgettingAction::Skip,
         );
+    }
+
+    #[test]
+    fn forgetting_run_makes_progress_when_batch_size_is_zero() {
+        let engine = ForgettingEngine;
+        let run = engine.create_run(
+            ns("test"),
+            ForgettingPolicy {
+                batch_size: 0,
+                ..Default::default()
+            },
+            2,
+        );
+        let mut handle = MaintenanceJobHandle::new(run, 3);
+
+        let first = handle.poll();
+        assert_eq!(
+            first.state,
+            MaintenanceJobState::Running {
+                progress: Some(MaintenanceProgress::new(1, 2)),
+            }
+        );
+        assert_eq!(first.polls_used, 1);
+
+        let second = handle.poll();
+        assert!(matches!(second.state, MaintenanceJobState::Completed(_)));
+        assert_eq!(second.polls_used, 2);
     }
 }

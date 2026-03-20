@@ -16,7 +16,7 @@ pub mod ranking;
 pub mod recall;
 /// Repair and rebuild maintenance surfaces.
 pub mod repair;
-/// Bounded Tier2/Tier3 retrieval planners with escalation logic.
-pub mod retrieval_planner;
 /// Retrieval result envelope and packaging surfaces.
 pub mod result;
+/// Bounded Tier2/Tier3 retrieval planners with escalation logic.
+pub mod retrieval_planner;

@@ -272,7 +272,7 @@ impl TierRouter {
     ///
     /// This method implements explicit routing rules in priority order:
     /// 1. Pinned items are protected from demotion
-    /// 2. Archived items stay archived
+    /// 2. Archived items converge to cold canonical ownership
     /// 3. Explicit lifecycle state overrides
     /// 4. Salience-based decisions
     /// 5. Dormancy-based decisions
@@ -286,11 +286,17 @@ impl TierRouter {
             };
         }
 
-        // Rule 2: Archived items stay archived
+        // Rule 2: Archived items converge to cold canonical ownership
         if input.lifecycle_state == LifecycleState::Archived {
-            return TierRoutingDecision::KeepInPlace {
-                current_tier: TierOwnership::Cold,
-                reason: TierRoutingReason::AlreadyArchived,
+            return if input.current_tier == TierOwnership::Cold {
+                TierRoutingDecision::KeepInPlace {
+                    current_tier: TierOwnership::Cold,
+                    reason: TierRoutingReason::AlreadyArchived,
+                }
+            } else {
+                TierRoutingDecision::DemoteToCold {
+                    reason: TierRoutingReason::ExplicitArchive,
+                }
             };
         }
 
@@ -325,17 +331,7 @@ impl TierRouter {
             };
         }
 
-        // Rule 6: Low salience demotes from hot
-        if input.current_tier == TierOwnership::Hot
-            && input.salience < self.config.hot_salience_threshold
-            && input.lifecycle_state != LifecycleState::Fresh
-        {
-            return TierRoutingDecision::DemoteToCold {
-                reason: TierRoutingReason::LowSalience,
-            };
-        }
-
-        // Rule 7: Payload size exceeds hot tier limit
+        // Rule 6: Payload size exceeds hot tier limit even during freshness/dormancy grace
         if input.current_tier == TierOwnership::Hot
             && input.payload_size_bytes > self.config.hot_payload_size_limit
         {
@@ -344,7 +340,7 @@ impl TierRouter {
             };
         }
 
-        // Rule 8: Fresh items in hot tier stay hot due to recent activity
+        // Rule 7: Fresh items in hot tier stay hot due to recent activity
         if input.current_tier == TierOwnership::Hot
             && input.lifecycle_state == LifecycleState::Fresh
         {
@@ -354,7 +350,7 @@ impl TierRouter {
             };
         }
 
-        // Rule 9: Dormant but within threshold
+        // Rule 8: Dormant items within the grace threshold stay hot
         if input.current_tier == TierOwnership::Hot
             && input.lifecycle_state == LifecycleState::Dormant
             && input.ticks_since_recall < self.config.dormancy_demotion_threshold
@@ -362,6 +358,16 @@ impl TierRouter {
             return TierRoutingDecision::KeepInPlace {
                 current_tier: TierOwnership::Hot,
                 reason: TierRoutingReason::DormantWithinThreshold,
+            };
+        }
+
+        // Rule 9: Low salience demotes from hot once grace rules no longer apply
+        if input.current_tier == TierOwnership::Hot
+            && input.salience < self.config.hot_salience_threshold
+            && input.lifecycle_state != LifecycleState::Fresh
+        {
+            return TierRoutingDecision::DemoteToCold {
+                reason: TierRoutingReason::LowSalience,
             };
         }
 
@@ -438,7 +444,7 @@ mod tests {
     }
 
     #[test]
-    fn archived_item_stays_archived() {
+    fn archived_cold_item_stays_archived() {
         let router = TierRouter::with_defaults();
         let input = make_input(
             TierOwnership::Cold,
@@ -455,6 +461,27 @@ mod tests {
             TierRoutingDecision::KeepInPlace {
                 current_tier: TierOwnership::Cold,
                 reason: TierRoutingReason::AlreadyArchived
+            }
+        ));
+    }
+
+    #[test]
+    fn archived_hot_item_demotes_to_cold() {
+        let router = TierRouter::with_defaults();
+        let input = make_input(
+            TierOwnership::Hot,
+            LifecycleState::Archived,
+            900,
+            0,
+            1024,
+            false,
+        );
+
+        let decision = router.evaluate(&input);
+        assert!(matches!(
+            decision,
+            TierRoutingDecision::DemoteToCold {
+                reason: TierRoutingReason::ExplicitArchive
             }
         ));
     }
@@ -565,6 +592,27 @@ mod tests {
     }
 
     #[test]
+    fn large_payload_overrides_dormancy_grace() {
+        let router = TierRouter::with_defaults();
+        let input = make_input(
+            TierOwnership::Hot,
+            LifecycleState::Dormant,
+            500,
+            5000,     // within dormancy grace threshold
+            100 * 1024, // exceeds 64 KB limit
+            false,
+        );
+
+        let decision = router.evaluate(&input);
+        assert!(matches!(
+            decision,
+            TierRoutingDecision::DemoteToCold {
+                reason: TierRoutingReason::PayloadTooLarge
+            }
+        ));
+    }
+
+    #[test]
     fn fresh_item_stays_hot() {
         let router = TierRouter::with_defaults();
         let input = make_input(
@@ -594,6 +642,28 @@ mod tests {
             LifecycleState::Dormant,
             500,
             5000, // below threshold of 10,000
+            1024,
+            false,
+        );
+
+        let decision = router.evaluate(&input);
+        assert!(matches!(
+            decision,
+            TierRoutingDecision::KeepInPlace {
+                current_tier: TierOwnership::Hot,
+                reason: TierRoutingReason::DormantWithinThreshold
+            }
+        ));
+    }
+
+    #[test]
+    fn dormant_low_salience_within_threshold_keeps_hot_until_grace_expires() {
+        let router = TierRouter::with_defaults();
+        let input = make_input(
+            TierOwnership::Hot,
+            LifecycleState::Dormant,
+            100,  // low salience
+            5000, // still within dormancy grace threshold
             1024,
             false,
         );

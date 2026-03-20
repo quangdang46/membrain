@@ -121,7 +121,8 @@ impl MaintenanceOperation for ConsolidationRun {
         }
 
         // Simulate processing one batch
-        let batch_end = (self.processed + self.policy.batch_size as u32).min(self.total);
+        let batch_size = (self.policy.batch_size as u32).max(1);
+        let batch_end = (self.processed + batch_size).min(self.total);
         let batch_count = batch_end - self.processed;
 
         // In a real implementation, each group would be evaluated for similarity
@@ -204,16 +205,53 @@ mod tests {
     #[test]
     fn consolidation_run_can_be_cancelled() {
         let engine = ConsolidationEngine;
-        let run = engine.create_run(ns("test"), ConsolidationPolicy { batch_size: 5, ..Default::default() }, 100);
+        let run = engine.create_run(
+            ns("test"),
+            ConsolidationPolicy {
+                batch_size: 5,
+                ..Default::default()
+            },
+            100,
+        );
         let mut handle = MaintenanceJobHandle::new(run, 100);
 
         handle.start();
         handle.poll(); // Process first batch
         let snap = handle.cancel();
 
-        assert!(matches!(snap.state, MaintenanceJobState::CancelRequested { .. }));
+        assert!(matches!(
+            snap.state,
+            MaintenanceJobState::CancelRequested { .. }
+        ));
 
         let snap = handle.poll();
         assert!(matches!(snap.state, MaintenanceJobState::Cancelled(_)));
+    }
+
+    #[test]
+    fn consolidation_run_makes_progress_when_batch_size_is_zero() {
+        let engine = ConsolidationEngine;
+        let run = engine.create_run(
+            ns("test"),
+            ConsolidationPolicy {
+                batch_size: 0,
+                ..Default::default()
+            },
+            2,
+        );
+        let mut handle = MaintenanceJobHandle::new(run, 3);
+
+        let first = handle.poll();
+        assert_eq!(
+            first.state,
+            MaintenanceJobState::Running {
+                progress: Some(MaintenanceProgress::new(1, 2)),
+            }
+        );
+        assert_eq!(first.polls_used, 1);
+
+        let second = handle.poll();
+        assert!(matches!(second.state, MaintenanceJobState::Completed(_)));
+        assert_eq!(second.polls_used, 2);
     }
 }

@@ -4,10 +4,9 @@
 //! edges (relationships with strengths), bounded neighborhood
 //! expansion, and lineage tracing for memory provenance.
 
-use std::collections::{HashSet, VecDeque};
 use crate::api::NamespaceId;
 use crate::types::MemoryId;
-
+use std::collections::{HashSet, VecDeque};
 
 // ── Entity types ─────────────────────────────────────────────────────────────
 
@@ -91,7 +90,11 @@ impl RelationKind {
     pub const fn is_directed(self) -> bool {
         matches!(
             self,
-            Self::DerivedFrom | Self::Contradicts | Self::Supersedes | Self::CreatedIn | Self::OwnedBy
+            Self::DerivedFrom
+                | Self::Contradicts
+                | Self::Supersedes
+                | Self::CreatedIn
+                | Self::OwnedBy
         )
     }
 }
@@ -237,13 +240,17 @@ impl BoundedExpansionPlanner {
             }
 
             if depth >= self.constraints.max_depth {
-                explain.cutoff_reasons.push(CutoffReason::MaxDepthReached(depth));
+                explain
+                    .cutoff_reasons
+                    .push(CutoffReason::MaxDepthReached(depth));
                 neighborhood.truncated = true;
                 continue;
             }
 
             if explain.expanded_nodes >= self.constraints.max_entities {
-                explain.cutoff_reasons.push(CutoffReason::MaxNodesReached(explain.expanded_nodes));
+                explain
+                    .cutoff_reasons
+                    .push(CutoffReason::MaxNodesReached(explain.expanded_nodes));
                 neighborhood.truncated = true;
                 break;
             }
@@ -255,7 +262,15 @@ impl BoundedExpansionPlanner {
                 if edge.strength < self.constraints.min_strength {
                     continue;
                 }
-                
+
+                if neighborhood.entities.len() >= self.constraints.max_entities {
+                    explain
+                        .cutoff_reasons
+                        .push(CutoffReason::MaxNodesReached(self.constraints.max_entities));
+                    neighborhood.truncated = true;
+                    break;
+                }
+
                 if !visited.contains(&entity.id) {
                     visited.insert(entity.id);
                     neighborhood.edges.push(edge);
@@ -270,7 +285,6 @@ impl BoundedExpansionPlanner {
         (neighborhood, explain)
     }
 }
-
 
 // ── Edge Derivation & Rebuild (mb-23u.8.1) ───────────────────────────────────
 
@@ -349,10 +363,7 @@ mod tests {
     #[test]
     fn empty_neighborhood_expansion() {
         let graph = GraphModule;
-        let neighborhood = graph.expand_neighborhood(
-            EntityId(1),
-            ExpansionConstraints::default(),
-        );
+        let neighborhood = graph.expand_neighborhood(EntityId(1), ExpansionConstraints::default());
         assert_eq!(neighborhood.seed, EntityId(1));
         assert!(neighborhood.entities.is_empty());
         assert!(!neighborhood.truncated);
@@ -422,12 +433,21 @@ mod tests {
         let seed = EntityId(1);
         let fetcher = |current: EntityId| -> Vec<(GraphEdge, GraphEntity)> {
             if current == seed {
-                vec![
-                    (
-                        GraphEdge { from: current, to: EntityId(2), relation: RelationKind::Mentions, strength: 100 },
-                        GraphEntity { id: EntityId(2), kind: EntityKind::Concept, label: "test".into(), namespace: NamespaceId::new("ns").unwrap(), memory_id: None }
-                    )
-                ]
+                vec![(
+                    GraphEdge {
+                        from: current,
+                        to: EntityId(2),
+                        relation: RelationKind::Mentions,
+                        strength: 100,
+                    },
+                    GraphEntity {
+                        id: EntityId(2),
+                        kind: EntityKind::Concept,
+                        label: "test".into(),
+                        namespace: NamespaceId::new("ns").unwrap(),
+                        memory_id: None,
+                    },
+                )]
             } else {
                 vec![]
             }
@@ -450,14 +470,72 @@ mod tests {
         };
         // Simulated centroid refresh
         cluster.member_count += 1;
-        cluster.centroid = vec![0.15, 0.25, 0.35]; 
+        cluster.centroid = vec![0.15, 0.25, 0.35];
         assert_eq!(cluster.member_count, 2);
+    }
+
+    #[test]
+    fn bfs_marks_truncation_when_neighbor_fanout_exceeds_entity_budget() {
+        let planner = BoundedExpansionPlanner::new(ExpansionConstraints {
+            max_depth: 3,
+            max_entities: 1,
+            min_strength: 50,
+            follow_reverse: false,
+        });
+
+        let seed = EntityId(1);
+        let (nb, ex) = planner.plan_bfs(seed, |current| {
+            if current == seed {
+                vec![
+                    (
+                        GraphEdge {
+                            from: current,
+                            to: EntityId(2),
+                            relation: RelationKind::Mentions,
+                            strength: 100,
+                        },
+                        GraphEntity {
+                            id: EntityId(2),
+                            kind: EntityKind::Concept,
+                            label: "first".into(),
+                            namespace: NamespaceId::new("ns").unwrap(),
+                            memory_id: None,
+                        },
+                    ),
+                    (
+                        GraphEdge {
+                            from: current,
+                            to: EntityId(3),
+                            relation: RelationKind::Mentions,
+                            strength: 100,
+                        },
+                        GraphEntity {
+                            id: EntityId(3),
+                            kind: EntityKind::Concept,
+                            label: "second".into(),
+                            namespace: NamespaceId::new("ns").unwrap(),
+                            memory_id: None,
+                        },
+                    ),
+                ]
+            } else {
+                Vec::new()
+            }
+        });
+
+        assert_eq!(nb.entities.len(), 1);
+        assert!(nb.truncated);
+        assert_eq!(ex.edges_followed, 1);
+        assert!(
+            ex.cutoff_reasons
+                .contains(&CutoffReason::MaxNodesReached(1))
+        );
     }
 
     #[test]
     fn test_graph_failure_injection() {
         // mb-23u.8.4
-        // A simulated partial rebuild gracefully failing, ensuring 
+        // A simulated partial rebuild gracefully failing, ensuring
         // true data is not lost from the source of truth.
         let is_corrupted = true;
         let recovered_edges = if !is_corrupted {

@@ -1,4 +1,4 @@
-use membrain_core::api::NamespaceId;
+use membrain_core::api::{NamespaceId, PassiveObservationInspectSummary, RequestId, ResponseContext};
 use membrain_core::engine::encode::EncodeRuntime;
 use membrain_core::engine::ranking::RankingRuntime;
 use membrain_core::engine::recall::{RecallRuntime, RecallTraceStage};
@@ -100,9 +100,10 @@ fn cli_can_prepare_the_synchronous_encode_fast_path_through_core() {
 fn cli_can_exercise_recall_route_explain_contract_through_core() {
     let store = BrainStore::new(RuntimeConfig::default());
 
-    let exact_plan = store
-        .recall_engine()
-        .plan_recall(membrain_core::engine::recall::RecallRequest::exact(MemoryId(42)), store.config());
+    let exact_plan = store.recall_engine().plan_recall(
+        membrain_core::engine::recall::RecallRequest::exact(MemoryId(42)),
+        store.config(),
+    );
     let small_lookup_plan = store.recall_engine().plan_recall(
         membrain_core::engine::recall::RecallRequest::small_session_lookup(SessionId(7)),
         store.config(),
@@ -205,4 +206,32 @@ fn cli_zero_limit_recent_windows_stay_empty() {
     assert_eq!(recent.trace.payload_fetch_count, 0);
     assert_eq!(recent.trace.recent_candidates_inspected, 0);
     assert!(!recent.trace.session_window_hit);
+}
+
+#[test]
+fn cli_can_surface_passive_observation_inspect_provenance_and_retention() {
+    let store = BrainStore::new(RuntimeConfig::default());
+    let observed = store.encode_engine().prepare_ingest_candidate(
+        RawEncodeInput::new(RawIntakeKind::Observation, "watcher noticed a file change"),
+        membrain_core::policy::IngestMode::PassiveObservation,
+        true,
+        false,
+    );
+
+    let response = ResponseContext::success(
+        NamespaceId::new("cli.team").unwrap(),
+        RequestId::new("req-passive-observation").unwrap(),
+        1u8,
+    )
+    .with_passive_observation(PassiveObservationInspectSummary::from_encode(
+        &observed.passive_observation_inspect,
+    ));
+
+    let passive = response.passive_observation.as_ref().unwrap();
+    assert_eq!(passive.source_kind, "observation");
+    assert_eq!(passive.write_decision, "capture");
+    assert!(passive.captured_as_observation);
+    assert_eq!(passive.observation_source.state_name(), "present");
+    assert_eq!(passive.observation_chunk_id.state_name(), "present");
+    assert_eq!(passive.retention_marker.state_name(), "present");
 }

@@ -838,7 +838,11 @@ impl IndexLookupTrace {
                 self.family.as_str(),
                 self.candidates_returned,
                 self.candidates_inspected,
-                if self.was_truncated { "truncated" } else { "complete" }
+                if self.was_truncated {
+                    "truncated"
+                } else {
+                    "complete"
+                }
             )
         }
     }
@@ -1018,12 +1022,8 @@ mod tests {
             IndexCandidate::new(MemoryId(2), IndexFamily::Fts5Lexical, 600, ns.clone()),
         ];
 
-        let set = CandidateSet::from_candidates(
-            candidates.clone(),
-            10,
-            15,
-            IndexFamily::Fts5Lexical,
-        );
+        let set =
+            CandidateSet::from_candidates(candidates.clone(), 10, 15, IndexFamily::Fts5Lexical);
 
         assert_eq!(set.len(), 2);
         assert!(!set.is_empty());
@@ -1123,13 +1123,7 @@ mod tests {
     #[test]
     fn temporal_index_entry_touch() {
         let ns = NamespaceId::new("test").unwrap();
-        let mut entry = TemporalIndexEntry::new(
-            MemoryId(1),
-            ns,
-            SessionId(5),
-            100,
-            1,
-        );
+        let mut entry = TemporalIndexEntry::new(MemoryId(1), ns, SessionId(5), 100, 1);
         assert_eq!(entry.tick_last_accessed, 100);
 
         entry.touch(200);

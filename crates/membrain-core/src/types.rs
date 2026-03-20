@@ -104,13 +104,67 @@ impl FastPathRouteFamily {
     }
 }
 
-/// Raw intake submitted to the synchronous encode fast path.
+/// Bounded temporal-landmark signals evaluated during encode.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct LandmarkSignals {
+    /// Emotional arousal signal normalized to 0.0..=1.0.
+    pub arousal: f32,
+    /// Novelty signal normalized to 0.0..=1.0.
+    pub novelty: f32,
+    /// Highest recent similarity score against nearby landmark candidates.
+    pub recent_similarity: f32,
+    /// Distance from the last accepted landmark in logical ticks.
+    pub ticks_since_last_landmark: u64,
+}
+
+impl LandmarkSignals {
+    /// Builds bounded landmark signals for one encode candidate.
+    pub const fn new(
+        arousal: f32,
+        novelty: f32,
+        recent_similarity: f32,
+        ticks_since_last_landmark: u64,
+    ) -> Self {
+        Self {
+            arousal,
+            novelty,
+            recent_similarity,
+            ticks_since_last_landmark,
+        }
+    }
+}
+
+/// Additive landmark and era metadata derived during encode.
 #[derive(Debug, Clone, PartialEq, Eq)]
+pub struct LandmarkMetadata {
+    /// Whether the memory qualifies as a temporal landmark.
+    pub is_landmark: bool,
+    /// Human-readable auto-label for landmark surfaces.
+    pub landmark_label: Option<String>,
+    /// Era identifier opened by this landmark, when one is created.
+    pub era_id: Option<String>,
+}
+
+impl LandmarkMetadata {
+    /// Returns the canonical non-landmark metadata shape.
+    pub fn non_landmark() -> Self {
+        Self {
+            is_landmark: false,
+            landmark_label: None,
+            era_id: None,
+        }
+    }
+}
+
+/// Raw intake submitted to the synchronous encode fast path.
+#[derive(Debug, Clone, PartialEq)]
 pub struct RawEncodeInput {
     /// Caller-supplied kind used to freeze the first canonical memory family.
     pub kind: RawIntakeKind,
     /// Raw evidence preserved for normalization and later persistence.
     pub raw_text: String,
+    /// Optional bounded temporal-landmark signals supplied by the caller.
+    pub landmark_signals: Option<LandmarkSignals>,
 }
 
 impl RawEncodeInput {
@@ -119,7 +173,14 @@ impl RawEncodeInput {
         Self {
             kind,
             raw_text: raw_text.into(),
+            landmark_signals: None,
         }
+    }
+
+    /// Attaches bounded landmark signals for additive temporal enrichment.
+    pub fn with_landmark_signals(mut self, landmark_signals: LandmarkSignals) -> Self {
+        self.landmark_signals = Some(landmark_signals);
+        self
     }
 }
 
@@ -138,6 +199,12 @@ pub struct NormalizedMemoryEnvelope {
     pub normalization_generation: &'static str,
     /// Bounded normalized payload size consulted by later routing.
     pub payload_size_bytes: usize,
+    /// Additive temporal landmark and era metadata derived during encode.
+    pub landmark: LandmarkMetadata,
+    /// Optional passive-observation batch source preserved for provenance and inspect.
+    pub observation_source: Option<String>,
+    /// Optional passive-observation batch grouping preserved for inspect and repair.
+    pub observation_chunk_id: Option<String>,
 }
 
 /// Stable identifier for persisted memories used by exact and recent Tier1 lookups.

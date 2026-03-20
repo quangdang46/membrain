@@ -23,7 +23,7 @@ impl SchemaVersion {
 
     /// Whether this version is compatible with the target.
     pub const fn compatible_with(&self, target: &Self) -> bool {
-        self.major == target.major && self.minor >= target.minor
+        self.major == target.major && self.minor <= target.minor
     }
 }
 
@@ -110,9 +110,17 @@ mod tests {
     #[test]
     fn older_minor_upgrades_safely() {
         let module = MigrationModule;
-        let report = module.check_compatibility(SchemaVersion::new(0, 0));
+        let older = SchemaVersion::new(0, 0);
+        let report = module.check_compatibility(older);
         assert_eq!(report.direction, MigrationDirection::Upgrade);
         assert!(report.auto_safe);
+        assert!(older.compatible_with(&SchemaVersion::CURRENT));
+    }
+
+    #[test]
+    fn newer_minor_is_not_compatible_with_current_runtime() {
+        let newer_minor = SchemaVersion::new(0, 2);
+        assert!(!newer_minor.compatible_with(&SchemaVersion::CURRENT));
     }
 
     #[test]

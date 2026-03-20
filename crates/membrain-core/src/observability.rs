@@ -1,4 +1,4 @@
-use crate::types::{CanonicalMemoryType, FastPathRouteFamily};
+use crate::types::{CanonicalMemoryType, FastPathRouteFamily, LandmarkMetadata, LandmarkSignals};
 
 /// Canonical outcome classes shared across core APIs and wrappers.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -18,13 +18,14 @@ pub enum EncodeFastPathStage {
     Fingerprint,
     ShallowClassify,
     ProvisionalSalience,
+    LandmarkTagging,
 }
 
 /// Stable trace artifact for the synchronous encode fast path.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct EncodeFastPathTrace {
     /// Ordered fast-path stages executed before persistence.
-    pub stages: [EncodeFastPathStage; 4],
+    pub stages: [EncodeFastPathStage; 5],
     /// Stable normalization generation used for the normalized envelope.
     pub normalization_generation: &'static str,
     /// Canonical memory family frozen by normalization.
@@ -35,6 +36,10 @@ pub struct EncodeFastPathTrace {
     pub provisional_salience: u16,
     /// Number of duplicate-hint candidates consulted on the fast path.
     pub duplicate_hint_candidate_count: usize,
+    /// Landmark signals consulted for additive temporal enrichment.
+    pub landmark_signals: Option<LandmarkSignals>,
+    /// Landmark and era metadata derived during the fast path.
+    pub landmark: LandmarkMetadata,
     /// Whether the fast path stayed inside its declared bounded latency contract.
     pub stayed_within_latency_budget: bool,
 }

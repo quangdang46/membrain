@@ -1145,6 +1145,14 @@ Files:
   ~/.membrain/cold.db
   ~/.membrain/hot.usearch
   ~/.membrain/cold.usearch
+
+Tier2 rebuild / migration / backfill contract:
+  - SQLite durable rows remain authoritative for Tier2 metadata, provenance, lifecycle state, payload locators, graph tables, and engram membership.
+  - FTS5 hot/cold lexical indexes are derived artifacts and must be rebuildable or backfillable from authoritative SQLite rows without rewriting durable truth.
+  - USearch hot/cold indexes are derived artifacts and must be rebuildable or backfillable from authoritative SQLite metadata plus stored float32 embeddings; quantized search projections are never the only durable copy.
+  - Engram helper indexes, centroids, and adjacency accelerators are derived artifacts and must be rebuildable from normalized engram + membership + graph-edge tables.
+  - If any derived lexical, vector, or engram index is missing, stale, or corrupt, recall falls back to degraded mode and repair must restore the index, verify row/count or generation parity against durable truth, and emit an operator-visible verification artifact.
+  - Migrations must preserve durable truth first, then rebuild derived indexes from post-migration rows; backfills follow the same rule and are complete only after verification proves the rebuilt view matches authoritative rows.
 ```
 
 ### 7.4 Semantic Index: USearch

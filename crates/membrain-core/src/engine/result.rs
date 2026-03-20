@@ -3,16 +3,124 @@
 //! Owns the canonical retrieval result shape that `recall → ranking → packaging`
 //! produces before any wrapper formats it for CLI, daemon, or MCP output.
 
-use crate::api::NamespaceId;
-use crate::engine::contradiction::ContradictionExplain;
+use crate::api::{FieldPresence, NamespaceId, PolicyFilterSummary};
+use crate::engine::contradiction::{ContradictionExplain, ResolutionState};
 use crate::engine::ranking::{RankingExplain, RankingResult};
-use crate::engine::recall::{RecallPlan, RecallPlanKind};
+use crate::engine::recall::{RecallPlan, RecallPlanKind, RecallTraceStage};
+use crate::graph::{EntityId, RelationKind};
+use crate::observability::OutcomeClass;
 use crate::types::{CanonicalMemoryType, MemoryId, SessionId};
 
 // ── Result envelope ──────────────────────────────────────────────────────────
 
-/// One ranked retrieval result ready for packaging into a response envelope.
+/// Which retrieval role an evidence item plays inside the bounded result set.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum EvidenceRole {
+    Primary,
+    Supporting,
+}
+
+impl EvidenceRole {
+    /// Stable machine-readable name.
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Primary => "primary",
+            Self::Supporting => "supporting",
+        }
+    }
+}
+
+/// Inline vs deferred payload state preserved across wrappers.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum PayloadState {
+    Inline,
+    PreviewOnly,
+    Deferred,
+    Redacted,
+}
+
+impl PayloadState {
+    /// Stable machine-readable name.
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Inline => "inline",
+            Self::PreviewOnly => "preview_only",
+            Self::Deferred => "deferred",
+            Self::Redacted => "redacted",
+        }
+    }
+}
+
+/// Lane by which an item entered the bounded shortlist.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum EntryLane {
+    Exact,
+    Recent,
+    Lexical,
+    Semantic,
+    Graph,
+    ColdFallback,
+}
+
+impl EntryLane {
+    /// Stable machine-readable name.
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Exact => "exact",
+            Self::Recent => "recent",
+            Self::Lexical => "lexical",
+            Self::Semantic => "semantic",
+            Self::Graph => "graph",
+            Self::ColdFallback => "cold_fallback",
+        }
+    }
+}
+
+/// Bounded score decomposition preserved for packaging and inspect surfaces.
 #[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ScoreSummary {
+    pub final_score: u16,
+    pub signal_breakdown: Vec<(&'static str, u16, u8)>,
+    pub profile: &'static str,
+}
+
+impl ScoreSummary {
+    /// Builds a bounded score summary from the ranking explain payload.
+    pub fn from_ranking_explain(explain: &RankingExplain) -> Self {
+        Self {
+            final_score: explain.final_score,
+            signal_breakdown: explain
+                .signal_breakdown
+                .iter()
+                .map(|(family, raw_value, weight)| (family.as_str(), *raw_value, *weight))
+                .collect(),
+            profile: explain.profile,
+        }
+    }
+}
+
+/// Bounded uncertainty markers attached to returned evidence.
+#[derive(Debug, Clone, PartialEq)]
+pub struct UncertaintyMarkers {
+    pub confidence: u16,
+    pub uncertainty_score: u16,
+    pub freshness_uncertainty: Option<u16>,
+    pub contradiction_uncertainty: Option<u16>,
+    pub missing_evidence_uncertainty: Option<u16>,
+}
+
+/// Machine-readable conflict summary preserved for every returned item.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ConflictMarkers {
+    pub conflict_state: ResolutionState,
+    pub conflict_record_ids: Vec<u64>,
+    pub belief_chain_id: Option<u64>,
+    pub superseded_by: Option<MemoryId>,
+    pub omitted_conflict_siblings: usize,
+}
+
+/// One ranked retrieval result ready for packaging into a response envelope.
+#[derive(Debug, Clone, PartialEq)]
 pub struct RetrievalResult {
     /// Durable memory identity.
     pub memory_id: MemoryId,
@@ -24,12 +132,24 @@ pub struct RetrievalResult {
     pub memory_type: CanonicalMemoryType,
     /// Human-readable compact text.
     pub compact_text: String,
+    /// Primary/supporting role inside the evidence pack.
+    pub role: EvidenceRole,
+    /// Lane by which the item entered the bounded shortlist.
+    pub entry_lane: EntryLane,
+    /// Inline vs deferred payload state.
+    pub payload_state: PayloadState,
     /// Final ranking score (0..1000).
     pub score: u16,
+    /// Bounded score decomposition used for packaging and inspect surfaces.
+    pub score_summary: ScoreSummary,
     /// Full ranking explain payload.
     pub ranking_explain: RankingExplain,
     /// Contradiction explanations attached to this result.
     pub contradiction_explains: Vec<ContradictionExplain>,
+    /// Conflict-state summary required by inspect/explain surfaces.
+    pub conflict_markers: ConflictMarkers,
+    /// Uncertainty contribution summary for the item.
+    pub uncertainty_markers: UncertaintyMarkers,
     /// Tier that answered the query.
     pub answered_from: AnsweredFrom,
 }
@@ -55,20 +175,26 @@ impl AnsweredFrom {
 
 // ── Packaging & Sub-Summaries ────────────────────────────────────────────────
 
-/// Omitted result summary (filtered by policy or threshold).
+/// Omitted result summary (filtered by policy, threshold, or bounded packaging rules).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct OmissionSummary {
     pub policy_redacted: usize,
     pub threshold_dropped: usize,
     pub dedup_dropped: usize,
+    pub budget_capped: usize,
+    pub duplicate_collapsed: usize,
+    pub low_confidence_suppressed: usize,
+    pub stale_bypassed: usize,
 }
 
 /// Policy evaluation summary.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PolicySummary {
     pub namespace_applied: NamespaceId,
+    pub outcome_class: OutcomeClass,
     pub redactions_applied: bool,
     pub restrictions_active: Vec<&'static str>,
+    pub filters: Vec<PolicyFilterSummary>,
 }
 
 /// Freshness markers for the result set.
@@ -77,21 +203,29 @@ pub struct FreshnessMarkers {
     pub oldest_item_days: u32,
     pub newest_item_days: u32,
     pub volatile_items_included: bool,
+    pub stale_warning: bool,
+    pub as_of_tick: Option<u64>,
 }
 
 /// Provenance trace for an item.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ProvenanceSummary {
+    pub source_kind: &'static str,
+    pub source_reference: &'static str,
     pub source_agent: &'static str,
     pub original_namespace: NamespaceId,
     pub derived_from: Option<MemoryId>,
+    pub lineage_ancestors: Vec<MemoryId>,
+    pub relation_to_seed: Option<RelationKind>,
+    pub graph_seed: Option<EntityId>,
 }
 
 /// Bounded evidence item in the evidence pack.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct EvidenceItem {
     pub result: RetrievalResult,
-    pub provenance: ProvenanceSummary,
+    pub provenance_summary: ProvenanceSummary,
+    pub freshness_markers: FreshnessMarkers,
     pub omitted_fields: Vec<&'static str>,
 }
 
@@ -102,6 +236,25 @@ pub struct ActionArtifact {
     pub suggestion: String,
     pub supporting_evidence: Vec<MemoryId>,
     pub confidence_score: u16,
+}
+
+/// Handle for a payload intentionally deferred past the final bounded cut.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DeferredPayload {
+    pub memory_id: MemoryId,
+    pub payload_state: PayloadState,
+    pub reason: &'static str,
+    pub hydration_path: &'static str,
+}
+
+/// Packaging facts preserved for downstream consumers.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PackagingMetadata {
+    pub result_budget: usize,
+    pub token_budget: Option<usize>,
+    pub graph_assistance: &'static str,
+    pub degraded_summary: Option<&'static str>,
+    pub packaging_mode: &'static str,
 }
 
 /// Operating mode for dual memory output.
@@ -115,20 +268,28 @@ pub enum DualOutputMode {
 // ── Result set ───────────────────────────────────────────────────────────────
 
 /// Packaged result set returned by the retrieval pipeline.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct RetrievalResultSet {
+    /// Final outcome class for the bounded retrieval path.
+    pub outcome_class: OutcomeClass,
     /// Bounded evidence items (what the system knows).
     pub evidence_pack: Vec<EvidenceItem>,
     /// Derived action suggestions (what the system suggests doing).
     pub action_pack: Option<Vec<ActionArtifact>>,
+    /// Payloads intentionally left deferred after the final cut.
+    pub deferred_payloads: Vec<DeferredPayload>,
     /// Explain summary for the entire retrieval operation.
     pub explain: RetrievalExplain,
     /// Policy evaluation context.
     pub policy_summary: PolicySummary,
+    /// Shared provenance summary for the packaged result set.
+    pub provenance_summary: ProvenanceSummary,
     /// Omission statistics.
     pub omitted_summary: OmissionSummary,
     /// Freshness state.
     pub freshness_markers: FreshnessMarkers,
+    /// Packaging facts preserved across transport wrappers.
+    pub packaging_metadata: PackagingMetadata,
     /// Output mode applied.
     pub output_mode: DualOutputMode,
     /// Whether the result set was truncated by budget or time limits.
@@ -137,28 +298,54 @@ pub struct RetrievalResultSet {
     pub total_candidates: usize,
 }
 
-
 impl RetrievalResultSet {
     /// Builds an empty result set (no matches found).
     pub fn empty(explain: RetrievalExplain, namespace: NamespaceId) -> Self {
         Self {
+            outcome_class: OutcomeClass::Accepted,
             evidence_pack: Vec::new(),
             action_pack: None,
+            deferred_payloads: Vec::new(),
             explain,
             policy_summary: PolicySummary {
-                namespace_applied: namespace,
+                namespace_applied: namespace.clone(),
+                outcome_class: OutcomeClass::Accepted,
                 redactions_applied: false,
                 restrictions_active: Vec::new(),
+                filters: Vec::new(),
+            },
+            provenance_summary: ProvenanceSummary {
+                source_kind: "retrieval_pipeline",
+                source_reference: "result_set",
+                source_agent: "core_engine",
+                original_namespace: namespace,
+                derived_from: None,
+                lineage_ancestors: Vec::new(),
+                relation_to_seed: None,
+                graph_seed: None,
             },
             omitted_summary: OmissionSummary {
                 policy_redacted: 0,
                 threshold_dropped: 0,
                 dedup_dropped: 0,
+                budget_capped: 0,
+                duplicate_collapsed: 0,
+                low_confidence_suppressed: 0,
+                stale_bypassed: 0,
             },
             freshness_markers: FreshnessMarkers {
                 oldest_item_days: 0,
                 newest_item_days: 0,
                 volatile_items_included: false,
+                stale_warning: false,
+                as_of_tick: None,
+            },
+            packaging_metadata: PackagingMetadata {
+                result_budget: 0,
+                token_budget: None,
+                graph_assistance: "none",
+                degraded_summary: None,
+                packaging_mode: "evidence_only",
             },
             output_mode: DualOutputMode::Balanced,
             truncated: false,
@@ -186,6 +373,14 @@ impl RetrievalResultSet {
 
 // ── Retrieval explain ────────────────────────────────────────────────────────
 
+/// Why an item appeared or an alternative was omitted.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ResultReason {
+    pub memory_id: Option<MemoryId>,
+    pub reason_code: &'static str,
+    pub detail: &'static str,
+}
+
 /// Top-level explain payload for the full retrieval operation.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RetrievalExplain {
@@ -195,6 +390,8 @@ pub struct RetrievalExplain {
     pub route_reason: &'static str,
     /// Tiers consulted during retrieval.
     pub tiers_consulted: Vec<&'static str>,
+    /// Stable trace stages preserved for explain surfaces.
+    pub trace_stages: Vec<RecallTraceStage>,
     /// Whether Tier1 answered directly.
     pub tier1_answered_directly: bool,
     /// Candidate budget used.
@@ -205,6 +402,8 @@ pub struct RetrievalExplain {
     pub ranking_profile: &'static str,
     /// Number of contradictions encountered.
     pub contradictions_found: usize,
+    /// Why concrete results appeared or alternatives were omitted.
+    pub result_reasons: Vec<ResultReason>,
 }
 
 impl RetrievalExplain {
@@ -226,11 +425,13 @@ impl RetrievalExplain {
             recall_plan: plan.kind,
             route_reason: plan.route_summary.reason,
             tiers_consulted,
+            trace_stages: plan.route_summary.trace_stages.to_vec(),
             tier1_answered_directly: plan.route_summary.tier1_answers_directly,
             candidate_budget: plan.tier1_candidate_budget,
             time_consumed_ms: None,
             ranking_profile,
             contradictions_found: 0,
+            result_reasons: Vec::new(),
         }
     }
 }
@@ -272,56 +473,147 @@ impl ResultBuilder {
     ) {
         self.total_candidates += 1;
 
+        let ranking_explain = RankingExplain::from_result(ranking_result);
         let result = RetrievalResult {
             memory_id,
             namespace: namespace.clone(),
             session_id,
             memory_type,
             compact_text,
+            role: EvidenceRole::Primary,
+            entry_lane: match answered_from {
+                AnsweredFrom::Tier1Hot => EntryLane::Exact,
+                AnsweredFrom::Tier2Indexed => EntryLane::Semantic,
+                AnsweredFrom::Tier3Cold => EntryLane::ColdFallback,
+            },
+            payload_state: PayloadState::Inline,
             score: ranking_result.final_score,
-            ranking_explain: RankingExplain::from_result(ranking_result),
+            score_summary: ScoreSummary::from_ranking_explain(&ranking_explain),
+            ranking_explain,
             contradiction_explains: ranking_result.contradiction_explains.clone(),
+            conflict_markers: ConflictMarkers {
+                conflict_state: if ranking_result.contradiction_explains.is_empty() {
+                    ResolutionState::AutoResolved
+                } else {
+                    ResolutionState::Unresolved
+                },
+                conflict_record_ids: ranking_result
+                    .contradiction_explains
+                    .iter()
+                    .map(|explain| explain.contradiction_id.0)
+                    .collect(),
+                belief_chain_id: None,
+                superseded_by: ranking_result
+                    .contradiction_explains
+                    .iter()
+                    .find_map(|explain| explain.preferred_memory),
+                omitted_conflict_siblings: 0,
+            },
+            uncertainty_markers: UncertaintyMarkers {
+                confidence: ranking_result.final_score,
+                uncertainty_score: 1000u16.saturating_sub(ranking_result.final_score),
+                freshness_uncertainty: None,
+                contradiction_uncertainty: (!ranking_result.contradiction_explains.is_empty())
+                    .then_some(500),
+                missing_evidence_uncertainty: None,
+            },
             answered_from,
         };
-        
-        // Basic provenance for now
-        let provenance = ProvenanceSummary {
+
+        let provenance_summary = ProvenanceSummary {
+            source_kind: "memory",
+            source_reference: "memory_id",
             source_agent: "core_engine",
             original_namespace: namespace,
             derived_from: None,
+            lineage_ancestors: Vec::new(),
+            relation_to_seed: None,
+            graph_seed: None,
         };
 
         self.evidence_pack.push(EvidenceItem {
             result,
-            provenance,
+            provenance_summary,
+            freshness_markers: FreshnessMarkers {
+                oldest_item_days: 0,
+                newest_item_days: 0,
+                volatile_items_included: false,
+                stale_warning: false,
+                as_of_tick: None,
+            },
             omitted_fields: Vec::new(),
         });
     }
 
     /// Builds the final result set, sorting by score and truncating.
     pub fn build(mut self, explain: RetrievalExplain) -> RetrievalResultSet {
-        self.evidence_pack.sort_by(|a, b| b.result.score.cmp(&a.result.score));
+        self.evidence_pack
+            .sort_by(|a, b| b.result.score.cmp(&a.result.score));
         let truncated = self.evidence_pack.len() > self.max_results;
+        let packaging_mode = if self.action_pack.is_some() {
+            "evidence_plus_action"
+        } else {
+            "evidence_only"
+        };
         self.evidence_pack.truncate(self.max_results);
 
         RetrievalResultSet {
+            outcome_class: if truncated {
+                OutcomeClass::Partial
+            } else {
+                OutcomeClass::Accepted
+            },
             evidence_pack: self.evidence_pack,
             action_pack: self.action_pack,
+            deferred_payloads: Vec::new(),
             explain,
             policy_summary: PolicySummary {
-                namespace_applied: self.namespace_applied,
+                namespace_applied: self.namespace_applied.clone(),
+                outcome_class: OutcomeClass::Accepted,
                 redactions_applied: false,
                 restrictions_active: Vec::new(),
+                filters: vec![PolicyFilterSummary::new(
+                    self.namespace_applied.as_str(),
+                    "namespace",
+                    OutcomeClass::Accepted,
+                    "none",
+                    FieldPresence::Present("namespace_bound"),
+                    FieldPresence::Absent,
+                    Vec::new(),
+                )],
+            },
+            provenance_summary: ProvenanceSummary {
+                source_kind: "retrieval_pipeline",
+                source_reference: "result_builder",
+                source_agent: "core_engine",
+                original_namespace: self.namespace_applied.clone(),
+                derived_from: None,
+                lineage_ancestors: Vec::new(),
+                relation_to_seed: None,
+                graph_seed: None,
             },
             omitted_summary: OmissionSummary {
                 policy_redacted: 0,
                 threshold_dropped: 0,
                 dedup_dropped: 0,
+                budget_capped: usize::from(truncated),
+                duplicate_collapsed: 0,
+                low_confidence_suppressed: 0,
+                stale_bypassed: 0,
             },
             freshness_markers: FreshnessMarkers {
                 oldest_item_days: 0,
                 newest_item_days: 0,
                 volatile_items_included: false,
+                stale_warning: false,
+                as_of_tick: None,
+            },
+            packaging_metadata: PackagingMetadata {
+                result_budget: self.max_results,
+                token_budget: None,
+                graph_assistance: "none",
+                degraded_summary: None,
+                packaging_mode,
             },
             output_mode: DualOutputMode::Balanced,
             truncated,
@@ -375,27 +667,48 @@ mod tests {
         );
 
         builder.add(
-            MemoryId(1), ns("test"), SessionId(1),
-            CanonicalMemoryType::Event, "low".into(), &low, AnsweredFrom::Tier1Hot,
+            MemoryId(1),
+            ns("test"),
+            SessionId(1),
+            CanonicalMemoryType::Event,
+            "low".into(),
+            &low,
+            AnsweredFrom::Tier1Hot,
         );
         builder.add(
-            MemoryId(2), ns("test"), SessionId(1),
-            CanonicalMemoryType::Observation, "high".into(), &high, AnsweredFrom::Tier1Hot,
+            MemoryId(2),
+            ns("test"),
+            SessionId(1),
+            CanonicalMemoryType::Observation,
+            "high".into(),
+            &high,
+            AnsweredFrom::Tier1Hot,
         );
         builder.add(
-            MemoryId(3), ns("test"), SessionId(1),
-            CanonicalMemoryType::ToolOutcome, "mid".into(), &mid, AnsweredFrom::Tier2Indexed,
+            MemoryId(3),
+            ns("test"),
+            SessionId(1),
+            CanonicalMemoryType::ToolOutcome,
+            "mid".into(),
+            &mid,
+            AnsweredFrom::Tier2Indexed,
         );
 
         let explain = RetrievalExplain {
             recall_plan: RecallPlanKind::Tier2ExactThenTier3Fallback,
             route_reason: "test",
             tiers_consulted: vec!["tier1_exact"],
+            trace_stages: vec![RecallTraceStage::Tier1ExactHandle],
             tier1_answered_directly: false,
             candidate_budget: 10,
             time_consumed_ms: None,
             ranking_profile: "balanced",
             contradictions_found: 0,
+            result_reasons: vec![ResultReason {
+                memory_id: Some(MemoryId(2)),
+                reason_code: "score_kept",
+                detail: "top-ranked result stayed within the bounded result cap",
+            }],
         };
 
         let result_set = builder.build(explain);
@@ -403,9 +716,24 @@ mod tests {
         assert_eq!(result_set.count(), 2);
         assert!(result_set.truncated);
         assert_eq!(result_set.total_candidates, 3);
+        assert_eq!(result_set.omitted_summary.budget_capped, 1);
+        assert_eq!(result_set.packaging_metadata.result_budget, 2);
+        assert_eq!(result_set.packaging_metadata.packaging_mode, "evidence_only");
+        assert!(result_set.deferred_payloads.is_empty());
         // Highest score first
-        assert!(result_set.evidence_pack[0].result.score >= result_set.evidence_pack[1].result.score);
+        assert!(
+            result_set.evidence_pack[0].result.score >= result_set.evidence_pack[1].result.score
+        );
         assert_eq!(result_set.evidence_pack[0].result.memory_id, MemoryId(2));
+        assert_eq!(result_set.evidence_pack[0].result.entry_lane.as_str(), "exact");
+        assert_eq!(
+            result_set.evidence_pack[0].result.score_summary.final_score,
+            result_set.evidence_pack[0].result.score
+        );
+        assert_eq!(
+            result_set.policy_summary.filters[0].effective_namespace,
+            "test".to_string()
+        );
     }
 
     #[test]
@@ -414,11 +742,17 @@ mod tests {
             recall_plan: RecallPlanKind::ExactIdTier1,
             route_reason: "no match",
             tiers_consulted: vec!["tier1_exact"],
+            trace_stages: vec![RecallTraceStage::Tier1ExactHandle],
             tier1_answered_directly: true,
             candidate_budget: 10,
             time_consumed_ms: Some(5),
             ranking_profile: "balanced",
             contradictions_found: 0,
+            result_reasons: vec![ResultReason {
+                memory_id: None,
+                reason_code: "no_match",
+                detail: "the bounded route produced no candidates",
+            }],
         };
 
         let result_set = RetrievalResultSet::empty(explain, ns("test"));
@@ -426,6 +760,9 @@ mod tests {
         assert!(!result_set.truncated);
         assert!(!result_set.has_contradictions());
         assert!(result_set.top().is_none());
+        assert!(result_set.deferred_payloads.is_empty());
+        assert_eq!(result_set.packaging_metadata.packaging_mode, "evidence_only");
+        assert_eq!(result_set.omitted_summary.budget_capped, 0);
     }
 
     #[test]

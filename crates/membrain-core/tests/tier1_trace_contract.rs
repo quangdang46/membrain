@@ -93,7 +93,10 @@ fn planner_trace_names_direct_tier1_route_and_latency_evidence() {
     assert_eq!(plan.trace.route_name, "tier1.exact_handle");
     assert!(plan.trace.tier1_answered_directly);
     assert!(plan.trace.stayed_within_latency_budget);
-    assert_eq!(plan.trace.candidate_budget, RuntimeConfig::default().tier1_candidate_budget);
+    assert_eq!(
+        plan.trace.candidate_budget,
+        RuntimeConfig::default().tier1_candidate_budget
+    );
     assert_eq!(plan.trace.pre_tier1_candidates, 1);
     assert_eq!(plan.trace.post_tier1_candidates, 1);
 }
@@ -134,7 +137,10 @@ fn planner_trace_names_fallback_route_and_preserves_candidate_budget_evidence() 
         RuntimeConfig::default().tier1_candidate_budget,
     );
 
-    assert_eq!(fallback_plan.trace.route_name, "tier2.exact_then_tier3_fallback");
+    assert_eq!(
+        fallback_plan.trace.route_name,
+        "tier2.exact_then_tier3_fallback"
+    );
     assert!(!fallback_plan.trace.tier1_answered_directly);
     assert!(fallback_plan.trace.stayed_within_latency_budget);
     assert_eq!(fallback_plan.trace.pre_tier1_candidates, 0);

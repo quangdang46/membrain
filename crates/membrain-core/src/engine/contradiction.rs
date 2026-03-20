@@ -130,12 +130,7 @@ impl ContradictionRecord {
     }
 
     /// Resolves this contradiction by preferring one memory.
-    pub fn resolve(
-        &mut self,
-        state: ResolutionState,
-        preferred: MemoryId,
-        reason: &'static str,
-    ) {
+    pub fn resolve(&mut self, state: ResolutionState, preferred: MemoryId, reason: &'static str) {
         self.resolution = state;
         self.preferred_memory = Some(preferred);
         self.resolution_reason = Some(reason);
@@ -283,8 +278,7 @@ impl ContradictionEngine {
             if record.namespace == candidate.namespace {
                 // This is a simplified detection; real implementation would
                 // cross-reference with stored memory metadata
-                if record.memory_a == candidate.memory_id
-                    || record.memory_b == candidate.memory_id
+                if record.memory_a == candidate.memory_id || record.memory_b == candidate.memory_id
                 {
                     continue; // Skip self-references
                 }
@@ -314,8 +308,10 @@ impl ContradictionStore for ContradictionEngine {
     ) -> Result<ContradictionId, ContradictionError> {
         // Check for duplicate contradiction on the same memory pair
         let exists = self.records.iter().any(|existing| {
-            (existing.memory_a == record.memory_a && existing.memory_b == record.memory_b)
-                || (existing.memory_a == record.memory_b && existing.memory_b == record.memory_a)
+            existing.namespace == record.namespace
+                && ((existing.memory_a == record.memory_a && existing.memory_b == record.memory_b)
+                    || (existing.memory_a == record.memory_b
+                        && existing.memory_b == record.memory_a))
         });
         if exists {
             return Err(ContradictionError::DuplicateRecord);
@@ -485,7 +481,12 @@ mod tests {
             .unwrap();
 
         let err = engine
-            .resolve(id, ResolutionState::ManuallyResolved, MemoryId(2), "re-resolve")
+            .resolve(
+                id,
+                ResolutionState::ManuallyResolved,
+                MemoryId(2),
+                "re-resolve",
+            )
             .unwrap_err();
         assert_eq!(err, ContradictionError::AlreadyResolved);
     }
@@ -514,6 +515,21 @@ mod tests {
     }
 
     #[test]
+    fn duplicate_pair_allowed_across_namespaces() {
+        let mut engine = ContradictionEngine::new();
+        let r1 = make_record(ns("alpha"), 5, 6, ContradictionKind::Revision);
+        let r2 = make_record(ns("beta"), 6, 5, ContradictionKind::Duplicate);
+
+        let first = engine.record(r1).unwrap();
+        let second = engine.record(r2).unwrap();
+
+        assert_eq!(first, ContradictionId(1));
+        assert_eq!(second, ContradictionId(2));
+        assert_eq!(engine.count_in_namespace(&ns("alpha")), 1);
+        assert_eq!(engine.count_in_namespace(&ns("beta")), 1);
+    }
+
+    #[test]
     fn find_unresolved_filters_by_namespace_and_state() {
         let mut engine = ContradictionEngine::new();
         let r1 = make_record(ns("alpha"), 1, 2, ContradictionKind::Revision);
@@ -526,7 +542,12 @@ mod tests {
 
         // Resolve the first one
         engine
-            .resolve(id1, ResolutionState::ManuallyResolved, MemoryId(2), "human chose")
+            .resolve(
+                id1,
+                ResolutionState::ManuallyResolved,
+                MemoryId(2),
+                "human chose",
+            )
             .unwrap();
 
         let unresolved_alpha = engine.find_unresolved(&ns("alpha"));

@@ -244,6 +244,12 @@ pub struct CacheKey {
     pub family: CacheFamily,
     /// Effective namespace the entry is scoped to.
     pub namespace: NamespaceId,
+    /// Optional workspace binding when visibility depends on workspace scope.
+    pub workspace_key: Option<u64>,
+    /// Optional owner boundary for session/task-local families.
+    pub owner_key: Option<u64>,
+    /// Optional normalized request-shape hash for request-local families.
+    pub request_shape_hash: Option<u64>,
     /// Family-specific item identity (memory id, request hash, etc.).
     pub item_key: u64,
     /// Generation anchors snapshotted when entry was stored.
@@ -263,9 +269,188 @@ pub enum CacheAdmissionDecision {
     BypassDisabled,
 }
 
+/// Machine-readable reason explaining an admission decision.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CacheAdmissionReason {
+    /// Entry was admitted under the family contract.
+    Accepted,
+    /// The request did not authorize cache participation for this family.
+    PolicyDenied,
+    /// The family is disabled or degraded for this request.
+    Disabled,
+    /// The candidate payload was empty for a family that requires payload bytes.
+    EmptyPayload,
+    /// Capacity was reached but eviction was allowed, so the oldest entry was replaced.
+    CapacityEvicted,
+    /// Capacity was reached and this request could not evict an older entry.
+    CapacityRejected,
+}
+
+impl CacheAdmissionReason {
+    /// Returns the machine-readable reason label.
+    pub const fn as_str(&self) -> &'static str {
+        match self {
+            Self::Accepted => "accepted",
+            Self::PolicyDenied => "policy_denied",
+            Self::Disabled => "disabled",
+            Self::EmptyPayload => "empty_payload",
+            Self::CapacityEvicted => "capacity_evicted",
+            Self::CapacityRejected => "capacity_rejected",
+        }
+    }
+}
+
+impl CacheKey {
+    /// Returns whether two keys refer to the same lookup identity independent of generations.
+    pub fn same_lookup_identity(&self, other: &Self) -> bool {
+        self.family == other.family
+            && self.namespace == other.namespace
+            && self.workspace_key == other.workspace_key
+            && self.owner_key == other.owner_key
+            && self.request_shape_hash == other.request_shape_hash
+            && self.item_key == other.item_key
+    }
+}
+
+/// Request-scoped admission inputs that make family rules explicit.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct CacheAdmissionRequest {
+    /// Whether request policy allows this family to participate.
+    pub policy_allowed: bool,
+    /// Whether this request may replace an older entry if the family is full.
+    pub allow_capacity_eviction: bool,
+    /// Whether request-local families may bind a normalized request shape.
+    pub request_shape_hash: Option<u64>,
+}
+
+impl Default for CacheAdmissionRequest {
+    fn default() -> Self {
+        Self {
+            policy_allowed: true,
+            allow_capacity_eviction: true,
+            request_shape_hash: None,
+        }
+    }
+}
+
+/// Structured outcome for admission evaluation and trace logging.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct CacheAdmissionOutcome {
+    /// Final admission decision.
+    pub decision: CacheAdmissionDecision,
+    /// Machine-readable reason for the decision.
+    pub reason: CacheAdmissionReason,
+    /// Whether the admission replaced an older resident entry.
+    pub evicted_existing: bool,
+}
+
+impl CacheAdmissionOutcome {
+    /// Returns the canonical outcome for an admitted entry.
+    pub const fn admitted(reason: CacheAdmissionReason, evicted_existing: bool) -> Self {
+        Self {
+            decision: CacheAdmissionDecision::Admit,
+            reason,
+            evicted_existing,
+        }
+    }
+
+    /// Returns the canonical outcome for a bypassed or rejected entry.
+    pub const fn rejected(decision: CacheAdmissionDecision, reason: CacheAdmissionReason) -> Self {
+        Self {
+            decision,
+            reason,
+            evicted_existing: false,
+        }
+    }
+}
+
+/// Explicit cache hot-path lookup stages in canonical evaluation order.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum HotPathLookupStage {
+    PrefetchHints,
+    SessionWarmup,
+    Tier1Item,
+    NegativeCache,
+    ResultCache,
+    EntityNeighborhood,
+    SummaryCache,
+    AnnProbeCache,
+    GoalConditioned,
+    ColdStartMitigation,
+}
+
+impl HotPathLookupStage {
+    /// Returns the canonical stage name.
+    pub const fn as_str(&self) -> &'static str {
+        match self {
+            Self::PrefetchHints => "prefetch_hints",
+            Self::SessionWarmup => "session_warmup",
+            Self::Tier1Item => "tier1_item",
+            Self::NegativeCache => "negative_cache",
+            Self::ResultCache => "result_cache",
+            Self::EntityNeighborhood => "entity_neighborhood",
+            Self::SummaryCache => "summary_cache",
+            Self::AnnProbeCache => "ann_probe_cache",
+            Self::GoalConditioned => "goal_conditioned",
+            Self::ColdStartMitigation => "cold_start_mitigation",
+        }
+    }
+}
+
 // ──────────────────────────────────────────────────────────────────────────────
 // § 3  Bounded retrieval cache store  (mb-23u.9.1)
 // ──────────────────────────────────────────────────────────────────────────────
+
+/// Family-local admission behavior derived from the canonical ownership map.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct CacheAdmissionPolicy {
+    /// Whether empty candidate payloads may be cached for this family.
+    pub allows_empty_payload: bool,
+    /// Whether this family requires an owner boundary for correctness.
+    pub requires_owner_key: bool,
+    /// Whether this family requires a normalized request-shape hash.
+    pub requires_request_shape_hash: bool,
+}
+
+impl CacheAdmissionPolicy {
+    /// Returns the canonical admission policy for one cache family.
+    pub const fn for_family(family: CacheFamily) -> Self {
+        match family {
+            CacheFamily::Tier1Item => Self {
+                allows_empty_payload: false,
+                requires_owner_key: false,
+                requires_request_shape_hash: false,
+            },
+            CacheFamily::NegativeCache => Self {
+                allows_empty_payload: true,
+                requires_owner_key: false,
+                requires_request_shape_hash: true,
+            },
+            CacheFamily::ResultCache | CacheFamily::AnnProbeCache => Self {
+                allows_empty_payload: false,
+                requires_owner_key: false,
+                requires_request_shape_hash: true,
+            },
+            CacheFamily::EntityNeighborhood | CacheFamily::SummaryCache => Self {
+                allows_empty_payload: false,
+                requires_owner_key: false,
+                requires_request_shape_hash: false,
+            },
+            CacheFamily::PrefetchHints
+            | CacheFamily::SessionWarmup
+            | CacheFamily::GoalConditioned => Self {
+                allows_empty_payload: false,
+                requires_owner_key: true,
+                requires_request_shape_hash: false,
+            },
+            CacheFamily::ColdStartMitigation => Self {
+                allows_empty_payload: false,
+                requires_owner_key: false,
+                requires_request_shape_hash: false,
+            },
+        }
+    }
+}
 
 /// Cached retrieval entry with version-aware metadata.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -303,6 +488,7 @@ pub struct CacheLookupResult {
 /// aligned with the CACHE_AND_PREFETCH.md contract.
 #[derive(Debug, Clone)]
 pub struct BoundedCacheStore {
+    admission_policy: CacheAdmissionPolicy,
     family: CacheFamily,
     capacity: usize,
     entries: HashMap<CacheKey, CacheEntry>,
@@ -329,6 +515,7 @@ impl BoundedCacheStore {
     /// Builds a new bounded cache for the given family with a hard capacity limit.
     pub fn new(family: CacheFamily, capacity: usize) -> Self {
         Self {
+            admission_policy: CacheAdmissionPolicy::for_family(family),
             family,
             capacity: capacity.max(1),
             entries: HashMap::new(),
@@ -370,21 +557,74 @@ impl BoundedCacheStore {
     }
 
     /// Evaluates admission and stores the entry if admitted.
-    ///
-    /// Returns the admission decision so callers can trace what happened.
     pub fn admit(
         &mut self,
-        key: CacheKey,
+        mut key: CacheKey,
         memory_ids: Vec<MemoryId>,
-    ) -> CacheAdmissionDecision {
+        request: CacheAdmissionRequest,
+    ) -> CacheAdmissionOutcome {
         if self.disabled {
-            return CacheAdmissionDecision::BypassDisabled;
+            return CacheAdmissionOutcome::rejected(
+                CacheAdmissionDecision::BypassDisabled,
+                CacheAdmissionReason::Disabled,
+            );
+        }
+        if !request.policy_allowed {
+            return CacheAdmissionOutcome::rejected(
+                CacheAdmissionDecision::BypassPolicy,
+                CacheAdmissionReason::PolicyDenied,
+            );
+        }
+        if self.admission_policy.requires_owner_key && key.owner_key.is_none() {
+            return CacheAdmissionOutcome::rejected(
+                CacheAdmissionDecision::BypassPolicy,
+                CacheAdmissionReason::PolicyDenied,
+            );
+        }
+        if self.admission_policy.requires_request_shape_hash
+            && request
+                .request_shape_hash
+                .or(key.request_shape_hash)
+                .is_none()
+        {
+            return CacheAdmissionOutcome::rejected(
+                CacheAdmissionDecision::BypassPolicy,
+                CacheAdmissionReason::PolicyDenied,
+            );
         }
 
-        // Capacity-bounded LRU eviction
+        if key.request_shape_hash.is_none() {
+            key.request_shape_hash = request.request_shape_hash;
+        }
+        if !self.admission_policy.allows_empty_payload && memory_ids.is_empty() {
+            return CacheAdmissionOutcome::rejected(
+                CacheAdmissionDecision::BypassPolicy,
+                CacheAdmissionReason::EmptyPayload,
+            );
+        }
+
+        let replaced_keys: Vec<CacheKey> = self
+            .entries
+            .keys()
+            .filter(|existing| existing.same_lookup_identity(&key) && *existing != &key)
+            .cloned()
+            .collect();
+        let mut evicted_existing = !replaced_keys.is_empty();
+        for replaced_key in &replaced_keys {
+            self.entries.remove(replaced_key);
+            self.access_order.retain(|existing| existing != replaced_key);
+        }
+
         if self.entries.len() >= self.capacity && !self.entries.contains_key(&key) {
+            if !request.allow_capacity_eviction {
+                return CacheAdmissionOutcome::rejected(
+                    CacheAdmissionDecision::RejectCapacity,
+                    CacheAdmissionReason::CapacityRejected,
+                );
+            }
             if let Some(evicted_key) = self.access_order.pop_front() {
                 self.entries.remove(&evicted_key);
+                evicted_existing = true;
             }
         }
 
@@ -397,7 +637,14 @@ impl BoundedCacheStore {
         self.entries.insert(key.clone(), entry);
         self.touch(&key);
 
-        CacheAdmissionDecision::Admit
+        CacheAdmissionOutcome::admitted(
+            if evicted_existing {
+                CacheAdmissionReason::CapacityEvicted
+            } else {
+                CacheAdmissionReason::Accepted
+            },
+            evicted_existing,
+        )
     }
 
     /// Looks up an entry with full generation-aware validation.
@@ -421,7 +668,12 @@ impl BoundedCacheStore {
             };
         }
 
-        let Some(entry) = self.entries.get(key) else {
+        let matched_key = self
+            .entries
+            .keys()
+            .find(|candidate| candidate.same_lookup_identity(key))
+            .cloned();
+        let Some(matched_key) = matched_key else {
             self.metrics.miss_count += 1;
             return CacheLookupResult {
                 family: self.family,
@@ -433,6 +685,10 @@ impl BoundedCacheStore {
                 candidates_after: 0,
             };
         };
+        let entry = self
+            .entries
+            .get(&matched_key)
+            .expect("matched cache key must exist");
 
         // --- Generation-anchor validation ---
         let gen_status = validate_generations(&entry.key.generations, current_generations);
@@ -440,7 +696,7 @@ impl BoundedCacheStore {
             GenerationStatus::Valid => {
                 let ids = entry.memory_ids.clone();
                 let count = ids.len();
-                self.touch(&key.clone());
+                self.touch(&matched_key);
                 self.metrics.hit_count += 1;
                 CacheLookupResult {
                     family: self.family,
@@ -932,20 +1188,48 @@ pub struct CacheManager {
 }
 
 impl CacheManager {
+    /// Canonical cache hot-path lookup order.
+    pub const HOT_PATH_LOOKUP_ORDER: [HotPathLookupStage; 10] = [
+        HotPathLookupStage::PrefetchHints,
+        HotPathLookupStage::SessionWarmup,
+        HotPathLookupStage::Tier1Item,
+        HotPathLookupStage::NegativeCache,
+        HotPathLookupStage::ResultCache,
+        HotPathLookupStage::EntityNeighborhood,
+        HotPathLookupStage::SummaryCache,
+        HotPathLookupStage::AnnProbeCache,
+        HotPathLookupStage::GoalConditioned,
+        HotPathLookupStage::ColdStartMitigation,
+    ];
+
     /// Builds a cache manager with the given per-family capacity and prefetch budget.
     pub fn new(per_family_capacity: usize, prefetch_capacity: usize) -> Self {
         Self {
             tier1_item: BoundedCacheStore::new(CacheFamily::Tier1Item, per_family_capacity),
             negative: BoundedCacheStore::new(CacheFamily::NegativeCache, per_family_capacity),
             result: BoundedCacheStore::new(CacheFamily::ResultCache, per_family_capacity),
-            entity_neighborhood: BoundedCacheStore::new(CacheFamily::EntityNeighborhood, per_family_capacity),
+            entity_neighborhood: BoundedCacheStore::new(
+                CacheFamily::EntityNeighborhood,
+                per_family_capacity,
+            ),
             summary: BoundedCacheStore::new(CacheFamily::SummaryCache, per_family_capacity),
             ann_probe: BoundedCacheStore::new(CacheFamily::AnnProbeCache, per_family_capacity),
             session_warmup: BoundedCacheStore::new(CacheFamily::SessionWarmup, per_family_capacity),
-            goal_conditioned: BoundedCacheStore::new(CacheFamily::GoalConditioned, per_family_capacity),
-            cold_start: BoundedCacheStore::new(CacheFamily::ColdStartMitigation, per_family_capacity),
+            goal_conditioned: BoundedCacheStore::new(
+                CacheFamily::GoalConditioned,
+                per_family_capacity,
+            ),
+            cold_start: BoundedCacheStore::new(
+                CacheFamily::ColdStartMitigation,
+                per_family_capacity,
+            ),
             prefetch: PrefetchController::new(prefetch_capacity),
         }
+    }
+
+    /// Returns the canonical cache hot-path lookup order.
+    pub fn hot_path_lookup_order(&self) -> &'static [HotPathLookupStage] {
+        &Self::HOT_PATH_LOOKUP_ORDER
     }
 
     /// Returns the store for a given cache family.
@@ -957,7 +1241,9 @@ impl CacheManager {
             CacheFamily::EntityNeighborhood => &mut self.entity_neighborhood,
             CacheFamily::SummaryCache => &mut self.summary,
             CacheFamily::AnnProbeCache => &mut self.ann_probe,
-            CacheFamily::PrefetchHints => &mut self.tier1_item, // prefetch uses the controller, not a store
+            CacheFamily::PrefetchHints => {
+                panic!("prefetch hints are managed by the PrefetchController, not a cache store")
+            }
             CacheFamily::SessionWarmup => &mut self.session_warmup,
             CacheFamily::GoalConditioned => &mut self.goal_conditioned,
             CacheFamily::ColdStartMitigation => &mut self.cold_start,
@@ -1044,21 +1330,111 @@ mod tests {
     }
 
     fn make_key(family: CacheFamily, ns_str: &str, item: u64) -> CacheKey {
+        let owner_key = matches!(
+            family,
+            CacheFamily::PrefetchHints | CacheFamily::SessionWarmup | CacheFamily::GoalConditioned
+        )
+        .then_some(item + 10_000);
+        let request_shape_hash = matches!(
+            family,
+            CacheFamily::NegativeCache | CacheFamily::ResultCache | CacheFamily::AnnProbeCache
+        )
+        .then_some(item + 20_000);
+
         CacheKey {
             family,
             namespace: ns(ns_str),
+            workspace_key: None,
+            owner_key,
+            request_shape_hash,
             item_key: item,
             generations: gen_anchors(1),
         }
     }
 
-    // ── § 9.1  Hit/miss visibility by family ─────────────────────────────
+    // ── § 9.1  Family contract and hit/miss visibility ───────────────────
+
+    #[test]
+    fn cache_family_policies_match_owner_boundary_contract() {
+        let request_local = CacheAdmissionPolicy::for_family(CacheFamily::ResultCache);
+        assert!(request_local.requires_request_shape_hash);
+        assert!(!request_local.requires_owner_key);
+        assert!(!request_local.allows_empty_payload);
+
+        let negative = CacheAdmissionPolicy::for_family(CacheFamily::NegativeCache);
+        assert!(negative.requires_request_shape_hash);
+        assert!(negative.allows_empty_payload);
+        assert!(!negative.requires_owner_key);
+
+        let session_local = CacheAdmissionPolicy::for_family(CacheFamily::SessionWarmup);
+        assert!(session_local.requires_owner_key);
+        assert!(!session_local.requires_request_shape_hash);
+        assert!(!session_local.allows_empty_payload);
+    }
+
+    #[test]
+    fn request_local_family_admission_uses_bound_request_shape_hash() {
+        let mut store = BoundedCacheStore::new(CacheFamily::ResultCache, 10);
+        let key = make_key(CacheFamily::ResultCache, "team.alpha", 42);
+
+        let outcome = store.admit(
+            key.clone(),
+            vec![MemoryId(1)],
+            CacheAdmissionRequest::default(),
+        );
+
+        assert_eq!(outcome.decision, CacheAdmissionDecision::Admit);
+        let stored = store
+            .entries
+            .values()
+            .next()
+            .expect("entry should be stored");
+        assert_eq!(stored.key.request_shape_hash, key.request_shape_hash);
+    }
+
+    #[test]
+    fn request_local_family_rejects_missing_request_shape_hash() {
+        let mut store = BoundedCacheStore::new(CacheFamily::ResultCache, 10);
+        let mut key = make_key(CacheFamily::ResultCache, "team.alpha", 42);
+        key.request_shape_hash = None;
+
+        let outcome = store.admit(key, vec![MemoryId(1)], CacheAdmissionRequest::default());
+
+        assert_eq!(outcome.decision, CacheAdmissionDecision::BypassPolicy);
+        assert_eq!(outcome.reason, CacheAdmissionReason::PolicyDenied);
+        assert!(store.is_empty());
+    }
+
+    #[test]
+    fn hot_path_lookup_order_matches_canonical_contract() {
+        let manager = CacheManager::new(10, 5);
+
+        assert_eq!(
+            manager.hot_path_lookup_order(),
+            &[
+                HotPathLookupStage::PrefetchHints,
+                HotPathLookupStage::SessionWarmup,
+                HotPathLookupStage::Tier1Item,
+                HotPathLookupStage::NegativeCache,
+                HotPathLookupStage::ResultCache,
+                HotPathLookupStage::EntityNeighborhood,
+                HotPathLookupStage::SummaryCache,
+                HotPathLookupStage::AnnProbeCache,
+                HotPathLookupStage::GoalConditioned,
+                HotPathLookupStage::ColdStartMitigation,
+            ],
+        );
+    }
 
     #[test]
     fn fresh_cache_hit_returns_hit_event_and_increments_metric() {
         let mut store = BoundedCacheStore::new(CacheFamily::Tier1Item, 10);
         let key = make_key(CacheFamily::Tier1Item, "team.alpha", 42);
-        store.admit(key.clone(), vec![MemoryId(1), MemoryId(2)]);
+        store.admit(
+            key.clone(),
+            vec![MemoryId(1), MemoryId(2)],
+            CacheAdmissionRequest::default(),
+        );
 
         let result = store.lookup(&key, &gen_anchors(1));
 
@@ -1088,7 +1464,11 @@ mod tests {
     fn stale_generation_returns_stale_warning_not_silent_miss() {
         let mut store = BoundedCacheStore::new(CacheFamily::AnnProbeCache, 10);
         let key = make_key(CacheFamily::AnnProbeCache, "team.alpha", 1);
-        store.admit(key.clone(), vec![MemoryId(5)]);
+        store.admit(
+            key.clone(),
+            vec![MemoryId(5)],
+            CacheAdmissionRequest::default(),
+        );
 
         // Advance current generations beyond what is stored
         let result = store.lookup(&key, &gen_anchors(2));
@@ -1097,6 +1477,41 @@ mod tests {
         assert_eq!(result.reason, Some(CacheReason::GenerationAnchorMismatch));
         assert!(result.memory_ids.is_empty());
         assert_eq!(store.metrics.stale_warning_count, 1);
+    }
+
+    #[test]
+    fn replacing_same_lookup_identity_removes_older_generation_entry() {
+        let mut store = BoundedCacheStore::new(CacheFamily::ResultCache, 10);
+        let stale_key = CacheKey {
+            generations: gen_anchors(1),
+            ..make_key(CacheFamily::ResultCache, "team.alpha", 7)
+        };
+        let fresh_key = CacheKey {
+            generations: gen_anchors(2),
+            ..make_key(CacheFamily::ResultCache, "team.alpha", 7)
+        };
+
+        store.admit(
+            stale_key,
+            vec![MemoryId(1)],
+            CacheAdmissionRequest::default(),
+        );
+        let outcome = store.admit(
+            fresh_key.clone(),
+            vec![MemoryId(2)],
+            CacheAdmissionRequest::default(),
+        );
+
+        assert_eq!(store.len(), 1);
+        assert!(outcome.evicted_existing);
+
+        let lookup_key = CacheKey {
+            generations: gen_anchors(999),
+            ..fresh_key
+        };
+        let result = store.lookup(&lookup_key, &gen_anchors(2));
+        assert_eq!(result.event, CacheEvent::Hit);
+        assert_eq!(result.memory_ids, vec![MemoryId(2)]);
     }
 
     // ── § 9.3  Degraded mode serving ─────────────────────────────────────
@@ -1179,10 +1594,18 @@ mod tests {
         store.admit(
             make_key(CacheFamily::ResultCache, "team.alpha", 1),
             vec![MemoryId(10)],
+            CacheAdmissionRequest {
+                request_shape_hash: Some(1),
+                ..CacheAdmissionRequest::default()
+            },
         );
         store.admit(
             make_key(CacheFamily::ResultCache, "team.beta", 2),
             vec![MemoryId(20)],
+            CacheAdmissionRequest {
+                request_shape_hash: Some(2),
+                ..CacheAdmissionRequest::default()
+            },
         );
 
         let count = store.invalidate_namespace(&ns("team.alpha"));
@@ -1196,21 +1619,27 @@ mod tests {
     #[test]
     fn lru_eviction_removes_oldest_on_capacity_overflow() {
         let mut store = BoundedCacheStore::new(CacheFamily::Tier1Item, 2);
-        store.admit(make_key(CacheFamily::Tier1Item, "ns", 1), vec![MemoryId(1)]);
-        store.admit(make_key(CacheFamily::Tier1Item, "ns", 2), vec![MemoryId(2)]);
-        store.admit(make_key(CacheFamily::Tier1Item, "ns", 3), vec![MemoryId(3)]);
+        store.admit(
+            make_key(CacheFamily::Tier1Item, "ns", 1),
+            vec![MemoryId(1)],
+            CacheAdmissionRequest::default(),
+        );
+        store.admit(
+            make_key(CacheFamily::Tier1Item, "ns", 2),
+            vec![MemoryId(2)],
+            CacheAdmissionRequest::default(),
+        );
+        store.admit(
+            make_key(CacheFamily::Tier1Item, "ns", 3),
+            vec![MemoryId(3)],
+            CacheAdmissionRequest::default(),
+        );
 
         // Oldest (key=1) should have been evicted.
-        let miss = store.lookup(
-            &make_key(CacheFamily::Tier1Item, "ns", 1),
-            &gen_anchors(1),
-        );
+        let miss = store.lookup(&make_key(CacheFamily::Tier1Item, "ns", 1), &gen_anchors(1));
         assert_eq!(miss.event, CacheEvent::Miss);
 
-        let hit = store.lookup(
-            &make_key(CacheFamily::Tier1Item, "ns", 3),
-            &gen_anchors(1),
-        );
+        let hit = store.lookup(&make_key(CacheFamily::Tier1Item, "ns", 3), &gen_anchors(1));
         assert_eq!(hit.event, CacheEvent::Hit);
     }
 
@@ -1222,24 +1651,38 @@ mod tests {
         mgr.tier1_item.admit(
             make_key(CacheFamily::Tier1Item, "team.alpha", 1),
             vec![MemoryId(1)],
+            CacheAdmissionRequest::default(),
         );
         mgr.negative.admit(
             make_key(CacheFamily::NegativeCache, "team.alpha", 2),
             vec![],
+            CacheAdmissionRequest {
+                request_shape_hash: Some(2),
+                ..CacheAdmissionRequest::default()
+            },
         );
         mgr.result.admit(
             make_key(CacheFamily::ResultCache, "team.beta", 3),
             vec![MemoryId(3)],
+            CacheAdmissionRequest {
+                request_shape_hash: Some(3),
+                ..CacheAdmissionRequest::default()
+            },
         );
-        mgr.prefetch.submit_hint(ns("team.alpha"), vec![MemoryId(10)]);
+        mgr.prefetch
+            .submit_hint(ns("team.alpha"), vec![MemoryId(10)]);
 
         let outcome = mgr.handle_invalidation(InvalidationTrigger::PolicyChange, &ns("team.alpha"));
 
         assert_eq!(outcome.trigger, InvalidationTrigger::PolicyChange);
         assert!(outcome.entries_invalidated >= 3); // tier1_item + negative + prefetch
         assert!(outcome.families_affected.contains(&CacheFamily::Tier1Item));
-        assert!(outcome.families_affected.contains(&CacheFamily::NegativeCache));
-        assert!(outcome.families_affected.contains(&CacheFamily::PrefetchHints));
+        assert!(outcome
+            .families_affected
+            .contains(&CacheFamily::NegativeCache));
+        assert!(outcome
+            .families_affected
+            .contains(&CacheFamily::PrefetchHints));
         // team.beta should survive
         assert_eq!(mgr.result.len(), 1);
     }
@@ -1253,15 +1696,25 @@ mod tests {
         let key = CacheKey {
             family: CacheFamily::SummaryCache,
             namespace: ns("ns"),
+            workspace_key: None,
+            owner_key: None,
+            request_shape_hash: None,
             item_key: 1,
             generations: gen_anchors(2),
         };
-        store.admit(key.clone(), vec![MemoryId(1)]);
+        store.admit(
+            key.clone(),
+            vec![MemoryId(1)],
+            CacheAdmissionRequest::default(),
+        );
 
         let result = store.lookup(&key, &gen_anchors(1));
         assert_eq!(result.event, CacheEvent::Bypass);
         assert_eq!(result.reason, Some(CacheReason::VersionMismatch));
-        assert_eq!(result.generation_status, GenerationStatus::VersionMismatched);
+        assert_eq!(
+            result.generation_status,
+            GenerationStatus::VersionMismatched
+        );
     }
 
     // ── § 9.10  Per-request metrics accumulation ─────────────────────────

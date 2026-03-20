@@ -24,6 +24,88 @@ pub enum PassiveObservationDecision {
     Deny,
 }
 
+impl PassiveObservationDecision {
+    /// Returns the stable machine-readable passive-observation decision label.
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Capture => "capture",
+            Self::Suppress => "suppress",
+            Self::Deny => "deny",
+        }
+    }
+}
+
+/// Canonical visibility for namespace-aware sharing.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum SharingVisibility {
+    #[default]
+    Private,
+    Shared,
+    Public,
+}
+
+impl SharingVisibility {
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Private => "private",
+            Self::Shared => "shared",
+            Self::Public => "public",
+        }
+    }
+}
+
+/// Machine-readable access scope granted after sharing mediation.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SharingScope {
+    NamespaceOnly,
+    ApprovedShared,
+    ApprovedPublic,
+}
+
+impl SharingScope {
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::NamespaceOnly => "namespace_only",
+            Self::ApprovedShared => "approved_shared",
+            Self::ApprovedPublic => "approved_public",
+        }
+    }
+}
+
+/// Stable denial reasons for namespace-aware sharing access.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SharingDenialReason {
+    NamespaceIsolation,
+    ApprovedScopeRequired,
+    VisibilityNotShareable,
+    WorkspaceAclDenied,
+    AgentAclDenied,
+    SessionVisibilityDenied,
+    LegalHold,
+}
+
+impl SharingDenialReason {
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::NamespaceIsolation => "namespace_isolation",
+            Self::ApprovedScopeRequired => "approved_scope_required",
+            Self::VisibilityNotShareable => "visibility_not_shareable",
+            Self::WorkspaceAclDenied => "workspace_acl_denied",
+            Self::AgentAclDenied => "agent_acl_denied",
+            Self::SessionVisibilityDenied => "session_visibility_denied",
+            Self::LegalHold => "legal_hold",
+        }
+    }
+}
+
+/// Final mediation outcome for namespace-aware sharing access.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SharingAccessDecision {
+    Allow,
+    Redact,
+    Deny,
+}
+
 /// Machine-readable summary of the policy gate that fired before expensive work.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct PolicySummary {
@@ -133,6 +215,28 @@ pub struct ObservationWriteOutcome {
     pub captured_as_observation: bool,
 }
 
+/// Input facts for namespace-aware sharing mediation.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct SharingAccessRequest {
+    pub same_namespace: bool,
+    pub include_public: bool,
+    pub visibility: SharingVisibility,
+    pub workspace_acl_allowed: bool,
+    pub agent_acl_allowed: bool,
+    pub session_visibility_allowed: bool,
+    pub legal_hold: bool,
+}
+
+/// Machine-readable outcome for namespace-aware sharing mediation.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SharingAccessOutcome {
+    pub decision: SharingAccessDecision,
+    pub policy_summary: PolicySummary,
+    pub sharing_scope: Option<SharingScope>,
+    pub denial_reasons: Vec<SharingDenialReason>,
+    pub redaction_fields: Vec<&'static str>,
+}
+
 /// Shared confirmation state for previewed risky operations.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct ConfirmationState {
@@ -235,8 +339,14 @@ pub trait PolicyGateway {
     /// Evaluates the namespace gate before expensive work starts.
     fn evaluate_namespace(&self, namespace_bound: bool) -> PolicySummary;
 
+    /// Evaluates namespace-aware sharing access before candidate generation or packaging.
+    fn evaluate_sharing_access(&self, request: SharingAccessRequest) -> SharingAccessOutcome;
+
     /// Evaluates passive-observation write gating before intake persists anything.
-    fn evaluate_observation_write(&self, request: ObservationWriteRequest) -> ObservationWriteOutcome;
+    fn evaluate_observation_write(
+        &self,
+        request: ObservationWriteRequest,
+    ) -> ObservationWriteOutcome;
 
     /// Evaluates the shared safeguard and preflight contract for risky operations.
     fn evaluate_safeguard(&self, request: SafeguardRequest) -> SafeguardOutcome;
@@ -253,6 +363,20 @@ impl PolicyModule {
             OperationClass::DerivedSurfaceMutation => ReversibilityKind::RepairableFromDurableTruth,
             OperationClass::AuthoritativeRewrite => ReversibilityKind::RollbackViaSnapshot,
             OperationClass::IrreversibleMutation => ReversibilityKind::Irreversible,
+        }
+    }
+
+    fn sharing_scope(request: SharingAccessRequest) -> Option<SharingScope> {
+        if request.same_namespace {
+            Some(SharingScope::NamespaceOnly)
+        } else {
+            match request.visibility {
+                SharingVisibility::Public if request.include_public => {
+                    Some(SharingScope::ApprovedPublic)
+                }
+                SharingVisibility::Shared => Some(SharingScope::ApprovedShared),
+                _ => None,
+            }
         }
     }
 
@@ -360,7 +484,80 @@ impl PolicyGateway for PolicyModule {
         }
     }
 
-    fn evaluate_observation_write(&self, request: ObservationWriteRequest) -> ObservationWriteOutcome {
+    fn evaluate_sharing_access(&self, request: SharingAccessRequest) -> SharingAccessOutcome {
+        let mut denial_reasons = Vec::new();
+
+        if request.legal_hold && !request.same_namespace {
+            denial_reasons.push(SharingDenialReason::LegalHold);
+        }
+        if !request.workspace_acl_allowed {
+            denial_reasons.push(SharingDenialReason::WorkspaceAclDenied);
+        }
+        if !request.agent_acl_allowed {
+            denial_reasons.push(SharingDenialReason::AgentAclDenied);
+        }
+        if !request.session_visibility_allowed {
+            denial_reasons.push(SharingDenialReason::SessionVisibilityDenied);
+        }
+
+        let sharing_scope = Self::sharing_scope(request);
+        if !request.same_namespace {
+            if sharing_scope.is_none() {
+                denial_reasons.push(SharingDenialReason::NamespaceIsolation);
+                denial_reasons.push(match request.visibility {
+                    SharingVisibility::Private => SharingDenialReason::VisibilityNotShareable,
+                    SharingVisibility::Public => SharingDenialReason::ApprovedScopeRequired,
+                    SharingVisibility::Shared => SharingDenialReason::NamespaceIsolation,
+                });
+            }
+        }
+
+        let policy_summary = if denial_reasons.is_empty() {
+            PolicySummary::allow(true)
+        } else {
+            PolicySummary::deny(true)
+        };
+
+        if !denial_reasons.is_empty() {
+            let redaction_fields = if request.same_namespace {
+                vec!["sharing_scope"]
+            } else {
+                vec!["memory_id", "sharing_scope", "workspace_id", "session_id"]
+            };
+            return SharingAccessOutcome {
+                decision: SharingAccessDecision::Deny,
+                policy_summary,
+                sharing_scope: None,
+                denial_reasons,
+                redaction_fields,
+            };
+        }
+
+        let sharing_scope = sharing_scope.expect("allow path requires sharing scope");
+        let redaction_fields = if request.same_namespace {
+            Vec::new()
+        } else {
+            vec!["workspace_id", "session_id"]
+        };
+        let decision = if redaction_fields.is_empty() {
+            SharingAccessDecision::Allow
+        } else {
+            SharingAccessDecision::Redact
+        };
+
+        SharingAccessOutcome {
+            decision,
+            policy_summary,
+            sharing_scope: Some(sharing_scope),
+            denial_reasons,
+            redaction_fields,
+        }
+    }
+
+    fn evaluate_observation_write(
+        &self,
+        request: ObservationWriteRequest,
+    ) -> ObservationWriteOutcome {
         let policy_summary = if request.namespace_bound && request.policy_allowed {
             PolicySummary::allow(request.namespace_bound)
         } else {
@@ -391,17 +588,21 @@ impl PolicyGateway for PolicyModule {
             policy_summary,
             captured_as_observation: matches!(
                 (request.ingest_mode, decision),
-                (IngestMode::PassiveObservation, PassiveObservationDecision::Capture)
+                (
+                    IngestMode::PassiveObservation,
+                    PassiveObservationDecision::Capture
+                )
             ),
         }
     }
 
     fn evaluate_safeguard(&self, request: SafeguardRequest) -> SafeguardOutcome {
-        let policy_summary = if request.namespace_bound && request.policy_allowed && !request.legal_hold {
-            PolicySummary::allow(request.namespace_bound)
-        } else {
-            PolicySummary::deny(request.namespace_bound)
-        };
+        let policy_summary =
+            if request.namespace_bound && request.policy_allowed && !request.legal_hold {
+                PolicySummary::allow(request.namespace_bound)
+            } else {
+                PolicySummary::deny(request.namespace_bound)
+            };
 
         let confirmation = Self::confirmation_state(request);
         let reversibility = Self::reversibility_for(request.operation_class);
@@ -467,13 +668,14 @@ impl PolicyGateway for PolicyModule {
             input_reason.into_iter().collect(),
         );
 
-        let dependency_reason = if request.maintenance_window_required && !request.maintenance_window_active {
-            Some(SafeguardReasonCode::MaintenanceWindowRequired)
-        } else if !request.dependencies_ready {
-            Some(SafeguardReasonCode::DependencyPending)
-        } else {
-            None
-        };
+        let dependency_reason =
+            if request.maintenance_window_required && !request.maintenance_window_active {
+                Some(SafeguardReasonCode::MaintenanceWindowRequired)
+            } else if !request.dependencies_ready {
+                Some(SafeguardReasonCode::DependencyPending)
+            } else {
+                None
+            };
         Self::push_check(
             &mut preflight_checks,
             "dependency",
@@ -486,8 +688,8 @@ impl PolicyGateway for PolicyModule {
             dependency_reason.into_iter().collect(),
         );
 
-        let confidence_reason = (!request.confidence_ready)
-            .then_some(SafeguardReasonCode::ConfidenceTooLow);
+        let confidence_reason =
+            (!request.confidence_ready).then_some(SafeguardReasonCode::ConfidenceTooLow);
         Self::push_check(
             &mut preflight_checks,
             "confidence",
@@ -560,7 +762,9 @@ impl PolicyGateway for PolicyModule {
 
         let preflight_state = if !request.generation_matches {
             PreflightState::StaleKnowledge
-        } else if (request.snapshot_required && !request.snapshot_available) || !request.scope_precise {
+        } else if (request.snapshot_required && !request.snapshot_available)
+            || !request.scope_precise
+        {
             PreflightState::MissingData
         } else if blocked_reasons.is_empty() {
             PreflightState::Ready
@@ -644,9 +848,146 @@ mod tests {
     use super::{
         IngestMode, ObservationWriteRequest, OperationClass, PassiveObservationDecision,
         PolicyDecision, PolicyGateway, PolicyModule, PreflightCheckStatus, PreflightState,
-        ReversibilityKind, SafeguardReasonCode, SafeguardRequest,
+        ReversibilityKind, SafeguardReasonCode, SafeguardRequest, SharingAccessDecision,
+        SharingAccessRequest, SharingVisibility,
     };
     use crate::observability::OutcomeClass;
+
+    #[test]
+    fn sharing_access_allows_same_namespace_private_scope() {
+        let gateway = PolicyModule;
+        let outcome = gateway.evaluate_sharing_access(SharingAccessRequest {
+            same_namespace: true,
+            include_public: false,
+            visibility: SharingVisibility::Private,
+            workspace_acl_allowed: true,
+            agent_acl_allowed: true,
+            session_visibility_allowed: true,
+            legal_hold: false,
+        });
+
+        assert_eq!(outcome.decision, SharingAccessDecision::Allow);
+        assert_eq!(outcome.sharing_scope.unwrap().as_str(), "namespace_only");
+        assert!(outcome.denial_reasons.is_empty());
+        assert!(outcome.redaction_fields.is_empty());
+    }
+
+    #[test]
+    fn sharing_access_denies_private_cross_namespace_visibility() {
+        let gateway = PolicyModule;
+        let outcome = gateway.evaluate_sharing_access(SharingAccessRequest {
+            same_namespace: false,
+            include_public: false,
+            visibility: SharingVisibility::Private,
+            workspace_acl_allowed: true,
+            agent_acl_allowed: true,
+            session_visibility_allowed: true,
+            legal_hold: false,
+        });
+
+        assert_eq!(outcome.decision, SharingAccessDecision::Deny);
+        assert!(outcome
+            .denial_reasons
+            .iter()
+            .any(|reason| reason.as_str() == "namespace_isolation"));
+        assert!(outcome
+            .denial_reasons
+            .iter()
+            .any(|reason| reason.as_str() == "visibility_not_shareable"));
+        assert_eq!(
+            outcome.redaction_fields,
+            vec!["memory_id", "sharing_scope", "workspace_id", "session_id"]
+        );
+    }
+
+    #[test]
+    fn sharing_access_redacts_shared_cross_namespace_visibility() {
+        let gateway = PolicyModule;
+        let outcome = gateway.evaluate_sharing_access(SharingAccessRequest {
+            same_namespace: false,
+            include_public: false,
+            visibility: SharingVisibility::Shared,
+            workspace_acl_allowed: true,
+            agent_acl_allowed: true,
+            session_visibility_allowed: true,
+            legal_hold: false,
+        });
+
+        assert_eq!(outcome.decision, SharingAccessDecision::Redact);
+        assert_eq!(outcome.sharing_scope.unwrap().as_str(), "approved_shared");
+        assert_eq!(outcome.redaction_fields, vec!["workspace_id", "session_id"]);
+    }
+
+    #[test]
+    fn sharing_access_requires_include_public_for_public_widening() {
+        let gateway = PolicyModule;
+        let outcome = gateway.evaluate_sharing_access(SharingAccessRequest {
+            same_namespace: false,
+            include_public: false,
+            visibility: SharingVisibility::Public,
+            workspace_acl_allowed: true,
+            agent_acl_allowed: true,
+            session_visibility_allowed: true,
+            legal_hold: false,
+        });
+
+        assert_eq!(outcome.decision, SharingAccessDecision::Deny);
+        assert!(outcome
+            .denial_reasons
+            .iter()
+            .any(|reason| reason.as_str() == "approved_scope_required"));
+    }
+
+    #[test]
+    fn sharing_access_denies_when_acl_or_visibility_guards_fail() {
+        let gateway = PolicyModule;
+        let outcome = gateway.evaluate_sharing_access(SharingAccessRequest {
+            same_namespace: false,
+            include_public: true,
+            visibility: SharingVisibility::Public,
+            workspace_acl_allowed: false,
+            agent_acl_allowed: false,
+            session_visibility_allowed: false,
+            legal_hold: true,
+        });
+
+        assert_eq!(outcome.decision, SharingAccessDecision::Deny);
+        assert!(outcome
+            .denial_reasons
+            .iter()
+            .any(|reason| reason.as_str() == "workspace_acl_denied"));
+        assert!(outcome
+            .denial_reasons
+            .iter()
+            .any(|reason| reason.as_str() == "agent_acl_denied"));
+        assert!(outcome
+            .denial_reasons
+            .iter()
+            .any(|reason| reason.as_str() == "session_visibility_denied"));
+        assert!(outcome
+            .denial_reasons
+            .iter()
+            .any(|reason| reason.as_str() == "legal_hold"));
+    }
+
+    #[test]
+    fn sharing_access_allows_same_namespace_private_reads_during_legal_hold() {
+        let gateway = PolicyModule;
+        let outcome = gateway.evaluate_sharing_access(SharingAccessRequest {
+            same_namespace: true,
+            include_public: false,
+            visibility: SharingVisibility::Private,
+            workspace_acl_allowed: true,
+            agent_acl_allowed: true,
+            session_visibility_allowed: true,
+            legal_hold: true,
+        });
+
+        assert_eq!(outcome.decision, SharingAccessDecision::Allow);
+        assert_eq!(outcome.sharing_scope.unwrap().as_str(), "namespace_only");
+        assert!(outcome.denial_reasons.is_empty());
+        assert!(outcome.redaction_fields.is_empty());
+    }
 
     #[test]
     fn passive_observation_captures_when_policy_allows_and_no_duplicate_hint_exists() {
@@ -721,7 +1062,10 @@ mod tests {
         assert_eq!(outcome.preflight_state, PreflightState::Ready);
         assert!(outcome.blocked_reasons.is_empty());
         assert!(outcome.confirmation.required);
-        assert_eq!(outcome.reversibility, ReversibilityKind::RollbackViaSnapshot);
+        assert_eq!(
+            outcome.reversibility,
+            ReversibilityKind::RollbackViaSnapshot
+        );
     }
 
     #[test]

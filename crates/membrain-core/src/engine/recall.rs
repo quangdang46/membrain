@@ -195,7 +195,8 @@ impl RecallRuntime for RecallEngine {
                 tier1_answers_directly: false,
                 tier1_consulted_first: false,
                 routes_to_deeper_tiers: true,
-                reason: "request lacks a direct Tier1 answer and escalates to deeper indexed retrieval",
+                reason:
+                    "request lacks a direct Tier1 answer and escalates to deeper indexed retrieval",
                 trace_stages: Self::TIER2_THEN_TIER3_TRACE,
             },
             trace: Tier1PlanTrace {
@@ -229,7 +230,10 @@ mod tests {
         assert!(plan.route_summary.tier1_answers_directly);
         assert!(plan.route_summary.tier1_consulted_first);
         assert!(!plan.route_summary.routes_to_deeper_tiers);
-        assert_eq!(plan.route_summary.trace_stages, &[RecallTraceStage::Tier1ExactHandle]);
+        assert_eq!(
+            plan.route_summary.trace_stages,
+            &[RecallTraceStage::Tier1ExactHandle]
+        );
         assert_eq!(plan.trace.route_name, "tier1.exact_handle");
         assert!(plan.trace.tier1_answered_directly);
         assert!(plan.trace.stayed_within_latency_budget);
@@ -264,10 +268,16 @@ mod tests {
                 RecallTraceStage::Tier2Exact,
             ],
         );
-        assert_eq!(plan.trace.route_name, "tier1.recent_window_then_tier2_exact");
+        assert_eq!(
+            plan.trace.route_name,
+            "tier1.recent_window_then_tier2_exact"
+        );
         assert!(!plan.trace.tier1_answered_directly);
         assert!(plan.trace.stayed_within_latency_budget);
-        assert_eq!(plan.trace.candidate_budget, RuntimeConfig::default().tier1_candidate_budget);
+        assert_eq!(
+            plan.trace.candidate_budget,
+            RuntimeConfig::default().tier1_candidate_budget
+        );
         assert_eq!(
             plan.trace.pre_tier1_candidates,
             RuntimeConfig::default().tier1_candidate_budget,
@@ -299,13 +309,19 @@ mod tests {
             RuntimeConfig::default(),
         );
 
-        assert_eq!(large_lookup.kind, RecallPlanKind::Tier2ExactThenTier3Fallback);
+        assert_eq!(
+            large_lookup.kind,
+            RecallPlanKind::Tier2ExactThenTier3Fallback
+        );
         assert_eq!(large_lookup.session_id, Some(SessionId(9)));
         assert!(!large_lookup.terminates_in_tier1());
         assert!(!large_lookup.route_summary.tier1_answers_directly);
         assert!(!large_lookup.route_summary.tier1_consulted_first);
         assert!(large_lookup.route_summary.routes_to_deeper_tiers);
-        assert_eq!(large_lookup.trace.route_name, "tier2.exact_then_tier3_fallback");
+        assert_eq!(
+            large_lookup.trace.route_name,
+            "tier2.exact_then_tier3_fallback"
+        );
         assert!(!large_lookup.trace.tier1_answered_directly);
         assert_eq!(large_lookup.trace.pre_tier1_candidates, 0);
         assert_eq!(large_lookup.trace.post_tier1_candidates, 0);

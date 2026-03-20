@@ -15,7 +15,7 @@
 //! - Every hit is eligible to refresh Tier1 mirrors without changing durable ownership
 
 use crate::api::NamespaceId;
-use crate::index::{CandidateSet, Fts5Query, IndexFamily, IndexLookupTrace};
+use crate::index::CandidateSet;
 use crate::types::{CanonicalMemoryType, MemoryId, SessionId};
 
 // ── Planner input ─────────────────────────────────────────────────────────────
@@ -52,12 +52,95 @@ impl QueryPath {
 
     /// Returns true if this path requires lexical prefiltering.
     pub const fn requires_lexical_prefilter(self) -> bool {
-        matches!(self, Self::Hybrid | Self::PartialCue | Self::Temporal | Self::EntityHeavy)
+        matches!(
+            self,
+            Self::Hybrid | Self::PartialCue | Self::Temporal | Self::EntityHeavy
+        )
     }
 
     /// Returns true if this path requires semantic search.
     pub const fn requires_semantic_search(self) -> bool {
         matches!(self, Self::Hybrid | Self::SemanticOnly | Self::PartialCue)
+    }
+}
+
+/// Query-by-example polarity for a seed memory.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum QueryExamplePolarity {
+    /// A memory to retrieve results similar to.
+    Like,
+    /// A memory to retrieve results dissimilar to.
+    Unlike,
+}
+
+impl QueryExamplePolarity {
+    /// Returns the stable machine-readable name.
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Like => "like",
+            Self::Unlike => "unlike",
+        }
+    }
+}
+
+/// Stable query-by-example seed descriptor.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct QueryExampleSeed {
+    /// Stored evidence selected as a retrieval seed.
+    pub memory_id: MemoryId,
+    /// Whether the seed is a positive or negative cue.
+    pub polarity: QueryExamplePolarity,
+}
+
+/// Declared primary cue after request normalization.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum PrimaryCue {
+    /// Normalized query text remains the main cue.
+    QueryText,
+    /// A like-by-example reference is the main cue.
+    LikeId,
+    /// An unlike-by-example reference is the main cue.
+    UnlikeId,
+}
+
+impl PrimaryCue {
+    /// Returns the stable machine-readable name.
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::QueryText => "query_text",
+            Self::LikeId => "like_id",
+            Self::UnlikeId => "unlike_id",
+        }
+    }
+}
+
+/// Normalized query-by-example request surface.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct QueryByExampleNormalization {
+    /// Trimmed query text when present.
+    pub normalized_query_text: Option<String>,
+    /// The primary cue chosen for this request.
+    pub primary_cue: PrimaryCue,
+    /// Ordered seed memories referenced by the request.
+    pub seeds: Vec<QueryExampleSeed>,
+}
+
+/// Validation failures for canonical retrieval cues.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum RetrievalRequestValidationError {
+    /// Request omitted both query text and query-by-example references.
+    MissingPrimaryCue,
+    /// Request reused the same memory as both like and unlike cue.
+    DuplicateExampleCue(MemoryId),
+}
+
+impl RetrievalRequestValidationError {
+    /// Returns the stable machine-readable name.
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::MissingPrimaryCue => "missing_primary_cue",
+            Self::DuplicateExampleCue(_) => "duplicate_example_cue",
+        }
     }
 }
 
@@ -68,6 +151,10 @@ pub struct RetrievalRequest {
     pub namespace: NamespaceId,
     /// Query text for lexical matching.
     pub query_text: Option<String>,
+    /// Query-by-example positive cue.
+    pub like_memory_id: Option<MemoryId>,
+    /// Query-by-example negative cue.
+    pub unlike_memory_id: Option<MemoryId>,
     /// Query path selection hint.
     pub query_path: QueryPath,
     /// Exact memory ID for direct lookup.
@@ -92,6 +179,8 @@ impl RetrievalRequest {
         Self {
             namespace,
             query_text: Some(query_text.into()),
+            like_memory_id: None,
+            unlike_memory_id: None,
             query_path: QueryPath::Hybrid,
             exact_memory_id: None,
             session_filter: None,
@@ -108,6 +197,8 @@ impl RetrievalRequest {
         Self {
             namespace,
             query_text: None,
+            like_memory_id: None,
+            unlike_memory_id: None,
             query_path: QueryPath::ExactId,
             exact_memory_id: Some(memory_id),
             session_filter: None,
@@ -119,8 +210,86 @@ impl RetrievalRequest {
         }
     }
 
+    /// Creates a query-by-example request using a positive memory cue.
+    pub fn query_by_example(namespace: NamespaceId, like_memory_id: MemoryId, limit: usize) -> Self {
+        Self {
+            namespace,
+            query_text: None,
+            like_memory_id: Some(like_memory_id),
+            unlike_memory_id: None,
+            query_path: QueryPath::Hybrid,
+            exact_memory_id: None,
+            session_filter: None,
+            memory_type_filter: None,
+            limit,
+            candidate_budget: Self::DEFAULT_CANDIDATE_BUDGET,
+            enable_tier3_fallback: true,
+            enable_graph_expansion: false,
+        }
+    }
+
     /// Default candidate budget for retrieval requests.
     pub const DEFAULT_CANDIDATE_BUDGET: usize = 5000;
+
+    /// Adds a positive query-by-example cue.
+    pub fn with_like_memory(mut self, memory_id: MemoryId) -> Self {
+        self.like_memory_id = Some(memory_id);
+        self
+    }
+
+    /// Adds a negative query-by-example cue.
+    pub fn with_unlike_memory(mut self, memory_id: MemoryId) -> Self {
+        self.unlike_memory_id = Some(memory_id);
+        self
+    }
+
+    /// Returns the normalized query-by-example cue contract for this request.
+    pub fn normalize_query_by_example(
+        &self,
+    ) -> Result<QueryByExampleNormalization, RetrievalRequestValidationError> {
+        let normalized_query_text = self
+            .query_text
+            .as_ref()
+            .map(|text| text.trim())
+            .filter(|text| !text.is_empty())
+            .map(str::to_owned);
+
+        if let (Some(like_id), Some(unlike_id)) = (self.like_memory_id, self.unlike_memory_id) {
+            if like_id == unlike_id {
+                return Err(RetrievalRequestValidationError::DuplicateExampleCue(like_id));
+            }
+        }
+
+        let mut seeds = Vec::new();
+        if let Some(memory_id) = self.like_memory_id {
+            seeds.push(QueryExampleSeed {
+                memory_id,
+                polarity: QueryExamplePolarity::Like,
+            });
+        }
+        if let Some(memory_id) = self.unlike_memory_id {
+            seeds.push(QueryExampleSeed {
+                memory_id,
+                polarity: QueryExamplePolarity::Unlike,
+            });
+        }
+
+        let primary_cue = if normalized_query_text.is_some() {
+            PrimaryCue::QueryText
+        } else if self.like_memory_id.is_some() {
+            PrimaryCue::LikeId
+        } else if self.unlike_memory_id.is_some() {
+            PrimaryCue::UnlikeId
+        } else {
+            return Err(RetrievalRequestValidationError::MissingPrimaryCue);
+        };
+
+        Ok(QueryByExampleNormalization {
+            normalized_query_text,
+            primary_cue,
+            seeds,
+        })
+    }
 
     /// Adds a session filter.
     pub fn with_session(mut self, session_id: SessionId) -> Self {
@@ -150,6 +319,16 @@ impl RetrievalRequest {
     pub fn with_graph_expansion(mut self, enabled: bool) -> Self {
         self.enable_graph_expansion = enabled;
         self
+    }
+
+    /// Returns whether this request should schedule lexical prefiltering.
+    pub fn requires_lexical_prefilter(&self) -> bool {
+        self.query_path.requires_lexical_prefilter() && self.query_text.is_some()
+    }
+
+    /// Returns whether this request should schedule semantic search.
+    pub fn requires_semantic_search(&self) -> bool {
+        self.query_path.requires_semantic_search() || self.like_memory_id.is_some()
     }
 }
 
@@ -187,7 +366,10 @@ impl PlannerStage {
 
     /// Returns true if this is a Tier2 stage.
     pub const fn is_tier2(self) -> bool {
-        matches!(self, Self::LexicalPrefilter | Self::HotSemanticSearch | Self::Float32Rescore)
+        matches!(
+            self,
+            Self::LexicalPrefilter | Self::HotSemanticSearch | Self::Float32Rescore
+        )
     }
 
     /// Returns true if this is a Tier3 stage.
@@ -486,7 +668,11 @@ impl RetrievalPlanTrace {
             } else {
                 "no"
             },
-            if self.graph_expansion_triggered { "yes" } else { "no" }
+            if self.graph_expansion_triggered {
+                "yes"
+            } else {
+                "no"
+            }
         ));
 
         lines.join("\n")
@@ -531,13 +717,13 @@ impl RetrievalPlan {
         let mut stage_budgets = Vec::new();
 
         // Stage 1: Lexical prefilter (if applicable)
-        if request.query_path.requires_lexical_prefilter() {
+        if request.requires_lexical_prefilter() {
             stages.push(PlannerStage::LexicalPrefilter);
             stage_budgets.push(request.candidate_budget);
         }
 
         // Stage 2: Hot semantic search (if applicable)
-        if request.query_path.requires_semantic_search() {
+        if request.requires_semantic_search() {
             stages.push(PlannerStage::HotSemanticSearch);
             stage_budgets.push(100); // Bounded top-K for HNSW
         }
@@ -625,7 +811,12 @@ impl RetrievalPlanner {
         tier2_confidence: u16,
         request: &RetrievalRequest,
     ) -> EscalationDecision {
-        EscalationDecision::evaluate(tier2_results, tier2_confidence, &self.escalation_config, request)
+        EscalationDecision::evaluate(
+            tier2_results,
+            tier2_confidence,
+            &self.escalation_config,
+            request,
+        )
     }
 
     /// Creates a trace for a new retrieval execution.
@@ -638,6 +829,7 @@ impl RetrievalPlanner {
 mod tests {
     use super::*;
     use crate::index::{CandidateSet, IndexFamily};
+    use crate::types::MemoryId;
 
     fn test_namespace() -> NamespaceId {
         NamespaceId::new("test.namespace").unwrap()
@@ -652,6 +844,70 @@ mod tests {
         assert!(request.query_path.requires_semantic_search());
         assert_eq!(request.limit, 10);
         assert!(request.enable_tier3_fallback);
+        assert_eq!(request.query_text.as_deref(), Some("hello world"));
+        assert!(request.like_memory_id.is_none());
+        assert!(request.unlike_memory_id.is_none());
+    }
+
+    #[test]
+    fn query_by_example_request_uses_like_seed_as_primary_cue() {
+        let ns = test_namespace();
+        let request = RetrievalRequest::query_by_example(ns, MemoryId(7), 3);
+
+        let normalized = request.normalize_query_by_example().unwrap();
+
+        assert_eq!(normalized.normalized_query_text, None);
+        assert_eq!(normalized.primary_cue, PrimaryCue::LikeId);
+        assert_eq!(normalized.seeds.len(), 1);
+        assert_eq!(normalized.seeds[0].memory_id, MemoryId(7));
+        assert_eq!(normalized.seeds[0].polarity, QueryExamplePolarity::Like);
+        assert!(!request.requires_lexical_prefilter());
+        assert!(request.requires_semantic_search());
+    }
+
+    #[test]
+    fn normalization_preserves_query_text_as_primary_cue_when_examples_exist() {
+        let ns = test_namespace();
+        let request = RetrievalRequest::hybrid(ns, "  example cue  ", 5)
+            .with_like_memory(MemoryId(11))
+            .with_unlike_memory(MemoryId(12));
+
+        let normalized = request.normalize_query_by_example().unwrap();
+
+        assert_eq!(normalized.normalized_query_text.as_deref(), Some("example cue"));
+        assert_eq!(normalized.primary_cue, PrimaryCue::QueryText);
+        assert_eq!(normalized.seeds.len(), 2);
+        assert_eq!(normalized.seeds[0].polarity, QueryExamplePolarity::Like);
+        assert_eq!(normalized.seeds[1].polarity, QueryExamplePolarity::Unlike);
+    }
+
+    #[test]
+    fn normalization_rejects_requests_without_query_text_or_example_seed() {
+        let ns = test_namespace();
+        let request = RetrievalRequest::hybrid(ns, "   ", 5);
+
+        let error = request.normalize_query_by_example().unwrap_err();
+
+        assert_eq!(
+            error,
+            RetrievalRequestValidationError::MissingPrimaryCue
+        );
+        assert_eq!(error.as_str(), "missing_primary_cue");
+    }
+
+    #[test]
+    fn normalization_rejects_duplicate_like_and_unlike_seed() {
+        let ns = test_namespace();
+        let request = RetrievalRequest::query_by_example(ns, MemoryId(9), 5)
+            .with_unlike_memory(MemoryId(9));
+
+        let error = request.normalize_query_by_example().unwrap_err();
+
+        assert_eq!(
+            error,
+            RetrievalRequestValidationError::DuplicateExampleCue(MemoryId(9))
+        );
+        assert_eq!(error.as_str(), "duplicate_example_cue");
     }
 
     #[test]
@@ -668,8 +924,7 @@ mod tests {
     #[test]
     fn retrieval_plan_hybrid_includes_all_stages() {
         let ns = test_namespace();
-        let request = RetrievalRequest::hybrid(ns, "test", 10)
-            .with_graph_expansion(true);
+        let request = RetrievalRequest::hybrid(ns, "test", 10).with_graph_expansion(true);
 
         let plan = RetrievalPlan::new(request);
 
@@ -679,6 +934,18 @@ mod tests {
         assert!(plan.includes_tier3());
         assert!(plan.includes_graph_expansion());
         assert!(plan.stages.contains(&PlannerStage::FinalPackaging));
+    }
+
+    #[test]
+    fn query_by_example_plan_skips_lexical_prefilter_without_query_text() {
+        let ns = test_namespace();
+        let request = RetrievalRequest::query_by_example(ns, MemoryId(3), 10);
+
+        let plan = RetrievalPlan::new(request);
+
+        assert!(!plan.stages.contains(&PlannerStage::LexicalPrefilter));
+        assert!(plan.stages.contains(&PlannerStage::HotSemanticSearch));
+        assert!(plan.stages.contains(&PlannerStage::Float32Rescore));
     }
 
     #[test]
@@ -696,8 +963,7 @@ mod tests {
     #[test]
     fn stage_budgets_are_bounded() {
         let ns = test_namespace();
-        let request = RetrievalRequest::hybrid(ns, "test", 10)
-            .with_budget(1000);
+        let request = RetrievalRequest::hybrid(ns, "test", 10).with_budget(1000);
 
         let plan = RetrievalPlan::new(request);
 
@@ -733,10 +999,16 @@ mod tests {
 
         // Create a candidate set with only 2 candidates (underfill)
         let candidates = vec![
-            crate::index::IndexCandidate::new(MemoryId(1), IndexFamily::Fts5Lexical, 800, ns.clone()),
+            crate::index::IndexCandidate::new(
+                MemoryId(1),
+                IndexFamily::Fts5Lexical,
+                800,
+                ns.clone(),
+            ),
             crate::index::IndexCandidate::new(MemoryId(2), IndexFamily::Fts5Lexical, 700, ns),
         ];
-        let small_results = CandidateSet::from_candidates(candidates, 10, 2, IndexFamily::Fts5Lexical);
+        let small_results =
+            CandidateSet::from_candidates(candidates, 10, 2, IndexFamily::Fts5Lexical);
         let decision = EscalationDecision::evaluate(&small_results, 800, &config, &request);
 
         assert!(decision.should_escalate);
@@ -755,12 +1027,14 @@ mod tests {
 
         // Create a candidate set with 10 candidates but low confidence
         let candidates: Vec<crate::index::IndexCandidate> = (1..=10)
-            .map(|i| crate::index::IndexCandidate::new(
-                MemoryId(i),
-                IndexFamily::Fts5Lexical,
-                800 - i as u16,
-                ns.clone()
-            ))
+            .map(|i| {
+                crate::index::IndexCandidate::new(
+                    MemoryId(i),
+                    IndexFamily::Fts5Lexical,
+                    800 - i as u16,
+                    ns.clone(),
+                )
+            })
             .collect();
         let results = CandidateSet::from_candidates(candidates, 10, 10, IndexFamily::Fts5Lexical);
         let decision = EscalationDecision::evaluate(&results, 300, &config, &request);
@@ -781,12 +1055,14 @@ mod tests {
 
         // Create a candidate set with 10 candidates and high confidence
         let candidates: Vec<crate::index::IndexCandidate> = (1..=10)
-            .map(|i| crate::index::IndexCandidate::new(
-                MemoryId(i),
-                IndexFamily::Fts5Lexical,
-                900 - i as u16,
-                ns.clone()
-            ))
+            .map(|i| {
+                crate::index::IndexCandidate::new(
+                    MemoryId(i),
+                    IndexFamily::Fts5Lexical,
+                    900 - i as u16,
+                    ns.clone(),
+                )
+            })
             .collect();
         let results = CandidateSet::from_candidates(candidates, 10, 10, IndexFamily::Fts5Lexical);
         let decision = EscalationDecision::evaluate(&results, 800, &config, &request);
@@ -799,8 +1075,7 @@ mod tests {
     fn escalation_disabled_by_request() {
         let config = EscalationConfig::default();
         let ns = test_namespace();
-        let request = RetrievalRequest::hybrid(ns, "test", 10)
-            .with_tier3_fallback(false);
+        let request = RetrievalRequest::hybrid(ns, "test", 10).with_tier3_fallback(false);
 
         let empty_results = CandidateSet::empty(0, IndexFamily::Fts5Lexical);
         let decision = EscalationDecision::evaluate(&empty_results, 800, &config, &request);
@@ -825,8 +1100,16 @@ mod tests {
         let request = RetrievalRequest::hybrid(ns, "test", 10);
         let mut trace = RetrievalPlanTrace::new(&request);
 
-        trace.add_stage(StageTrace::executed(PlannerStage::LexicalPrefilter, 1000, 50));
-        trace.add_stage(StageTrace::executed(PlannerStage::HotSemanticSearch, 50, 20));
+        trace.add_stage(StageTrace::executed(
+            PlannerStage::LexicalPrefilter,
+            1000,
+            50,
+        ));
+        trace.add_stage(StageTrace::executed(
+            PlannerStage::HotSemanticSearch,
+            50,
+            20,
+        ));
         trace.set_final_candidates(10);
         trace.set_tier3_triggered(EscalationReason::Tier2Underfill);
 

@@ -1,6 +1,10 @@
 use crate::observability::OutcomeClass;
-use crate::policy::{PolicyGateway, PolicySummary, SafeguardOutcome as PolicySafeguardOutcome};
-use crate::types::SessionId;
+use crate::engine::encode::PassiveObservationInspect;
+use crate::policy::{
+    PolicyGateway, PolicySummary, SafeguardOutcome as PolicySafeguardOutcome, SharingAccessOutcome,
+    SharingAccessRequest, SharingVisibility,
+};
+use crate::types::{MemoryId, SessionId};
 
 /// Stable namespace identifier carried by every core request and response envelope.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
@@ -88,8 +92,18 @@ impl TaskId {
 pub struct PolicyContext {
     /// Whether approved public/shareable widening was requested.
     pub include_public: bool,
+    /// Visibility attached to the targeted memory or result set.
+    pub sharing_visibility: SharingVisibility,
     /// Whether the transport already bound the caller identity deterministically.
     pub caller_identity_bound: bool,
+    /// Whether workspace ACL permits the requested read or write.
+    pub workspace_acl_allowed: bool,
+    /// Whether agent ACL permits the requested read or write.
+    pub agent_acl_allowed: bool,
+    /// Whether session visibility permits the requested read or write.
+    pub session_visibility_allowed: bool,
+    /// Whether legal hold forbids widened sharing for this request.
+    pub legal_hold: bool,
 }
 
 /// Shared request envelope reused across CLI, daemon, and MCP surfaces.
@@ -157,6 +171,36 @@ impl BoundRequestContext {
         } else {
             PolicySummary::deny(true)
         }
+    }
+
+    /// Evaluates namespace-aware sharing access before candidate generation or packaging.
+    pub fn evaluate_sharing_access(&self, gateway: &impl PolicyGateway) -> SharingAccessOutcome {
+        gateway.evaluate_sharing_access(SharingAccessRequest {
+            same_namespace: true,
+            include_public: self.request.policy_context.include_public,
+            visibility: self.request.policy_context.sharing_visibility,
+            workspace_acl_allowed: self.request.policy_context.workspace_acl_allowed,
+            agent_acl_allowed: self.request.policy_context.agent_acl_allowed,
+            session_visibility_allowed: self.request.policy_context.session_visibility_allowed,
+            legal_hold: self.request.policy_context.legal_hold,
+        })
+    }
+
+    /// Evaluates widened cross-namespace sharing access for an explicitly targeted memory.
+    pub fn evaluate_cross_namespace_sharing_access(
+        &self,
+        gateway: &impl PolicyGateway,
+        memory_namespace: &NamespaceId,
+    ) -> SharingAccessOutcome {
+        gateway.evaluate_sharing_access(SharingAccessRequest {
+            same_namespace: self.namespace == *memory_namespace,
+            include_public: self.request.policy_context.include_public,
+            visibility: self.request.policy_context.sharing_visibility,
+            workspace_acl_allowed: self.request.policy_context.workspace_acl_allowed,
+            agent_acl_allowed: self.request.policy_context.agent_acl_allowed,
+            session_visibility_allowed: self.request.policy_context.session_visibility_allowed,
+            legal_hold: self.request.policy_context.legal_hold,
+        })
     }
 }
 
@@ -346,7 +390,10 @@ impl<T> FieldPresence<T> {
 /// Shared machine-readable summary of policy shaping applied to a visible outcome.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PolicyFilterSummary {
+    pub effective_namespace: String,
     pub policy_family: &'static str,
+    pub outcome_class: OutcomeClass,
+    pub blocked_stage: &'static str,
     pub sharing_scope: FieldPresence<&'static str>,
     pub retention_marker: FieldPresence<&'static str>,
     pub redaction_fields: Vec<&'static str>,
@@ -355,13 +402,19 @@ pub struct PolicyFilterSummary {
 impl PolicyFilterSummary {
     /// Builds a new machine-readable policy filter summary.
     pub fn new(
+        effective_namespace: impl Into<String>,
         policy_family: &'static str,
+        outcome_class: OutcomeClass,
+        blocked_stage: &'static str,
         sharing_scope: FieldPresence<&'static str>,
         retention_marker: FieldPresence<&'static str>,
         redaction_fields: Vec<&'static str>,
     ) -> Self {
         Self {
+            effective_namespace: effective_namespace.into(),
             policy_family,
+            outcome_class,
+            blocked_stage,
             sharing_scope,
             retention_marker,
             redaction_fields,
@@ -464,6 +517,135 @@ impl ResponseWarning {
     }
 }
 
+/// Machine-readable top-level route summary preserved across interfaces.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RouteSummary {
+    pub route_family: &'static str,
+    pub route_reason: &'static str,
+    pub tier1_consulted_first: bool,
+    pub routes_to_deeper_tiers: bool,
+}
+
+/// Stable trace-stage vocabulary for cross-surface explain payloads.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TraceStage {
+    Tier1ExactHandle,
+    Tier1RecentWindow,
+    Tier2Exact,
+    Tier3Fallback,
+    PolicyGate,
+    Packaging,
+}
+
+impl TraceStage {
+    /// Returns the stable machine-readable stage name.
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Tier1ExactHandle => "tier1_exact_handle",
+            Self::Tier1RecentWindow => "tier1_recent_window",
+            Self::Tier2Exact => "tier2_exact",
+            Self::Tier3Fallback => "tier3_fallback",
+            Self::PolicyGate => "policy_gate",
+            Self::Packaging => "packaging",
+        }
+    }
+    /// Maps a retrieval trace stage into the shared cross-surface stage vocabulary.
+    pub const fn from_recall(stage: crate::engine::recall::RecallTraceStage) -> Self {
+        match stage {
+            crate::engine::recall::RecallTraceStage::Tier1ExactHandle => Self::Tier1ExactHandle,
+            crate::engine::recall::RecallTraceStage::Tier1RecentWindow => Self::Tier1RecentWindow,
+            crate::engine::recall::RecallTraceStage::Tier2Exact => Self::Tier2Exact,
+            crate::engine::recall::RecallTraceStage::Tier3Fallback => Self::Tier3Fallback,
+        }
+    }
+}
+
+/// Machine-readable reason describing why an item appeared or was omitted.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ResultReason {
+    pub memory_id: Option<MemoryId>,
+    pub reason_code: &'static str,
+    pub detail: &'static str,
+}
+
+/// Shared policy summary for explain surfaces.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TracePolicySummary {
+    pub effective_namespace: String,
+    pub policy_family: &'static str,
+    pub outcome_class: OutcomeClass,
+    pub blocked_stage: &'static str,
+    pub redaction_fields: Vec<&'static str>,
+    pub retention_state: FieldPresence<&'static str>,
+    pub sharing_scope: FieldPresence<&'static str>,
+}
+
+/// Shared provenance summary for explain surfaces.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TraceProvenanceSummary {
+    pub source_kind: &'static str,
+    pub source_reference: &'static str,
+    pub lineage_ancestors: Vec<MemoryId>,
+}
+
+/// Shared inspect summary for passive-observation provenance and retention semantics.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PassiveObservationInspectSummary {
+    pub source_kind: &'static str,
+    pub write_decision: &'static str,
+    pub captured_as_observation: bool,
+    pub observation_source: FieldPresence<String>,
+    pub observation_chunk_id: FieldPresence<String>,
+    pub retention_marker: FieldPresence<&'static str>,
+}
+
+impl PassiveObservationInspectSummary {
+    /// Builds an inspect summary from encode-side passive-observation facts.
+    pub fn from_encode(inspect: &PassiveObservationInspect) -> Self {
+        Self {
+            source_kind: inspect.source_kind,
+            write_decision: inspect.write_decision,
+            captured_as_observation: inspect.captured_as_observation,
+            observation_source: inspect
+                .observation_source
+                .clone()
+                .map(FieldPresence::Present)
+                .unwrap_or(FieldPresence::Absent),
+            observation_chunk_id: inspect
+                .observation_chunk_id
+                .clone()
+                .map(FieldPresence::Present)
+                .unwrap_or(FieldPresence::Absent),
+            retention_marker: if inspect.retention_marker == "absent" {
+                FieldPresence::Absent
+            } else {
+                FieldPresence::Present(inspect.retention_marker)
+            },
+        }
+    }
+}
+
+/// Shared freshness marker for explain surfaces.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct FreshnessMarker {
+    pub code: &'static str,
+    pub detail: &'static str,
+}
+
+/// Shared conflict marker for explain surfaces.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ConflictMarker {
+    pub code: &'static str,
+    pub detail: &'static str,
+}
+
+/// Shared uncertainty marker for explain surfaces.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct UncertaintyMarker {
+    pub code: &'static str,
+    pub detail: &'static str,
+}
+
 /// Shared response envelope reused across CLI, daemon, and MCP wrappers.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ResponseContext<T> {
@@ -471,6 +653,9 @@ pub struct ResponseContext<T> {
     pub request_id: RequestId,
     pub namespace: NamespaceId,
     pub result: Option<T>,
+    pub route_summary: Option<RouteSummary>,
+    pub trace_stages: Vec<TraceStage>,
+    pub result_reasons: Vec<ResultReason>,
     pub outcome_class: OutcomeClass,
     pub error_kind: Option<ErrorKind>,
     pub retryable: bool,
@@ -478,6 +663,12 @@ pub struct ResponseContext<T> {
     pub remediation: Option<RemediationHint>,
     pub availability: Option<AvailabilitySummary>,
     pub policy_filters_applied: Vec<PolicyFilterSummary>,
+    pub policy_summary: Option<TracePolicySummary>,
+    pub provenance_summary: Option<TraceProvenanceSummary>,
+    pub passive_observation: Option<PassiveObservationInspectSummary>,
+    pub freshness_markers: Vec<FreshnessMarker>,
+    pub conflict_markers: Vec<ConflictMarker>,
+    pub uncertainty_markers: Vec<UncertaintyMarker>,
     pub safeguard: Option<PolicySafeguardOutcome>,
     pub warnings: Vec<ResponseWarning>,
 }
@@ -490,6 +681,9 @@ impl<T> ResponseContext<T> {
             request_id,
             namespace,
             result: Some(result),
+            route_summary: None,
+            trace_stages: Vec::new(),
+            result_reasons: Vec::new(),
             outcome_class: OutcomeClass::Accepted,
             error_kind: None,
             retryable: false,
@@ -497,9 +691,47 @@ impl<T> ResponseContext<T> {
             remediation: None,
             availability: None,
             policy_filters_applied: Vec::new(),
+            policy_summary: None,
+            provenance_summary: None,
+            passive_observation: None,
+            freshness_markers: Vec::new(),
+            conflict_markers: Vec::new(),
+            uncertainty_markers: Vec::new(),
             safeguard: None,
             warnings: Vec::new(),
         }
+    }
+
+    /// Attaches shared explain-trace schema fields to this response.
+    pub fn with_trace_schema(
+        mut self,
+        route_summary: RouteSummary,
+        trace_stages: Vec<TraceStage>,
+        result_reasons: Vec<ResultReason>,
+        policy_summary: TracePolicySummary,
+        provenance_summary: TraceProvenanceSummary,
+        freshness_markers: Vec<FreshnessMarker>,
+        conflict_markers: Vec<ConflictMarker>,
+        uncertainty_markers: Vec<UncertaintyMarker>,
+    ) -> Self {
+        self.route_summary = Some(route_summary);
+        self.trace_stages = trace_stages;
+        self.result_reasons = result_reasons;
+        self.policy_summary = Some(policy_summary);
+        self.provenance_summary = Some(provenance_summary);
+        self.freshness_markers = freshness_markers;
+        self.conflict_markers = conflict_markers;
+        self.uncertainty_markers = uncertainty_markers;
+        self
+    }
+
+    /// Attaches passive-observation inspect facts to this response.
+    pub fn with_passive_observation(
+        mut self,
+        passive_observation: PassiveObservationInspectSummary,
+    ) -> Self {
+        self.passive_observation = Some(passive_observation);
+        self
     }
 
     /// Builds a failed shared response envelope.
@@ -514,6 +746,9 @@ impl<T> ResponseContext<T> {
             request_id,
             namespace,
             result: None,
+            route_summary: None,
+            trace_stages: Vec::new(),
+            result_reasons: Vec::new(),
             outcome_class: OutcomeClass::Rejected,
             retryable: error_kind.retryable(),
             error_kind: Some(error_kind),
@@ -524,6 +759,12 @@ impl<T> ResponseContext<T> {
             )),
             availability: None,
             policy_filters_applied: Vec::new(),
+            policy_summary: None,
+            provenance_summary: None,
+            passive_observation: None,
+            freshness_markers: Vec::new(),
+            conflict_markers: Vec::new(),
+            uncertainty_markers: Vec::new(),
             safeguard: None,
             warnings,
         }
@@ -546,9 +787,9 @@ impl<T> ResponseContext<T> {
     pub fn with_availability(mut self, availability: AvailabilitySummary) -> Self {
         self.outcome_class = match availability.posture {
             AvailabilityPosture::Full => self.outcome_class,
-            AvailabilityPosture::Degraded | AvailabilityPosture::ReadOnly | AvailabilityPosture::Offline => {
-                OutcomeClass::Degraded
-            }
+            AvailabilityPosture::Degraded
+            | AvailabilityPosture::ReadOnly
+            | AvailabilityPosture::Offline => OutcomeClass::Degraded,
         };
         self.availability = Some(availability);
         self
@@ -582,16 +823,19 @@ impl ApiModule {
 #[cfg(test)]
 mod tests {
     use super::{
-        ApiModule, AvailabilityPosture, AvailabilityReason, AvailabilitySummary,
-        ContextValidationError, ErrorKind, FieldPresence, NamespaceId, PolicyContext,
-        PolicyFilterSummary, RemediationHint, RemediationStep, RequestContext, RequestId,
-        ResponseContext, ResponseWarning,
+        ApiModule, AvailabilityPosture, AvailabilityReason, AvailabilitySummary, ConflictMarker,
+        ContextValidationError, ErrorKind, FieldPresence, FreshnessMarker, NamespaceId,
+        PolicyContext, PolicyFilterSummary, RemediationHint, RemediationStep, RequestContext,
+        RequestId, ResponseContext, ResponseWarning, ResultReason, RouteSummary,
+        PassiveObservationInspectSummary, TracePolicySummary, TraceProvenanceSummary,
+        TraceStage, UncertaintyMarker,
     };
     use crate::observability::OutcomeClass;
     use crate::policy::{
         ConfidenceConstraint, ConfirmationState, OperationClass, PolicyDecision, PolicyGateway,
-        PolicyModule, PreflightState, ReversibilityKind, SafeguardAudit, SafeguardRequest,
-        SafeguardOutcome as PolicySafeguardOutcome, SafeguardReasonCode,
+        PolicyModule, PreflightState, ReversibilityKind, SafeguardAudit,
+        SafeguardOutcome as PolicySafeguardOutcome, SafeguardReasonCode, SafeguardRequest,
+        SharingAccessDecision, SharingVisibility,
     };
     use crate::types::SessionId;
 
@@ -606,7 +850,12 @@ mod tests {
             request_id: RequestId::new("req-1").unwrap(),
             policy_context: PolicyContext {
                 include_public: false,
+                sharing_visibility: SharingVisibility::Private,
                 caller_identity_bound: true,
+                workspace_acl_allowed: true,
+                agent_acl_allowed: true,
+                session_visibility_allowed: true,
+                legal_hold: false,
             },
             time_budget_ms: Some(50),
         };
@@ -628,7 +877,15 @@ mod tests {
             session_id: None,
             task_id: None,
             request_id: RequestId::new("req-1b").unwrap(),
-            policy_context: PolicyContext::default(),
+            policy_context: PolicyContext {
+                include_public: false,
+                sharing_visibility: SharingVisibility::Private,
+                caller_identity_bound: false,
+                workspace_acl_allowed: true,
+                agent_acl_allowed: true,
+                session_visibility_allowed: true,
+                legal_hold: false,
+            },
             time_budget_ms: None,
         };
 
@@ -651,7 +908,12 @@ mod tests {
             request_id: RequestId::new("req-2").unwrap(),
             policy_context: PolicyContext {
                 include_public: true,
+                sharing_visibility: SharingVisibility::Public,
                 caller_identity_bound: true,
+                workspace_acl_allowed: true,
+                agent_acl_allowed: true,
+                session_visibility_allowed: true,
+                legal_hold: false,
             },
             time_budget_ms: None,
         };
@@ -666,6 +928,175 @@ mod tests {
     }
 
     #[test]
+    fn sharing_access_allows_same_namespace_private_reads() {
+        let request = RequestContext {
+            namespace: Some(NamespaceId::new("team.alpha").unwrap()),
+            workspace_id: None,
+            agent_id: None,
+            session_id: None,
+            task_id: None,
+            request_id: RequestId::new("req-share-1").unwrap(),
+            policy_context: PolicyContext {
+                include_public: false,
+                sharing_visibility: SharingVisibility::Private,
+                caller_identity_bound: true,
+                workspace_acl_allowed: true,
+                agent_acl_allowed: true,
+                session_visibility_allowed: true,
+                legal_hold: false,
+            },
+            time_budget_ms: None,
+        };
+
+        let bound = request.bind_namespace(None).unwrap();
+        let outcome = bound.evaluate_sharing_access(&PolicyModule);
+
+        assert_eq!(outcome.decision, SharingAccessDecision::Allow);
+        assert_eq!(outcome.sharing_scope.unwrap().as_str(), "namespace_only");
+        assert!(outcome.redaction_fields.is_empty());
+        assert!(outcome.denial_reasons.is_empty());
+    }
+
+    #[test]
+    fn sharing_access_denies_cross_namespace_private_reads_without_leaking_scope() {
+        let request = RequestContext {
+            namespace: Some(NamespaceId::new("team.alpha").unwrap()),
+            workspace_id: None,
+            agent_id: None,
+            session_id: None,
+            task_id: None,
+            request_id: RequestId::new("req-share-2").unwrap(),
+            policy_context: PolicyContext {
+                include_public: false,
+                sharing_visibility: SharingVisibility::Private,
+                caller_identity_bound: true,
+                workspace_acl_allowed: true,
+                agent_acl_allowed: true,
+                session_visibility_allowed: true,
+                legal_hold: false,
+            },
+            time_budget_ms: None,
+        };
+
+        let bound = request.bind_namespace(None).unwrap();
+        let outcome = bound.evaluate_cross_namespace_sharing_access(
+            &PolicyModule,
+            &NamespaceId::new("team.beta").unwrap(),
+        );
+
+        assert_eq!(outcome.decision, SharingAccessDecision::Deny);
+        assert_eq!(outcome.policy_summary.decision, PolicyDecision::Deny);
+        assert!(outcome
+            .denial_reasons
+            .iter()
+            .any(|reason| reason.as_str() == "namespace_isolation"));
+        assert!(outcome
+            .denial_reasons
+            .iter()
+            .any(|reason| reason.as_str() == "visibility_not_shareable"));
+        assert_eq!(
+            outcome.redaction_fields,
+            vec!["memory_id", "sharing_scope", "workspace_id", "session_id"]
+        );
+    }
+
+    #[test]
+    fn sharing_access_redacts_cross_namespace_shared_reads() {
+        let request = RequestContext {
+            namespace: Some(NamespaceId::new("team.alpha").unwrap()),
+            workspace_id: None,
+            agent_id: None,
+            session_id: None,
+            task_id: None,
+            request_id: RequestId::new("req-share-3").unwrap(),
+            policy_context: PolicyContext {
+                include_public: false,
+                sharing_visibility: SharingVisibility::Shared,
+                caller_identity_bound: true,
+                workspace_acl_allowed: true,
+                agent_acl_allowed: true,
+                session_visibility_allowed: true,
+                legal_hold: false,
+            },
+            time_budget_ms: None,
+        };
+
+        let bound = request.bind_namespace(None).unwrap();
+        let outcome = bound.evaluate_cross_namespace_sharing_access(
+            &PolicyModule,
+            &NamespaceId::new("team.beta").unwrap(),
+        );
+
+        assert_eq!(outcome.decision, SharingAccessDecision::Redact);
+        assert_eq!(outcome.sharing_scope.unwrap().as_str(), "approved_shared");
+        assert_eq!(outcome.redaction_fields, vec!["workspace_id", "session_id"]);
+    }
+
+    #[test]
+    fn sharing_access_denies_public_widening_without_include_public() {
+        let request = RequestContext {
+            namespace: Some(NamespaceId::new("team.alpha").unwrap()),
+            workspace_id: None,
+            agent_id: None,
+            session_id: None,
+            task_id: None,
+            request_id: RequestId::new("req-share-4").unwrap(),
+            policy_context: PolicyContext {
+                include_public: false,
+                sharing_visibility: SharingVisibility::Public,
+                caller_identity_bound: true,
+                workspace_acl_allowed: true,
+                agent_acl_allowed: true,
+                session_visibility_allowed: true,
+                legal_hold: false,
+            },
+            time_budget_ms: None,
+        };
+
+        let bound = request.bind_namespace(None).unwrap();
+        let outcome = bound.evaluate_cross_namespace_sharing_access(
+            &PolicyModule,
+            &NamespaceId::new("team.beta").unwrap(),
+        );
+
+        assert_eq!(outcome.decision, SharingAccessDecision::Deny);
+        assert!(outcome
+            .denial_reasons
+            .iter()
+            .any(|reason| reason.as_str() == "approved_scope_required"));
+    }
+
+    #[test]
+    fn sharing_access_allows_same_namespace_private_reads_during_legal_hold() {
+        let request = RequestContext {
+            namespace: Some(NamespaceId::new("team.alpha").unwrap()),
+            workspace_id: None,
+            agent_id: None,
+            session_id: None,
+            task_id: None,
+            request_id: RequestId::new("req-share-legal-hold").unwrap(),
+            policy_context: PolicyContext {
+                include_public: false,
+                sharing_visibility: SharingVisibility::Private,
+                caller_identity_bound: true,
+                workspace_acl_allowed: true,
+                agent_acl_allowed: true,
+                session_visibility_allowed: true,
+                legal_hold: true,
+            },
+            time_budget_ms: None,
+        };
+
+        let bound = request.bind_namespace(None).unwrap();
+        let outcome = bound.evaluate_sharing_access(&PolicyModule);
+
+        assert_eq!(outcome.decision, SharingAccessDecision::Allow);
+        assert_eq!(outcome.sharing_scope.unwrap().as_str(), "namespace_only");
+        assert!(outcome.denial_reasons.is_empty());
+        assert!(outcome.redaction_fields.is_empty());
+    }
+
+    #[test]
     fn namespace_binding_rejects_missing_namespace_without_default() {
         let request = RequestContext {
             namespace: None,
@@ -674,7 +1105,15 @@ mod tests {
             session_id: None,
             task_id: None,
             request_id: RequestId::new("req-3").unwrap(),
-            policy_context: PolicyContext::default(),
+            policy_context: PolicyContext {
+                include_public: false,
+                sharing_visibility: SharingVisibility::Private,
+                caller_identity_bound: false,
+                workspace_acl_allowed: true,
+                agent_acl_allowed: true,
+                session_visibility_allowed: true,
+                legal_hold: false,
+            },
             time_budget_ms: None,
         };
 
@@ -738,7 +1177,10 @@ mod tests {
             .with_partial_success()
             .with_availability(availability.clone())
             .with_policy_filters(vec![PolicyFilterSummary::new(
+                "team.alpha",
                 "retention",
+                OutcomeClass::Accepted,
+                "packaging",
                 FieldPresence::Redacted,
                 FieldPresence::Absent,
                 vec!["raw_text"],
@@ -751,7 +1193,16 @@ mod tests {
         assert_eq!(success.error_kind, None);
         assert_eq!(success.availability, Some(availability));
         assert_eq!(success.policy_filters_applied.len(), 1);
+        assert_eq!(
+            success.policy_filters_applied[0].effective_namespace,
+            "team.alpha"
+        );
         assert_eq!(success.policy_filters_applied[0].policy_family, "retention");
+        assert_eq!(
+            success.policy_filters_applied[0].outcome_class,
+            OutcomeClass::Accepted
+        );
+        assert_eq!(success.policy_filters_applied[0].blocked_stage, "packaging");
         assert_eq!(success.safeguard, Some(safeguard));
         assert_eq!(
             success.safeguard.as_ref().unwrap().outcome_class,
@@ -778,7 +1229,9 @@ mod tests {
             "redacted",
         );
         assert_eq!(
-            success.policy_filters_applied[0].retention_marker.state_name(),
+            success.policy_filters_applied[0]
+                .retention_marker
+                .state_name(),
             "absent",
         );
 
@@ -804,6 +1257,151 @@ mod tests {
     }
 
     #[test]
+    fn trace_schema_fields_attach_with_stable_machine_names() {
+        let response = ResponseContext::success(
+            NamespaceId::new("team.gamma").unwrap(),
+            RequestId::new("req-trace").unwrap(),
+            11u8,
+        )
+        .with_trace_schema(
+            RouteSummary {
+                route_family: "tiered_recall",
+                route_reason: "bounded tier1 then tier2",
+                tier1_consulted_first: true,
+                routes_to_deeper_tiers: true,
+            },
+            vec![
+                TraceStage::PolicyGate,
+                TraceStage::Tier1RecentWindow,
+                TraceStage::Tier2Exact,
+                TraceStage::Packaging,
+            ],
+            vec![ResultReason {
+                memory_id: None,
+                reason_code: "tier2_exact_match",
+                detail: "candidate survived bounded ranking",
+            }],
+            TracePolicySummary {
+                effective_namespace: "team.gamma".into(),
+                policy_family: "namespace",
+                outcome_class: OutcomeClass::Accepted,
+                blocked_stage: "not_blocked",
+                redaction_fields: vec!["raw_text"],
+                retention_state: FieldPresence::Absent,
+                sharing_scope: FieldPresence::Present("same_namespace"),
+            },
+            TraceProvenanceSummary {
+                source_kind: "memory",
+                source_reference: "memory_id",
+                lineage_ancestors: Vec::new(),
+            },
+            vec![FreshnessMarker {
+                code: "fresh",
+                detail: "item is recent enough for default packaging",
+            }],
+            vec![ConflictMarker {
+                code: "no_open_conflict",
+                detail: "no contradiction siblings were surfaced",
+            }],
+            vec![UncertaintyMarker {
+                code: "low_uncertainty",
+                detail: "bounded evidence had low uncertainty",
+            }],
+        )
+        .with_passive_observation(PassiveObservationInspectSummary {
+            source_kind: "observation",
+            write_decision: "capture",
+            captured_as_observation: true,
+            observation_source: FieldPresence::Present("passive_observation".into()),
+            observation_chunk_id: FieldPresence::Present("obs-0000000000000042".into()),
+            retention_marker: FieldPresence::Present("volatile_observation"),
+        });
+
+        assert_eq!(
+            response.route_summary.as_ref().unwrap().route_family,
+            "tiered_recall"
+        );
+        assert_eq!(response.trace_stages.len(), 4);
+        assert_eq!(response.trace_stages[0].as_str(), "policy_gate");
+        assert_eq!(response.trace_stages[1].as_str(), "tier1_recent_window");
+        assert_eq!(response.trace_stages[2].as_str(), "tier2_exact");
+        assert_eq!(response.trace_stages[3].as_str(), "packaging");
+        assert_eq!(response.result_reasons[0].reason_code, "tier2_exact_match");
+        assert_eq!(
+            response
+                .policy_summary
+                .as_ref()
+                .unwrap()
+                .effective_namespace,
+            "team.gamma"
+        );
+        assert_eq!(
+            response
+                .policy_summary
+                .as_ref()
+                .unwrap()
+                .sharing_scope
+                .state_name(),
+            "present"
+        );
+        assert_eq!(
+            response
+                .policy_summary
+                .as_ref()
+                .unwrap()
+                .retention_state
+                .state_name(),
+            "absent"
+        );
+        assert_eq!(
+            response
+                .provenance_summary
+                .as_ref()
+                .unwrap()
+                .source_reference,
+            "memory_id"
+        );
+        assert_eq!(response.freshness_markers[0].code, "fresh");
+        assert_eq!(response.conflict_markers[0].code, "no_open_conflict");
+        assert_eq!(response.uncertainty_markers[0].code, "low_uncertainty");
+        assert_eq!(
+            response
+                .passive_observation
+                .as_ref()
+                .unwrap()
+                .observation_source
+                .state_name(),
+            "present"
+        );
+        assert_eq!(
+            response
+                .passive_observation
+                .as_ref()
+                .unwrap()
+                .observation_chunk_id
+                .state_name(),
+            "present"
+        );
+        assert_eq!(
+            response
+                .passive_observation
+                .as_ref()
+                .unwrap()
+                .retention_marker
+                .state_name(),
+            "present"
+        );
+        assert_eq!(
+            response
+                .passive_observation
+                .as_ref()
+                .unwrap()
+                .write_decision,
+            "capture"
+        );
+    }
+
+    #[test]
     fn remediation_and_availability_use_canonical_machine_names() {
         let remediation = RemediationHint::for_error(ErrorKind::CorruptionFailure, "corruption");
         assert_eq!(remediation.summary, "corruption");
@@ -811,11 +1409,11 @@ mod tests {
             remediation.next_steps,
             vec![RemediationStep::RunDoctor, RemediationStep::RunRepair],
         );
+        assert_eq!(remediation.step_names(), vec!["run_doctor", "run_repair"],);
         assert_eq!(
-            remediation.step_names(),
-            vec!["run_doctor", "run_repair"],
+            ErrorKind::PolicyDenied.primary_remediation(),
+            RemediationStep::ChangeScope
         );
-        assert_eq!(ErrorKind::PolicyDenied.primary_remediation(), RemediationStep::ChangeScope);
         assert_eq!(AvailabilityPosture::ReadOnly.as_str(), "read_only");
 
         let availability = AvailabilitySummary::degraded(
@@ -863,8 +1461,9 @@ mod tests {
             .blocked_reasons
             .contains(&SafeguardReasonCode::ConfirmationRequired));
 
-        let blocked_response = ResponseContext::success(namespace.clone(), request_id.clone(), "preview")
-            .with_safeguard(blocked);
+        let blocked_response =
+            ResponseContext::success(namespace.clone(), request_id.clone(), "preview")
+                .with_safeguard(blocked);
         assert!(blocked_response.ok);
         assert_eq!(blocked_response.error_kind, None);
         assert_eq!(blocked_response.outcome_class, OutcomeClass::Blocked);

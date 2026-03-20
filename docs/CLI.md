@@ -27,12 +27,14 @@
 This document fixes the stable CLI surface for `mb-1hw.1`: command families, naming rules, shared flag vocabulary, human-versus-JSON parity, and alias/deprecation expectations.
 
 It does **not** finalize:
-- the canonical retrieval result envelope from `mb-1hw.8`
+- the canonical retrieval result envelope defined by `mb-23u.3.1`
 - the destructive preflight / blocked-action schema from `mb-1hd.7`
 
 The shared failure/remediation taxonomy in this document should stay aligned with `docs/MCP_API.md` and the degraded/read-only availability contract in `docs/OPERATIONS.md`. Those sibling contracts may add transport-specific envelope fields or stronger safeguards later, but they should plug into the command and outcome vocabulary defined here rather than redefining it.
 
-For retrieval-facing commands, `mb-1hw.8` defines one canonical `RetrievalResult` envelope shared with daemon/JSON-RPC and MCP. CLI text may summarize that object for humans, but CLI `--json` must preserve the same outcome class, evidence-versus-action split (`evidence_pack` and optional `action_pack`), omission semantics, policy/provenance/freshness/conflict markers, deferred-payload meaning, and explanation families instead of inventing a CLI-only result shape.
+For retrieval-facing commands, `mb-23u.3.1` defines one canonical `RetrievalResult` envelope shared with daemon/JSON-RPC and MCP. CLI text may summarize that object for humans, but CLI `--json` must preserve the same outcome class, evidence-versus-action split (`evidence_pack` and optional `action_pack`), omission semantics, policy/provenance/freshness/conflict markers, deferred-payload meaning, and explanation families instead of inventing a CLI-only result shape.
+
+CLI regression coverage for future implementation beads must prove that accepted, partial, preview, blocked, degraded, and rejected retrieval outcomes all remain machine-readable with the same top-level field families and that the sample accepted and partial/deferred/conflict-bearing shapes from `docs/RETRIEVAL.md` remain representable without CLI-only semantic drift.
 
 ## Stable Command Families and Naming Rules
 

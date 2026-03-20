@@ -83,7 +83,11 @@ impl Tier1HotMetadataStore {
     }
 
     /// Performs a bounded Tier1 exact lookup by stable namespace and memory id.
-    pub fn exact_lookup(&mut self, namespace: &NamespaceId, memory_id: MemoryId) -> Tier1ExactLookup {
+    pub fn exact_lookup(
+        &mut self,
+        namespace: &NamespaceId,
+        memory_id: MemoryId,
+    ) -> Tier1ExactLookup {
         self.exact_lookup_with_budget(namespace, memory_id, 1)
     }
 
@@ -197,11 +201,7 @@ impl Tier1HotMetadataStore {
     }
 
     fn touch_recent(&mut self, key: (NamespaceId, MemoryId)) {
-        if let Some(position) = self
-            .recent
-            .iter()
-            .position(|candidate| candidate == &key)
-        {
+        if let Some(position) = self.recent.iter().position(|candidate| candidate == &key) {
             self.recent.remove(position);
         }
         self.recent.push_back(key);
@@ -245,7 +245,10 @@ mod tests {
         let exact = store.exact_lookup(&namespace, MemoryId(1));
         store.seed(seed_record("team.alpha", 3, 10, "newest"));
 
-        assert_eq!(exact.record.as_ref().map(|record| record.memory_id), Some(MemoryId(1)));
+        assert_eq!(
+            exact.record.as_ref().map(|record| record.memory_id),
+            Some(MemoryId(1))
+        );
         assert!(store.exact_lookup(&namespace, MemoryId(1)).record.is_some());
         assert!(store.exact_lookup(&namespace, MemoryId(2)).record.is_none());
         assert!(store.exact_lookup(&namespace, MemoryId(3)).record.is_some());
@@ -278,8 +281,20 @@ mod tests {
 
         let exact = store.exact_lookup(&namespace, MemoryId(7));
 
-        assert_eq!(exact.record.as_ref().map(|record| record.compact_text.as_str()), Some("alpha record"));
-        assert_eq!(exact.record.as_ref().map(|record| record.namespace.as_str()), Some("team.alpha"));
+        assert_eq!(
+            exact
+                .record
+                .as_ref()
+                .map(|record| record.compact_text.as_str()),
+            Some("alpha record")
+        );
+        assert_eq!(
+            exact
+                .record
+                .as_ref()
+                .map(|record| record.namespace.as_str()),
+            Some("team.alpha")
+        );
     }
 
     #[test]
@@ -294,7 +309,10 @@ mod tests {
         let recent = store.recent_for_session(&namespace, SessionId(10), 2);
 
         assert_eq!(recent.records.len(), 2);
-        assert!(recent.records.iter().all(|record| record.namespace == namespace));
+        assert!(recent
+            .records
+            .iter()
+            .all(|record| record.namespace == namespace));
         assert_eq!(recent.records[0].memory_id, MemoryId(3));
         assert_eq!(recent.records[1].memory_id, MemoryId(1));
         assert_eq!(recent.trace.recent_candidates_inspected, 4);

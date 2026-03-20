@@ -1,7 +1,7 @@
 use membrain_core::api::NamespaceId;
 use membrain_core::store::tier2::Tier2Store;
 use membrain_core::types::{
-    MemoryId, NormalizedMemoryEnvelope, RawEncodeInput, RawIntakeKind, SessionId,
+    LandmarkMetadata, MemoryId, NormalizedMemoryEnvelope, RawEncodeInput, RawIntakeKind, SessionId,
 };
 
 fn normalized_event(raw_text: &str, compact_text: &str) -> NormalizedMemoryEnvelope {
@@ -13,6 +13,9 @@ fn normalized_event(raw_text: &str, compact_text: &str) -> NormalizedMemoryEnvel
         compact_text: compact_text.to_string(),
         normalization_generation: "norm-v1",
         payload_size_bytes: raw_text.len(),
+        landmark: LandmarkMetadata::non_landmark(),
+        observation_source: None,
+        observation_chunk_id: None,
     }
 }
 
@@ -25,17 +28,32 @@ fn tier2_layout_separates_metadata_from_raw_payload_body_and_preserves_namespace
         "compact prefilter text",
     );
 
-    let layout = store.layout_item(namespace.clone(), MemoryId(41), SessionId(7), 991, &envelope);
+    let layout = store.layout_item(
+        namespace.clone(),
+        MemoryId(41),
+        SessionId(7),
+        991,
+        &envelope,
+    );
 
     assert_eq!(layout.metadata.namespace, namespace);
     assert_eq!(layout.metadata.memory_id, MemoryId(41));
     assert_eq!(layout.metadata.session_id, SessionId(7));
     assert_eq!(layout.metadata.compact_text, "compact prefilter text");
-    assert_eq!(layout.metadata.payload_size_bytes, envelope.payload_size_bytes);
+    assert_eq!(
+        layout.metadata.payload_size_bytes,
+        envelope.payload_size_bytes
+    );
     assert_eq!(layout.payload.namespace.as_str(), "team.alpha");
     assert_eq!(layout.payload.memory_id, MemoryId(41));
-    assert_eq!(layout.metadata.payload_locator, layout.payload.payload_locator);
-    assert_eq!(layout.payload.payload_locator.namespace.as_str(), "team.alpha");
+    assert_eq!(
+        layout.metadata.payload_locator,
+        layout.payload.payload_locator
+    );
+    assert_eq!(
+        layout.payload.payload_locator.namespace.as_str(),
+        "team.alpha"
+    );
     assert_eq!(layout.payload.raw_size_bytes, envelope.raw_text.len());
     assert_eq!(
         layout.payload.raw_text,
@@ -81,7 +99,10 @@ fn tier2_metadata_index_key_matches_namespace_safe_identity_fields() {
     assert_eq!(key.route_family, layout.metadata.route_family);
     assert_eq!(key.fingerprint, layout.metadata.fingerprint);
     assert_eq!(key.compact_text, layout.metadata.compact_text);
-    assert_eq!(key.normalization_generation, layout.metadata.normalization_generation);
+    assert_eq!(
+        key.normalization_generation,
+        layout.metadata.normalization_generation
+    );
     assert_eq!(key.payload_locator, layout.metadata.payload_locator);
     assert!(layout.index_key_stays_metadata_only());
 }
@@ -106,9 +127,18 @@ fn tier2_payload_locator_changes_with_namespace_for_same_memory_id() {
         &envelope,
     );
 
-    assert_ne!(alpha.payload.payload_locator.namespace, beta.payload.payload_locator.namespace);
-    assert_eq!(alpha.payload.payload_locator.slot, beta.payload.payload_locator.slot);
-    assert_eq!(alpha.payload.payload_locator.shard, beta.payload.payload_locator.shard);
+    assert_ne!(
+        alpha.payload.payload_locator.namespace,
+        beta.payload.payload_locator.namespace
+    );
+    assert_eq!(
+        alpha.payload.payload_locator.slot,
+        beta.payload.payload_locator.slot
+    );
+    assert_eq!(
+        alpha.payload.payload_locator.shard,
+        beta.payload.payload_locator.shard
+    );
 }
 
 #[test]

@@ -6,17 +6,18 @@ use crate::policy::{
     IngestMode, ObservationWriteOutcome, PassiveObservationDecision, PolicyGateway,
 };
 use crate::types::{
-    CanonicalMemoryType, FastPathRouteFamily, NormalizedMemoryEnvelope, RawEncodeInput,
-    WorkingMemoryId, WorkingMemoryItem,
+    CanonicalMemoryType, FastPathRouteFamily, LandmarkMetadata, LandmarkSignals,
+    NormalizedMemoryEnvelope, RawEncodeInput, WorkingMemoryId, WorkingMemoryItem,
 };
 use xxhash_rust::xxh64::xxh64;
 
 const NORMALIZATION_GENERATION: &str = "normalize-v1";
-const FAST_PATH_STAGES: [EncodeFastPathStage; 4] = [
+const FAST_PATH_STAGES: [EncodeFastPathStage; 5] = [
     EncodeFastPathStage::Normalize,
     EncodeFastPathStage::Fingerprint,
     EncodeFastPathStage::ShallowClassify,
     EncodeFastPathStage::ProvisionalSalience,
+    EncodeFastPathStage::LandmarkTagging,
 ];
 
 /// Shared interface for Tier1 encode orchestration owned by `membrain-core`.
@@ -37,8 +38,25 @@ pub struct ShallowClassification {
     pub route_family: FastPathRouteFamily,
 }
 
-/// Prepared encode candidate emitted by the synchronous fast path.
+/// Passive-observation provenance and retention facts exposed to inspect surfaces.
 #[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PassiveObservationInspect {
+    /// Stable source intake family preserved in normalized provenance.
+    pub source_kind: &'static str,
+    /// Stable passive-observation write decision.
+    pub write_decision: &'static str,
+    /// Whether this candidate was admitted through passive-observation capture.
+    pub captured_as_observation: bool,
+    /// Stable provenance source label when passive observation applies.
+    pub observation_source: Option<String>,
+    /// Stable provenance chunk label when passive observation applies.
+    pub observation_chunk_id: Option<String>,
+    /// Stable retention marker for passive-observation artifacts.
+    pub retention_marker: &'static str,
+}
+
+/// Prepared encode candidate emitted by the synchronous fast path.
+#[derive(Debug, Clone, PartialEq)]
 pub struct PreparedEncodeCandidate {
     /// Canonical normalized envelope frozen before persistence.
     pub normalized: NormalizedMemoryEnvelope,
@@ -52,9 +70,18 @@ pub struct PreparedEncodeCandidate {
     pub write_decision: PassiveObservationDecision,
     /// Whether this candidate was admitted through passive-observation capture.
     pub captured_as_observation: bool,
+    /// Structured passive-observation inspect facts for provenance and retention.
+    pub passive_observation_inspect: PassiveObservationInspect,
     /// Structured trace proving the ordered fast-path stages.
     pub trace: EncodeFastPathTrace,
 }
+
+const LANDMARK_AROUSAL_THRESHOLD: f32 = 0.7;
+const LANDMARK_NOVELTY_THRESHOLD: f32 = 0.75;
+const LANDMARK_SIMILARITY_FLOOR: f32 = 0.85;
+const LANDMARK_MIN_ERA_GAP_TICKS: u64 = 50;
+const PASSIVE_OBSERVATION_SOURCE: &str = "passive_observation";
+const PASSIVE_OBSERVATION_RETENTION_MARKER: &str = "volatile_observation";
 
 /// Final controller decision for a working-memory admission attempt.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -230,6 +257,16 @@ impl EncodeEngine {
             .join(" ");
         let payload_size_bytes = compact_text.len();
 
+        let landmark = input
+            .landmark_signals
+            .map(|signals| self.derive_landmark_metadata(&compact_text, signals))
+            .unwrap_or_else(LandmarkMetadata::non_landmark);
+
+        let observation_source = matches!(input.kind, crate::types::RawIntakeKind::Observation)
+            .then(|| PASSIVE_OBSERVATION_SOURCE.to_string());
+        let observation_chunk_id = matches!(input.kind, crate::types::RawIntakeKind::Observation)
+            .then(|| format!("obs-{:016x}", xxh64(compact_text.as_bytes(), 0)));
+
         NormalizedMemoryEnvelope {
             memory_type: input.kind.canonical_memory_type(),
             source_kind: input.kind,
@@ -237,6 +274,9 @@ impl EncodeEngine {
             compact_text,
             normalization_generation: NORMALIZATION_GENERATION,
             payload_size_bytes,
+            landmark,
+            observation_source,
+            observation_chunk_id,
         }
     }
 
@@ -259,6 +299,48 @@ impl EncodeEngine {
         ShallowClassification {
             memory_type: normalized.memory_type,
             route_family: FastPathRouteFamily::from_memory_type(normalized.memory_type),
+        }
+    }
+
+    fn derive_landmark_metadata(
+        &self,
+        compact_text: &str,
+        signals: LandmarkSignals,
+    ) -> LandmarkMetadata {
+        let qualifies = signals.arousal >= LANDMARK_AROUSAL_THRESHOLD
+            && signals.novelty >= LANDMARK_NOVELTY_THRESHOLD
+            && signals.recent_similarity < LANDMARK_SIMILARITY_FLOOR
+            && signals.ticks_since_last_landmark >= LANDMARK_MIN_ERA_GAP_TICKS;
+
+        if !qualifies {
+            return LandmarkMetadata::non_landmark();
+        }
+
+        let label = compact_text
+            .split_whitespace()
+            .take(8)
+            .collect::<Vec<_>>()
+            .join(" ");
+        let label = if label.is_empty() {
+            String::from("landmark")
+        } else {
+            label
+        };
+        let era_id = format!(
+            "era-{}-{:04}",
+            compact_text
+                .chars()
+                .filter(|ch| ch.is_ascii_alphanumeric())
+                .take(12)
+                .collect::<String>()
+                .to_ascii_lowercase(),
+            signals.ticks_since_last_landmark.min(9_999)
+        );
+
+        LandmarkMetadata {
+            is_landmark: true,
+            landmark_label: Some(label),
+            era_id: Some(era_id),
         }
     }
 
@@ -292,6 +374,7 @@ impl EncodeEngine {
         namespace_bound: bool,
         duplicate_hint: bool,
     ) -> PreparedEncodeCandidate {
+        let landmark_signals = input.landmark_signals;
         let normalized = self.normalize_input(input);
         let fingerprint = self.fingerprint(&normalized);
         let classification = self.shallow_classify(&normalized);
@@ -302,6 +385,18 @@ impl EncodeEngine {
             namespace_bound,
             duplicate_hint,
         );
+        let passive_observation_inspect = PassiveObservationInspect {
+            source_kind: normalized.source_kind.as_str(),
+            write_decision: write_gate.decision.as_str(),
+            captured_as_observation: write_gate.captured_as_observation,
+            observation_source: normalized.observation_source.clone(),
+            observation_chunk_id: normalized.observation_chunk_id.clone(),
+            retention_marker: if matches!(ingest_mode, IngestMode::PassiveObservation) {
+                PASSIVE_OBSERVATION_RETENTION_MARKER
+            } else {
+                "absent"
+            },
+        };
         let trace = EncodeFastPathTrace {
             stages: FAST_PATH_STAGES,
             normalization_generation: normalized.normalization_generation,
@@ -312,6 +407,8 @@ impl EncodeEngine {
                 write_gate.decision,
                 PassiveObservationDecision::Suppress
             )),
+            landmark_signals,
+            landmark: normalized.landmark.clone(),
             stayed_within_latency_budget: true,
         };
 
@@ -322,6 +419,7 @@ impl EncodeEngine {
             provisional_salience,
             write_decision: write_gate.decision,
             captured_as_observation: write_gate.captured_as_observation,
+            passive_observation_inspect,
             trace,
         }
     }
@@ -348,7 +446,7 @@ mod tests {
     use super::EncodeEngine;
     use crate::policy::IngestMode;
     use crate::policy::PassiveObservationDecision;
-    use crate::types::{RawEncodeInput, RawIntakeKind};
+    use crate::types::{LandmarkSignals, RawEncodeInput, RawIntakeKind};
     use crate::RuntimeConfig;
 
     fn test_engine() -> EncodeEngine {
@@ -397,8 +495,58 @@ mod tests {
 
         assert_eq!(captured.write_decision, PassiveObservationDecision::Capture);
         assert!(captured.captured_as_observation);
-        assert_eq!(suppressed.write_decision, PassiveObservationDecision::Suppress);
+        assert_eq!(
+            suppressed.write_decision,
+            PassiveObservationDecision::Suppress
+        );
         assert!(!suppressed.captured_as_observation);
         assert_eq!(suppressed.trace.duplicate_hint_candidate_count, 1);
+    }
+
+    #[test]
+    fn landmark_metadata_is_additive_when_signals_clear_thresholds() {
+        let engine = test_engine();
+
+        let prepared = engine.prepare_fast_path(
+            RawEncodeInput::new(RawIntakeKind::Event, "project launch deadline was moved")
+                .with_landmark_signals(LandmarkSignals::new(0.91, 0.83, 0.31, 88)),
+        );
+
+        assert!(prepared.normalized.landmark.is_landmark);
+        assert_eq!(
+            prepared.trace.landmark_signals,
+            Some(LandmarkSignals::new(0.91, 0.83, 0.31, 88))
+        );
+        assert_eq!(prepared.trace.landmark, prepared.normalized.landmark);
+        assert!(prepared
+            .normalized
+            .landmark
+            .landmark_label
+            .as_ref()
+            .is_some_and(|label| label.contains("project launch deadline was moved")));
+        assert!(prepared
+            .normalized
+            .landmark
+            .era_id
+            .as_ref()
+            .is_some_and(|era| era.starts_with("era-projectlaunc-0088")));
+    }
+
+    #[test]
+    fn landmark_metadata_stays_non_authoritative_when_signals_do_not_qualify() {
+        let engine = test_engine();
+
+        let prepared = engine.prepare_fast_path(
+            RawEncodeInput::new(RawIntakeKind::Event, "routine standup note")
+                .with_landmark_signals(LandmarkSignals::new(0.62, 0.91, 0.20, 88)),
+        );
+
+        assert!(!prepared.normalized.landmark.is_landmark);
+        assert_eq!(prepared.normalized.landmark.landmark_label, None);
+        assert_eq!(prepared.normalized.landmark.era_id, None);
+        assert_eq!(
+            prepared.trace.landmark_signals,
+            Some(LandmarkSignals::new(0.62, 0.91, 0.20, 88))
+        );
     }
 }

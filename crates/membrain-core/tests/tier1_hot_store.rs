@@ -78,7 +78,13 @@ fn default_recent_window_scans_past_interleaved_foreign_session_entries() {
     store.seed(seed_record("tests/tier1", 1, 10, "target older", 4_096));
     store.seed(seed_record("tests/tier1", 2, 20, "foreign newer", 4_096));
     store.seed(seed_record("tests/tier1", 3, 10, "target newest", 4_096));
-    store.seed(seed_record("tests/tier1", 4, 30, "foreign newest-most", 4_096));
+    store.seed(seed_record(
+        "tests/tier1",
+        4,
+        30,
+        "foreign newest-most",
+        4_096,
+    ));
 
     let recent = store.recent_for_session(&namespace, SessionId(10), 2);
 
@@ -118,8 +124,20 @@ fn exact_lookup_does_not_cross_namespace_boundaries() {
     let exact = store.exact_lookup(&alpha, MemoryId(9));
 
     assert_eq!(exact.trace.outcome, Tier1LookupOutcome::Hit);
-    assert_eq!(exact.record.as_ref().map(|record| record.namespace.as_str()), Some("tests/alpha"));
-    assert_eq!(exact.record.as_ref().map(|record| record.compact_text.as_str()), Some("alpha payload"));
+    assert_eq!(
+        exact
+            .record
+            .as_ref()
+            .map(|record| record.namespace.as_str()),
+        Some("tests/alpha")
+    );
+    assert_eq!(
+        exact
+            .record
+            .as_ref()
+            .map(|record| record.compact_text.as_str()),
+        Some("alpha payload")
+    );
 }
 
 #[test]
@@ -136,7 +154,10 @@ fn recent_window_filters_out_colliding_foreign_namespace_entries() {
     assert_eq!(recent.trace.outcome, Tier1LookupOutcome::Hit);
     assert_eq!(recent.trace.recent_candidates_inspected, 4);
     assert_eq!(recent.records.len(), 2);
-    assert!(recent.records.iter().all(|record| record.namespace == alpha));
+    assert!(recent
+        .records
+        .iter()
+        .all(|record| record.namespace == alpha));
     assert_eq!(recent.records[0].memory_id, MemoryId(3));
     assert_eq!(recent.records[1].memory_id, MemoryId(1));
 }

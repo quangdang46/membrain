@@ -1,24 +1,37 @@
+use std::cell::RefCell;
+use std::rc::Rc;
+
+use membrain_core::api::NamespaceId;
 use membrain_core::engine::maintenance::{
     DurableStateToken, InterruptedMaintenance, InterruptionReason, MaintenanceController,
     MaintenanceJobHandle, MaintenanceJobState, MaintenanceOperation, MaintenanceProgress,
     MaintenanceStep,
 };
+use membrain_core::engine::repair::{RepairEngine, RepairTarget};
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone)]
 struct ScriptedMaintenance {
     steps: Vec<MaintenanceStep<&'static str>>,
     next_step: usize,
     preserved: DurableStateToken,
-    interruptions: Vec<InterruptionReason>,
+    interruptions: Rc<RefCell<Vec<InterruptionReason>>>,
 }
 
 impl ScriptedMaintenance {
     fn new(steps: Vec<MaintenanceStep<&'static str>>, preserved: DurableStateToken) -> Self {
+        Self::with_interruptions(steps, preserved, Rc::new(RefCell::new(Vec::new())))
+    }
+
+    fn with_interruptions(
+        steps: Vec<MaintenanceStep<&'static str>>,
+        preserved: DurableStateToken,
+        interruptions: Rc<RefCell<Vec<InterruptionReason>>>,
+    ) -> Self {
         Self {
             steps,
             next_step: 0,
             preserved,
-            interruptions: Vec::new(),
+            interruptions,
         }
     }
 }
@@ -33,7 +46,7 @@ impl MaintenanceOperation for ScriptedMaintenance {
     }
 
     fn interrupt(&mut self, reason: InterruptionReason) -> InterruptedMaintenance {
-        self.interruptions.push(reason);
+        self.interruptions.borrow_mut().push(reason);
         InterruptedMaintenance {
             reason,
             preserved_durable_state: self.preserved,
@@ -63,12 +76,14 @@ fn cancel_before_start_preserves_prior_durable_state() {
 
 #[test]
 fn cancel_during_run_finishes_as_cancelled_on_next_poll() {
-    let operation = ScriptedMaintenance::new(
+    let interruptions = Rc::new(RefCell::new(Vec::new()));
+    let operation = ScriptedMaintenance::with_interruptions(
         vec![
             MaintenanceStep::Pending(MaintenanceProgress::new(1, 3)),
             MaintenanceStep::Completed("should not complete"),
         ],
         DurableStateToken(52),
+        interruptions.clone(),
     );
     let mut handle = MaintenanceJobHandle::new(operation, 4);
 
@@ -97,17 +112,25 @@ fn cancel_during_run_finishes_as_cancelled_on_next_poll() {
         })
     );
     assert_eq!(cancelled.polls_used, 1);
+    assert_eq!(&*interruptions.borrow(), &[InterruptionReason::Cancelled]);
+
+    assert_eq!(handle.start(), cancelled);
+    assert_eq!(handle.poll(), cancelled);
+    assert_eq!(handle.cancel(), cancelled);
+    assert_eq!(&*interruptions.borrow(), &[InterruptionReason::Cancelled]);
 }
 
 #[test]
 fn timeout_escalation_preserves_prior_durable_state() {
-    let operation = ScriptedMaintenance::new(
+    let interruptions = Rc::new(RefCell::new(Vec::new()));
+    let operation = ScriptedMaintenance::with_interruptions(
         vec![
             MaintenanceStep::Pending(MaintenanceProgress::new(1, 5)),
             MaintenanceStep::Pending(MaintenanceProgress::new(2, 5)),
             MaintenanceStep::Completed("too late"),
         ],
         DurableStateToken(63),
+        interruptions.clone(),
     );
     let mut handle = MaintenanceJobHandle::new(operation, 2);
 
@@ -125,6 +148,12 @@ fn timeout_escalation_preserves_prior_durable_state() {
         })
     );
     assert_eq!(timed_out.polls_used, 2);
+    assert_eq!(&*interruptions.borrow(), &[InterruptionReason::TimedOut]);
+
+    assert_eq!(handle.start(), timed_out);
+    assert_eq!(handle.poll(), timed_out);
+    assert_eq!(handle.cancel(), timed_out);
+    assert_eq!(&*interruptions.borrow(), &[InterruptionReason::TimedOut]);
 }
 
 #[test]
@@ -139,6 +168,9 @@ fn blocked_and_degraded_results_stay_operator_visible() {
         blocked_snapshot.state,
         MaintenanceJobState::Blocked("snapshot_required")
     );
+    assert_eq!(blocked_handle.start(), blocked_snapshot);
+    assert_eq!(blocked_handle.poll(), blocked_snapshot);
+    assert_eq!(blocked_handle.cancel(), blocked_snapshot);
 
     let degraded = ScriptedMaintenance::new(
         vec![MaintenanceStep::Degraded("foreground_latency_guard")],
@@ -150,6 +182,9 @@ fn blocked_and_degraded_results_stay_operator_visible() {
         degraded_snapshot.state,
         MaintenanceJobState::Degraded("foreground_latency_guard")
     );
+    assert_eq!(degraded_handle.start(), degraded_snapshot);
+    assert_eq!(degraded_handle.poll(), degraded_snapshot);
+    assert_eq!(degraded_handle.cancel(), degraded_snapshot);
 }
 
 #[test]
@@ -196,7 +231,10 @@ fn snapshot_reports_state_transitions_without_consuming_extra_work() {
     assert_eq!(handle.snapshot().polls_used, 0);
 
     let started = handle.start();
-    assert_eq!(started.state, MaintenanceJobState::Running { progress: None });
+    assert_eq!(
+        started.state,
+        MaintenanceJobState::Running { progress: None }
+    );
     assert_eq!(started.polls_used, 0);
     assert_eq!(handle.snapshot(), started);
 
@@ -313,4 +351,55 @@ fn repeated_cancel_requests_stay_stable_until_poll_finalizes_cancellation() {
         })
     );
     assert_eq!(cancelled.polls_used, 1);
+}
+
+#[test]
+fn repair_runs_expose_verification_artifacts_through_maintenance_handle() {
+    let namespace = NamespaceId::new("test").unwrap();
+    let engine = RepairEngine;
+    let run = engine.create_targeted(
+        namespace,
+        vec![
+            RepairTarget::LexicalIndex,
+            RepairTarget::SemanticHotIndex,
+            RepairTarget::EngramIndex,
+        ],
+    );
+    let mut handle = MaintenanceJobHandle::new(run, 10);
+
+    handle.start();
+    loop {
+        let snapshot = handle.poll();
+        match snapshot.state {
+            MaintenanceJobState::Completed(ref summary) => {
+                assert_eq!(summary.targets_checked, 3);
+                assert_eq!(summary.healthy, 3);
+                assert_eq!(summary.verification_artifacts.len(), 3);
+
+                let lexical = summary
+                    .verification_artifacts
+                    .get(&RepairTarget::LexicalIndex)
+                    .unwrap();
+                assert_eq!(lexical.authoritative_rows, 128);
+                assert_eq!(lexical.derived_rows, 128);
+                assert_eq!(lexical.authoritative_generation, "durable.v1");
+                assert_eq!(lexical.derived_generation, "durable.v1");
+
+                let semantic_hot = summary
+                    .verification_artifacts
+                    .get(&RepairTarget::SemanticHotIndex)
+                    .unwrap();
+                assert_eq!(semantic_hot.authoritative_rows, 64);
+
+                let engram = summary
+                    .verification_artifacts
+                    .get(&RepairTarget::EngramIndex)
+                    .unwrap();
+                assert_eq!(engram.authoritative_rows, 24);
+                break;
+            }
+            MaintenanceJobState::Running { .. } => continue,
+            _ => panic!("unexpected state"),
+        }
+    }
 }

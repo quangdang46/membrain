@@ -68,8 +68,12 @@ pub trait MaintenanceOperation {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum MaintenanceJobState<S> {
     Ready,
-    Running { progress: Option<MaintenanceProgress> },
-    CancelRequested { progress: Option<MaintenanceProgress> },
+    Running {
+        progress: Option<MaintenanceProgress>,
+    },
+    CancelRequested {
+        progress: Option<MaintenanceProgress>,
+    },
     Completed(S),
     Cancelled(InterruptedMaintenance),
     TimedOut(InterruptedMaintenance),

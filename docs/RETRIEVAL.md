@@ -73,6 +73,188 @@ All recall-facing transports should map onto one logical `RecallRequest` even wh
 - `omitted_summary`, `policy_summary`, `provenance_summary`, `freshness_markers`, and `conflict_markers` remain first-class result fields rather than human-only narration so callers can inspect why the package looks incomplete, filtered, stale, or conflict-aware
 - CLI, daemon/JSON-RPC, and MCP may render this object differently for humans, but they must preserve the same evidence-versus-action split and the same omission, policy, freshness, conflict, and deferred-payload semantics
 
+## Canonical RetrievalResult field contract
+
+The canonical `RetrievalResult` envelope is a stable machine-readable object shared across CLI JSON, daemon/JSON-RPC, IPC, and MCP recall-facing surfaces.
+
+### Required top-level fields
+
+| Field | Required | Contract |
+|-------|----------|----------|
+| `outcome_class` | yes | One of `accepted`, `partial`, `preview`, `blocked`, `degraded`, or `rejected`. This is the shared retrieval/result status vocabulary across transports. |
+| `evidence_pack` | yes | Bounded returned evidence set used for answer construction. Present even when empty. |
+| `action_pack` | no | Optional derived answer/recommendation layer. Never replaces `evidence_pack`. |
+| `omitted_summary` | yes | Machine-readable omission counts and reasons so truncation, redaction, suppression, or budget cuts never masquerade as consensus. |
+| `policy_summary` | yes | Effective namespace, widening/redaction/denial state, and any policy-driven payload or sibling suppression that shaped the visible result. |
+| `provenance_summary` | yes | Source-kind mix, lineage anchors, and derived-versus-raw evidence mix for the packaged result. |
+| `freshness_markers` | yes | Time-sensitivity and lifecycle markers that materially affect safe use of the result. |
+| `conflict_markers` | yes | Conflict/supersession/override state for the packaged result set. |
+| `deferred_payloads` | no | Handles for payloads intentionally not materialized yet, including reason and hydration conditions. |
+| `packaging_metadata` | yes | Prompt-construction and downstream-consumption facts such as result budget, token budget, graph-assistance summary, cache/degraded summary, and packaging mode. |
+| `explain_handle` or embedded explanation families | yes | Either a stable handle for deferred explanation or embedded `route_summary`, `result_reasons`, `omitted_summary`, `policy_summary`, `provenance_summary`, `freshness_markers`, `conflict_markers`, and `trace_stages` when full trace detail is requested. |
+
+### `evidence_pack` item contract
+
+Each returned evidence item must preserve enough structure that downstream CLI/MCP/daemon surfaces do not need transport-specific guesswork.
+
+| Field | Required | Contract |
+|-------|----------|----------|
+| `memory_id` or canonical handle | yes | Stable durable identity or canonical opaque handle for the returned evidence item. |
+| `role` | yes | `primary` or `supporting`. Supporting items must not be silently merged into primary evidence. |
+| `entry_lane` | yes | The lane or route by which the item entered the bounded shortlist, such as `exact`, `recent`, `lexical`, `semantic`, `graph`, or `cold_fallback`. |
+| `payload_state` | yes | One of `inline`, `preview_only`, `deferred`, or `redacted`. |
+| `score_summary` | yes | Bounded score decomposition sufficient to explain ranking and packaging without exposing unstable internals as mandatory schema. |
+| `provenance_summary` | yes | Per-item source kind, source reference or opaque handle, and lineage anchors. |
+| `freshness_markers` | yes | Per-item freshness/lease/snapshot/stale-derived markers when applicable. |
+| `conflict_markers` | yes | Per-item contradiction, supersession, override, or omitted-sibling state when applicable. |
+| `uncertainty` markers | when available | Includes `uncertainty_score` and its component fields when available; high-stakes paths must include this surface by default. |
+| `payload` / snippet / preview | conditional | Included only when allowed by `payload_state`, budget, and policy. |
+
+### `action_pack` contract
+
+When present, `action_pack` is the only stable home for synthesized answer text, recommended actions, or next-step guidance. It must preserve:
+- the synthesized content or structured action payload,
+- supporting evidence ids or handles,
+- uncertainty markers that qualify the synthesis,
+- any policy or freshness caveats that materially constrain safe use.
+
+### `omitted_summary` contract
+
+`omitted_summary` must preserve counts and reasons for at least these families when relevant:
+- `budget_capped`
+- `policy_filtered`
+- `redacted`
+- `duplicate_collapsed`
+- `low_confidence_suppressed`
+- `stale_bypassed`
+- `conflict_siblings_omitted`
+- `deferred_payload_only`
+
+### `policy_summary` contract
+
+`policy_summary` must preserve:
+- `effective_namespace`
+- approved widening such as `include_public`
+- redaction or denial state that shaped the packaged answer
+- whether policy prevented payload hydration or sibling disclosure
+
+### `provenance_summary` contract
+
+`provenance_summary` must preserve:
+- source-kind mix,
+- lineage anchors or handles,
+- whether returned artifacts are raw evidence, summaries, extracted facts, or other derived artifacts.
+
+### `freshness_markers` contract
+
+`freshness_markers` must preserve relevant markers such as:
+- `decaying_soon`
+- `snapshot_scoped`
+- `as_of_scoped`
+- `lease_sensitive`
+- `stale_derived`
+- `archival_recovery_partial`
+
+### `conflict_markers` contract
+
+`conflict_markers` must preserve relevant markers such as:
+- `open_conflict`
+- `superseded`
+- `authoritative_override`
+- `preferred_operational_answer`
+- `omitted_conflict_sibling`
+
+### Sample outcome shapes
+
+These examples are normative for field presence and semantic meaning, not exact formatting.
+
+#### Accepted evidence-only result
+
+```json
+{
+  "outcome_class": "accepted",
+  "evidence_pack": [
+    {
+      "memory_id": "mem_123",
+      "role": "primary",
+      "entry_lane": "semantic",
+      "payload_state": "inline",
+      "score_summary": { "final_score": 0.91 },
+      "provenance_summary": { "source_kind": "raw_memory", "lineage": ["enc_77"] },
+      "freshness_markers": [],
+      "conflict_markers": [],
+      "uncertainty_score": 0.08
+    }
+  ],
+  "omitted_summary": { "budget_capped": 2 },
+  "policy_summary": { "effective_namespace": "project-x", "include_public": false },
+  "provenance_summary": { "source_kinds": ["raw_memory"], "derived_artifacts_present": false },
+  "freshness_markers": [],
+  "conflict_markers": [],
+  "packaging_metadata": { "result_budget": 5, "packaging_mode": "evidence_only" },
+  "explain_handle": "exp_456"
+}
+```
+
+#### Partial result with deferred/redacted payloads and conflict visibility
+
+```json
+{
+  "outcome_class": "partial",
+  "evidence_pack": [
+    {
+      "memory_id": "mem_200",
+      "role": "primary",
+      "entry_lane": "exact",
+      "payload_state": "preview_only",
+      "score_summary": { "final_score": 0.84 },
+      "provenance_summary": { "source_kind": "summary_artifact", "lineage": ["mem_120", "mem_121"] },
+      "freshness_markers": ["snapshot_scoped"],
+      "conflict_markers": ["open_conflict", "omitted_conflict_sibling"]
+    }
+  ],
+  "omitted_summary": {
+    "policy_filtered": 1,
+    "conflict_siblings_omitted": 1,
+    "deferred_payload_only": 1
+  },
+  "policy_summary": {
+    "effective_namespace": "project-x",
+    "include_public": true,
+    "payload_hydration_blocked": true
+  },
+  "provenance_summary": {
+    "source_kinds": ["summary_artifact", "raw_memory"],
+    "derived_artifacts_present": true
+  },
+  "freshness_markers": ["snapshot_scoped"],
+  "conflict_markers": ["open_conflict", "preferred_operational_answer"],
+  "deferred_payloads": [
+    {
+      "handle": "payload_9",
+      "reason": "budget_capped",
+      "hydrate_via": "inspect",
+      "condition": "remaining_token_budget"
+    }
+  ],
+  "packaging_metadata": {
+    "result_budget": 3,
+    "graph_assistance": { "used": true, "added_supporting": 1 },
+    "packaging_mode": "evidence_plus_action"
+  },
+  "route_summary": { "planner": "tier2_then_graph", "tier3_escalated": false }
+}
+```
+
+### Regression obligations
+
+Schema and serialization tests for future implementation beads must prove that:
+- all transports preserve the same top-level field families and semantic meaning,
+- `action_pack` never replaces or silently redefines `evidence_pack`,
+- omission, freshness, provenance, and conflict markers survive transport-specific formatting,
+- partial, blocked, degraded, and preview outcomes remain distinguishable,
+- sample accepted and partial/deferred/conflict-bearing outputs remain representable without inventing transport-local fields.
+
 ## Tier1 exact and recent retrieval contract
 - Tier1 is the first bounded retrieval surface for exact and recent recall. It is an in-process derived accelerator, not authoritative evidence.
 - Tier1 may return or shortlist only already-authorized items after request normalization, deterministic effective-namespace binding, and policy or owner-boundary checks for the live request.

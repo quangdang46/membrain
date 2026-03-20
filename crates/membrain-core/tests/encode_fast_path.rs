@@ -2,7 +2,7 @@ use membrain_core::engine::encode::{EncodeEngine, EncodeRuntime};
 use membrain_core::observability::EncodeFastPathStage;
 use membrain_core::policy::{IngestMode, PassiveObservationDecision};
 use membrain_core::types::{
-    CanonicalMemoryType, FastPathRouteFamily, RawEncodeInput, RawIntakeKind,
+    CanonicalMemoryType, FastPathRouteFamily, LandmarkMetadata, RawEncodeInput, RawIntakeKind,
 };
 use membrain_core::RuntimeConfig;
 
@@ -33,9 +33,13 @@ fn normalization_and_fingerprint_are_stable_for_equivalent_whitespace() {
             EncodeFastPathStage::Fingerprint,
             EncodeFastPathStage::ShallowClassify,
             EncodeFastPathStage::ProvisionalSalience,
+            EncodeFastPathStage::LandmarkTagging,
         ]
     );
     assert_eq!(first.trace.duplicate_hint_candidate_count, 0);
+    assert_eq!(first.normalized.landmark, LandmarkMetadata::non_landmark());
+    assert_eq!(first.trace.landmark, LandmarkMetadata::non_landmark());
+    assert_eq!(first.trace.landmark_signals, None);
     assert_eq!(first.write_decision, PassiveObservationDecision::Capture);
     assert!(!first.captured_as_observation);
     assert!(first.trace.stayed_within_latency_budget);
@@ -108,6 +112,24 @@ fn passive_observation_capture_stays_explicit_when_policy_allows() {
 
     assert_eq!(observed.write_decision, PassiveObservationDecision::Capture);
     assert!(observed.captured_as_observation);
+    assert_eq!(
+        observed.passive_observation_inspect.source_kind,
+        RawIntakeKind::Observation.as_str()
+    );
+    assert_eq!(observed.passive_observation_inspect.write_decision, "capture");
+    assert_eq!(
+        observed.passive_observation_inspect.observation_source.as_deref(),
+        Some("passive_observation")
+    );
+    assert!(observed
+        .passive_observation_inspect
+        .observation_chunk_id
+        .as_deref()
+        .is_some_and(|chunk| chunk.starts_with("obs-")));
+    assert_eq!(
+        observed.passive_observation_inspect.retention_marker,
+        "volatile_observation"
+    );
 }
 
 #[test]
@@ -123,6 +145,11 @@ fn passive_observation_denial_blocks_capture_when_namespace_is_not_bound() {
 
     assert_eq!(denied.write_decision, PassiveObservationDecision::Deny);
     assert!(!denied.captured_as_observation);
+    assert_eq!(denied.passive_observation_inspect.write_decision, "deny");
+    assert_eq!(
+        denied.passive_observation_inspect.retention_marker,
+        "volatile_observation"
+    );
 }
 
 #[test]
@@ -136,9 +163,17 @@ fn passive_observation_duplicate_hints_are_suppressed() {
         true,
     );
 
-    assert_eq!(suppressed.write_decision, PassiveObservationDecision::Suppress);
+    assert_eq!(
+        suppressed.write_decision,
+        PassiveObservationDecision::Suppress
+    );
     assert_eq!(suppressed.trace.duplicate_hint_candidate_count, 1);
     assert!(!suppressed.captured_as_observation);
+    assert_eq!(suppressed.passive_observation_inspect.write_decision, "suppress");
+    assert_eq!(
+        suppressed.passive_observation_inspect.retention_marker,
+        "volatile_observation"
+    );
 }
 
 #[test]

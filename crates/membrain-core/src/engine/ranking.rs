@@ -162,7 +162,11 @@ pub fn fuse_scores(input: RankingInput, profile: RankingProfile) -> RankingResul
         ScoreSignal::new("recency", input.recency, profile.recency_weight),
         ScoreSignal::new("salience", input.salience, profile.salience_weight),
         ScoreSignal::new("relevance", input.relevance, profile.relevance_weight),
-        ScoreSignal::new("conflict_adjustment", input.conflict, profile.conflict_weight),
+        ScoreSignal::new(
+            "conflict_adjustment",
+            input.conflict,
+            profile.conflict_weight,
+        ),
         ScoreSignal::new("access_frequency", input.access, profile.access_weight),
     ];
 
@@ -209,11 +213,31 @@ impl RankingExplain {
     /// Builds an explain payload from a ranking result.
     pub fn from_result(result: &RankingResult) -> Self {
         let signal_breakdown = vec![
-            (ScoreFamily::Recency, result.signals[0].raw_value, result.signals[0].weight),
-            (ScoreFamily::Salience, result.signals[1].raw_value, result.signals[1].weight),
-            (ScoreFamily::Relevance, result.signals[2].raw_value, result.signals[2].weight),
-            (ScoreFamily::ConflictAdjustment, result.signals[3].raw_value, result.signals[3].weight),
-            (ScoreFamily::AccessFrequency, result.signals[4].raw_value, result.signals[4].weight),
+            (
+                ScoreFamily::Recency,
+                result.signals[0].raw_value,
+                result.signals[0].weight,
+            ),
+            (
+                ScoreFamily::Salience,
+                result.signals[1].raw_value,
+                result.signals[1].weight,
+            ),
+            (
+                ScoreFamily::Relevance,
+                result.signals[2].raw_value,
+                result.signals[2].weight,
+            ),
+            (
+                ScoreFamily::ConflictAdjustment,
+                result.signals[3].raw_value,
+                result.signals[3].weight,
+            ),
+            (
+                ScoreFamily::AccessFrequency,
+                result.signals[4].raw_value,
+                result.signals[4].weight,
+            ),
         ];
 
         Self {

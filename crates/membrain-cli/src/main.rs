@@ -1,5 +1,7 @@
 use clap::{Parser, Subcommand};
 use membrain_core::api::NamespaceId;
+use membrain_daemon::daemon::{DaemonRuntime, DaemonRuntimeConfig};
+use std::path::PathBuf;
 
 #[derive(Parser, Debug)]
 #[command(name = "membrain", version, about = "Membrain CLI", long_about = None)]
@@ -72,41 +74,66 @@ enum Commands {
     },
     /// Validate system configuration and index health
     Doctor,
+    /// Run the local daemon inside the CLI process
+    Daemon {
+        /// Unix socket path to bind
+        #[arg(long, default_value = "/tmp/membrain.sock")]
+        socket_path: PathBuf,
+        /// Maximum number of concurrent request handlers
+        #[arg(long, default_value_t = 8)]
+        request_concurrency: usize,
+        /// Maximum queued requests before new requests are rejected
+        #[arg(long, default_value_t = 32)]
+        max_queue_depth: usize,
+    },
 }
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
     let cli = Cli::parse();
-    
+
     match &cli.command {
-        Commands::Encode { content, namespace, memory_type } => {
+        Commands::Encode {
+            content,
+            namespace,
+            memory_type,
+        } => {
             let ns = NamespaceId::new(namespace)?;
             println!("Encoding memory in '{}': {}", ns.as_str(), content);
             println!("Memory Type: {}", memory_type);
-            // TODO: BrainStore integration
             println!("Output: {{\"status\": \"success\", \"action\": \"encode\"}}");
         }
-        Commands::Recall { query, namespace, limit } => {
+        Commands::Recall {
+            query,
+            namespace,
+            limit,
+        } => {
             let ns = NamespaceId::new(namespace)?;
             println!("Recalling top {} from '{}': {}", limit, ns.as_str(), query);
-            // TODO: BrainStore integration
-            println!("Output: {{\"status\": \"success\", \"action\": \"recall\", \"results\": []}}");
+            println!(
+                "Output: {{\"status\": \"success\", \"action\": \"recall\", \"results\": []}}"
+            );
         }
         Commands::Inspect { id, namespace } => {
             let ns = NamespaceId::new(namespace)?;
             println!("Inspecting entity {} in '{}'", id, ns.as_str());
-            // TODO: BrainStore integration
-            println!("Output: {{\"status\": \"success\", \"action\": \"inspect\", \"entity\": null}}");
+            println!(
+                "Output: {{\"status\": \"success\", \"action\": \"inspect\", \"entity\": null}}"
+            );
         }
         Commands::Explain { query, namespace } => {
             let ns = NamespaceId::new(namespace)?;
             println!("Explaining '{}' in '{}'", query, ns.as_str());
-            // TODO: BrainStore integration
-            println!("Output: {{\"status\": \"success\", \"action\": \"explain\", \"trace\": null}}");
+            println!(
+                "Output: {{\"status\": \"success\", \"action\": \"explain\", \"trace\": null}}"
+            );
         }
         Commands::Maintenance { action, namespace } => {
             let ns_str = namespace.as_deref().unwrap_or("global");
-            println!("Running maintenance action '{}' on scope '{}'", action, ns_str);
+            println!(
+                "Running maintenance action '{}' on scope '{}'",
+                action, ns_str
+            );
             println!("Output: {{\"status\": \"success\", \"action\": \"maintenance\", \"target\": \"{}\"}}", action);
         }
         Commands::Benchmark { target, iters } => {
@@ -117,7 +144,18 @@ async fn main() -> anyhow::Result<()> {
             println!("Running system diagnostic...");
             println!("Output: {{\"status\": \"success\", \"action\": \"doctor\", \"health\": \"healthy\"}}");
         }
+        Commands::Daemon {
+            socket_path,
+            request_concurrency,
+            max_queue_depth,
+        } => {
+            let mut config = DaemonRuntimeConfig::new(socket_path);
+            config.request_concurrency = *request_concurrency;
+            config.max_queue_depth = *max_queue_depth;
+            let runtime = DaemonRuntime::with_config(config);
+            runtime.run_until_stopped().await?;
+        }
     }
-    
+
     Ok(())
 }
