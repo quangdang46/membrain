@@ -1,5 +1,5 @@
-use crate::observability::OutcomeClass;
 use crate::engine::encode::PassiveObservationInspect;
+use crate::observability::OutcomeClass;
 use crate::policy::{
     PolicyGateway, PolicySummary, SafeguardOutcome as PolicySafeguardOutcome, SharingAccessOutcome,
     SharingAccessRequest, SharingVisibility,
@@ -7,7 +7,7 @@ use crate::policy::{
 use crate::types::{MemoryId, SessionId};
 
 /// Stable namespace identifier carried by every core request and response envelope.
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
 pub struct NamespaceId(String);
 
 impl NamespaceId {
@@ -364,7 +364,7 @@ pub struct AvailabilitySummary {
 }
 
 /// Shared absent-vs-redacted field marker for cross-interface response parity.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum FieldPresence<T> {
     Present(T),
     Absent,
@@ -388,33 +388,33 @@ impl<T> FieldPresence<T> {
 }
 
 /// Shared machine-readable summary of policy shaping applied to a visible outcome.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct PolicyFilterSummary {
     pub effective_namespace: String,
-    pub policy_family: &'static str,
+    pub policy_family: String,
     pub outcome_class: OutcomeClass,
-    pub blocked_stage: &'static str,
-    pub sharing_scope: FieldPresence<&'static str>,
-    pub retention_marker: FieldPresence<&'static str>,
-    pub redaction_fields: Vec<&'static str>,
+    pub blocked_stage: String,
+    pub sharing_scope: FieldPresence<String>,
+    pub retention_marker: FieldPresence<String>,
+    pub redaction_fields: Vec<String>,
 }
 
 impl PolicyFilterSummary {
     /// Builds a new machine-readable policy filter summary.
     pub fn new(
         effective_namespace: impl Into<String>,
-        policy_family: &'static str,
+        policy_family: impl Into<String>,
         outcome_class: OutcomeClass,
-        blocked_stage: &'static str,
-        sharing_scope: FieldPresence<&'static str>,
-        retention_marker: FieldPresence<&'static str>,
-        redaction_fields: Vec<&'static str>,
+        blocked_stage: impl Into<String>,
+        sharing_scope: FieldPresence<String>,
+        retention_marker: FieldPresence<String>,
+        redaction_fields: Vec<String>,
     ) -> Self {
         Self {
             effective_namespace: effective_namespace.into(),
-            policy_family,
+            policy_family: policy_family.into(),
             outcome_class,
-            blocked_stage,
+            blocked_stage: blocked_stage.into(),
             sharing_scope,
             retention_marker,
             redaction_fields,
@@ -825,10 +825,9 @@ mod tests {
     use super::{
         ApiModule, AvailabilityPosture, AvailabilityReason, AvailabilitySummary, ConflictMarker,
         ContextValidationError, ErrorKind, FieldPresence, FreshnessMarker, NamespaceId,
-        PolicyContext, PolicyFilterSummary, RemediationHint, RemediationStep, RequestContext,
-        RequestId, ResponseContext, ResponseWarning, ResultReason, RouteSummary,
-        PassiveObservationInspectSummary, TracePolicySummary, TraceProvenanceSummary,
-        TraceStage, UncertaintyMarker,
+        PassiveObservationInspectSummary, PolicyContext, PolicyFilterSummary, RemediationHint,
+        RemediationStep, RequestContext, RequestId, ResponseContext, ResponseWarning, ResultReason,
+        RouteSummary, TracePolicySummary, TraceProvenanceSummary, TraceStage, UncertaintyMarker,
     };
     use crate::observability::OutcomeClass;
     use crate::policy::{
@@ -1183,7 +1182,7 @@ mod tests {
                 "packaging",
                 FieldPresence::Redacted,
                 FieldPresence::Absent,
-                vec!["raw_text"],
+                vec!["raw_text".to_string()],
             )])
             .with_safeguard(safeguard.clone());
         assert!(success.ok);
@@ -1254,6 +1253,37 @@ mod tests {
             )),
         );
         assert_eq!(failure.safeguard, None);
+    }
+
+    #[test]
+    fn passive_observation_summary_preserves_absent_vs_present_fields() {
+        let absent = PassiveObservationInspectSummary::from_encode(
+            &crate::engine::encode::PassiveObservationInspect {
+                source_kind: "event",
+                write_decision: "capture",
+                captured_as_observation: false,
+                observation_source: None,
+                observation_chunk_id: None,
+                retention_marker: "absent",
+            },
+        );
+        assert_eq!(absent.observation_source.state_name(), "absent");
+        assert_eq!(absent.observation_chunk_id.state_name(), "absent");
+        assert_eq!(absent.retention_marker.state_name(), "absent");
+
+        let present = PassiveObservationInspectSummary::from_encode(
+            &crate::engine::encode::PassiveObservationInspect {
+                source_kind: "observation",
+                write_decision: "capture",
+                captured_as_observation: true,
+                observation_source: Some("passive_observation".into()),
+                observation_chunk_id: Some("obs-0000000000000007".into()),
+                retention_marker: "volatile_observation",
+            },
+        );
+        assert_eq!(present.observation_source.state_name(), "present");
+        assert_eq!(present.observation_chunk_id.state_name(), "present");
+        assert_eq!(present.retention_marker.state_name(), "present");
     }
 
     #[test]

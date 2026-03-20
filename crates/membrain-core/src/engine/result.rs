@@ -10,11 +10,12 @@ use crate::engine::recall::{RecallPlan, RecallPlanKind, RecallTraceStage};
 use crate::graph::{EntityId, RelationKind};
 use crate::observability::OutcomeClass;
 use crate::types::{CanonicalMemoryType, MemoryId, SessionId};
+use serde::{Deserialize, Serialize};
 
 // ── Result envelope ──────────────────────────────────────────────────────────
 
 /// Which retrieval role an evidence item plays inside the bounded result set.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum EvidenceRole {
     Primary,
     Supporting,
@@ -31,7 +32,7 @@ impl EvidenceRole {
 }
 
 /// Inline vs deferred payload state preserved across wrappers.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum PayloadState {
     Inline,
     PreviewOnly,
@@ -52,7 +53,7 @@ impl PayloadState {
 }
 
 /// Lane by which an item entered the bounded shortlist.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum EntryLane {
     Exact,
     Recent,
@@ -77,11 +78,11 @@ impl EntryLane {
 }
 
 /// Bounded score decomposition preserved for packaging and inspect surfaces.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ScoreSummary {
     pub final_score: u16,
-    pub signal_breakdown: Vec<(&'static str, u16, u8)>,
-    pub profile: &'static str,
+    pub signal_breakdown: Vec<(String, u16, u8)>,
+    pub profile: String,
 }
 
 impl ScoreSummary {
@@ -92,15 +93,15 @@ impl ScoreSummary {
             signal_breakdown: explain
                 .signal_breakdown
                 .iter()
-                .map(|(family, raw_value, weight)| (family.as_str(), *raw_value, *weight))
+                .map(|(family, raw_value, weight)| (family.as_str().to_string(), *raw_value, *weight))
                 .collect(),
-            profile: explain.profile,
+            profile: explain.profile.clone(),
         }
     }
 }
 
 /// Bounded uncertainty markers attached to returned evidence.
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct UncertaintyMarkers {
     pub confidence: u16,
     pub uncertainty_score: u16,
@@ -110,7 +111,7 @@ pub struct UncertaintyMarkers {
 }
 
 /// Machine-readable conflict summary preserved for every returned item.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ConflictMarkers {
     pub conflict_state: ResolutionState,
     pub conflict_record_ids: Vec<u64>,
@@ -120,7 +121,7 @@ pub struct ConflictMarkers {
 }
 
 /// One ranked retrieval result ready for packaging into a response envelope.
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct RetrievalResult {
     /// Durable memory identity.
     pub memory_id: MemoryId,
@@ -155,7 +156,7 @@ pub struct RetrievalResult {
 }
 
 /// Which storage tier serviced this result.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum AnsweredFrom {
     Tier1Hot,
     Tier2Indexed,
@@ -176,7 +177,7 @@ impl AnsweredFrom {
 // ── Packaging & Sub-Summaries ────────────────────────────────────────────────
 
 /// Omitted result summary (filtered by policy, threshold, or bounded packaging rules).
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct OmissionSummary {
     pub policy_redacted: usize,
     pub threshold_dropped: usize,
@@ -188,17 +189,17 @@ pub struct OmissionSummary {
 }
 
 /// Policy evaluation summary.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct PolicySummary {
     pub namespace_applied: NamespaceId,
     pub outcome_class: OutcomeClass,
     pub redactions_applied: bool,
-    pub restrictions_active: Vec<&'static str>,
+    pub restrictions_active: Vec<String>,
     pub filters: Vec<PolicyFilterSummary>,
 }
 
 /// Freshness markers for the result set.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct FreshnessMarkers {
     pub oldest_item_days: u32,
     pub newest_item_days: u32,
@@ -208,11 +209,11 @@ pub struct FreshnessMarkers {
 }
 
 /// Provenance trace for an item.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ProvenanceSummary {
-    pub source_kind: &'static str,
-    pub source_reference: &'static str,
-    pub source_agent: &'static str,
+    pub source_kind: String,
+    pub source_reference: String,
+    pub source_agent: String,
     pub original_namespace: NamespaceId,
     pub derived_from: Option<MemoryId>,
     pub lineage_ancestors: Vec<MemoryId>,
@@ -221,44 +222,44 @@ pub struct ProvenanceSummary {
 }
 
 /// Bounded evidence item in the evidence pack.
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct EvidenceItem {
     pub result: RetrievalResult,
     pub provenance_summary: ProvenanceSummary,
     pub freshness_markers: FreshnessMarkers,
-    pub omitted_fields: Vec<&'static str>,
+    pub omitted_fields: Vec<String>,
 }
 
 /// Action artifact linking back to evidence.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ActionArtifact {
-    pub action_type: &'static str,
+    pub action_type: String,
     pub suggestion: String,
     pub supporting_evidence: Vec<MemoryId>,
     pub confidence_score: u16,
 }
 
 /// Handle for a payload intentionally deferred past the final bounded cut.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct DeferredPayload {
     pub memory_id: MemoryId,
     pub payload_state: PayloadState,
-    pub reason: &'static str,
-    pub hydration_path: &'static str,
+    pub reason: String,
+    pub hydration_path: String,
 }
 
 /// Packaging facts preserved for downstream consumers.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct PackagingMetadata {
     pub result_budget: usize,
     pub token_budget: Option<usize>,
-    pub graph_assistance: &'static str,
-    pub degraded_summary: Option<&'static str>,
-    pub packaging_mode: &'static str,
+    pub graph_assistance: String,
+    pub degraded_summary: Option<String>,
+    pub packaging_mode: String,
 }
 
 /// Operating mode for dual memory output.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum DualOutputMode {
     Strict,
     Balanced,
@@ -268,7 +269,7 @@ pub enum DualOutputMode {
 // ── Result set ───────────────────────────────────────────────────────────────
 
 /// Packaged result set returned by the retrieval pipeline.
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct RetrievalResultSet {
     /// Final outcome class for the bounded retrieval path.
     pub outcome_class: OutcomeClass,
@@ -315,9 +316,9 @@ impl RetrievalResultSet {
                 filters: Vec::new(),
             },
             provenance_summary: ProvenanceSummary {
-                source_kind: "retrieval_pipeline",
-                source_reference: "result_set",
-                source_agent: "core_engine",
+                source_kind: "retrieval_pipeline".to_string(),
+                source_reference: "result_set".to_string(),
+                source_agent: "core_engine".to_string(),
                 original_namespace: namespace,
                 derived_from: None,
                 lineage_ancestors: Vec::new(),
@@ -343,9 +344,9 @@ impl RetrievalResultSet {
             packaging_metadata: PackagingMetadata {
                 result_budget: 0,
                 token_budget: None,
-                graph_assistance: "none",
+                graph_assistance: "none".to_string(),
                 degraded_summary: None,
-                packaging_mode: "evidence_only",
+                packaging_mode: "evidence_only".to_string(),
             },
             output_mode: DualOutputMode::Balanced,
             truncated: false,
@@ -369,27 +370,37 @@ impl RetrievalResultSet {
             .iter()
             .any(|e| !e.result.contradiction_explains.is_empty())
     }
+
+    /// Encodes the canonical retrieval result set to transport-stable JSON.
+    pub fn to_json(&self) -> Result<String, serde_json::Error> {
+        serde_json::to_string(self)
+    }
+
+    /// Decodes transport JSON back into the canonical result set.
+    pub fn from_json(json: &str) -> Result<Self, serde_json::Error> {
+        serde_json::from_str(json)
+    }
 }
 
 // ── Retrieval explain ────────────────────────────────────────────────────────
 
 /// Why an item appeared or an alternative was omitted.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ResultReason {
     pub memory_id: Option<MemoryId>,
-    pub reason_code: &'static str,
-    pub detail: &'static str,
+    pub reason_code: String,
+    pub detail: String,
 }
 
 /// Top-level explain payload for the full retrieval operation.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct RetrievalExplain {
     /// Route plan chosen by the recall engine.
     pub recall_plan: RecallPlanKind,
     /// Route reason.
-    pub route_reason: &'static str,
+    pub route_reason: String,
     /// Tiers consulted during retrieval.
-    pub tiers_consulted: Vec<&'static str>,
+    pub tiers_consulted: Vec<String>,
     /// Stable trace stages preserved for explain surfaces.
     pub trace_stages: Vec<RecallTraceStage>,
     /// Whether Tier1 answered directly.
@@ -399,7 +410,7 @@ pub struct RetrievalExplain {
     /// Time budget consumed (ms), if known.
     pub time_consumed_ms: Option<u32>,
     /// Ranking profile applied.
-    pub ranking_profile: &'static str,
+    pub ranking_profile: String,
     /// Number of contradictions encountered.
     pub contradictions_found: usize,
     /// Why concrete results appeared or alternatives were omitted.
@@ -409,7 +420,7 @@ pub struct RetrievalExplain {
 impl RetrievalExplain {
     /// Builds an explain payload from a recall plan and ranking profile name.
     pub fn from_plan(plan: &RecallPlan, ranking_profile: &'static str) -> Self {
-        let tiers_consulted: Vec<&'static str> = plan
+        let tiers_consulted: Vec<String> = plan
             .route_summary
             .trace_stages
             .iter()
@@ -418,18 +429,18 @@ impl RetrievalExplain {
                 crate::engine::recall::RecallTraceStage::Tier1RecentWindow => "tier1_recent",
                 crate::engine::recall::RecallTraceStage::Tier2Exact => "tier2_exact",
                 crate::engine::recall::RecallTraceStage::Tier3Fallback => "tier3_fallback",
-            })
+            }.to_string())
             .collect();
 
         Self {
             recall_plan: plan.kind,
-            route_reason: plan.route_summary.reason,
+            route_reason: plan.route_summary.reason.to_string(),
             tiers_consulted,
             trace_stages: plan.route_summary.trace_stages.to_vec(),
             tier1_answered_directly: plan.route_summary.tier1_answers_directly,
             candidate_budget: plan.tier1_candidate_budget,
             time_consumed_ms: None,
-            ranking_profile,
+            ranking_profile: ranking_profile.to_string(),
             contradictions_found: 0,
             result_reasons: Vec::new(),
         }
@@ -521,9 +532,9 @@ impl ResultBuilder {
         };
 
         let provenance_summary = ProvenanceSummary {
-            source_kind: "memory",
-            source_reference: "memory_id",
-            source_agent: "core_engine",
+            source_kind: "memory".to_string(),
+            source_reference: "memory_id".to_string(),
+            source_agent: "core_engine".to_string(),
             original_namespace: namespace,
             derived_from: None,
             lineage_ancestors: Vec::new(),
@@ -577,15 +588,15 @@ impl ResultBuilder {
                     "namespace",
                     OutcomeClass::Accepted,
                     "none",
-                    FieldPresence::Present("namespace_bound"),
+                    FieldPresence::Present("namespace_bound".to_string()),
                     FieldPresence::Absent,
                     Vec::new(),
                 )],
             },
             provenance_summary: ProvenanceSummary {
-                source_kind: "retrieval_pipeline",
-                source_reference: "result_builder",
-                source_agent: "core_engine",
+                source_kind: "retrieval_pipeline".to_string(),
+                source_reference: "result_builder".to_string(),
+                source_agent: "core_engine".to_string(),
                 original_namespace: self.namespace_applied.clone(),
                 derived_from: None,
                 lineage_ancestors: Vec::new(),
@@ -611,9 +622,9 @@ impl ResultBuilder {
             packaging_metadata: PackagingMetadata {
                 result_budget: self.max_results,
                 token_budget: None,
-                graph_assistance: "none",
+                graph_assistance: "none".to_string(),
                 degraded_summary: None,
-                packaging_mode,
+                packaging_mode: packaging_mode.to_string(),
             },
             output_mode: DualOutputMode::Balanced,
             truncated,
@@ -696,18 +707,18 @@ mod tests {
 
         let explain = RetrievalExplain {
             recall_plan: RecallPlanKind::Tier2ExactThenTier3Fallback,
-            route_reason: "test",
-            tiers_consulted: vec!["tier1_exact"],
+            route_reason: "test".to_string(),
+            tiers_consulted: vec!["tier1_exact".to_string()],
             trace_stages: vec![RecallTraceStage::Tier1ExactHandle],
             tier1_answered_directly: false,
             candidate_budget: 10,
             time_consumed_ms: None,
-            ranking_profile: "balanced",
+            ranking_profile: "balanced".to_string(),
             contradictions_found: 0,
             result_reasons: vec![ResultReason {
                 memory_id: Some(MemoryId(2)),
-                reason_code: "score_kept",
-                detail: "top-ranked result stayed within the bounded result cap",
+                reason_code: "score_kept".to_string(),
+                detail: "top-ranked result stayed within the bounded result cap".to_string(),
             }],
         };
 
@@ -718,14 +729,20 @@ mod tests {
         assert_eq!(result_set.total_candidates, 3);
         assert_eq!(result_set.omitted_summary.budget_capped, 1);
         assert_eq!(result_set.packaging_metadata.result_budget, 2);
-        assert_eq!(result_set.packaging_metadata.packaging_mode, "evidence_only");
+        assert_eq!(
+            result_set.packaging_metadata.packaging_mode,
+            "evidence_only"
+        );
         assert!(result_set.deferred_payloads.is_empty());
         // Highest score first
         assert!(
             result_set.evidence_pack[0].result.score >= result_set.evidence_pack[1].result.score
         );
         assert_eq!(result_set.evidence_pack[0].result.memory_id, MemoryId(2));
-        assert_eq!(result_set.evidence_pack[0].result.entry_lane.as_str(), "exact");
+        assert_eq!(
+            result_set.evidence_pack[0].result.entry_lane.as_str(),
+            "exact"
+        );
         assert_eq!(
             result_set.evidence_pack[0].result.score_summary.final_score,
             result_set.evidence_pack[0].result.score
@@ -740,18 +757,18 @@ mod tests {
     fn empty_result_set() {
         let explain = RetrievalExplain {
             recall_plan: RecallPlanKind::ExactIdTier1,
-            route_reason: "no match",
-            tiers_consulted: vec!["tier1_exact"],
+            route_reason: "no match".to_string(),
+            tiers_consulted: vec!["tier1_exact".to_string()],
             trace_stages: vec![RecallTraceStage::Tier1ExactHandle],
             tier1_answered_directly: true,
             candidate_budget: 10,
             time_consumed_ms: Some(5),
-            ranking_profile: "balanced",
+            ranking_profile: "balanced".to_string(),
             contradictions_found: 0,
             result_reasons: vec![ResultReason {
                 memory_id: None,
-                reason_code: "no_match",
-                detail: "the bounded route produced no candidates",
+                reason_code: "no_match".to_string(),
+                detail: "the bounded route produced no candidates".to_string(),
             }],
         };
 
@@ -761,7 +778,10 @@ mod tests {
         assert!(!result_set.has_contradictions());
         assert!(result_set.top().is_none());
         assert!(result_set.deferred_payloads.is_empty());
-        assert_eq!(result_set.packaging_metadata.packaging_mode, "evidence_only");
+        assert_eq!(
+            result_set.packaging_metadata.packaging_mode,
+            "evidence_only"
+        );
         assert_eq!(result_set.omitted_summary.budget_capped, 0);
     }
 

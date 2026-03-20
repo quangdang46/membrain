@@ -33,7 +33,7 @@ impl RecallRequest {
 }
 
 /// Stable planner branches for exact-id, recent, and deeper fallback routing.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum RecallPlanKind {
     ExactIdTier1,
     RecentTier1ThenTier2Exact,
@@ -41,7 +41,7 @@ pub enum RecallPlanKind {
 }
 
 /// Stage-level route facts preserved for explain and inspect surfaces.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum RecallTraceStage {
     Tier1ExactHandle,
     Tier1RecentWindow,

@@ -598,7 +598,7 @@ mod tests {
             TierOwnership::Hot,
             LifecycleState::Dormant,
             500,
-            5000,     // within dormancy grace threshold
+            5000,       // within dormancy grace threshold
             100 * 1024, // exceeds 64 KB limit
             false,
         );

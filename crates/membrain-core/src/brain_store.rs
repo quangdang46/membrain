@@ -1,9 +1,10 @@
 use crate::api::ApiModule;
+use crate::api::NamespaceId;
 use crate::config::RuntimeConfig;
 use crate::embed::EmbedModule;
 use crate::engine::consolidation::ConsolidationEngine;
-use crate::engine::contradiction::ContradictionEngine;
-use crate::engine::encode::EncodeEngine;
+use crate::engine::contradiction::{ContradictionEngine, ContradictionError, ContradictionKind};
+use crate::engine::encode::{ContradictionWriteOutcome, EncodeEngine};
 use crate::engine::forgetting::ForgettingEngine;
 use crate::engine::ranking::RankingEngine;
 use crate::engine::recall::RecallEngine;
@@ -13,10 +14,11 @@ use crate::index::IndexModule;
 use crate::migrate::MigrationModule;
 use crate::observability::ObservabilityModule;
 use crate::policy::PolicyModule;
+use crate::store::audit::AuditLogStore;
 use crate::store::cold::ColdStore;
 use crate::store::hot::HotStore;
 use crate::store::tier2::Tier2Store;
-use crate::types::CoreApiVersion;
+use crate::types::{CoreApiVersion, MemoryId};
 
 /// Stable top-level core facade for the initial workspace bootstrap.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -35,6 +37,7 @@ pub struct BrainStore {
     hot_store: HotStore,
     tier2_store: Tier2Store,
     cold_store: ColdStore,
+    audit_log_store: AuditLogStore,
     graph: GraphModule,
     index: IndexModule,
     embed: EmbedModule,
@@ -59,6 +62,7 @@ impl BrainStore {
             hot_store: HotStore,
             tier2_store: Tier2Store,
             cold_store: ColdStore,
+            audit_log_store: AuditLogStore,
             graph: GraphModule,
             index: IndexModule,
             embed: EmbedModule,
@@ -116,6 +120,25 @@ impl BrainStore {
         &mut self.contradiction
     }
 
+    /// Records an encode-side contradiction branch without silently overwriting either memory.
+    pub fn record_encode_contradiction(
+        &mut self,
+        namespace: NamespaceId,
+        existing_memory: MemoryId,
+        incoming_memory: MemoryId,
+        kind: ContradictionKind,
+        conflict_score: u16,
+    ) -> Result<ContradictionWriteOutcome, ContradictionError> {
+        self.encode.record_contradiction_branch(
+            &mut self.contradiction,
+            namespace,
+            existing_memory,
+            incoming_memory,
+            kind,
+            conflict_score,
+        )
+    }
+
     /// Returns the shared consolidation surface owned by the core crate.
     pub fn consolidation_engine(&self) -> &ConsolidationEngine {
         &self.consolidation
@@ -144,6 +167,11 @@ impl BrainStore {
     /// Returns the canonical cold storage surface owned by the core crate.
     pub fn cold_store(&self) -> &ColdStore {
         &self.cold_store
+    }
+
+    /// Returns the append-only audit-log storage surface owned by the core crate.
+    pub fn audit_log_store(&self) -> &AuditLogStore {
+        &self.audit_log_store
     }
 
     /// Returns the bounded graph surface owned by the core crate.

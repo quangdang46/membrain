@@ -1,4 +1,8 @@
+use crate::api::NamespaceId;
 use crate::config::RuntimeConfig;
+use crate::engine::contradiction::{
+    ContradictionError, ContradictionId, ContradictionKind, ContradictionRecord, ContradictionStore,
+};
 use crate::observability::{
     AdmissionOutcomeKind, EncodeFastPathStage, EncodeFastPathTrace, WorkingMemoryTrace,
 };
@@ -6,7 +10,7 @@ use crate::policy::{
     IngestMode, ObservationWriteOutcome, PassiveObservationDecision, PolicyGateway,
 };
 use crate::types::{
-    CanonicalMemoryType, FastPathRouteFamily, LandmarkMetadata, LandmarkSignals,
+    CanonicalMemoryType, FastPathRouteFamily, LandmarkMetadata, LandmarkSignals, MemoryId,
     NormalizedMemoryEnvelope, RawEncodeInput, WorkingMemoryId, WorkingMemoryItem,
 };
 use xxhash_rust::xxh64::xxh64;
@@ -74,6 +78,30 @@ pub struct PreparedEncodeCandidate {
     pub passive_observation_inspect: PassiveObservationInspect,
     /// Structured trace proving the ordered fast-path stages.
     pub trace: EncodeFastPathTrace,
+}
+
+/// Machine-readable write-path branch taken when a contradiction is detected.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum EncodeWriteBranch {
+    /// The candidate may continue through the ordinary write path.
+    Accepted,
+    /// The candidate branched into explicit contradiction recording.
+    ContradictionRecorded,
+}
+
+/// Result of routing an encode candidate through contradiction-aware write branching.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ContradictionWriteOutcome {
+    /// Stable contradiction artifact created for the conflicting pair.
+    pub contradiction_id: ContradictionId,
+    /// Machine-readable branch taken by the write path.
+    pub branch: EncodeWriteBranch,
+    /// Existing durable memory preserved as one side of the contradiction.
+    pub existing_memory: MemoryId,
+    /// Incoming durable memory preserved as the other side of the contradiction.
+    pub incoming_memory: MemoryId,
+    /// Canonical contradiction relationship recorded for the pair.
+    pub kind: ContradictionKind,
 }
 
 const LANDMARK_AROUSAL_THRESHOLD: f32 = 0.7;
@@ -222,6 +250,34 @@ impl EncodeEngine {
         Self {
             working_memory: WorkingMemoryController::new(config),
         }
+    }
+
+    /// Branches a conflicting write into an explicit contradiction artifact instead of overwrite.
+    pub fn record_contradiction_branch(
+        &self,
+        contradictions: &mut impl ContradictionStore,
+        namespace: NamespaceId,
+        existing_memory: MemoryId,
+        incoming_memory: MemoryId,
+        kind: ContradictionKind,
+        conflict_score: u16,
+    ) -> Result<ContradictionWriteOutcome, ContradictionError> {
+        let contradiction_id = contradictions.record(ContradictionRecord::new(
+            ContradictionId(0),
+            namespace,
+            existing_memory,
+            incoming_memory,
+            kind,
+            conflict_score,
+        ))?;
+
+        Ok(ContradictionWriteOutcome {
+            contradiction_id,
+            branch: EncodeWriteBranch::ContradictionRecorded,
+            existing_memory,
+            incoming_memory,
+            kind,
+        })
     }
 
     fn write_gate(
@@ -443,14 +499,22 @@ impl EncodeRuntime for EncodeEngine {
 
 #[cfg(test)]
 mod tests {
-    use super::EncodeEngine;
+    use super::{EncodeEngine, EncodeWriteBranch};
+    use crate::api::NamespaceId;
+    use crate::engine::contradiction::{
+        ContradictionEngine, ContradictionError, ContradictionKind, ContradictionStore,
+    };
     use crate::policy::IngestMode;
     use crate::policy::PassiveObservationDecision;
-    use crate::types::{LandmarkSignals, RawEncodeInput, RawIntakeKind};
+    use crate::types::{LandmarkSignals, MemoryId, RawEncodeInput, RawIntakeKind};
     use crate::RuntimeConfig;
 
     fn test_engine() -> EncodeEngine {
         EncodeEngine::new(RuntimeConfig::default())
+    }
+
+    fn test_namespace() -> NamespaceId {
+        NamespaceId::new("tests/encode").unwrap()
     }
 
     #[test]
@@ -548,5 +612,55 @@ mod tests {
             prepared.trace.landmark_signals,
             Some(LandmarkSignals::new(0.62, 0.91, 0.20, 88))
         );
+    }
+
+    #[test]
+    fn contradiction_branch_records_explicit_artifact() {
+        let engine = test_engine();
+        let mut contradictions = ContradictionEngine::new();
+
+        let outcome = engine
+            .record_contradiction_branch(
+                &mut contradictions,
+                test_namespace(),
+                MemoryId(41),
+                MemoryId(42),
+                ContradictionKind::Supersession,
+                777,
+            )
+            .unwrap();
+
+        assert_eq!(outcome.branch, EncodeWriteBranch::ContradictionRecorded);
+        assert_eq!(outcome.existing_memory, MemoryId(41));
+        assert_eq!(outcome.incoming_memory, MemoryId(42));
+        assert_eq!(contradictions.find_by_memory(MemoryId(41)).len(), 1);
+    }
+
+    #[test]
+    fn contradiction_branch_does_not_silently_duplicate_existing_pair() {
+        let engine = test_engine();
+        let mut contradictions = ContradictionEngine::new();
+
+        engine
+            .record_contradiction_branch(
+                &mut contradictions,
+                test_namespace(),
+                MemoryId(41),
+                MemoryId(42),
+                ContradictionKind::Revision,
+                650,
+            )
+            .unwrap();
+
+        let duplicate = engine.record_contradiction_branch(
+            &mut contradictions,
+            test_namespace(),
+            MemoryId(42),
+            MemoryId(41),
+            ContradictionKind::Duplicate,
+            650,
+        );
+
+        assert_eq!(duplicate.unwrap_err(), ContradictionError::DuplicateRecord);
     }
 }

@@ -34,7 +34,7 @@ impl ScoreSignal {
 }
 
 /// Stable scoring signal families used by the canonical ranking formula.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
 pub enum ScoreFamily {
     /// Time-based decay: more recent = higher score.
     Recency,
@@ -195,14 +195,14 @@ pub fn fuse_scores(input: RankingInput, profile: RankingProfile) -> RankingResul
 // ── Explain payload ──────────────────────────────────────────────────────────
 
 /// Machine-readable ranking explain payload for retrieval result envelopes.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct RankingExplain {
     /// Final fused score.
     pub final_score: u16,
     /// Named signal breakdown.
     pub signal_breakdown: Vec<(ScoreFamily, u16, u8)>,
     /// Profile that was applied.
-    pub profile: &'static str,
+    pub profile: String,
     /// Whether the result was in a contradiction.
     pub has_conflict: bool,
     /// Contradiction-specific explanations.
@@ -243,7 +243,7 @@ impl RankingExplain {
         Self {
             final_score: result.final_score,
             signal_breakdown,
-            profile: result.profile_name,
+            profile: result.profile_name.to_string(),
             has_conflict: !result.contradiction_explains.is_empty(),
             contradiction_details: result.contradiction_explains.clone(),
         }

@@ -505,8 +505,7 @@ impl DaemonRuntime {
                     Err(err)
                         if matches!(
                             err.kind(),
-                            std::io::ErrorKind::ConnectionRefused
-                                | std::io::ErrorKind::NotFound
+                            std::io::ErrorKind::ConnectionRefused | std::io::ErrorKind::NotFound
                         ) =>
                     {
                         tokio::fs::remove_file(&self.config.socket_path).await?;
@@ -972,7 +971,10 @@ mod tests {
             json!({"jsonrpc":"2.0","method":"status","params":{},"id":"status"}),
         )
         .await;
-        assert_eq!(status_response["result"]["metrics"]["maintenance_runs"], json!(1));
+        assert_eq!(
+            status_response["result"]["metrics"]["maintenance_runs"],
+            json!(1)
+        );
 
         let shutdown_response = send_request(
             &socket_path,

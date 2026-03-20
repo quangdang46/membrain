@@ -1,4 +1,6 @@
-use membrain_core::api::{NamespaceId, PassiveObservationInspectSummary, RequestId, ResponseContext};
+use membrain_core::api::{
+    NamespaceId, PassiveObservationInspectSummary, RequestId, ResponseContext,
+};
 use membrain_core::engine::encode::EncodeRuntime;
 use membrain_core::engine::ranking::RankingRuntime;
 use membrain_core::engine::recall::{RecallRuntime, RecallTraceStage};
@@ -234,4 +236,30 @@ fn cli_can_surface_passive_observation_inspect_provenance_and_retention() {
     assert_eq!(passive.observation_source.state_name(), "present");
     assert_eq!(passive.observation_chunk_id.state_name(), "present");
     assert_eq!(passive.retention_marker.state_name(), "present");
+}
+
+#[test]
+fn cli_keeps_non_observation_inspect_fields_explicitly_absent() {
+    let store = BrainStore::new(RuntimeConfig::default());
+    let active = store.encode_engine().prepare_fast_path(RawEncodeInput::new(
+        RawIntakeKind::Event,
+        "ordinary active intake",
+    ));
+
+    let response = ResponseContext::success(
+        NamespaceId::new("cli.team").unwrap(),
+        RequestId::new("req-active-ingest").unwrap(),
+        1u8,
+    )
+    .with_passive_observation(PassiveObservationInspectSummary::from_encode(
+        &active.passive_observation_inspect,
+    ));
+
+    let passive = response.passive_observation.as_ref().unwrap();
+    assert_eq!(passive.source_kind, "event");
+    assert_eq!(passive.write_decision, "capture");
+    assert!(!passive.captured_as_observation);
+    assert_eq!(passive.observation_source.state_name(), "absent");
+    assert_eq!(passive.observation_chunk_id.state_name(), "absent");
+    assert_eq!(passive.retention_marker.state_name(), "absent");
 }

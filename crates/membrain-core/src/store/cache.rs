@@ -612,7 +612,8 @@ impl BoundedCacheStore {
         let mut evicted_existing = !replaced_keys.is_empty();
         for replaced_key in &replaced_keys {
             self.entries.remove(replaced_key);
-            self.access_order.retain(|existing| existing != replaced_key);
+            self.access_order
+                .retain(|existing| existing != replaced_key);
         }
 
         if self.entries.len() >= self.capacity && !self.entries.contains_key(&key) {

@@ -244,7 +244,10 @@ mod tests {
         let error = request.parse_method().unwrap_err();
         assert_eq!(error.code, -32600);
         assert_eq!(error.message, "unsupported jsonrpc version");
-        assert_eq!(error.data, Some(json!({ "expected": "2.0", "actual": "1.0" })));
+        assert_eq!(
+            error.data,
+            Some(json!({ "expected": "2.0", "actual": "1.0" }))
+        );
     }
 
     #[test]

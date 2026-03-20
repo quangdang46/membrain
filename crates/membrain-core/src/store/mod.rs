@@ -1,4 +1,5 @@
 /// Bounded cache families, admission, prefetch, invalidation, and observability.
+pub mod audit;
 pub mod cache;
 pub mod cold;
 pub mod hot;
@@ -6,6 +7,7 @@ pub mod tier2;
 /// Tier routing, promotion, demotion, and lifecycle-aware placement decisions.
 pub mod tier_router;
 
+pub use audit::AuditLogStore;
 pub use cache::CacheManager;
 pub use cold::ColdStore;
 pub use hot::HotStore;
@@ -33,18 +35,35 @@ pub trait ColdStoreApi {
     fn component_name(&self) -> &'static str;
 }
 
+/// Shared append-only audit-log boundary for forensic and governance history.
+pub trait AuditLogStoreApi {
+    /// Returns the stable component identifier for this audit-log surface.
+    fn component_name(&self) -> &'static str;
+}
+
 /// Stable store set composed by the core facade.
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
 pub struct CoreStores {
     hot: HotStore,
     tier2: Tier2Store,
     cold: ColdStore,
+    audit: AuditLogStore,
 }
 
 impl CoreStores {
     /// Builds the stable store set from the canonical core-owned store surfaces.
-    pub const fn new(hot: HotStore, tier2: Tier2Store, cold: ColdStore) -> Self {
-        Self { hot, tier2, cold }
+    pub const fn new(
+        hot: HotStore,
+        tier2: Tier2Store,
+        cold: ColdStore,
+        audit: AuditLogStore,
+    ) -> Self {
+        Self {
+            hot,
+            tier2,
+            cold,
+            audit,
+        }
     }
 
     /// Returns the Tier1 store boundary.
@@ -60,5 +79,10 @@ impl CoreStores {
     /// Returns the cold/archive store boundary.
     pub fn cold(&self) -> &ColdStore {
         &self.cold
+    }
+
+    /// Returns the append-only audit-log store boundary.
+    pub fn audit(&self) -> &AuditLogStore {
+        &self.audit
     }
 }

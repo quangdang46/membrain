@@ -11,7 +11,7 @@ use std::collections::{HashSet, VecDeque};
 // ── Entity types ─────────────────────────────────────────────────────────────
 
 /// Stable identifier for graph nodes.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
 pub struct EntityId(pub u64);
 
 /// Canonical entity kinds in the association graph.
@@ -55,7 +55,7 @@ pub struct GraphEntity {
 // ── Edge types ───────────────────────────────────────────────────────────────
 
 /// Canonical relationship kinds between entities.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
 pub enum RelationKind {
     /// Memory mentions or references a concept.
     Mentions,
@@ -526,10 +526,9 @@ mod tests {
         assert_eq!(nb.entities.len(), 1);
         assert!(nb.truncated);
         assert_eq!(ex.edges_followed, 1);
-        assert!(
-            ex.cutoff_reasons
-                .contains(&CutoffReason::MaxNodesReached(1))
-        );
+        assert!(ex
+            .cutoff_reasons
+            .contains(&CutoffReason::MaxNodesReached(1)));
     }
 
     #[test]

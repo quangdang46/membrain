@@ -215,7 +215,8 @@ Full memory details: tier, lineage, policy, lifecycle, archive reason and restor
 
 Inspect contract:
 - `membrain inspect` is the item-anchored structural and diagnostic surface, not a second retrieval path with different semantics.
-- In `--json` mode it should preserve the same machine-readable families the retrieval contract expects when they are relevant to the inspected item: `policy_summary`, `provenance_summary`, `freshness_markers`, `conflict_markers`, and `trace_stages` or an `explain_handle` when deeper routing context is deferred.
+- In `--json` mode it should preserve the same machine-readable families the retrieval contract expects when they are relevant to the inspected item: `policy_summary`, `provenance_summary`, `freshness_markers`, `conflict_markers`, `passive_observation`, and `trace_stages` or an `explain_handle` when deeper routing context is deferred.
+- When the inspected item came from passive observation, `passive_observation` should make `source_kind`, `write_decision`, `captured_as_observation`, `observation_source`, `observation_chunk_id`, and `retention_marker` inspectable with absent-versus-redacted fidelity instead of collapsing that provenance into prose.
 - When the inspected item was returned, filtered, archived, degraded, or partially reconstructed through a bounded route that still matters operationally, `inspect` should expose enough cache/tier/route metadata to explain that state without forcing operators to infer it from prose.
 
 ```bash

@@ -994,6 +994,8 @@ version = "0.1.0"
 dependencies = [
  "fastembed",
  "petgraph",
+ "serde",
+ "serde_json",
  "xxhash-rust",
 ]
 

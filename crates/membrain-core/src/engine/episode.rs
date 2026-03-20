@@ -175,9 +175,17 @@ impl EpisodeGroupingModule {
         };
 
         let mut matching_fields = vec![primary_reason];
-        if members.len() > 1 && members.iter().all(|m| m.session_id == first.session_id && m.session_id.is_some()) {
+        if members.len() > 1
+            && members
+                .iter()
+                .all(|m| m.session_id == first.session_id && m.session_id.is_some())
+        {
             matching_fields.push("session_id");
-        } else if members.len() > 1 && members.iter().all(|m| m.task_id == first.task_id && m.task_id.is_some()) {
+        } else if members.len() > 1
+            && members
+                .iter()
+                .all(|m| m.task_id == first.task_id && m.task_id.is_some())
+        {
             matching_fields.push("task_id");
         }
 
@@ -323,7 +331,10 @@ mod tests {
 
         // 1 & 2 grouped because of overlap.
         assert_eq!(groups[0].members, vec![MemoryId(1), MemoryId(2)]);
-        assert!(groups[0].explain.matching_fields.contains(&"entity_overlap"));
+        assert!(groups[0]
+            .explain
+            .matching_fields
+            .contains(&"entity_overlap"));
 
         // 3 broken off because no entity overlap with 2
         assert_eq!(groups[1].members, vec![MemoryId(3)]);

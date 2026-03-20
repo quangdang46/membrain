@@ -1,8 +1,12 @@
-use membrain_core::engine::encode::{EncodeEngine, EncodeRuntime};
+use membrain_core::api::NamespaceId;
+use membrain_core::brain_store::BrainStore;
+use membrain_core::engine::contradiction::{ContradictionKind, ContradictionStore};
+use membrain_core::engine::encode::{EncodeEngine, EncodeRuntime, EncodeWriteBranch};
 use membrain_core::observability::EncodeFastPathStage;
 use membrain_core::policy::{IngestMode, PassiveObservationDecision};
 use membrain_core::types::{
-    CanonicalMemoryType, FastPathRouteFamily, LandmarkMetadata, RawEncodeInput, RawIntakeKind,
+    CanonicalMemoryType, FastPathRouteFamily, LandmarkMetadata, MemoryId, RawEncodeInput,
+    RawIntakeKind,
 };
 use membrain_core::RuntimeConfig;
 
@@ -116,9 +120,15 @@ fn passive_observation_capture_stays_explicit_when_policy_allows() {
         observed.passive_observation_inspect.source_kind,
         RawIntakeKind::Observation.as_str()
     );
-    assert_eq!(observed.passive_observation_inspect.write_decision, "capture");
     assert_eq!(
-        observed.passive_observation_inspect.observation_source.as_deref(),
+        observed.passive_observation_inspect.write_decision,
+        "capture"
+    );
+    assert_eq!(
+        observed
+            .passive_observation_inspect
+            .observation_source
+            .as_deref(),
         Some("passive_observation")
     );
     assert!(observed
@@ -169,7 +179,10 @@ fn passive_observation_duplicate_hints_are_suppressed() {
     );
     assert_eq!(suppressed.trace.duplicate_hint_candidate_count, 1);
     assert!(!suppressed.captured_as_observation);
-    assert_eq!(suppressed.passive_observation_inspect.write_decision, "suppress");
+    assert_eq!(
+        suppressed.passive_observation_inspect.write_decision,
+        "suppress"
+    );
     assert_eq!(
         suppressed.passive_observation_inspect.retention_marker,
         "volatile_observation"
@@ -189,4 +202,65 @@ fn encode_runtime_trait_delegates_to_the_inherent_fast_path() {
     assert_eq!(prepared.normalized.compact_text, "trait dispatched encode");
     assert_eq!(prepared.write_decision, PassiveObservationDecision::Capture);
     assert!(!prepared.captured_as_observation);
+}
+
+#[test]
+fn contradiction_branching_records_an_explicit_artifact_instead_of_overwrite() {
+    let mut store = BrainStore::default();
+    let namespace = NamespaceId::new("tests/contradictions").unwrap();
+
+    let outcome = store
+        .record_encode_contradiction(
+            namespace.clone(),
+            MemoryId(11),
+            MemoryId(22),
+            ContradictionKind::Revision,
+            640,
+        )
+        .unwrap();
+
+    assert_eq!(outcome.branch, EncodeWriteBranch::ContradictionRecorded);
+    assert_eq!(outcome.existing_memory, MemoryId(11));
+    assert_eq!(outcome.incoming_memory, MemoryId(22));
+    assert_eq!(outcome.kind, ContradictionKind::Revision);
+
+    let explains = store
+        .contradiction_engine()
+        .explain_for_memory(MemoryId(11));
+    assert_eq!(explains.len(), 1);
+    assert_eq!(explains[0].contradiction_id.0, outcome.contradiction_id.0);
+    assert_eq!(explains[0].conflicting_memory, MemoryId(22));
+}
+
+#[test]
+fn contradiction_branching_rejects_duplicate_pair_records() {
+    let mut store = BrainStore::default();
+    let namespace = NamespaceId::new("tests/contradictions").unwrap();
+
+    store
+        .record_encode_contradiction(
+            namespace.clone(),
+            MemoryId(7),
+            MemoryId(8),
+            ContradictionKind::Duplicate,
+            900,
+        )
+        .unwrap();
+
+    let duplicate = store.record_encode_contradiction(
+        namespace,
+        MemoryId(8),
+        MemoryId(7),
+        ContradictionKind::Revision,
+        750,
+    );
+
+    assert!(duplicate.is_err());
+    assert_eq!(
+        store
+            .contradiction_engine()
+            .find_by_memory(MemoryId(7))
+            .len(),
+        1
+    );
 }

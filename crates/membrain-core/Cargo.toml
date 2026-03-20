@@ -12,3 +12,5 @@ path = "src/lib.rs"
 fastembed = { version = "5.13.0", default-features = false, features = ["hf-hub-rustls-tls", "ort-download-binaries-rustls-tls"] }
 xxhash-rust = { version = "0.8", features = ["xxh64"] }
 petgraph = "0.6"
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"

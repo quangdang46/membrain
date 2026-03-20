@@ -1,7 +1,74 @@
 use crate::types::{CanonicalMemoryType, FastPathRouteFamily, LandmarkMetadata, LandmarkSignals};
 
+/// High-level audit event families preserved in append-only storage.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum AuditEventCategory {
+    Encode,
+    Recall,
+    Policy,
+    Maintenance,
+    Archive,
+}
+
+impl AuditEventCategory {
+    /// Returns the stable machine-readable category name.
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Encode => "encode",
+            Self::Recall => "recall",
+            Self::Policy => "policy",
+            Self::Maintenance => "maintenance",
+            Self::Archive => "archive",
+        }
+    }
+}
+
+/// Stable audit event taxonomy for append-only log rows.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum AuditEventKind {
+    EncodeAccepted,
+    EncodeRejected,
+    RecallServed,
+    RecallDenied,
+    PolicyDenied,
+    PolicyRedacted,
+    MaintenanceRepairStarted,
+    MaintenanceRepairCompleted,
+    ArchiveRecorded,
+}
+
+impl AuditEventKind {
+    /// Returns the stable machine-readable event name.
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::EncodeAccepted => "encode_accepted",
+            Self::EncodeRejected => "encode_rejected",
+            Self::RecallServed => "recall_served",
+            Self::RecallDenied => "recall_denied",
+            Self::PolicyDenied => "policy_denied",
+            Self::PolicyRedacted => "policy_redacted",
+            Self::MaintenanceRepairStarted => "maintenance_repair_started",
+            Self::MaintenanceRepairCompleted => "maintenance_repair_completed",
+            Self::ArchiveRecorded => "archive_recorded",
+        }
+    }
+
+    /// Returns the canonical category for this event kind.
+    pub const fn category(self) -> AuditEventCategory {
+        match self {
+            Self::EncodeAccepted | Self::EncodeRejected => AuditEventCategory::Encode,
+            Self::RecallServed | Self::RecallDenied => AuditEventCategory::Recall,
+            Self::PolicyDenied | Self::PolicyRedacted => AuditEventCategory::Policy,
+            Self::MaintenanceRepairStarted | Self::MaintenanceRepairCompleted => {
+                AuditEventCategory::Maintenance
+            }
+            Self::ArchiveRecorded => AuditEventCategory::Archive,
+        }
+    }
+}
+
 /// Canonical outcome classes shared across core APIs and wrappers.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum OutcomeClass {
     Accepted,
     Rejected,

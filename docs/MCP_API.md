@@ -306,9 +306,9 @@ Create or update explicit relations between memories, entities, or goals.
 
 Retrieve diagnostic and structural details about a memory.
 
-**Exposes**: current tier, lineage, policy flags, lifecycle state, archive reason and restore eligibility when relevant, index presence, graph neighborhood summary, decay/retention info, cache-related routing metadata when relevant, provenance summary, freshness markers, duplicate-family or interference-maintenance summaries when present, degraded or partial-fidelity markers when archival recovery is incomplete, and linked contradiction state (`conflict_state`, related `ConflictRecord` handles, preferred memory if resolved)
+**Exposes**: current tier, lineage, policy flags, lifecycle state, archive reason and restore eligibility when relevant, index presence, graph neighborhood summary, decay/retention info, cache-related routing metadata when relevant, provenance summary, freshness markers, duplicate-family or interference-maintenance summaries when present, degraded or partial-fidelity markers when archival recovery is incomplete, passive-observation inspect metadata (`source_kind`, `write_decision`, `captured_as_observation`, `observation_source`, `observation_chunk_id`, `retention_marker`) when relevant, and linked contradiction state (`conflict_state`, related `ConflictRecord` handles, preferred memory if resolved)
 
-When `memory_inspect` includes embedded explanation or route context, it should reuse the canonical families relevant to the inspected item rather than inventing a separate inspect-only schema, especially `policy_summary`, `provenance_summary`, `freshness_markers`, `conflict_markers`, and `trace_stages` or an `explain_handle` for deferred detail.
+When `memory_inspect` includes embedded explanation or route context, it should reuse the canonical families relevant to the inspected item rather than inventing a separate inspect-only schema, especially `policy_summary`, `provenance_summary`, `freshness_markers`, `conflict_markers`, `passive_observation`, and `trace_stages` or an `explain_handle` for deferred detail.
 
 ### `memory_explain`
 

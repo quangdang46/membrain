@@ -10,7 +10,7 @@ use crate::types::MemoryId;
 // ── Contradiction kinds ──────────────────────────────────────────────────────
 
 /// Canonical contradiction relationship kinds.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
 pub enum ContradictionKind {
     /// Same factual content ingested more than once.
     Duplicate,
@@ -48,7 +48,7 @@ impl ContradictionKind {
 // ── Resolution state ─────────────────────────────────────────────────────────
 
 /// State of contradiction resolution.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
 pub enum ResolutionState {
     /// Contradiction detected but not yet resolved.
     Unresolved,
@@ -80,7 +80,7 @@ impl ResolutionState {
 // ── Contradiction record ─────────────────────────────────────────────────────
 
 /// Unique identifier for one contradiction record.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
 pub struct ContradictionId(pub u64);
 
 /// Durable contradiction record linking two memories that disagree.
@@ -156,7 +156,7 @@ impl ContradictionRecord {
 // ── Contradiction explain payload ────────────────────────────────────────────
 
 /// Machine-readable contradiction explain payload for retrieval surfaces.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct ContradictionExplain {
     /// The contradiction that affected this result.
     pub contradiction_id: ContradictionId,

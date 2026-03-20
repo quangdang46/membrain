@@ -14,7 +14,7 @@ impl CoreApiVersion {
 }
 
 /// Canonical memory families frozen by the synchronous encode fast path.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
 pub enum CanonicalMemoryType {
     Event,
     Observation,
@@ -208,13 +208,13 @@ pub struct NormalizedMemoryEnvelope {
 }
 
 /// Stable identifier for persisted memories used by exact and recent Tier1 lookups.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
 pub struct MemoryId(pub u64);
 
 use crate::api::NamespaceId;
 
 /// Stable identifier for one session-local hot window.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
 pub struct SessionId(pub u64);
 
 /// Payload residency state for Tier1 metadata entries.

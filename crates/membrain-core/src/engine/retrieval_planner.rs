@@ -211,7 +211,11 @@ impl RetrievalRequest {
     }
 
     /// Creates a query-by-example request using a positive memory cue.
-    pub fn query_by_example(namespace: NamespaceId, like_memory_id: MemoryId, limit: usize) -> Self {
+    pub fn query_by_example(
+        namespace: NamespaceId,
+        like_memory_id: MemoryId,
+        limit: usize,
+    ) -> Self {
         Self {
             namespace,
             query_text: None,
@@ -256,7 +260,9 @@ impl RetrievalRequest {
 
         if let (Some(like_id), Some(unlike_id)) = (self.like_memory_id, self.unlike_memory_id) {
             if like_id == unlike_id {
-                return Err(RetrievalRequestValidationError::DuplicateExampleCue(like_id));
+                return Err(RetrievalRequestValidationError::DuplicateExampleCue(
+                    like_id,
+                ));
             }
         }
 
@@ -874,7 +880,10 @@ mod tests {
 
         let normalized = request.normalize_query_by_example().unwrap();
 
-        assert_eq!(normalized.normalized_query_text.as_deref(), Some("example cue"));
+        assert_eq!(
+            normalized.normalized_query_text.as_deref(),
+            Some("example cue")
+        );
         assert_eq!(normalized.primary_cue, PrimaryCue::QueryText);
         assert_eq!(normalized.seeds.len(), 2);
         assert_eq!(normalized.seeds[0].polarity, QueryExamplePolarity::Like);
@@ -888,18 +897,15 @@ mod tests {
 
         let error = request.normalize_query_by_example().unwrap_err();
 
-        assert_eq!(
-            error,
-            RetrievalRequestValidationError::MissingPrimaryCue
-        );
+        assert_eq!(error, RetrievalRequestValidationError::MissingPrimaryCue);
         assert_eq!(error.as_str(), "missing_primary_cue");
     }
 
     #[test]
     fn normalization_rejects_duplicate_like_and_unlike_seed() {
         let ns = test_namespace();
-        let request = RetrievalRequest::query_by_example(ns, MemoryId(9), 5)
-            .with_unlike_memory(MemoryId(9));
+        let request =
+            RetrievalRequest::query_by_example(ns, MemoryId(9), 5).with_unlike_memory(MemoryId(9));
 
         let error = request.normalize_query_by_example().unwrap_err();
 
