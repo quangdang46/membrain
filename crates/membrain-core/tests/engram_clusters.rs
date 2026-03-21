@@ -32,8 +32,14 @@ fn rebuild_recovers_authoritative_centroid_and_membership() {
         rebuilt_cluster.map(|cluster| cluster.centroid.clone()),
         Some(vec![0.975, 0.025])
     );
-    assert_eq!(rebuilt.lookup_for_memory(MemoryId(10)), Some(cluster.engram_id));
-    assert_eq!(rebuilt.lookup_for_memory(MemoryId(11)), Some(cluster.engram_id));
+    assert_eq!(
+        rebuilt.lookup_for_memory(MemoryId(10)),
+        Some(cluster.engram_id)
+    );
+    assert_eq!(
+        rebuilt.lookup_for_memory(MemoryId(11)),
+        Some(cluster.engram_id)
+    );
 }
 
 #[test]
@@ -60,9 +66,10 @@ fn rebuild_preserves_lookup_cap_and_next_cluster_identity() {
 
     let rebuilt = store.rebuild_from_memberships();
     let candidates = rebuilt.similar_engrams(&[0.8, 0.2]);
-    let created_after_rebuild = rebuilt
-        .clone()
-        .assign_memory(MemoryId(4), vec![0.0, -1.0], 13, "embed.v1");
+    let created_after_rebuild =
+        rebuilt
+            .clone()
+            .assign_memory(MemoryId(4), vec![0.0, -1.0], 13, "embed.v1");
 
     assert_eq!(candidates.len(), 2);
     assert_eq!(created_after_rebuild.engram_id.0, second.engram_id.0 + 2);

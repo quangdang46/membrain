@@ -4,15 +4,15 @@
 //! produces before any wrapper formats it for CLI, daemon, or MCP output.
 
 use crate::api::{FieldPresence, NamespaceId, PolicyFilterSummary};
-use crate::observability::{
-    ExplainResultReason, ObservabilityModule, TracePolicySummary, TraceProvenanceSummary,
-};
 use crate::brain_store::PreparedTier2Layout;
 use crate::engine::contradiction::{ContradictionExplain, ResolutionState};
 use crate::engine::ranking::{RankingExplain, RankingResult};
 use crate::engine::recall::{RecallPlan, RecallPlanKind, RecallTraceStage};
 use crate::graph::{EntityId, RelationKind};
 use crate::observability::OutcomeClass;
+use crate::observability::{
+    ExplainResultReason, ObservabilityModule, TracePolicySummary, TraceProvenanceSummary,
+};
 use crate::types::{CanonicalMemoryType, MemoryId, SessionId};
 use serde::{Deserialize, Serialize};
 
@@ -123,6 +123,9 @@ pub struct ConflictMarkers {
     pub conflict_record_ids: Vec<u64>,
     pub belief_chain_id: Option<u64>,
     pub superseded_by: Option<MemoryId>,
+    pub contradiction_lineage_pairs: Vec<[MemoryId; 2]>,
+    pub resolution_reasons: Vec<String>,
+    pub audit_visible_count: usize,
     pub omitted_conflict_siblings: usize,
 }
 
@@ -425,7 +428,12 @@ pub struct RetrievalExplain {
 
 impl RetrievalResultSet {
     /// Builds the shared route summary and trace stages from the canonical envelope.
-    pub fn explain_route(&self) -> (crate::observability::RouteSummary, Vec<crate::observability::TraceStage>) {
+    pub fn explain_route(
+        &self,
+    ) -> (
+        crate::observability::RouteSummary,
+        Vec<crate::observability::TraceStage>,
+    ) {
         ObservabilityModule.explain_route(self)
     }
 
@@ -566,6 +574,7 @@ impl ResultBuilder {
     }
 
     /// Adds a candidate to the result set.
+    #[allow(clippy::too_many_arguments)]
     pub fn add(
         &mut self,
         memory_id: MemoryId,
@@ -597,11 +606,12 @@ impl ResultBuilder {
             ranking_explain,
             contradiction_explains: ranking_result.contradiction_explains.clone(),
             conflict_markers: ConflictMarkers {
-                conflict_state: if ranking_result.contradiction_explains.is_empty() {
-                    ResolutionState::AutoResolved
-                } else {
-                    ResolutionState::Unresolved
-                },
+                conflict_state: ranking_result
+                    .contradiction_explains
+                    .iter()
+                    .map(|explain| explain.resolution)
+                    .find(|state| *state != ResolutionState::None)
+                    .unwrap_or(ResolutionState::None),
                 conflict_record_ids: ranking_result
                     .contradiction_explains
                     .iter()
@@ -611,15 +621,39 @@ impl ResultBuilder {
                 superseded_by: ranking_result
                     .contradiction_explains
                     .iter()
-                    .find_map(|explain| explain.preferred_memory),
+                    .find_map(|explain| {
+                        (explain.superseded_memory == Some(memory_id)).then_some(
+                            explain
+                                .preferred_memory
+                                .unwrap_or(explain.conflicting_memory),
+                        )
+                    }),
+                contradiction_lineage_pairs: ranking_result
+                    .contradiction_explains
+                    .iter()
+                    .map(|explain| explain.lineage_pair)
+                    .collect(),
+                resolution_reasons: ranking_result
+                    .contradiction_explains
+                    .iter()
+                    .filter_map(|explain| explain.resolution_reason.clone())
+                    .collect(),
+                audit_visible_count: ranking_result
+                    .contradiction_explains
+                    .iter()
+                    .filter(|explain| explain.audit_visible)
+                    .count(),
                 omitted_conflict_siblings: 0,
             },
             uncertainty_markers: UncertaintyMarkers {
                 confidence: ranking_result.final_score,
                 uncertainty_score: 1000u16.saturating_sub(ranking_result.final_score),
                 freshness_uncertainty: None,
-                contradiction_uncertainty: (!ranking_result.contradiction_explains.is_empty())
-                    .then_some(500),
+                contradiction_uncertainty: ranking_result
+                    .contradiction_explains
+                    .iter()
+                    .map(|explain| 1000u16.saturating_sub(explain.confidence_signal))
+                    .max(),
                 missing_evidence_uncertainty: None,
             },
             answered_from,
@@ -655,6 +689,11 @@ impl ResultBuilder {
         self.evidence_pack
             .sort_by(|a, b| b.result.score.cmp(&a.result.score));
         let truncated = self.evidence_pack.len() > self.max_results;
+        let outcome_class = if truncated {
+            OutcomeClass::Partial
+        } else {
+            OutcomeClass::Accepted
+        };
         let packaging_mode = if self.action_pack.is_some() {
             "evidence_plus_action"
         } else {
@@ -662,19 +701,24 @@ impl ResultBuilder {
         };
         self.evidence_pack.truncate(self.max_results);
 
+        let contradictions_found = self
+            .evidence_pack
+            .iter()
+            .map(|item| item.result.contradiction_explains.len())
+            .sum();
+
         RetrievalResultSet {
-            outcome_class: if truncated {
-                OutcomeClass::Partial
-            } else {
-                OutcomeClass::Accepted
-            },
+            outcome_class,
             evidence_pack: self.evidence_pack,
             action_pack: self.action_pack,
             deferred_payloads: self.deferred_payloads,
-            explain,
+            explain: RetrievalExplain {
+                contradictions_found,
+                ..explain
+            },
             policy_summary: PolicySummary {
                 namespace_applied: self.namespace_applied.clone(),
-                outcome_class: OutcomeClass::Accepted,
+                outcome_class,
                 redactions_applied: false,
                 restrictions_active: Vec::new(),
                 filters: vec![PolicyFilterSummary::new(
@@ -732,6 +776,9 @@ mod tests {
     use super::*;
     use crate::brain_store::BrainStore;
     use crate::config::RuntimeConfig;
+    use crate::engine::contradiction::{
+        ContradictionExplain, ContradictionId, ContradictionKind, PreferredAnswerState,
+    };
     use crate::engine::ranking::{fuse_scores, RankingInput, RankingProfile};
     use crate::types::{LandmarkSignals, RawEncodeInput, RawIntakeKind};
 
@@ -823,6 +870,11 @@ mod tests {
 
         assert_eq!(result_set.count(), 2);
         assert!(result_set.truncated);
+        assert_eq!(result_set.outcome_class, OutcomeClass::Partial);
+        assert_eq!(
+            result_set.policy_summary.outcome_class,
+            OutcomeClass::Partial
+        );
         assert_eq!(result_set.total_candidates, 3);
         assert_eq!(result_set.omitted_summary.budget_capped, 1);
         assert_eq!(result_set.packaging_metadata.result_budget, 2);
@@ -848,6 +900,43 @@ mod tests {
             result_set.policy_summary.filters[0].effective_namespace,
             "test".to_string()
         );
+        assert_eq!(
+            result_set.evidence_pack[0]
+                .result
+                .conflict_markers
+                .conflict_state,
+            ResolutionState::None
+        );
+        assert!(result_set.evidence_pack[0]
+            .result
+            .conflict_markers
+            .conflict_record_ids
+            .is_empty());
+        assert!(result_set.evidence_pack[0]
+            .result
+            .conflict_markers
+            .contradiction_lineage_pairs
+            .is_empty());
+        assert!(result_set.evidence_pack[0]
+            .result
+            .conflict_markers
+            .resolution_reasons
+            .is_empty());
+        assert_eq!(
+            result_set.evidence_pack[0]
+                .result
+                .conflict_markers
+                .audit_visible_count,
+            0
+        );
+        assert_eq!(
+            result_set.evidence_pack[0]
+                .result
+                .uncertainty_markers
+                .contradiction_uncertainty,
+            None
+        );
+        assert_eq!(result_set.explain.contradictions_found, 0);
     }
 
     #[test]
@@ -883,6 +972,157 @@ mod tests {
     }
 
     #[test]
+    fn result_builder_preserves_contradiction_audit_and_lineage_markers() {
+        let mut builder = ResultBuilder::new(1, ns("test"));
+        let mut ranked = fuse_scores(
+            RankingInput {
+                recency: 650,
+                salience: 700,
+                strength: 760,
+                provenance: 900,
+                conflict: 280,
+            },
+            RankingProfile::balanced(),
+        );
+        ranked.contradiction_explains = vec![ContradictionExplain {
+            contradiction_id: ContradictionId(9),
+            kind: ContradictionKind::Supersession,
+            resolution: ResolutionState::ManuallyResolved,
+            preferred_answer_state: PreferredAnswerState::Preferred,
+            preferred_memory: Some(MemoryId(44)),
+            confidence_signal: 830,
+            conflicting_memory: MemoryId(12),
+            lineage_pair: [MemoryId(12), MemoryId(44)],
+            result_is_preferred: true,
+            superseded_memory: Some(MemoryId(12)),
+            resolution_reason: Some("manual review".to_string()),
+            active_contradiction: false,
+            archived: false,
+            legal_hold: false,
+            authoritative_evidence: true,
+            retention_reason: None,
+            audit_visible: true,
+        }];
+
+        builder.add(
+            MemoryId(44),
+            ns("test"),
+            SessionId(3),
+            CanonicalMemoryType::Event,
+            "resolved contradiction".into(),
+            &ranked,
+            AnsweredFrom::Tier2Indexed,
+        );
+
+        let result_set = builder.build(RetrievalExplain {
+            recall_plan: RecallPlanKind::Tier2ExactThenTier3Fallback,
+            route_reason: "contradiction explain".to_string(),
+            tiers_consulted: vec!["tier2_exact".to_string()],
+            trace_stages: vec![RecallTraceStage::Tier2Exact],
+            tier1_answered_directly: false,
+            candidate_budget: 6,
+            time_consumed_ms: Some(9),
+            ranking_profile: "balanced".to_string(),
+            contradictions_found: 0,
+            result_reasons: vec![ResultReason {
+                memory_id: Some(MemoryId(44)),
+                reason_code: "contradiction_selected".to_string(),
+                detail: "manual review kept the preferred branch visible".to_string(),
+            }],
+        });
+
+        let markers = &result_set.evidence_pack[0].result.conflict_markers;
+        assert_eq!(result_set.explain.contradictions_found, 1);
+        assert_eq!(markers.conflict_state, ResolutionState::ManuallyResolved);
+        assert_eq!(markers.conflict_record_ids, vec![9]);
+        assert_eq!(markers.superseded_by, None);
+        assert_eq!(
+            markers.contradiction_lineage_pairs,
+            vec![[MemoryId(12), MemoryId(44)]]
+        );
+        assert_eq!(
+            markers.resolution_reasons,
+            vec!["manual review".to_string()]
+        );
+        assert_eq!(markers.audit_visible_count, 1);
+        assert_eq!(
+            result_set.evidence_pack[0]
+                .result
+                .uncertainty_markers
+                .contradiction_uncertainty,
+            Some(170)
+        );
+    }
+
+    #[test]
+    fn result_builder_counts_legal_hold_contradictions_as_audit_visible() {
+        let mut builder = ResultBuilder::new(1, ns("test"));
+        let mut ranked = fuse_scores(
+            RankingInput {
+                recency: 650,
+                salience: 700,
+                strength: 760,
+                provenance: 900,
+                conflict: 280,
+            },
+            RankingProfile::balanced(),
+        );
+        ranked.contradiction_explains = vec![ContradictionExplain {
+            contradiction_id: ContradictionId(13),
+            kind: ContradictionKind::Supersession,
+            resolution: ResolutionState::AuthoritativelyResolved,
+            preferred_answer_state: PreferredAnswerState::Preferred,
+            preferred_memory: Some(MemoryId(44)),
+            confidence_signal: 980,
+            conflicting_memory: MemoryId(12),
+            lineage_pair: [MemoryId(12), MemoryId(44)],
+            result_is_preferred: true,
+            superseded_memory: Some(MemoryId(12)),
+            resolution_reason: Some("authoritative archive".to_string()),
+            active_contradiction: false,
+            archived: true,
+            legal_hold: true,
+            authoritative_evidence: true,
+            retention_reason: Some("legal hold keeps archived contradiction".to_string()),
+            audit_visible: true,
+        }];
+
+        builder.add(
+            MemoryId(44),
+            ns("test"),
+            SessionId(3),
+            CanonicalMemoryType::Event,
+            "archived contradiction under legal hold".into(),
+            &ranked,
+            AnsweredFrom::Tier2Indexed,
+        );
+
+        let result_set = builder.build(RetrievalExplain {
+            recall_plan: RecallPlanKind::Tier2ExactThenTier3Fallback,
+            route_reason: "contradiction archive explain".to_string(),
+            tiers_consulted: vec!["tier2_exact".to_string()],
+            trace_stages: vec![RecallTraceStage::Tier2Exact],
+            tier1_answered_directly: false,
+            candidate_budget: 6,
+            time_consumed_ms: Some(9),
+            ranking_profile: "balanced".to_string(),
+            contradictions_found: 0,
+            result_reasons: vec![ResultReason {
+                memory_id: Some(MemoryId(44)),
+                reason_code: "contradiction_retained_under_legal_hold".to_string(),
+                detail: "legal hold keeps archived authoritative evidence visible".to_string(),
+            }],
+        });
+
+        let markers = &result_set.evidence_pack[0].result.conflict_markers;
+        assert_eq!(markers.audit_visible_count, 1);
+        assert_eq!(
+            markers.resolution_reasons,
+            vec!["authoritative archive".to_string()]
+        );
+    }
+
+    #[test]
     fn retrieval_result_set_round_trips_through_transport_json() {
         let mut builder = ResultBuilder::new(1, ns("test"));
         let ranked = fuse_scores(
@@ -908,7 +1148,8 @@ mod tests {
         builder.deferred_payloads.push(DeferredPayload {
             memory_id: MemoryId(7),
             payload_state: PayloadState::Deferred,
-            reason: "tier2 payload intentionally deferred past bounded result packaging".to_string(),
+            reason: "tier2 payload intentionally deferred past bounded result packaging"
+                .to_string(),
             hydration_path: "tier2://test/payload/0007/7".to_string(),
         });
 
@@ -940,7 +1181,10 @@ mod tests {
         assert_eq!(decoded.top().unwrap().result.memory_id, MemoryId(7));
         assert_eq!(decoded.deferred_payloads.len(), 1);
         assert_eq!(decoded.deferred_payloads[0].memory_id, MemoryId(7));
-        assert_eq!(decoded.deferred_payloads[0].payload_state, PayloadState::Deferred);
+        assert_eq!(
+            decoded.deferred_payloads[0].payload_state,
+            PayloadState::Deferred
+        );
         assert_eq!(
             decoded.deferred_payloads[0].hydration_path,
             "tier2://test/payload/0007/7"
@@ -948,6 +1192,75 @@ mod tests {
         assert_eq!(
             decoded.explain.result_reasons[0].reason_code,
             "tier2_exact_match"
+        );
+    }
+
+    #[test]
+    fn result_builder_marks_losing_memory_with_superseding_winner() {
+        let mut builder = ResultBuilder::new(1, ns("test"));
+        let mut ranked = fuse_scores(
+            RankingInput {
+                recency: 620,
+                salience: 700,
+                strength: 710,
+                provenance: 900,
+                conflict: 260,
+            },
+            RankingProfile::balanced(),
+        );
+        ranked.contradiction_explains = vec![ContradictionExplain {
+            contradiction_id: ContradictionId(11),
+            kind: ContradictionKind::Supersession,
+            resolution: ResolutionState::ManuallyResolved,
+            preferred_answer_state: PreferredAnswerState::Preferred,
+            preferred_memory: Some(MemoryId(44)),
+            confidence_signal: 830,
+            conflicting_memory: MemoryId(44),
+            lineage_pair: [MemoryId(12), MemoryId(44)],
+            result_is_preferred: false,
+            superseded_memory: Some(MemoryId(12)),
+            resolution_reason: Some("manual review".to_string()),
+            active_contradiction: false,
+            archived: false,
+            legal_hold: false,
+            authoritative_evidence: true,
+            retention_reason: None,
+            audit_visible: true,
+        }];
+
+        builder.add(
+            MemoryId(12),
+            ns("test"),
+            SessionId(3),
+            CanonicalMemoryType::Event,
+            "superseded contradiction".into(),
+            &ranked,
+            AnsweredFrom::Tier2Indexed,
+        );
+
+        let result_set = builder.build(RetrievalExplain {
+            recall_plan: RecallPlanKind::Tier2ExactThenTier3Fallback,
+            route_reason: "contradiction explain".to_string(),
+            tiers_consulted: vec!["tier2_exact".to_string()],
+            trace_stages: vec![RecallTraceStage::Tier2Exact],
+            tier1_answered_directly: false,
+            candidate_budget: 6,
+            time_consumed_ms: Some(9),
+            ranking_profile: "balanced".to_string(),
+            contradictions_found: 0,
+            result_reasons: vec![ResultReason {
+                memory_id: Some(MemoryId(12)),
+                reason_code: "contradiction_visible".to_string(),
+                detail: "manual review kept the losing branch inspectable".to_string(),
+            }],
+        });
+
+        let markers = &result_set.evidence_pack[0].result.conflict_markers;
+        assert_eq!(markers.superseded_by, Some(MemoryId(44)));
+        assert_eq!(markers.conflict_record_ids, vec![11]);
+        assert_eq!(
+            markers.contradiction_lineage_pairs,
+            vec![[MemoryId(12), MemoryId(44)]]
         );
     }
 

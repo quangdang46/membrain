@@ -1,9 +1,14 @@
 use clap::{Parser, Subcommand};
 use membrain_core::api::NamespaceId;
+use membrain_core::engine::maintenance::{
+    MaintenanceController, MaintenanceJobHandle, MaintenanceJobState,
+};
+use membrain_core::engine::repair::{IndexRepairEntrypoint, RepairTarget};
 use membrain_core::index::{IndexApi, IndexModule};
 use membrain_core::observability::{AuditEventCategory, AuditEventKind};
 use membrain_core::store::audit::{AppendOnlyAuditLog, AuditLogEntry, AuditLogStore};
 use membrain_core::types::{MemoryId, SessionId};
+use membrain_core::{BrainStore, RuntimeConfig};
 use membrain_daemon::daemon::{DaemonRuntime, DaemonRuntimeConfig};
 use membrain_daemon::rpc::{RuntimeMetrics, RuntimePosture, RuntimeStatus};
 use serde::Serialize;
@@ -124,6 +129,7 @@ struct AuditRow {
     memory_id: Option<u64>,
     session_id: Option<u64>,
     triggered_by: &'static str,
+    request_id: Option<String>,
     related_run: Option<String>,
     redacted: bool,
     note: String,
@@ -139,6 +145,15 @@ struct DoctorIndexRow {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+struct RepairReportRow {
+    target: &'static str,
+    status: &'static str,
+    verification_passed: bool,
+    rebuild_entrypoint: Option<&'static str>,
+    rebuilt_outputs: Vec<&'static str>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 struct DoctorReport {
     status: &'static str,
     action: &'static str,
@@ -146,6 +161,8 @@ struct DoctorReport {
     degraded_reasons: Vec<String>,
     metrics: RuntimeMetrics,
     indexes: Vec<DoctorIndexRow>,
+    repair_engine_component: &'static str,
+    repair_reports: Vec<RepairReportRow>,
     warnings: Vec<&'static str>,
 }
 
@@ -159,6 +176,7 @@ impl From<AuditLogEntry> for AuditRow {
             memory_id: entry.memory_id.map(|id| id.0),
             session_id: entry.session_id.map(|id| id.0),
             triggered_by: entry.actor_source,
+            request_id: entry.request_id,
             related_run: entry.related_run,
             redacted: entry.redacted,
             note: entry.detail,
@@ -177,7 +195,8 @@ fn sample_audit_log(namespace: &NamespaceId) -> AppendOnlyAuditLog {
             "encoded memory into durable flow",
         )
         .with_memory_id(MemoryId(21))
-        .with_session_id(SessionId(5)),
+        .with_session_id(SessionId(5))
+        .with_request_id("req-encode-21"),
     );
     log.append(
         AuditLogEntry::new(
@@ -188,6 +207,7 @@ fn sample_audit_log(namespace: &NamespaceId) -> AppendOnlyAuditLog {
             "redacted protected actor details for export",
         )
         .with_memory_id(MemoryId(21))
+        .with_request_id("req-policy-21")
         .with_related_run("incident-2026-03-20")
         .with_redaction(),
     );
@@ -200,6 +220,7 @@ fn sample_audit_log(namespace: &NamespaceId) -> AppendOnlyAuditLog {
             "applied audit-log schema migration",
         )
         .with_memory_id(MemoryId(21))
+        .with_request_id("req-migration-21")
         .with_related_run("migration-0042"),
     );
     log.append(AuditLogEntry::new(
@@ -265,7 +286,7 @@ fn print_audit_rows(rows: &[AuditRow], json: bool) -> anyhow::Result<()> {
 
     for row in rows {
         println!(
-            "#{} {} {} ns={} memory={:?} session={:?} actor={} redacted={} run={:?} note={}",
+            "#{} {} {} ns={} memory={:?} session={:?} actor={} request_id={:?} redacted={} run={:?} note={}",
             row.sequence,
             row.category,
             row.kind,
@@ -273,6 +294,7 @@ fn print_audit_rows(rows: &[AuditRow], json: bool) -> anyhow::Result<()> {
             row.memory_id,
             row.session_id,
             row.triggered_by,
+            row.request_id,
             row.redacted,
             row.related_run,
             row.note,
@@ -318,7 +340,47 @@ fn doctor_report() -> DoctorReport {
             _ => None,
         })
         .collect::<Vec<_>>();
-    let overall_status = if warnings.is_empty() { "healthy" } else { "warn" };
+    let overall_status = if warnings.is_empty() {
+        "healthy"
+    } else {
+        "warn"
+    };
+    let store = BrainStore::new(RuntimeConfig::default());
+    let repair_engine = store.repair_engine();
+    let namespace = NamespaceId::new("doctor.system").expect("doctor namespace should be valid");
+    let mut repair_handle = MaintenanceJobHandle::new(
+        repair_engine.create_targeted(
+            namespace,
+            vec![RepairTarget::LexicalIndex, RepairTarget::MetadataIndex],
+            IndexRepairEntrypoint::RebuildIfNeeded,
+        ),
+        8,
+    );
+    repair_handle.start();
+    let mut repair_reports = Vec::new();
+    loop {
+        let snapshot = repair_handle.poll();
+        match snapshot.state {
+            MaintenanceJobState::Completed(summary) => {
+                repair_reports = summary
+                    .results
+                    .into_iter()
+                    .map(|result| RepairReportRow {
+                        target: result.target.as_str(),
+                        status: result.status.as_str(),
+                        verification_passed: result.verification_passed,
+                        rebuild_entrypoint: result
+                            .rebuild_entrypoint
+                            .map(IndexRepairEntrypoint::as_str),
+                        rebuilt_outputs: result.rebuilt_outputs,
+                    })
+                    .collect();
+                break;
+            }
+            MaintenanceJobState::Running { .. } => continue,
+            _ => break,
+        }
+    }
 
     DoctorReport {
         status: overall_status,
@@ -327,6 +389,8 @@ fn doctor_report() -> DoctorReport {
         degraded_reasons: status.degraded_reasons,
         metrics: status.metrics,
         indexes,
+        repair_engine_component: repair_engine.component_name(),
+        repair_reports,
         warnings,
     }
 }
@@ -334,6 +398,58 @@ fn doctor_report() -> DoctorReport {
 fn print_doctor_report(report: &DoctorReport) -> anyhow::Result<()> {
     println!("{}", serde_json::to_string_pretty(report)?);
     Ok(())
+}
+
+#[cfg(test)]
+#[allow(clippy::items_after_test_module)]
+mod tests {
+    use super::{filter_audit_rows, print_audit_rows, sample_audit_log};
+    use membrain_core::api::NamespaceId;
+
+    #[test]
+    fn audit_rows_preserve_request_id_in_json_export() {
+        let namespace = NamespaceId::new("team.alpha").expect("valid namespace");
+        let log = sample_audit_log(&namespace);
+        let rows = filter_audit_rows(&log, &namespace, Some(21), None, None, None);
+
+        assert_eq!(rows.len(), 3);
+        assert_eq!(rows[0].request_id.as_deref(), Some("req-encode-21"));
+        assert_eq!(rows[1].request_id.as_deref(), Some("req-policy-21"));
+        assert_eq!(rows[2].request_id.as_deref(), Some("req-migration-21"));
+    }
+
+    #[test]
+    fn text_export_includes_request_id_field() {
+        let namespace = NamespaceId::new("team.alpha").expect("valid namespace");
+        let log = sample_audit_log(&namespace);
+        let rows = filter_audit_rows(&log, &namespace, Some(21), None, None, Some(1));
+
+        let rendered = rows
+            .iter()
+            .map(|row| {
+                format!(
+                    "#{} {} {} ns={} memory={:?} session={:?} actor={} request_id={:?} redacted={} run={:?} note={}",
+                    row.sequence,
+                    row.category,
+                    row.kind,
+                    row.namespace,
+                    row.memory_id,
+                    row.session_id,
+                    row.triggered_by,
+                    row.request_id,
+                    row.redacted,
+                    row.related_run,
+                    row.note,
+                )
+            })
+            .collect::<Vec<_>>()
+            .join("\n");
+
+        assert!(rendered.contains("request_id=Some(\"req-migration-21\")"));
+        assert!(rendered.contains("run=Some(\"migration-0042\")"));
+
+        print_audit_rows(&rows, false).expect("text export should render");
+    }
 }
 
 #[tokio::main]

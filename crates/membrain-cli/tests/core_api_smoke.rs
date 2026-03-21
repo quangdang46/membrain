@@ -3,8 +3,12 @@ use membrain_core::api::{
 };
 use membrain_core::engine::encode::EncodeRuntime;
 use membrain_core::engine::intent::{IntentEngine, QueryIntent};
+use membrain_core::engine::maintenance::{
+    MaintenanceController, MaintenanceJobHandle, MaintenanceJobState,
+};
 use membrain_core::engine::ranking::RankingRuntime;
 use membrain_core::engine::recall::{RecallRuntime, RecallTraceStage};
+use membrain_core::engine::repair::{IndexRepairEntrypoint, RepairTarget};
 use membrain_core::engine::retrieval_planner::{PrimaryCue, RetrievalRequest};
 use membrain_core::observability::OutcomeClass;
 use membrain_core::policy::{PolicyDecision, PolicyGateway};
@@ -64,6 +68,7 @@ fn cli_depends_on_shared_core_boundaries() {
     assert_eq!(store.index().component_name(), "index");
     assert_eq!(store.embed().component_name(), "embed");
     assert_eq!(store.migrate().component_name(), "migrate");
+    assert_eq!(store.repair_engine().component_name(), "engine.repair");
 }
 
 #[test]
@@ -159,14 +164,21 @@ fn cli_can_exercise_intent_taxonomy_and_classification_logs_through_core() {
     assert_eq!(procedural.route_inputs.query_path.as_str(), "entity_heavy");
     assert_eq!(procedural.route_inputs.ranking_profile.as_str(), "balanced");
     assert!(procedural.route_inputs.prefer_small_lookup);
-    assert!(procedural.route_inputs.prefer_preview_only_on_low_confidence);
+    assert!(
+        procedural
+            .route_inputs
+            .prefer_preview_only_on_low_confidence
+    );
     assert!(procedural.route_inputs.high_stakes);
     assert_eq!(log.intent, "procedural_lookup");
     assert_eq!(log.query_path, "entity_heavy");
     assert!(log.matched_patterns.contains(&"how to"));
     assert_eq!(fallback.intent, QueryIntent::SemanticBroad);
     assert!(fallback.low_confidence_fallback);
-    assert_eq!(fallback.log_record().matched_patterns, vec!["default_semantic_broad"]);
+    assert_eq!(
+        fallback.log_record().matched_patterns,
+        vec!["default_semantic_broad"]
+    );
 }
 
 #[test]
@@ -313,4 +325,51 @@ fn cli_keeps_non_observation_inspect_fields_explicitly_absent() {
     assert_eq!(passive.observation_source.state_name(), "absent");
     assert_eq!(passive.observation_chunk_id.state_name(), "absent");
     assert_eq!(passive.retention_marker.state_name(), "absent");
+}
+
+#[test]
+fn cli_can_surface_repair_reports_through_shared_core_repair_engine() {
+    let store = BrainStore::new(RuntimeConfig::default());
+    let namespace = NamespaceId::new("cli.team").unwrap();
+    let run = store.repair_engine().create_targeted(
+        namespace,
+        vec![RepairTarget::LexicalIndex, RepairTarget::MetadataIndex],
+        IndexRepairEntrypoint::RebuildIfNeeded,
+    );
+    let mut handle = MaintenanceJobHandle::new(run, 8);
+
+    handle.start();
+    let mut completed_summary = None;
+    for _ in 0..8 {
+        let snapshot = handle.poll();
+        match snapshot.state {
+            MaintenanceJobState::Completed(summary) => {
+                completed_summary = Some(summary);
+                break;
+            }
+            MaintenanceJobState::Running { .. } => continue,
+            _ => break,
+        }
+    }
+
+    let summary = completed_summary.expect("repair run should complete within bounded polls");
+    assert_eq!(summary.targets_checked, 2);
+    assert_eq!(summary.rebuilt, 2);
+    assert!(summary
+        .results
+        .iter()
+        .all(|result| result.verification_passed));
+    assert!(summary.results.iter().all(|result| {
+        result.rebuild_entrypoint == Some(IndexRepairEntrypoint::RebuildIfNeeded)
+    }));
+    assert_eq!(summary.results[0].target, RepairTarget::LexicalIndex);
+    assert_eq!(summary.results[1].target, RepairTarget::MetadataIndex);
+    assert_eq!(
+        summary.results[0].rebuilt_outputs,
+        vec!["fts5_lexical_projection", "lexical_lookup_table"]
+    );
+    assert_eq!(
+        summary.results[1].rebuilt_outputs,
+        vec!["tier2_metadata_projection", "namespace_lookup_table"]
+    );
 }

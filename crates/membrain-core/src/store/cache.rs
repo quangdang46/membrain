@@ -1112,12 +1112,10 @@ impl CacheRequestMetrics {
             }
             CacheEvent::Miss => {
                 self.cache_miss_count += 1;
-                self.cold_fallback_count += 1;
             }
             CacheEvent::Bypass => self.cache_bypass_count += 1,
             CacheEvent::StaleWarning => {
                 self.cache_bypass_count += 1;
-                self.cold_fallback_count += 1;
             }
             CacheEvent::Disabled => {
                 self.degraded_mode_served = true;
@@ -1131,6 +1129,11 @@ impl CacheRequestMetrics {
             }
             CacheEvent::RepairWarmup => {}
         }
+    }
+
+    /// Records that this request escalated from warm evaluation to a colder authoritative path.
+    pub fn record_cold_fallback(&mut self) {
+        self.cold_fallback_count += 1;
     }
 }
 
@@ -1342,6 +1345,12 @@ impl CacheManager {
     ) -> InvalidationOutcome {
         let mut total = 0usize;
         let mut affected = Vec::new();
+        let namespace_scoped = matches!(
+            trigger,
+            InvalidationTrigger::MemoryMutation
+                | InvalidationTrigger::PolicyChange
+                | InvalidationTrigger::RedactionChange
+        );
 
         let families: &mut [&mut BoundedCacheStore] = &mut [
             &mut self.tier1_item,
@@ -1356,16 +1365,27 @@ impl CacheManager {
         ];
 
         for store in families.iter_mut() {
-            let count = store.invalidate_namespace(namespace);
+            let count = if namespace_scoped {
+                store.invalidate_namespace(namespace)
+            } else {
+                let count = store.len();
+                store.clear();
+                count
+            };
             if count > 0 {
                 affected.push(store.family());
                 total += count;
             }
         }
 
-        let prefetch_dropped = self
-            .prefetch
-            .cancel_namespace(namespace, PrefetchBypassReason::ScopeChanged);
+        let prefetch_dropped = if namespace_scoped {
+            self.prefetch
+                .cancel_namespace(namespace, PrefetchBypassReason::ScopeChanged)
+        } else {
+            let dropped = self.prefetch.queue_depth();
+            self.prefetch.cancel_all();
+            dropped
+        };
         if prefetch_dropped > 0 {
             affected.push(CacheFamily::PrefetchHints);
             total += prefetch_dropped;
@@ -1846,6 +1866,129 @@ mod tests {
     }
 
     #[test]
+    fn namespace_change_broadly_invalidates_all_families_and_prefetch() {
+        let mut mgr = CacheManager::new(4, 4);
+        mgr.tier1_item.admit(
+            make_key(CacheFamily::Tier1Item, "team.alpha", 1),
+            vec![MemoryId(1)],
+            CacheAdmissionRequest::default(),
+        );
+        mgr.result.admit(
+            make_key(CacheFamily::ResultCache, "team.beta", 3),
+            vec![MemoryId(3)],
+            CacheAdmissionRequest {
+                request_shape_hash: Some(3),
+                ..CacheAdmissionRequest::default()
+            },
+        );
+        mgr.summary.admit(
+            make_key(CacheFamily::SummaryCache, "team.gamma", 4),
+            vec![MemoryId(4)],
+            CacheAdmissionRequest {
+                request_shape_hash: Some(4),
+                ..CacheAdmissionRequest::default()
+            },
+        );
+        mgr.prefetch.submit_hint(
+            ns("team.alpha"),
+            PrefetchTrigger::SessionRecency,
+            vec![MemoryId(10)],
+        );
+        mgr.prefetch.submit_hint(
+            ns("team.beta"),
+            PrefetchTrigger::SessionRecency,
+            vec![MemoryId(11)],
+        );
+
+        let outcome =
+            mgr.handle_invalidation(InvalidationTrigger::NamespaceChange, &ns("team.alpha"));
+
+        assert_eq!(outcome.trigger, InvalidationTrigger::NamespaceChange);
+        assert!(outcome.entries_invalidated >= 5);
+        assert!(outcome.families_affected.contains(&CacheFamily::Tier1Item));
+        assert!(outcome
+            .families_affected
+            .contains(&CacheFamily::ResultCache));
+        assert!(outcome
+            .families_affected
+            .contains(&CacheFamily::SummaryCache));
+        assert!(outcome
+            .families_affected
+            .contains(&CacheFamily::PrefetchHints));
+        assert_eq!(mgr.tier1_item.len(), 0);
+        assert_eq!(mgr.result.len(), 0);
+        assert_eq!(mgr.summary.len(), 0);
+        assert_eq!(mgr.prefetch.queue_depth(), 0);
+    }
+
+    #[test]
+    fn repair_and_generation_changes_broadly_invalidate_all_families_and_prefetch() {
+        for trigger in [
+            InvalidationTrigger::SchemaChange,
+            InvalidationTrigger::IndexChange,
+            InvalidationTrigger::EmbeddingChange,
+            InvalidationTrigger::RankingChange,
+            InvalidationTrigger::RepairStarted,
+        ] {
+            let mut mgr = CacheManager::new(4, 4);
+            mgr.tier1_item.admit(
+                make_key(CacheFamily::Tier1Item, "team.alpha", 1),
+                vec![MemoryId(1)],
+                CacheAdmissionRequest::default(),
+            );
+            mgr.result.admit(
+                make_key(CacheFamily::ResultCache, "team.beta", 3),
+                vec![MemoryId(3)],
+                CacheAdmissionRequest {
+                    request_shape_hash: Some(3),
+                    ..CacheAdmissionRequest::default()
+                },
+            );
+            mgr.summary.admit(
+                make_key(CacheFamily::SummaryCache, "team.gamma", 4),
+                vec![MemoryId(4)],
+                CacheAdmissionRequest {
+                    request_shape_hash: Some(4),
+                    ..CacheAdmissionRequest::default()
+                },
+            );
+            mgr.prefetch.submit_hint(
+                ns("team.alpha"),
+                PrefetchTrigger::SessionRecency,
+                vec![MemoryId(10)],
+            );
+            mgr.prefetch.submit_hint(
+                ns("team.beta"),
+                PrefetchTrigger::SessionRecency,
+                vec![MemoryId(11)],
+            );
+
+            let outcome = mgr.handle_invalidation(trigger, &ns("team.alpha"));
+
+            assert_eq!(outcome.trigger, trigger);
+            assert!(
+                outcome.entries_invalidated >= 5,
+                "trigger={}",
+                trigger.as_str()
+            );
+            assert!(outcome.families_affected.contains(&CacheFamily::Tier1Item));
+            assert!(outcome
+                .families_affected
+                .contains(&CacheFamily::ResultCache));
+            assert!(outcome
+                .families_affected
+                .contains(&CacheFamily::SummaryCache));
+            assert!(outcome
+                .families_affected
+                .contains(&CacheFamily::PrefetchHints));
+            assert_eq!(mgr.tier1_item.len(), 0);
+            assert_eq!(mgr.result.len(), 0);
+            assert_eq!(mgr.summary.len(), 0);
+            assert_eq!(mgr.prefetch.queue_depth(), 0);
+        }
+    }
+
+    #[test]
     fn store_for_returns_none_for_prefetch_family() {
         let mut mgr = CacheManager::new(4, 4);
 
@@ -1906,6 +2049,7 @@ mod tests {
             memory_ids: vec![],
             candidates_after: 0,
         });
+        req.record_cold_fallback();
 
         assert_eq!(req.cache_hit_count, 1);
         assert_eq!(req.cache_miss_count, 1);
@@ -1950,6 +2094,7 @@ mod tests {
         assert_eq!(req.prefetch_used_count, 1);
         assert_eq!(req.prefetch_dropped_count, 2);
         assert_eq!(req.cache_bypass_count, 1);
+        assert_eq!(req.cold_fallback_count, 0);
     }
 
     #[test]
@@ -1986,5 +2131,42 @@ mod tests {
         assert_eq!(req.entity_neighborhood_hit_count, 1);
         assert_eq!(req.summary_cache_hit_count, 1);
         assert_eq!(req.ann_probe_hit_count, 1);
+    }
+
+    #[test]
+    fn per_request_metrics_do_not_treat_intermediate_miss_or_stale_as_cold_fallback() {
+        let mut req = CacheRequestMetrics::default();
+        req.record_lookup(&CacheLookupResult {
+            family: CacheFamily::Tier1Item,
+            event: CacheEvent::Miss,
+            reason: None,
+            warm_source: None,
+            generation_status: GenerationStatus::Unknown,
+            memory_ids: vec![],
+            candidates_after: 0,
+        });
+        req.record_lookup(&CacheLookupResult {
+            family: CacheFamily::ResultCache,
+            event: CacheEvent::StaleWarning,
+            reason: Some(CacheReason::GenerationAnchorMismatch),
+            warm_source: None,
+            generation_status: GenerationStatus::Stale,
+            memory_ids: vec![],
+            candidates_after: 0,
+        });
+        req.record_lookup(&CacheLookupResult {
+            family: CacheFamily::AnnProbeCache,
+            event: CacheEvent::Hit,
+            reason: None,
+            warm_source: Some(WarmSource::AnnProbeCache),
+            generation_status: GenerationStatus::Valid,
+            memory_ids: vec![MemoryId(11)],
+            candidates_after: 1,
+        });
+
+        assert_eq!(req.cache_miss_count, 1);
+        assert_eq!(req.cache_bypass_count, 1);
+        assert_eq!(req.cache_hit_count, 1);
+        assert_eq!(req.cold_fallback_count, 0);
     }
 }

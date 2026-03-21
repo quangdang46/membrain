@@ -6,9 +6,7 @@ use membrain_core::engine::result::{
     FreshnessMarkers, OmissionSummary, PackagingMetadata, PolicySummary, ProvenanceSummary,
     RetrievalExplain, RetrievalResultSet,
 };
-use membrain_core::observability::{
-    OutcomeClass, Tier1LookupLane, Tier1LookupOutcome, TraceStage,
-};
+use membrain_core::observability::{OutcomeClass, Tier1LookupLane, Tier1LookupOutcome, TraceStage};
 use membrain_core::store::hot::Tier1HotMetadataStore;
 use membrain_core::types::{
     CanonicalMemoryType, FastPathRouteFamily, MemoryId, SessionId, Tier1HotRecord,
@@ -326,12 +324,15 @@ fn retrieval_result_envelope_projects_stable_route_policy_and_provenance_labels(
     assert_eq!(route.route_family, "recent_tier1_then_tier2_exact");
     assert_eq!(route.route_reason, "small_session_lookup");
     assert!(route.tier1_consulted_first);
-    assert_eq!(stages, vec![
-        TraceStage::Tier1RecentWindow,
-        TraceStage::Tier2Exact,
-        TraceStage::PolicyGate,
-        TraceStage::Packaging,
-    ]);
+    assert_eq!(
+        stages,
+        vec![
+            TraceStage::Tier1RecentWindow,
+            TraceStage::Tier2Exact,
+            TraceStage::PolicyGate,
+            TraceStage::Packaging,
+        ]
+    );
 
     assert_eq!(policy.effective_namespace, "team.gamma");
     assert_eq!(policy.policy_family, "namespace");
@@ -341,4 +342,43 @@ fn retrieval_result_envelope_projects_stable_route_policy_and_provenance_labels(
     assert_eq!(provenance.source_kind, "retrieval_pipeline");
     assert_eq!(provenance.source_reference, "result_set");
     assert_eq!(provenance.lineage_ancestors, vec![11, 17]);
+}
+
+#[test]
+fn retrieval_result_json_preserves_stale_bypass_omission_counts() {
+    let mut result_set = recent_tier1_result_set();
+    result_set.omitted_summary.stale_bypassed = 2;
+
+    let encoded = result_set.to_json().unwrap();
+    let decoded = RetrievalResultSet::from_json(&encoded).unwrap();
+
+    assert_eq!(decoded.omitted_summary.stale_bypassed, 2);
+    assert_eq!(
+        decoded.explain.trace_stages,
+        result_set.explain.trace_stages
+    );
+}
+
+#[test]
+fn explain_route_appends_packaging_stage_after_policy_gate_once() {
+    let mut result_set = recent_tier1_result_set();
+    result_set.explain.trace_stages = vec![RecallTraceStage::Tier1RecentWindow];
+
+    let (_, stages) = result_set.explain_route();
+
+    assert_eq!(
+        stages,
+        vec![
+            TraceStage::Tier1RecentWindow,
+            TraceStage::PolicyGate,
+            TraceStage::Packaging,
+        ]
+    );
+    assert_eq!(
+        stages
+            .iter()
+            .filter(|stage| **stage == TraceStage::Packaging)
+            .count(),
+        1
+    );
 }

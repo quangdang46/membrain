@@ -92,6 +92,26 @@ pub struct RuntimeStatus {
     pub metrics: RuntimeMetrics,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct RuntimeDoctorIndex {
+    pub family: &'static str,
+    pub health: &'static str,
+    pub usable: bool,
+    pub entry_count: usize,
+    pub generation: &'static str,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct RuntimeDoctorReport {
+    pub status: &'static str,
+    pub action: &'static str,
+    pub posture: RuntimePosture,
+    pub degraded_reasons: Vec<String>,
+    pub metrics: RuntimeMetrics,
+    pub indexes: Vec<RuntimeDoctorIndex>,
+    pub warnings: Vec<&'static str>,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct RuntimeMaintenanceAccepted {
     pub maintenance_id: u64,
@@ -194,6 +214,7 @@ impl RuntimeMethodRequest {
         match self.method.as_str() {
             "ping" => Ok(RuntimeRequest::Ping),
             "status" => Ok(RuntimeRequest::Status),
+            "doctor" => Ok(RuntimeRequest::Doctor),
             "recall" => {
                 let query = self
                     .params
@@ -285,11 +306,13 @@ impl RuntimeMethodRequest {
                     Some(Value::Array(items)) => items
                         .iter()
                         .map(|item| {
-                            item.as_str().map(ToOwned::to_owned).ok_or_else(|| JsonRpcError {
-                                code: -32602,
-                                message: "reasons must be an array of strings".to_string(),
-                                data: None,
-                            })
+                            item.as_str()
+                                .map(ToOwned::to_owned)
+                                .ok_or_else(|| JsonRpcError {
+                                    code: -32602,
+                                    message: "reasons must be an array of strings".to_string(),
+                                    data: None,
+                                })
                         })
                         .collect::<Result<Vec<_>, _>>()?,
                     Some(_) => {
@@ -331,6 +354,7 @@ impl RuntimeMethodRequest {
 pub enum RuntimeRequest {
     Ping,
     Status,
+    Doctor,
     Recall {
         query: String,
         namespace: String,
@@ -426,6 +450,18 @@ mod tests {
                 step_delay_ms: Some(15),
             }
         );
+    }
+
+    #[test]
+    fn parse_method_accepts_doctor_without_params() {
+        let request = RuntimeMethodRequest {
+            jsonrpc: "2.0".to_string(),
+            method: "doctor".to_string(),
+            params: json!({}),
+            id: Some(json!(101)),
+        };
+
+        assert_eq!(request.parse_method().unwrap(), RuntimeRequest::Doctor);
     }
 
     #[test]

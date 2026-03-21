@@ -144,6 +144,7 @@ pub enum OperationClass {
     DerivedSurfaceMutation,
     AuthoritativeRewrite,
     IrreversibleMutation,
+    ContradictionArchive,
 }
 
 /// Shared preflight readiness states preserved across interfaces.
@@ -363,6 +364,7 @@ impl PolicyModule {
             OperationClass::DerivedSurfaceMutation => ReversibilityKind::RepairableFromDurableTruth,
             OperationClass::AuthoritativeRewrite => ReversibilityKind::RollbackViaSnapshot,
             OperationClass::IrreversibleMutation => ReversibilityKind::Irreversible,
+            OperationClass::ContradictionArchive => ReversibilityKind::RollbackViaSnapshot,
         }
     }
 
@@ -406,6 +408,7 @@ impl PolicyModule {
                 }
             }
             OperationClass::IrreversibleMutation => "irreversible_mutation",
+            OperationClass::ContradictionArchive => "contradiction_archive",
         }
     }
 
@@ -445,6 +448,7 @@ impl PolicyModule {
                 OperationClass::DerivedSurfaceMutation => Some("derived-surface-run"),
                 OperationClass::AuthoritativeRewrite => Some("authoritative-rewrite-run"),
                 OperationClass::IrreversibleMutation => Some("irreversible-mutation-run"),
+                OperationClass::ContradictionArchive => Some("contradiction-archive-run"),
             },
             scope_handle: Self::affected_scope(request),
         }
@@ -501,15 +505,13 @@ impl PolicyGateway for PolicyModule {
         }
 
         let sharing_scope = Self::sharing_scope(request);
-        if !request.same_namespace {
-            if sharing_scope.is_none() {
-                denial_reasons.push(SharingDenialReason::NamespaceIsolation);
-                denial_reasons.push(match request.visibility {
-                    SharingVisibility::Private => SharingDenialReason::VisibilityNotShareable,
-                    SharingVisibility::Public => SharingDenialReason::ApprovedScopeRequired,
-                    SharingVisibility::Shared => SharingDenialReason::NamespaceIsolation,
-                });
-            }
+        if !request.same_namespace && sharing_scope.is_none() {
+            denial_reasons.push(SharingDenialReason::NamespaceIsolation);
+            denial_reasons.push(match request.visibility {
+                SharingVisibility::Private => SharingDenialReason::VisibilityNotShareable,
+                SharingVisibility::Public => SharingDenialReason::ApprovedScopeRequired,
+                SharingVisibility::Shared => SharingDenialReason::NamespaceIsolation,
+            });
         }
 
         let policy_summary = if denial_reasons.is_empty() {
@@ -697,6 +699,34 @@ impl PolicyGateway for PolicyModule {
             dependency_reason.into_iter().collect(),
         );
 
+        let contradiction_archive_reason = if request.operation_class
+            == OperationClass::ContradictionArchive
+            && !request.snapshot_available
+        {
+            Some(SafeguardReasonCode::SnapshotRequired)
+        } else if request.operation_class == OperationClass::ContradictionArchive
+            && !request.scope_precise
+        {
+            Some(SafeguardReasonCode::ScopeAmbiguous)
+        } else if request.operation_class == OperationClass::ContradictionArchive
+            && request.legal_hold
+        {
+            Some(SafeguardReasonCode::LegalHold)
+        } else {
+            None
+        };
+        Self::push_check(
+            &mut preflight_checks,
+            "contradiction_archive",
+            if contradiction_archive_reason.is_some() {
+                PreflightCheckStatus::Blocked
+            } else {
+                PreflightCheckStatus::Passed
+            },
+            "contradiction_records",
+            contradiction_archive_reason.into_iter().collect(),
+        );
+
         let confidence_reason =
             (!request.confidence_ready).then_some(SafeguardReasonCode::ConfidenceTooLow);
         Self::push_check(
@@ -760,6 +790,9 @@ impl PolicyGateway for PolicyModule {
             blocked_reasons.push(reason);
         }
         if let Some(reason) = dependency_reason {
+            blocked_reasons.push(reason);
+        }
+        if let Some(reason) = contradiction_archive_reason {
             blocked_reasons.push(reason);
         }
         if !request.confidence_ready && !request.can_degrade {
@@ -1242,6 +1275,40 @@ mod tests {
         let gateway = PolicyModule;
         let mut request = SafeguardRequest::ready(OperationClass::IrreversibleMutation);
         request.local_confirmation = true;
+        request.legal_hold = true;
+
+        let outcome = gateway.evaluate_safeguard(request);
+
+        assert_eq!(outcome.outcome_class, OutcomeClass::Rejected);
+        assert!(outcome
+            .blocked_reasons
+            .contains(&SafeguardReasonCode::LegalHold));
+    }
+
+    #[test]
+    fn contradiction_archive_requires_snapshot_for_authoritative_archive() {
+        let gateway = PolicyModule;
+        let mut request = SafeguardRequest::ready(OperationClass::ContradictionArchive);
+        request.snapshot_available = false;
+
+        let outcome = gateway.evaluate_safeguard(request);
+
+        assert_eq!(outcome.outcome_class, OutcomeClass::Blocked);
+        assert!(outcome
+            .blocked_reasons
+            .contains(&SafeguardReasonCode::SnapshotRequired));
+        assert!(outcome.preflight_checks.iter().any(|check| {
+            check.check_name == "contradiction_archive"
+                && check
+                    .reason_codes
+                    .contains(&SafeguardReasonCode::SnapshotRequired)
+        }));
+    }
+
+    #[test]
+    fn contradiction_archive_rejects_legal_hold() {
+        let gateway = PolicyModule;
+        let mut request = SafeguardRequest::ready(OperationClass::ContradictionArchive);
         request.legal_hold = true;
 
         let outcome = gateway.evaluate_safeguard(request);

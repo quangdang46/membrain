@@ -84,6 +84,16 @@ impl CoreStores {
         }
     }
 
+    /// Returns the stable Tier1 hot-store component identifier exposed by the shared store facade.
+    pub fn hot_component_name(&self) -> &'static str {
+        self.hot.component_name()
+    }
+
+    /// Returns the stable append-only audit-log component identifier exposed by the shared store facade.
+    pub fn audit_component_name(&self) -> &'static str {
+        self.audit.component_name()
+    }
+
     /// Returns the Tier1 store boundary.
     pub fn hot(&self) -> &HotStore {
         &self.hot
@@ -107,5 +117,31 @@ impl CoreStores {
     /// Returns the authoritative durable schema objects exposed by the Tier2 store.
     pub fn tier2_authoritative_schema_objects(&self) -> Vec<DurableSchemaObject> {
         self.tier2.authoritative_schema_objects()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{CoreStores, HotStoreApi};
+
+    #[test]
+    fn core_stores_exposes_hot_store_component_identity() {
+        let stores = CoreStores::default();
+
+        assert_eq!(stores.hot_component_name(), "store.hot");
+    }
+
+    #[test]
+    fn core_stores_hot_facade_matches_underlying_component_identity() {
+        let stores = CoreStores::default();
+
+        assert_eq!(stores.hot_component_name(), stores.hot().component_name());
+    }
+
+    #[test]
+    fn core_stores_exposes_audit_store_component_identity() {
+        let stores = CoreStores::default();
+
+        assert_eq!(stores.audit_component_name(), "store.audit");
     }
 }

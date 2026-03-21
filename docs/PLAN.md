@@ -9893,6 +9893,11 @@ Each section below is written in English and focuses on **how to build the featu
 - Reflection is advisory until validated by repeated usefulness or human approval.
 - Any later accepted procedure must preserve source lineage, deprecation/supersession visibility, and enough evidence to explain why it became reusable guidance instead of remaining tentative.
 
+**Acceptance posture**
+- reflection outputs remain tentative guidance artifacts until promotion criteria are met; they do not silently rewrite source evidence or become default truth
+- promotion from reflection to stronger reusable procedure must stay inspectable, with visible lineage, acceptance basis, and deprecation or rollback paths when later evidence disagrees
+- later procedural-memory refinements may improve reuse and continuity, but they must preserve the distinction between provisional advice and accepted guidance
+
 ---
 
 ### 10.5 Cognitive Blackboard
@@ -9917,6 +9922,11 @@ Each section below is written in English and focuses on **how to build the featu
 4. Treat the blackboard as a visible, namespace-aware working-state projection over selected evidence and active task metadata rather than a second authoritative memory store.
 5. Any persisted `blackboard.snapshot` or summary remains a lineage-bearing checkpoint artifact for inspect/resume/handoff; durable memory identity, policy, contradiction state, and canonical relation truth still live in the authoritative stores.
 6. Later-stage working-memory refinements may add clearer focus, pinning, dismissal, rehearsal, or active-work continuity semantics, but they must remain bounded controller state and must not become a hidden retrieval override or a second truth source.
+
+**Acceptance posture**
+- blackboard state remains bounded, inspectable working memory rather than a covert long-term store or retrieval-policy bypass
+- persisted blackboard artifacts must preserve the evidence handles, task context, and policy scope needed for resume, handoff, and inspect surfaces
+- later active-work continuity refinements may improve focus management, but they must stay subordinate to authoritative memory state and explicit operator actions
 
 **Minimum API**
 - `blackboard.get`
@@ -9961,6 +9971,11 @@ Each section below is written in English and focuses on **how to build the featu
    - goal-stack checkpoints are resumability anchors for active work
    - Feature 12 snapshots remain named historical inspection anchors rather than execution-state authority
 7. Add restart tests that verify resume quality and stale-checkpoint handling.
+
+**Acceptance posture**
+- goal-stack checkpoints remain bounded execution-state anchors for active work, not a hidden authority that can override current evidence, policy, or namespace limits
+- pause, resume, and abandon flows must keep lifecycle state explicit and inspectable so operators can tell whether work is dormant, active, stale, or intentionally ended
+- later active-work continuity improvements may strengthen restart quality or handoff ergonomics, but they must continue to surface stale evidence and partial reconstruction instead of guessing through gaps
 
 **Minimum acceptance**
 - resume must reconstruct task state without guessing from scratch
@@ -16858,6 +16873,7 @@ Schema columns in **Milestone 1**. `snapshot_encoding_mood()` in **Milestone 2 (
 **Acceptance posture**
 - emotional trajectory remains introspection-first and read-only from the operator perspective
 - any mood-congruent ranking bonus must stay opt-in, additive, and explainable, never a hidden default retrieval mode or a scope-widening shortcut
+- mood influence must remain weaker than direct evidence, policy constraints, and explicit task intent, with inspect surfaces able to show when it affected ordering
 - later emotional-controller refinements may improve prioritization or desensitization behavior only when they remain bounded, inspectable, and subordinate to stronger direct evidence and policy constraints
 
 ---

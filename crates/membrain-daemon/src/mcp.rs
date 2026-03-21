@@ -106,8 +106,9 @@ impl McpRetrievalPayload {
         partial_success: bool,
         result: RetrievalResultSet,
     ) -> Self {
-        let partial_success =
-            partial_success || matches!(result.outcome_class, OutcomeClass::Partial) || result.truncated;
+        let partial_success = partial_success
+            || matches!(result.outcome_class, OutcomeClass::Partial)
+            || result.truncated;
         let outcome_class = result.outcome_class;
 
         Self {

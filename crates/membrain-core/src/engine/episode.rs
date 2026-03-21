@@ -52,20 +52,56 @@ pub struct EpisodeCandidate {
     pub failure_retry_flag: bool,
 }
 
+/// Stable classification for a formed source set.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SourceSetKind {
+    Singleton,
+    TemporalCluster,
+    SessionCluster,
+    TaskCluster,
+    GoalCluster,
+    ToolChainCluster,
+    RetryCluster,
+}
+
+impl SourceSetKind {
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Singleton => "singleton",
+            Self::TemporalCluster => "temporal_cluster",
+            Self::SessionCluster => "session_cluster",
+            Self::TaskCluster => "task_cluster",
+            Self::GoalCluster => "goal_cluster",
+            Self::ToolChainCluster => "tool_chain_cluster",
+            Self::RetryCluster => "retry_cluster",
+        }
+    }
+}
+
 /// Explain payload showing why an episode was formed.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct EpisodeFormationExplain {
     pub primary_reason: &'static str,
     pub time_span_ms: u64,
     pub matching_fields: Vec<&'static str>,
+    pub anchor_memory_id: MemoryId,
+    pub terminal_memory_id: MemoryId,
 }
 
 /// A formed episode or source set.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SourceGroup {
     pub episode_id: EpisodeId,
+    pub source_set_kind: SourceSetKind,
     pub members: Vec<MemoryId>,
     pub explain: EpisodeFormationExplain,
+}
+
+/// Bounded, deterministic report for one grouping pass.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct EpisodeGroupingReport {
+    pub groups: Vec<SourceGroup>,
+    pub sample_logs: Vec<String>,
 }
 
 /// Stable grouping boundary owned by `membrain-core`.
@@ -102,30 +138,19 @@ impl EpisodeGroupingModule {
             let time_gap = candidate.timestamp_ms.saturating_sub(last.timestamp_ms);
             let time_span = candidate.timestamp_ms.saturating_sub(group_start_time);
 
-            if time_span > heuristics.max_episode_span_ms {
-                // Hard limit, definitely break episode, skipping other heuristics
-            } else if time_gap <= heuristics.temporal_proximity_ms {
-                join = true;
-            } else if heuristics.honor_session_bounds
-                && candidate.session_id.is_some()
-                && candidate.session_id == last.session_id
-            {
-                join = true;
-            } else if heuristics.honor_task_bounds
-                && candidate.task_id.is_some()
-                && candidate.task_id == last.task_id
-            {
-                join = true;
-            } else if candidate.goal_context.is_some()
-                && candidate.goal_context == last.goal_context
-            {
-                join = true;
-            } else if candidate.tool_chain_context.is_some()
-                && candidate.tool_chain_context == last.tool_chain_context
-            {
-                join = true;
-            } else if candidate.failure_retry_flag {
-                join = true;
+            if time_span <= heuristics.max_episode_span_ms {
+                join = time_gap <= heuristics.temporal_proximity_ms
+                    || (heuristics.honor_session_bounds
+                        && candidate.session_id.is_some()
+                        && candidate.session_id == last.session_id)
+                    || (heuristics.honor_task_bounds
+                        && candidate.task_id.is_some()
+                        && candidate.task_id == last.task_id)
+                    || (candidate.goal_context.is_some()
+                        && candidate.goal_context == last.goal_context)
+                    || (candidate.tool_chain_context.is_some()
+                        && candidate.tool_chain_context == last.tool_chain_context)
+                    || (candidate.failure_retry_flag && last.failure_retry_flag);
             }
 
             if heuristics.require_entity_overlap && join {
@@ -153,26 +178,26 @@ impl EpisodeGroupingModule {
         groups
     }
 
+    /// Produces a deterministic report that can be attached to maintenance and inspect surfaces.
+    pub fn grouping_report(
+        &self,
+        heuristics: &GroupingHeuristics,
+        candidates: &[EpisodeCandidate],
+    ) -> EpisodeGroupingReport {
+        let groups = self.form_episodes(heuristics, candidates);
+        let sample_logs = groups.iter().map(Self::sample_log_line).collect();
+        EpisodeGroupingReport {
+            groups,
+            sample_logs,
+        }
+    }
+
     fn finalize_group(episode_id: EpisodeId, members: &[EpisodeCandidate]) -> SourceGroup {
         let first = members.first().unwrap();
         let last = members.last().unwrap();
         let time_span_ms = last.timestamp_ms.saturating_sub(first.timestamp_ms);
-
-        let primary_reason = if members.len() == 1 {
-            "singleton"
-        } else if members
-            .iter()
-            .all(|m| m.session_id == first.session_id && m.session_id.is_some())
-        {
-            "shared_session"
-        } else if members
-            .iter()
-            .all(|m| m.task_id == first.task_id && m.task_id.is_some())
-        {
-            "shared_task"
-        } else {
-            "temporal_proximity"
-        };
+        let source_set_kind = Self::classify_group_kind(members);
+        let primary_reason = source_set_kind.as_str();
 
         let mut matching_fields = vec![primary_reason];
         if members.len() > 1
@@ -181,12 +206,30 @@ impl EpisodeGroupingModule {
                 .all(|m| m.session_id == first.session_id && m.session_id.is_some())
         {
             matching_fields.push("session_id");
-        } else if members.len() > 1
+        }
+        if members.len() > 1
             && members
                 .iter()
                 .all(|m| m.task_id == first.task_id && m.task_id.is_some())
         {
             matching_fields.push("task_id");
+        }
+        if members.len() > 1
+            && members
+                .iter()
+                .all(|m| m.goal_context == first.goal_context && m.goal_context.is_some())
+        {
+            matching_fields.push("goal_context");
+        }
+        if members.len() > 1
+            && members.iter().all(|m| {
+                m.tool_chain_context == first.tool_chain_context && m.tool_chain_context.is_some()
+            })
+        {
+            matching_fields.push("tool_chain_context");
+        }
+        if members.len() > 1 && members.iter().all(|m| m.failure_retry_flag) {
+            matching_fields.push("failure_retry");
         }
 
         if members.len() > 1 {
@@ -203,13 +246,59 @@ impl EpisodeGroupingModule {
 
         SourceGroup {
             episode_id,
+            source_set_kind,
             members: members.iter().map(|c| c.memory_id).collect(),
             explain: EpisodeFormationExplain {
                 primary_reason,
                 time_span_ms,
                 matching_fields,
+                anchor_memory_id: first.memory_id,
+                terminal_memory_id: last.memory_id,
             },
         }
+    }
+
+    fn classify_group_kind(members: &[EpisodeCandidate]) -> SourceSetKind {
+        let first = members.first().unwrap();
+        if members.len() == 1 {
+            SourceSetKind::Singleton
+        } else if members
+            .iter()
+            .all(|m| m.session_id == first.session_id && m.session_id.is_some())
+        {
+            SourceSetKind::SessionCluster
+        } else if members
+            .iter()
+            .all(|m| m.task_id == first.task_id && m.task_id.is_some())
+        {
+            SourceSetKind::TaskCluster
+        } else if members
+            .iter()
+            .all(|m| m.goal_context == first.goal_context && m.goal_context.is_some())
+        {
+            SourceSetKind::GoalCluster
+        } else if members.iter().all(|m| {
+            m.tool_chain_context == first.tool_chain_context && m.tool_chain_context.is_some()
+        }) {
+            SourceSetKind::ToolChainCluster
+        } else if members.iter().all(|m| m.failure_retry_flag) {
+            SourceSetKind::RetryCluster
+        } else {
+            SourceSetKind::TemporalCluster
+        }
+    }
+
+    fn sample_log_line(group: &SourceGroup) -> String {
+        format!(
+            "episode={} kind={} anchor={} terminal={} members={:?} reason={} fields={:?}",
+            group.episode_id.0,
+            group.source_set_kind.as_str(),
+            group.explain.anchor_memory_id.0,
+            group.explain.terminal_memory_id.0,
+            group.members.iter().map(|id| id.0).collect::<Vec<_>>(),
+            group.explain.primary_reason,
+            group.explain.matching_fields,
+        )
     }
 }
 
@@ -228,7 +317,7 @@ mod tests {
             memory_id: MemoryId(id),
             timestamp_ms: time,
             session_id: sess.map(SessionId),
-            task_id: tsk.map(|s| TaskId::new(s)),
+            task_id: tsk.map(TaskId::new),
             entities: ents.into_iter().map(EntityId).collect(),
             goal_context: None,
             tool_chain_context: None,
@@ -244,53 +333,52 @@ mod tests {
         let groups = engine.form_episodes(&GroupingHeuristics::default(), &cands);
         assert_eq!(groups.len(), 1);
         assert_eq!(groups[0].members.len(), 1);
+        assert_eq!(groups[0].source_set_kind, SourceSetKind::Singleton);
         assert_eq!(groups[0].explain.primary_reason, "singleton");
         assert_eq!(groups[0].explain.time_span_ms, 0);
+        assert_eq!(groups[0].explain.anchor_memory_id, MemoryId(1));
+        assert_eq!(groups[0].explain.terminal_memory_id, MemoryId(1));
     }
 
     #[test]
     fn groups_by_temporal_proximity() {
         let engine = EpisodeGroupingModule;
-        // Times in ms (diff is 5 mins = 300,000 ms)
         let cands = vec![
             cand(1, 1000, None, None, vec![]),
-            cand(2, 60_000, None, None, vec![]),    // 59s later
-            cand(3, 1_000_000, None, None, vec![]), // >> 10 mins later
-            cand(4, 1_050_000, None, None, vec![]), // 50s after 3
+            cand(2, 60_000, None, None, vec![]),
+            cand(3, 1_000_000, None, None, vec![]),
+            cand(4, 1_050_000, None, None, vec![]),
         ];
 
         let groups = engine.form_episodes(&GroupingHeuristics::default(), &cands);
         assert_eq!(groups.len(), 2);
-
-        // Group 1: 1 and 2
         assert_eq!(groups[0].members, vec![MemoryId(1), MemoryId(2)]);
-        assert_eq!(groups[0].explain.primary_reason, "temporal_proximity");
-
-        // Group 2: 3 and 4
+        assert_eq!(groups[0].source_set_kind, SourceSetKind::TemporalCluster);
+        assert_eq!(groups[0].explain.primary_reason, "temporal_cluster");
         assert_eq!(groups[1].members, vec![MemoryId(3), MemoryId(4)]);
-        assert_eq!(groups[1].explain.primary_reason, "temporal_proximity");
+        assert_eq!(groups[1].source_set_kind, SourceSetKind::TemporalCluster);
+        assert_eq!(groups[1].explain.primary_reason, "temporal_cluster");
     }
 
     #[test]
     fn groups_by_shared_task_even_if_temporal_gap_large() {
         let engine = EpisodeGroupingModule;
-        let mut heuristics = GroupingHeuristics::default();
-        heuristics.temporal_proximity_ms = 1000; // very short temporal bound
+        let heuristics = GroupingHeuristics {
+            temporal_proximity_ms: 1000,
+            ..Default::default()
+        };
 
         let cands = vec![
             cand(1, 1000, Some("task-A"), None, vec![]),
-            cand(2, 10_000, Some("task-A"), None, vec![]), // 9s later, > 1s threshold but same task
-            cand(3, 20_000, Some("task-B"), None, vec![]), // diff task
+            cand(2, 10_000, Some("task-A"), None, vec![]),
+            cand(3, 20_000, Some("task-B"), None, vec![]),
         ];
 
         let groups = engine.form_episodes(&heuristics, &cands);
         assert_eq!(groups.len(), 2);
-
-        // Group 1: 1 and 2
         assert_eq!(groups[0].members, vec![MemoryId(1), MemoryId(2)]);
-        assert_eq!(groups[0].explain.primary_reason, "shared_task");
-
-        // Group 2: 3
+        assert_eq!(groups[0].source_set_kind, SourceSetKind::TaskCluster);
+        assert_eq!(groups[0].explain.primary_reason, "task_cluster");
         assert_eq!(groups[1].members, vec![MemoryId(3)]);
         assert_eq!(groups[1].explain.primary_reason, "singleton");
     }
@@ -298,17 +386,18 @@ mod tests {
     #[test]
     fn breaks_episode_on_hard_span_limit() {
         let engine = EpisodeGroupingModule;
-        let mut heuristics = GroupingHeuristics::default();
-        heuristics.max_episode_span_ms = 1_000_000;
+        let heuristics = GroupingHeuristics {
+            max_episode_span_ms: 1_000_000,
+            ..Default::default()
+        };
 
         let cands = vec![
             cand(1, 100_000, Some("task-A"), None, vec![]),
             cand(2, 600_000, Some("task-A"), None, vec![]),
-            cand(3, 1_200_000, Some("task-A"), None, vec![]), // Over span limit relative to cand 1
+            cand(3, 1_200_000, Some("task-A"), None, vec![]),
         ];
 
         let groups = engine.form_episodes(&heuristics, &cands);
-        // Candidate 3 is forced into a new group even though it shares a task
         assert_eq!(groups.len(), 2);
         assert_eq!(groups[0].members, vec![MemoryId(1), MemoryId(2)]);
         assert_eq!(groups[1].members, vec![MemoryId(3)]);
@@ -317,26 +406,24 @@ mod tests {
     #[test]
     fn honors_entity_overlap_constraint() {
         let engine = EpisodeGroupingModule;
-        let mut heuristics = GroupingHeuristics::default();
-        heuristics.require_entity_overlap = true;
+        let heuristics = GroupingHeuristics {
+            require_entity_overlap: true,
+            ..Default::default()
+        };
 
         let cands = vec![
             cand(1, 1000, None, None, vec![100, 101]),
-            cand(2, 1100, None, None, vec![101, 102]), // Temporal proximity, overlap on 101
-            cand(3, 1200, None, None, vec![999]),      // Temporal proximity but NO overlap
+            cand(2, 1100, None, None, vec![101, 102]),
+            cand(3, 1200, None, None, vec![999]),
         ];
 
         let groups = engine.form_episodes(&heuristics, &cands);
         assert_eq!(groups.len(), 2);
-
-        // 1 & 2 grouped because of overlap.
         assert_eq!(groups[0].members, vec![MemoryId(1), MemoryId(2)]);
         assert!(groups[0]
             .explain
             .matching_fields
             .contains(&"entity_overlap"));
-
-        // 3 broken off because no entity overlap with 2
         assert_eq!(groups[1].members, vec![MemoryId(3)]);
         assert_eq!(groups[1].explain.matching_fields, vec!["singleton"]);
     }
@@ -344,8 +431,10 @@ mod tests {
     #[test]
     fn singleton_after_overlap_rejection_does_not_keep_temporal_reason() {
         let engine = EpisodeGroupingModule;
-        let mut heuristics = GroupingHeuristics::default();
-        heuristics.require_entity_overlap = true;
+        let heuristics = GroupingHeuristics {
+            require_entity_overlap: true,
+            ..Default::default()
+        };
 
         let cands = vec![
             cand(1, 1000, None, None, vec![10]),
@@ -358,5 +447,43 @@ mod tests {
         assert_eq!(groups[0].explain.matching_fields, vec!["singleton"]);
         assert_eq!(groups[1].explain.primary_reason, "singleton");
         assert_eq!(groups[1].explain.matching_fields, vec!["singleton"]);
+    }
+
+    #[test]
+    fn grouping_report_emits_deterministic_sample_logs() {
+        let engine = EpisodeGroupingModule;
+        let cands = vec![
+            cand(1, 1000, Some("task-A"), None, vec![10]),
+            cand(2, 1100, Some("task-A"), None, vec![10, 20]),
+        ];
+
+        let report = engine.grouping_report(&GroupingHeuristics::default(), &cands);
+        assert_eq!(report.groups.len(), 1);
+        assert_eq!(report.sample_logs.len(), 1);
+        assert_eq!(
+            report.sample_logs[0],
+            "episode=1 kind=task_cluster anchor=1 terminal=2 members=[1, 2] reason=task_cluster fields=[\"task_cluster\", \"task_id\", \"entity_overlap\"]"
+        );
+    }
+
+    #[test]
+    fn failure_retry_requires_continuity_across_group() {
+        let engine = EpisodeGroupingModule;
+        let heuristics = GroupingHeuristics {
+            temporal_proximity_ms: 1_000,
+            ..Default::default()
+        };
+        let mut first = cand(1, 1_000, None, None, vec![]);
+        first.failure_retry_flag = true;
+        let mut second = cand(2, 20_000, None, None, vec![]);
+        second.failure_retry_flag = true;
+        let third = cand(3, 40_000, None, None, vec![]);
+
+        let groups = engine.form_episodes(&heuristics, &[first, second, third]);
+        assert_eq!(groups.len(), 2);
+        assert_eq!(groups[0].source_set_kind, SourceSetKind::RetryCluster);
+        assert_eq!(groups[0].explain.primary_reason, "retry_cluster");
+        assert!(groups[0].explain.matching_fields.contains(&"failure_retry"));
+        assert_eq!(groups[1].source_set_kind, SourceSetKind::Singleton);
     }
 }

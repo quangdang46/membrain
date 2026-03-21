@@ -15,7 +15,7 @@
 //! - Every hit is eligible to refresh Tier1 mirrors without changing durable ownership
 
 use crate::api::NamespaceId;
-use crate::index::CandidateSet;
+use crate::index::{CandidateSet, EntityQuery, Fts5Query, TemporalQuery};
 use crate::types::{CanonicalMemoryType, MemoryId, SessionId};
 
 // ── Planner input ─────────────────────────────────────────────────────────────
@@ -52,10 +52,7 @@ impl QueryPath {
 
     /// Returns true if this path requires lexical prefiltering.
     pub const fn requires_lexical_prefilter(self) -> bool {
-        matches!(
-            self,
-            Self::Hybrid | Self::PartialCue | Self::Temporal | Self::EntityHeavy
-        )
+        matches!(self, Self::Hybrid | Self::PartialCue)
     }
 
     /// Returns true if this path requires semantic search.
@@ -195,6 +192,10 @@ pub struct RetrievalRequest {
     pub session_filter: Option<SessionId>,
     /// Memory type filter.
     pub memory_type_filter: Option<CanonicalMemoryType>,
+    /// Optional entity-name filter for entity-heavy retrieval.
+    pub entity_name_filter: Option<String>,
+    /// Optional entity-type filter for entity-heavy retrieval.
+    pub entity_type_filter: Option<String>,
     /// Maximum final results to return.
     pub limit: usize,
     /// Candidate budget for bounded retrieval.
@@ -217,6 +218,8 @@ impl RetrievalRequest {
             exact_memory_id: None,
             session_filter: None,
             memory_type_filter: None,
+            entity_name_filter: None,
+            entity_type_filter: None,
             limit,
             candidate_budget: Self::DEFAULT_CANDIDATE_BUDGET,
             enable_tier3_fallback: true,
@@ -235,6 +238,8 @@ impl RetrievalRequest {
             exact_memory_id: Some(memory_id),
             session_filter: None,
             memory_type_filter: None,
+            entity_name_filter: None,
+            entity_type_filter: None,
             limit: 1,
             candidate_budget: 1,
             enable_tier3_fallback: false,
@@ -257,6 +262,8 @@ impl RetrievalRequest {
             exact_memory_id: None,
             session_filter: None,
             memory_type_filter: None,
+            entity_name_filter: None,
+            entity_type_filter: None,
             limit,
             candidate_budget: Self::DEFAULT_CANDIDATE_BUDGET,
             enable_tier3_fallback: true,
@@ -341,6 +348,18 @@ impl RetrievalRequest {
         self
     }
 
+    /// Adds an entity-name filter for entity-heavy retrieval.
+    pub fn with_entity_name(mut self, name: impl Into<String>) -> Self {
+        self.entity_name_filter = Some(name.into());
+        self
+    }
+
+    /// Adds an entity-type filter for entity-heavy retrieval.
+    pub fn with_entity_type(mut self, entity_type: impl Into<String>) -> Self {
+        self.entity_type_filter = Some(entity_type.into());
+        self
+    }
+
     /// Sets the candidate budget.
     pub fn with_budget(mut self, budget: usize) -> Self {
         self.candidate_budget = budget;
@@ -366,7 +385,59 @@ impl RetrievalRequest {
 
     /// Returns whether this request should schedule semantic search.
     pub fn requires_semantic_search(&self) -> bool {
-        self.query_path.requires_semantic_search() || self.like_memory_id.is_some()
+        self.query_path.requires_semantic_search()
+            || self.like_memory_id.is_some()
+            || self.unlike_memory_id.is_some()
+    }
+
+    /// Builds the bounded temporal prefilter query when this request uses the temporal lane.
+    pub fn temporal_prefilter_query(&self) -> Option<TemporalQuery> {
+        (self.query_path == QueryPath::Temporal).then(|| {
+            let mut query = TemporalQuery::new(self.namespace.clone(), self.limit)
+                .with_budget(self.candidate_budget);
+            if let Some(session_id) = self.session_filter {
+                query = query.with_session(session_id);
+            }
+            query
+        })
+    }
+
+    /// Builds the bounded entity prefilter query when this request uses the entity-heavy lane.
+    pub fn entity_prefilter_query(&self) -> Option<EntityQuery> {
+        (self.query_path == QueryPath::EntityHeavy).then(|| {
+            let mut query = EntityQuery::new(self.namespace.clone(), self.limit)
+                .with_budget(self.candidate_budget);
+            if let Some(entity_name) = &self.entity_name_filter {
+                query = query.with_entity_name(entity_name.clone());
+            }
+            if let Some(entity_type) = &self.entity_type_filter {
+                query = query.with_entity_type(entity_type.clone());
+            }
+            query
+        })
+    }
+
+    /// Builds the bounded lexical prefilter query when this request schedules lexical prefiltering.
+    pub fn lexical_prefilter_query(&self) -> Option<Fts5Query> {
+        self.query_path
+            .requires_lexical_prefilter()
+            .then_some(())
+            .and(
+                self.query_text
+                    .as_ref()
+                    .filter(|text| !text.trim().is_empty()),
+            )
+            .map(|text| {
+                let mut query = Fts5Query::new(text.trim(), self.namespace.clone(), self.limit)
+                    .with_budget(self.candidate_budget);
+                if let Some(session_id) = self.session_filter {
+                    query = query.with_session(session_id);
+                }
+                if let Some(memory_type) = self.memory_type_filter {
+                    query = query.with_memory_type(memory_type);
+                }
+                query
+            })
     }
 }
 
@@ -646,6 +717,12 @@ pub struct RetrievalPlanTrace {
     pub requested_limit: usize,
     /// Candidate budget.
     pub candidate_budget: usize,
+    /// Optional lexical prefilter query prepared from request hints.
+    pub lexical_query: Option<Fts5Query>,
+    /// Optional temporal prefilter query prepared from request hints.
+    pub temporal_query: Option<TemporalQuery>,
+    /// Optional entity prefilter query prepared from request hints.
+    pub entity_query: Option<EntityQuery>,
     /// Stage traces in execution order.
     pub stages: Vec<StageTrace>,
     /// Final candidate count.
@@ -668,6 +745,9 @@ impl RetrievalPlanTrace {
             namespace: request.namespace.clone(),
             requested_limit: request.limit,
             candidate_budget: request.candidate_budget,
+            lexical_query: request.lexical_prefilter_query(),
+            temporal_query: request.temporal_prefilter_query(),
+            entity_query: request.entity_prefilter_query(),
             stages: Vec::new(),
             final_candidates: 0,
             tier3_triggered: false,
@@ -710,6 +790,25 @@ impl RetrievalPlanTrace {
 
         for stage in &self.stages {
             lines.push(format!("  {}", stage.summary()));
+        }
+
+        if let Some(query) = &self.lexical_query {
+            lines.push(format!(
+                "  lexical_query: terms={:?}, session={:?}, memory_type={:?}, budget={}",
+                query.terms, query.session_filter, query.memory_type_filter, query.candidate_budget
+            ));
+        }
+        if let Some(query) = &self.temporal_query {
+            lines.push(format!(
+                "  temporal_query: session={:?}, tick_range={:?}, epoch={:?}, budget={}",
+                query.session_filter, query.tick_range, query.epoch_filter, query.candidate_budget
+            ));
+        }
+        if let Some(query) = &self.entity_query {
+            lines.push(format!(
+                "  entity_query: name={:?}, type={:?}, budget={}",
+                query.entity_name, query.entity_type, query.candidate_budget
+            ));
         }
 
         lines.push(format!(
@@ -881,7 +980,7 @@ impl RetrievalPlanner {
 mod tests {
     use super::*;
     use crate::index::{CandidateSet, IndexFamily};
-    use crate::types::MemoryId;
+    use crate::types::{CanonicalMemoryType, MemoryId, SessionId};
 
     fn test_namespace() -> NamespaceId {
         NamespaceId::new("test.namespace").unwrap()
@@ -996,6 +1095,89 @@ mod tests {
     }
 
     #[test]
+    fn temporal_requests_build_bounded_temporal_prefilter_queries() {
+        let ns = test_namespace();
+        let request = RetrievalRequest::hybrid(ns.clone(), "recent deploys", 8)
+            .with_session(SessionId(33))
+            .with_budget(77);
+        let request = RetrievalRequest {
+            query_path: QueryPath::Temporal,
+            ..request
+        };
+
+        let query = request.temporal_prefilter_query().unwrap();
+
+        assert_eq!(query.namespace, ns);
+        assert_eq!(query.session_filter, Some(SessionId(33)));
+        assert_eq!(query.limit, 8);
+        assert_eq!(query.candidate_budget, 77);
+        assert!(request.entity_prefilter_query().is_none());
+    }
+
+    #[test]
+    fn entity_heavy_requests_build_bounded_entity_prefilter_queries() {
+        let ns = test_namespace();
+        let request = RetrievalRequest::hybrid(ns.clone(), "service ownership", 6)
+            .with_entity_name("payments-api")
+            .with_entity_type("service")
+            .with_budget(55);
+        let request = RetrievalRequest {
+            query_path: QueryPath::EntityHeavy,
+            ..request
+        };
+
+        let query = request.entity_prefilter_query().unwrap();
+
+        assert_eq!(query.namespace, ns);
+        assert_eq!(query.entity_name.as_deref(), Some("payments-api"));
+        assert_eq!(query.entity_type.as_deref(), Some("service"));
+        assert_eq!(query.limit, 6);
+        assert_eq!(query.candidate_budget, 55);
+        assert!(request.temporal_prefilter_query().is_none());
+    }
+
+    #[test]
+    fn lexical_prefilter_query_preserves_session_and_memory_type_filters() {
+        let ns = test_namespace();
+        let request = RetrievalRequest::hybrid(ns.clone(), " rollback plan ", 4)
+            .with_session(SessionId(9))
+            .with_memory_type(CanonicalMemoryType::Event)
+            .with_budget(88);
+
+        let query = request.lexical_prefilter_query().unwrap();
+
+        assert_eq!(query.namespace, ns);
+        assert_eq!(query.terms, "rollback plan");
+        assert_eq!(query.session_filter, Some(SessionId(9)));
+        assert_eq!(query.memory_type_filter, Some(CanonicalMemoryType::Event));
+        assert_eq!(query.limit, 4);
+        assert_eq!(query.candidate_budget, 88);
+    }
+
+    #[test]
+    fn temporal_and_entity_paths_do_not_emit_lexical_queries_in_trace() {
+        let ns = test_namespace();
+        let temporal = RetrievalRequest {
+            query_path: QueryPath::Temporal,
+            ..RetrievalRequest::hybrid(ns.clone(), "recent deploys", 8).with_session(SessionId(33))
+        };
+        let entity = RetrievalRequest {
+            query_path: QueryPath::EntityHeavy,
+            ..RetrievalRequest::hybrid(ns, "service ownership", 6)
+                .with_entity_name("payments-api")
+                .with_entity_type("service")
+        };
+
+        let temporal_trace = RetrievalPlanTrace::new(&temporal);
+        let entity_trace = RetrievalPlanTrace::new(&entity);
+
+        assert!(temporal_trace.lexical_query.is_none());
+        assert!(temporal_trace.temporal_query.is_some());
+        assert!(entity_trace.lexical_query.is_none());
+        assert!(entity_trace.entity_query.is_some());
+    }
+
+    #[test]
     fn retrieval_plan_hybrid_includes_all_stages() {
         let ns = test_namespace();
         let request = RetrievalRequest::hybrid(ns, "test", 10).with_graph_expansion(true);
@@ -1014,6 +1196,18 @@ mod tests {
     fn query_by_example_plan_skips_lexical_prefilter_without_query_text() {
         let ns = test_namespace();
         let request = RetrievalRequest::query_by_example(ns, MemoryId(3), 10);
+
+        let plan = RetrievalPlan::new(request);
+
+        assert!(!plan.stages.contains(&PlannerStage::LexicalPrefilter));
+        assert!(plan.stages.contains(&PlannerStage::HotSemanticSearch));
+        assert!(plan.stages.contains(&PlannerStage::Float32Rescore));
+    }
+
+    #[test]
+    fn unlike_only_query_by_example_still_schedules_semantic_search() {
+        let ns = test_namespace();
+        let request = RetrievalRequest::exact_id(ns, MemoryId(44)).with_unlike_memory(MemoryId(17));
 
         let plan = RetrievalPlan::new(request);
 
@@ -1196,6 +1390,7 @@ mod tests {
         let summary = trace.summary();
         assert!(summary.contains("hybrid"));
         assert!(summary.contains("lexical_prefilter"));
+        assert!(summary.contains("lexical_query: terms=\"test\""));
         assert!(summary.contains("budget cap 5000"));
         assert!(summary.contains("budget cap 100"));
         assert!(summary.contains("tier2_underfill"));
@@ -1226,8 +1421,11 @@ mod tests {
         assert!(QueryPath::Hybrid.requires_lexical_prefilter());
         assert!(QueryPath::Hybrid.requires_semantic_search());
 
-        assert!(QueryPath::Temporal.requires_lexical_prefilter());
+        assert!(!QueryPath::Temporal.requires_lexical_prefilter());
         assert!(!QueryPath::Temporal.requires_semantic_search());
+
+        assert!(!QueryPath::EntityHeavy.requires_lexical_prefilter());
+        assert!(!QueryPath::EntityHeavy.requires_semantic_search());
 
         assert!(!QueryPath::SemanticOnly.requires_lexical_prefilter());
         assert!(QueryPath::SemanticOnly.requires_semantic_search());

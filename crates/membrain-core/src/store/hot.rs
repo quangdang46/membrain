@@ -58,6 +58,11 @@ impl Tier1HotMetadataStore {
         self.exact.len()
     }
 
+    /// Returns the configured hard cap for Tier1 metadata entries.
+    pub fn capacity(&self) -> usize {
+        self.capacity
+    }
+
     /// Returns whether the Tier1 metadata store is empty.
     pub fn is_empty(&self) -> bool {
         self.exact.is_empty()
@@ -252,6 +257,13 @@ mod tests {
     }
 
     #[test]
+    fn tier1_hot_store_reports_configured_capacity() {
+        let store = Tier1HotMetadataStore::new(7);
+
+        assert_eq!(store.capacity(), 7);
+    }
+
+    #[test]
     fn exact_lookup_refreshes_recency_before_eviction() {
         let namespace = NamespaceId::new("team.alpha").unwrap();
         let mut store = Tier1HotMetadataStore::new(2);
@@ -268,6 +280,21 @@ mod tests {
         assert!(store.exact_lookup(&namespace, MemoryId(1)).record.is_some());
         assert!(store.exact_lookup(&namespace, MemoryId(2)).record.is_none());
         assert!(store.exact_lookup(&namespace, MemoryId(3)).record.is_some());
+    }
+
+    #[test]
+    fn exact_lookup_with_zero_budget_reports_bypass_without_fetching() {
+        let namespace = NamespaceId::new("team.alpha").unwrap();
+        let mut store = Tier1HotMetadataStore::new(2);
+        store.seed(seed_record("team.alpha", 1, 10, "older"));
+
+        let exact = store.exact_lookup_with_budget(&namespace, MemoryId(1), 0);
+
+        assert!(exact.record.is_none());
+        assert_eq!(exact.trace.outcome, Tier1LookupOutcome::Bypass);
+        assert_eq!(exact.trace.recent_candidates_inspected, 0);
+        assert!(!exact.trace.session_window_hit);
+        assert_eq!(exact.trace.payload_fetch_count, 0);
     }
 
     #[test]
@@ -335,13 +362,25 @@ mod tests {
     }
 
     #[test]
-    fn recent_lookup_reports_stale_bypass_when_only_stale_recency_entries_remain() {
+    fn recent_lookup_with_zero_budget_reports_bypass_without_scanning() {
         let namespace = NamespaceId::new("team.alpha").unwrap();
         let mut store = Tier1HotMetadataStore::new(2);
         store.seed(seed_record("team.alpha", 1, 10, "older"));
         store.seed(seed_record("team.alpha", 2, 10, "newer"));
-        store.seed(seed_record("team.alpha", 3, 20, "evicts older"));
 
+        let recent = store.recent_for_session_with_budget(&namespace, SessionId(10), 1, 0);
+
+        assert!(recent.records.is_empty());
+        assert_eq!(recent.trace.outcome, Tier1LookupOutcome::Bypass);
+        assert!(!recent.trace.session_window_hit);
+        assert_eq!(recent.trace.recent_candidates_inspected, 0);
+        assert_eq!(recent.trace.payload_fetch_count, 0);
+    }
+
+    #[test]
+    fn recent_lookup_reports_stale_bypass_when_only_stale_recency_entries_remain() {
+        let namespace = NamespaceId::new("team.alpha").unwrap();
+        let mut store = Tier1HotMetadataStore::new(2);
         store.inject_stale_recent_reference("team.alpha", 99);
 
         let recent = store.recent_for_session(&namespace, SessionId(30), 1);
@@ -349,7 +388,7 @@ mod tests {
         assert!(recent.records.is_empty());
         assert_eq!(recent.trace.outcome, Tier1LookupOutcome::StaleBypass);
         assert!(!recent.trace.session_window_hit);
-        assert_eq!(recent.trace.recent_candidates_inspected, 2);
+        assert_eq!(recent.trace.recent_candidates_inspected, 0);
     }
 
     #[test]

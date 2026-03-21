@@ -20,7 +20,7 @@ use crate::store::cold::ColdStore;
 use crate::store::hot::HotStore;
 use crate::store::tier2::{Tier2DurableItemLayout, Tier2Store};
 use crate::store::tier_router::{TierRouter, TierRoutingInput, TierRoutingTrace};
-use crate::store::Tier2StoreApi;
+use crate::store::{AuditLogStoreApi, HotStoreApi, Tier2StoreApi};
 use crate::types::{CoreApiVersion, MemoryId, RawEncodeInput, SessionId};
 
 /// Inspectable result returned when the core facade prepares a Tier2 layout from encode output.
@@ -185,6 +185,16 @@ impl BrainStore {
         &self.hot_store
     }
 
+    /// Returns the stable Tier1 hot-store component identifier exposed through the core facade.
+    pub fn hot_store_component_name(&self) -> &'static str {
+        self.hot_store.component_name()
+    }
+
+    /// Returns the stable audit-log component identifier exposed through the core facade.
+    pub fn audit_log_store_component_name(&self) -> &'static str {
+        self.audit_log_store.component_name()
+    }
+
     /// Returns the canonical Tier2 storage surface owned by the core crate.
     pub fn tier2_store(&self) -> &Tier2Store {
         &self.tier2_store
@@ -299,12 +309,8 @@ mod tests {
     use super::{BrainStore, PreparedTier2Layout};
     use crate::api::NamespaceId;
     use crate::migrate::DurableSchemaObject;
-    use crate::store::{
-        LifecycleState, TierOwnership, TierRoutingInput, TierRoutingReason,
-    };
-    use crate::types::{
-        CanonicalMemoryType, MemoryId, RawEncodeInput, RawIntakeKind, SessionId,
-    };
+    use crate::store::{LifecycleState, TierOwnership, TierRoutingInput, TierRoutingReason};
+    use crate::types::{CanonicalMemoryType, MemoryId, RawEncodeInput, RawIntakeKind, SessionId};
 
     #[test]
     fn prepare_tier2_layout_from_encode_preserves_landmark_metadata() {
@@ -381,6 +387,20 @@ mod tests {
         assert_eq!(prepared.prefilter_trace.metadata_candidate_count, 1);
         assert_eq!(prepared.prefilter_trace.payload_fetch_count, 0);
         assert!(prepared.prefilter_stays_metadata_only());
+    }
+
+    #[test]
+    fn brain_store_exposes_hot_store_component_identity() {
+        let store = BrainStore::default();
+
+        assert_eq!(store.hot_store_component_name(), "store.hot");
+    }
+
+    #[test]
+    fn brain_store_exposes_audit_store_component_identity() {
+        let store = BrainStore::default();
+
+        assert_eq!(store.audit_log_store_component_name(), "store.audit");
     }
 
     #[test]

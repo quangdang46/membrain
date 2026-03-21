@@ -191,10 +191,7 @@ mod tests {
 
     #[test]
     fn durable_schema_object_names_stay_machine_readable() {
-        assert_eq!(
-            DurableSchemaObject::EngramsTable.as_str(),
-            "engrams_table"
-        );
+        assert_eq!(DurableSchemaObject::EngramsTable.as_str(), "engrams_table");
         assert_eq!(
             DurableSchemaObject::EngramMembershipTable.as_str(),
             "engram_membership_table"

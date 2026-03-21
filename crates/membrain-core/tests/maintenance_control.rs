@@ -7,7 +7,9 @@ use membrain_core::engine::maintenance::{
     MaintenanceJobHandle, MaintenanceJobState, MaintenanceOperation, MaintenanceProgress,
     MaintenanceStep,
 };
-use membrain_core::engine::repair::{IndexRepairEntrypoint, RepairEngine, RepairTarget};
+use membrain_core::engine::repair::{
+    IndexRepairEntrypoint, RepairEngine, RepairStatus, RepairTarget,
+};
 use membrain_core::migrate::DurableSchemaObject;
 
 #[derive(Debug, Clone)]
@@ -365,6 +367,7 @@ fn repair_runs_expose_verification_artifacts_through_maintenance_handle() {
             RepairTarget::SemanticHotIndex,
             RepairTarget::EngramIndex,
         ],
+        IndexRepairEntrypoint::VerifyOnly,
     );
     let mut handle = MaintenanceJobHandle::new(run, 10);
 
@@ -376,6 +379,10 @@ fn repair_runs_expose_verification_artifacts_through_maintenance_handle() {
                 assert_eq!(summary.targets_checked, 3);
                 assert_eq!(summary.healthy, 3);
                 assert_eq!(summary.verification_artifacts.len(), 3);
+                assert_eq!(summary.operator_reports.len(), 3);
+                assert!(summary.operator_reports.iter().all(|report| {
+                    report.rebuild_entrypoint.is_none() && report.verification_passed
+                }));
 
                 let lexical = summary
                     .verification_artifacts
@@ -430,6 +437,7 @@ fn repair_runs_preserve_index_rebuild_entrypoint_contracts_in_verification_artif
     let run = engine.create_targeted(
         namespace,
         vec![RepairTarget::SemanticColdIndex, RepairTarget::MetadataIndex],
+        IndexRepairEntrypoint::ForceRebuild,
     );
     let mut handle = MaintenanceJobHandle::new(run, 10);
 
@@ -454,11 +462,34 @@ fn repair_runs_preserve_index_rebuild_entrypoint_contracts_in_verification_artif
     };
     assert_eq!(completed.polls_used, 2);
     assert_eq!(summary.targets_checked, 2);
+    assert_eq!(summary.healthy, 0);
+    assert_eq!(summary.rebuilt, 2);
     assert_eq!(summary.results.len(), 2);
-    assert!(summary
-        .results
+    assert_eq!(summary.operator_reports.len(), 2);
+    assert!(summary.results.iter().all(|result| {
+        result.detail == "rebuilt_from_durable_truth_and_verified"
+            && result.verification_passed
+            && result.rebuild_entrypoint == Some(IndexRepairEntrypoint::ForceRebuild)
+            && !result.rebuilt_outputs.is_empty()
+    }));
+
+    let semantic_cold_report = summary
+        .operator_reports
         .iter()
-        .all(|result| result.detail == "verified_against_durable_truth"));
+        .find(|report| report.target == RepairTarget::SemanticColdIndex)
+        .expect("semantic cold report should be present");
+    assert_eq!(semantic_cold_report.status.as_str(), "rebuilt");
+    assert_eq!(
+        semantic_cold_report.rebuild_entrypoint,
+        Some(IndexRepairEntrypoint::ForceRebuild)
+    );
+    assert!(semantic_cold_report
+        .rebuilt_outputs
+        .contains(&"usearch_cold_ann"));
+    assert_eq!(
+        semantic_cold_report.verification_artifact_name,
+        "usearch_cold_parity"
+    );
 
     let semantic_cold = summary
         .verification_artifacts
@@ -472,6 +503,7 @@ fn repair_runs_preserve_index_rebuild_entrypoint_contracts_in_verification_artif
         semantic_cold.parity_check,
         semantic_cold_plan.verification_artifact.parity_check
     );
+    assert!(semantic_cold.verification_passed);
     assert_eq!(
         semantic_cold.authoritative_rows,
         semantic_cold_plan.verification_artifact.authoritative_rows
@@ -495,6 +527,24 @@ fn repair_runs_preserve_index_rebuild_entrypoint_contracts_in_verification_artif
         vec![DurableSchemaObject::DurableMemoryRecords]
     );
 
+    let metadata_report = summary
+        .operator_reports
+        .iter()
+        .find(|report| report.target == RepairTarget::MetadataIndex)
+        .expect("metadata report should be present");
+    assert_eq!(metadata_report.status.as_str(), "rebuilt");
+    assert_eq!(
+        metadata_report.rebuild_entrypoint,
+        Some(IndexRepairEntrypoint::ForceRebuild)
+    );
+    assert!(metadata_report
+        .rebuilt_outputs
+        .contains(&"tier2_metadata_projection"));
+    assert_eq!(
+        metadata_report.verification_artifact_name,
+        "tier2_metadata_parity"
+    );
+
     let metadata = summary
         .verification_artifacts
         .get(&RepairTarget::MetadataIndex)
@@ -507,6 +557,7 @@ fn repair_runs_preserve_index_rebuild_entrypoint_contracts_in_verification_artif
         metadata.parity_check,
         metadata_plan.verification_artifact.parity_check
     );
+    assert!(metadata.verification_passed);
     assert_eq!(
         metadata.authoritative_rows,
         metadata_plan.verification_artifact.authoritative_rows
@@ -527,6 +578,231 @@ fn repair_runs_preserve_index_rebuild_entrypoint_contracts_in_verification_artif
     );
 
     assert_eq!(handle.snapshot().polls_used, 2);
+    assert_eq!(handle.start(), handle.snapshot());
+    assert_eq!(handle.poll(), handle.snapshot());
+    assert_eq!(handle.cancel(), handle.snapshot());
+}
+
+#[test]
+fn repair_run_full_scan_reports_doctor_health_surfaces_without_rebuilds() {
+    let namespace = NamespaceId::new("doctor.system").unwrap();
+    let engine = RepairEngine;
+    let run = engine.create_full_scan(namespace, IndexRepairEntrypoint::VerifyOnly);
+    let mut handle = MaintenanceJobHandle::new(run, 16);
+
+    let started = handle.start();
+    assert_eq!(
+        started.state,
+        MaintenanceJobState::Running { progress: None }
+    );
+
+    let completed = loop {
+        let snapshot = handle.poll();
+        let state = snapshot.state.clone();
+        match state {
+            MaintenanceJobState::Completed(summary) => break (snapshot, summary),
+            MaintenanceJobState::Running { .. } => continue,
+            other => panic!("unexpected state: {other:?}"),
+        }
+    };
+    let (snapshot, summary) = completed;
+
+    assert_eq!(summary.targets_checked, 10);
+    assert_eq!(summary.healthy, 10);
+    assert_eq!(summary.degraded, 0);
+    assert_eq!(summary.corrupt, 0);
+    assert_eq!(summary.rebuilt, 0);
+    assert_eq!(summary.results.len(), 10);
+    assert_eq!(summary.operator_reports.len(), 10);
+    assert_eq!(summary.verification_artifacts.len(), 10);
+    assert_eq!(snapshot.polls_used, 10);
+
+    for target in [
+        RepairTarget::LexicalIndex,
+        RepairTarget::MetadataIndex,
+        RepairTarget::SemanticHotIndex,
+        RepairTarget::SemanticColdIndex,
+        RepairTarget::HotStoreConsistency,
+        RepairTarget::PayloadIntegrity,
+        RepairTarget::GraphConsistency,
+        RepairTarget::CacheWarmState,
+        RepairTarget::EngramIndex,
+        RepairTarget::ContradictionConsistency,
+    ] {
+        let result = summary
+            .results
+            .iter()
+            .find(|result| result.target == target)
+            .unwrap_or_else(|| panic!("missing result for {}", target.as_str()));
+        assert_eq!(result.status, RepairStatus::Healthy);
+        assert!(result.verification_passed);
+        assert_eq!(result.detail, "verified_against_durable_truth");
+        assert!(result.rebuild_entrypoint.is_none());
+        assert!(result.rebuilt_outputs.is_empty());
+
+        let report = summary
+            .operator_reports
+            .iter()
+            .find(|report| report.target == target)
+            .unwrap_or_else(|| panic!("missing operator report for {}", target.as_str()));
+        assert_eq!(report.status, RepairStatus::Healthy);
+        assert!(report.verification_passed);
+        assert!(report.rebuild_entrypoint.is_none());
+        assert!(report.rebuilt_outputs.is_empty());
+        assert_eq!(
+            report.verification_artifact_name,
+            target.verification_artifact_name()
+        );
+
+        let artifact = summary
+            .verification_artifacts
+            .get(&target)
+            .unwrap_or_else(|| panic!("missing artifact for {}", target.as_str()));
+        assert_eq!(artifact.artifact_name, target.verification_artifact_name());
+        assert_eq!(artifact.parity_check, target.verification_parity_check());
+        assert!(artifact.verification_passed);
+        assert_eq!(artifact.authoritative_generation, "durable.v1");
+        assert_eq!(artifact.derived_generation, "durable.v1");
+        assert_eq!(artifact.authoritative_rows, artifact.derived_rows);
+    }
+
+    assert_eq!(handle.snapshot().polls_used, 10);
+    assert_eq!(handle.start(), handle.snapshot());
+    assert_eq!(handle.poll(), handle.snapshot());
+    assert_eq!(handle.cancel(), handle.snapshot());
+}
+
+#[test]
+fn repair_run_full_scan_rebuild_if_needed_keeps_doctor_surfaces_explainable() {
+    let namespace = NamespaceId::new("doctor.system").unwrap();
+    let engine = RepairEngine;
+    let run = engine.create_full_scan(namespace, IndexRepairEntrypoint::RebuildIfNeeded);
+    let mut handle = MaintenanceJobHandle::new(run, 16);
+
+    let started = handle.start();
+    assert_eq!(
+        started.state,
+        MaintenanceJobState::Running { progress: None }
+    );
+
+    let completed = loop {
+        let snapshot = handle.poll();
+        let state = snapshot.state.clone();
+        match state {
+            MaintenanceJobState::Completed(summary) => break (snapshot, summary),
+            MaintenanceJobState::Running { .. } => continue,
+            other => panic!("unexpected state: {other:?}"),
+        }
+    };
+    let (snapshot, summary) = completed;
+
+    assert_eq!(summary.targets_checked, 10);
+    assert_eq!(summary.healthy, 0);
+    assert_eq!(summary.degraded, 0);
+    assert_eq!(summary.corrupt, 0);
+    assert_eq!(summary.rebuilt, 6);
+    assert_eq!(summary.results.len(), 10);
+    assert_eq!(summary.operator_reports.len(), 10);
+    assert_eq!(summary.verification_artifacts.len(), 10);
+    assert_eq!(snapshot.polls_used, 10);
+
+    for target in [
+        RepairTarget::LexicalIndex,
+        RepairTarget::MetadataIndex,
+        RepairTarget::SemanticHotIndex,
+        RepairTarget::SemanticColdIndex,
+        RepairTarget::CacheWarmState,
+        RepairTarget::EngramIndex,
+    ] {
+        let result = summary
+            .results
+            .iter()
+            .find(|result| result.target == target)
+            .unwrap_or_else(|| panic!("missing result for {}", target.as_str()));
+        assert_eq!(result.status, RepairStatus::Rebuilt);
+        assert!(result.verification_passed);
+        assert_eq!(result.detail, "rebuilt_from_durable_truth_and_verified");
+        assert_eq!(
+            result.rebuild_entrypoint,
+            Some(IndexRepairEntrypoint::RebuildIfNeeded)
+        );
+        assert!(!result.rebuilt_outputs.is_empty());
+
+        let report = summary
+            .operator_reports
+            .iter()
+            .find(|report| report.target == target)
+            .unwrap_or_else(|| panic!("missing operator report for {}", target.as_str()));
+        assert_eq!(report.status, RepairStatus::Rebuilt);
+        assert!(report.verification_passed);
+        assert_eq!(
+            report.rebuild_entrypoint,
+            Some(IndexRepairEntrypoint::RebuildIfNeeded)
+        );
+        assert_eq!(
+            report.verification_artifact_name,
+            target.verification_artifact_name()
+        );
+        assert!(!report.rebuilt_outputs.is_empty());
+    }
+
+    for target in [
+        RepairTarget::HotStoreConsistency,
+        RepairTarget::PayloadIntegrity,
+        RepairTarget::GraphConsistency,
+        RepairTarget::ContradictionConsistency,
+    ] {
+        let result = summary
+            .results
+            .iter()
+            .find(|result| result.target == target)
+            .unwrap_or_else(|| panic!("missing result for {}", target.as_str()));
+        assert_eq!(result.status, RepairStatus::Skipped);
+        assert!(result.verification_passed);
+        assert_eq!(result.detail, "rebuild_not_supported_for_target");
+        assert!(result.rebuild_entrypoint.is_none());
+        assert!(result.rebuilt_outputs.is_empty());
+
+        let report = summary
+            .operator_reports
+            .iter()
+            .find(|report| report.target == target)
+            .unwrap_or_else(|| panic!("missing operator report for {}", target.as_str()));
+        assert_eq!(report.status, RepairStatus::Skipped);
+        assert!(report.verification_passed);
+        assert!(report.rebuild_entrypoint.is_none());
+        assert!(report.rebuilt_outputs.is_empty());
+        assert_eq!(
+            report.verification_artifact_name,
+            target.verification_artifact_name()
+        );
+    }
+
+    for target in [
+        RepairTarget::LexicalIndex,
+        RepairTarget::MetadataIndex,
+        RepairTarget::SemanticHotIndex,
+        RepairTarget::SemanticColdIndex,
+        RepairTarget::HotStoreConsistency,
+        RepairTarget::PayloadIntegrity,
+        RepairTarget::GraphConsistency,
+        RepairTarget::CacheWarmState,
+        RepairTarget::EngramIndex,
+        RepairTarget::ContradictionConsistency,
+    ] {
+        let artifact = summary
+            .verification_artifacts
+            .get(&target)
+            .unwrap_or_else(|| panic!("missing artifact for {}", target.as_str()));
+        assert_eq!(artifact.artifact_name, target.verification_artifact_name());
+        assert_eq!(artifact.parity_check, target.verification_parity_check());
+        assert!(artifact.verification_passed);
+        assert_eq!(artifact.authoritative_generation, "durable.v1");
+        assert_eq!(artifact.derived_generation, "durable.v1");
+        assert_eq!(artifact.authoritative_rows, artifact.derived_rows);
+    }
+
+    assert_eq!(handle.snapshot().polls_used, 10);
     assert_eq!(handle.start(), handle.snapshot());
     assert_eq!(handle.poll(), handle.snapshot());
     assert_eq!(handle.cancel(), handle.snapshot());

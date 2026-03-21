@@ -11,9 +11,13 @@ pub struct PreflightRunRequest {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct PreflightExplainResponse {
     pub allowed: bool,
+    pub preflight_state: String,
+    pub blocked_reasons: Vec<String>,
     pub blocked_reason: Option<String>,
     pub required_overrides: Vec<String>,
     pub policy_context: String,
+    pub request_id: Option<String>,
+    pub preflight_id: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -26,6 +30,10 @@ pub struct PreflightAllowRequest {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct PreflightOutcome {
     pub success: bool,
+    pub preflight_state: String,
+    pub blocked_reasons: Vec<String>,
+    pub request_id: Option<String>,
+    pub preflight_id: Option<String>,
     pub execution_id: Option<String>,
     pub degraded: bool,
     pub confirmation_reason: Option<String>,
@@ -64,9 +72,13 @@ mod tests {
     fn preflight_explain_response_preserves_blocked_reason_and_required_overrides() {
         let response = PreflightExplainResponse {
             allowed: false,
+            preflight_state: "blocked".to_string(),
+            blocked_reasons: vec!["policy_denied".to_string()],
             blocked_reason: Some("policy denied destructive action".to_string()),
             required_overrides: vec!["human_confirmation".to_string(), "audit_ticket".to_string()],
             policy_context: "destructive maintenance command".to_string(),
+            request_id: Some("req-42".to_string()),
+            preflight_id: Some("preflight-42".to_string()),
         };
 
         let value = serde_json::to_value(&response).unwrap();
@@ -74,14 +86,20 @@ mod tests {
             value,
             json!({
                 "allowed": false,
+                "preflight_state": "blocked",
+                "blocked_reasons": ["policy_denied"],
                 "blocked_reason": "policy denied destructive action",
                 "required_overrides": ["human_confirmation", "audit_ticket"],
-                "policy_context": "destructive maintenance command"
+                "policy_context": "destructive maintenance command",
+                "request_id": "req-42",
+                "preflight_id": "preflight-42"
             })
         );
 
         let decoded: PreflightExplainResponse = serde_json::from_value(value).unwrap();
         assert!(!decoded.allowed);
+        assert_eq!(decoded.preflight_state, "blocked");
+        assert_eq!(decoded.blocked_reasons, vec!["policy_denied"]);
         assert_eq!(
             decoded.blocked_reason.as_deref(),
             Some("policy denied destructive action")
@@ -91,6 +109,8 @@ mod tests {
             vec!["human_confirmation", "audit_ticket"]
         );
         assert_eq!(decoded.policy_context, "destructive maintenance command");
+        assert_eq!(decoded.request_id.as_deref(), Some("req-42"));
+        assert_eq!(decoded.preflight_id.as_deref(), Some("preflight-42"));
     }
 
     #[test]
@@ -102,6 +122,10 @@ mod tests {
         };
         let outcome = PreflightOutcome {
             success: true,
+            preflight_state: "ready".to_string(),
+            blocked_reasons: Vec::new(),
+            request_id: Some("req-42".to_string()),
+            preflight_id: Some("preflight-42".to_string()),
             execution_id: Some("exec-42".to_string()),
             degraded: true,
             confirmation_reason: Some("operator approved fallback mode".to_string()),
@@ -121,6 +145,10 @@ mod tests {
             outcome_value,
             json!({
                 "success": true,
+                "preflight_state": "ready",
+                "blocked_reasons": [],
+                "request_id": "req-42",
+                "preflight_id": "preflight-42",
                 "execution_id": "exec-42",
                 "degraded": true,
                 "confirmation_reason": "operator approved fallback mode"
@@ -134,6 +162,13 @@ mod tests {
         assert_eq!(decoded_allow.authorization_token, "token-123");
         assert_eq!(decoded_allow.bypass_flags, vec!["manual_override"]);
         assert!(decoded_outcome.success);
+        assert_eq!(decoded_outcome.preflight_state, "ready");
+        assert!(decoded_outcome.blocked_reasons.is_empty());
+        assert_eq!(decoded_outcome.request_id.as_deref(), Some("req-42"));
+        assert_eq!(
+            decoded_outcome.preflight_id.as_deref(),
+            Some("preflight-42")
+        );
         assert_eq!(decoded_outcome.execution_id.as_deref(), Some("exec-42"));
         assert!(decoded_outcome.degraded);
         assert_eq!(

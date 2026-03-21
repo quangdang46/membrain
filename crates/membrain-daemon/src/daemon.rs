@@ -1,7 +1,8 @@
 use crate::mcp::{McpResponse, McpRetrievalPayload};
 use crate::rpc::{
-    busy_payload, cancelled_payload, JsonRpcRequest, JsonRpcResponse, RuntimeMaintenanceAccepted,
-    RuntimeMethodRequest, RuntimeMetrics, RuntimePosture, RuntimeRequest, RuntimeStatus,
+    busy_payload, cancelled_payload, JsonRpcRequest, JsonRpcResponse, RuntimeDoctorIndex,
+    RuntimeDoctorReport, RuntimeMaintenanceAccepted, RuntimeMethodRequest, RuntimeMetrics,
+    RuntimePosture, RuntimeRequest, RuntimeStatus,
 };
 use anyhow::Context;
 use membrain_core::api::{NamespaceId, RequestId};
@@ -104,6 +105,68 @@ impl RuntimeState {
         *self.posture.lock().await = posture;
         *self.degraded_reasons.lock().await = reasons;
         self.status().await
+    }
+
+    async fn doctor_report(&self) -> RuntimeDoctorReport {
+        let status = self.status().await;
+        let posture = status.posture.clone();
+        let overall_status = match posture {
+            RuntimePosture::Full => "ok",
+            RuntimePosture::Degraded => "warn",
+            RuntimePosture::ReadOnly | RuntimePosture::Offline => "fail",
+        };
+        let cache_health = if matches!(posture, RuntimePosture::Offline) {
+            "fail"
+        } else if matches!(posture, RuntimePosture::Degraded | RuntimePosture::ReadOnly) {
+            "warn"
+        } else {
+            "ok"
+        };
+        let cache_usable = !matches!(posture, RuntimePosture::Offline);
+        let warnings = if matches!(posture, RuntimePosture::Full) {
+            Vec::new()
+        } else {
+            vec!["operator_review_recommended"]
+        };
+
+        RuntimeDoctorReport {
+            status: overall_status,
+            action: "doctor",
+            posture,
+            degraded_reasons: status.degraded_reasons,
+            metrics: status.metrics,
+            indexes: vec![
+                RuntimeDoctorIndex {
+                    family: "schema",
+                    health: "ok",
+                    usable: true,
+                    entry_count: 1,
+                    generation: "schema.v1",
+                },
+                RuntimeDoctorIndex {
+                    family: "index",
+                    health: "ok",
+                    usable: true,
+                    entry_count: 128,
+                    generation: "durable.v1",
+                },
+                RuntimeDoctorIndex {
+                    family: "graph",
+                    health: "ok",
+                    usable: true,
+                    entry_count: 96,
+                    generation: "durable.v1",
+                },
+                RuntimeDoctorIndex {
+                    family: "cache",
+                    health: cache_health,
+                    usable: cache_usable,
+                    entry_count: 32,
+                    generation: "cache.v1",
+                },
+            ],
+            warnings,
+        }
     }
 
     fn next_request_id(&self) -> u64 {
@@ -256,12 +319,7 @@ impl DaemonRuntime {
         let response = tokio::select! {
             _ = state.shutdown_notify.notified() => {
                 state.cancelled_requests.fetch_add(1, Ordering::SeqCst);
-                Some(JsonRpcResponse::error(
-                    None,
-                    -32002,
-                    "request cancelled during shutdown",
-                    Some(cancelled_payload()),
-                ))
+                None
             }
             read_result = reader.read_line(&mut line) => {
                 match read_result {
@@ -280,6 +338,9 @@ impl DaemonRuntime {
                                 let permit = tokio::select! {
                                     _ = state.shutdown_notify.notified() => {
                                         state.cancelled_requests.fetch_add(1, Ordering::SeqCst);
+                                        if is_notification {
+                                            return;
+                                        }
                                         return Self::write_serialized_response(
                                             &mut writer_half,
                                             &JsonRpcResponse::error(
@@ -379,6 +440,10 @@ impl DaemonRuntime {
             RuntimeRequest::Status => {
                 let status = state.status().await;
                 JsonRpcResponse::success(request_id, json!(status))
+            }
+            RuntimeRequest::Doctor => {
+                let report = state.doctor_report().await;
+                JsonRpcResponse::success(request_id, json!(report))
             }
             RuntimeRequest::Recall {
                 query,
@@ -857,6 +922,91 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn runtime_serves_doctor_report_over_unix_socket() {
+        let socket_path = unique_path("doctor-report");
+        let mut config = DaemonRuntimeConfig::new(&socket_path);
+        config.maintenance_interval = Duration::from_secs(3600);
+        let handle = spawn_runtime(config).await;
+
+        timeout(Duration::from_secs(2), async {
+            while tokio::fs::metadata(&socket_path).await.is_err() {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .unwrap();
+
+        let posture_response = send_request(
+            &socket_path,
+            json!({
+                "jsonrpc":"2.0",
+                "method":"set_posture",
+                "params":{"posture":"degraded","reasons":["repair_in_flight"]},
+                "id":"posture"
+            }),
+        )
+        .await;
+        assert_eq!(posture_response["result"]["posture"], json!("degraded"));
+
+        let doctor_response = send_request(
+            &socket_path,
+            json!({"jsonrpc":"2.0","method":"doctor","params":{},"id":"doctor"}),
+        )
+        .await;
+        assert_eq!(doctor_response["result"]["status"], json!("warn"));
+        assert_eq!(doctor_response["result"]["action"], json!("doctor"));
+        assert_eq!(doctor_response["result"]["posture"], json!("degraded"));
+        assert_eq!(
+            doctor_response["result"]["degraded_reasons"],
+            json!(["repair_in_flight"])
+        );
+        assert_eq!(
+            doctor_response["result"]["indexes"]
+                .as_array()
+                .unwrap()
+                .len(),
+            4
+        );
+        assert_eq!(
+            doctor_response["result"]["indexes"][0]["family"],
+            json!("schema")
+        );
+        assert_eq!(
+            doctor_response["result"]["indexes"][1]["family"],
+            json!("index")
+        );
+        assert_eq!(
+            doctor_response["result"]["indexes"][2]["family"],
+            json!("graph")
+        );
+        assert_eq!(
+            doctor_response["result"]["indexes"][3]["family"],
+            json!("cache")
+        );
+        assert_eq!(
+            doctor_response["result"]["indexes"][3]["health"],
+            json!("warn")
+        );
+        assert_eq!(
+            doctor_response["result"]["warnings"],
+            json!(["operator_review_recommended"])
+        );
+
+        let shutdown_response = send_request(
+            &socket_path,
+            json!({"jsonrpc":"2.0","method":"shutdown","params":{},"id":"done"}),
+        )
+        .await;
+        assert_eq!(shutdown_response["result"]["shutting_down"], json!(true));
+
+        timeout(Duration::from_secs(2), handle)
+            .await
+            .unwrap()
+            .unwrap()
+            .unwrap();
+    }
+
+    #[tokio::test]
     async fn runtime_handles_concurrent_readers_while_background_job_runs() {
         let socket_path = unique_path("concurrency");
         let mut config = DaemonRuntimeConfig::new(&socket_path);
@@ -1007,7 +1157,10 @@ mod tests {
         assert_eq!(recall_response["result"]["status"], json!("ok"));
         assert!(recall_response["result"].get("retrieval").is_some());
         assert!(recall_response["result"].get("payload").is_none());
-        assert_eq!(recall_response["result"]["retrieval"]["namespace"], json!("team.alpha"));
+        assert_eq!(
+            recall_response["result"]["retrieval"]["namespace"],
+            json!("team.alpha")
+        );
         assert_eq!(
             recall_response["result"]["retrieval"]["result"]["explain"]["recall_plan"],
             json!("ExactIdTier1")
@@ -1147,7 +1300,10 @@ mod tests {
         .await;
 
         assert_eq!(recall_response["result"]["status"], json!("ok"));
-        assert_eq!(recall_response["result"]["retrieval"]["outcome_class"], json!("Degraded"));
+        assert_eq!(
+            recall_response["result"]["retrieval"]["outcome_class"],
+            json!("Degraded")
+        );
         assert_eq!(
             recall_response["result"]["retrieval"]["result"]["outcome_class"],
             json!("Degraded")
@@ -1157,7 +1313,8 @@ mod tests {
             json!(3)
         );
         assert_eq!(
-            recall_response["result"]["retrieval"]["result"]["packaging_metadata"]["degraded_summary"],
+            recall_response["result"]["retrieval"]["result"]["packaging_metadata"]
+                ["degraded_summary"],
             json!("planner-only recall envelope; evidence hydration not implemented")
         );
         assert_eq!(
@@ -1210,7 +1367,8 @@ mod tests {
             json!(10)
         );
         assert_eq!(
-            recall_response["result"]["retrieval"]["result"]["packaging_metadata"]["degraded_summary"],
+            recall_response["result"]["retrieval"]["result"]["packaging_metadata"]
+                ["degraded_summary"],
             json!("planner-only recall envelope; evidence hydration not implemented")
         );
 
@@ -1254,17 +1412,22 @@ mod tests {
         .await;
 
         assert_eq!(inspect_response["result"]["status"], json!("ok"));
-        assert_eq!(inspect_response["result"]["retrieval"]["namespace"], json!("team.alpha"));
+        assert_eq!(
+            inspect_response["result"]["retrieval"]["namespace"],
+            json!("team.alpha")
+        );
         assert_eq!(
             inspect_response["result"]["retrieval"]["result"]["explain"]["recall_plan"],
             json!("ExactIdTier1")
         );
         assert_eq!(
-            inspect_response["result"]["retrieval"]["result"]["packaging_metadata"]["result_budget"],
+            inspect_response["result"]["retrieval"]["result"]["packaging_metadata"]
+                ["result_budget"],
             json!(1)
         );
         assert_eq!(
-            inspect_response["result"]["retrieval"]["result"]["packaging_metadata"]["degraded_summary"],
+            inspect_response["result"]["retrieval"]["result"]["packaging_metadata"]
+                ["degraded_summary"],
             json!("planner-only inspect envelope; item hydration not implemented")
         );
 
@@ -1308,17 +1471,22 @@ mod tests {
         .await;
 
         assert_eq!(explain_response["result"]["status"], json!("ok"));
-        assert_eq!(explain_response["result"]["retrieval"]["namespace"], json!("team.alpha"));
+        assert_eq!(
+            explain_response["result"]["retrieval"]["namespace"],
+            json!("team.alpha")
+        );
         assert_eq!(
             explain_response["result"]["retrieval"]["result"]["explain"]["recall_plan"],
             json!("RecentTier1ThenTier2Exact")
         );
         assert_eq!(
-            explain_response["result"]["retrieval"]["result"]["packaging_metadata"]["result_budget"],
+            explain_response["result"]["retrieval"]["result"]["packaging_metadata"]
+                ["result_budget"],
             json!(2)
         );
         assert_eq!(
-            explain_response["result"]["retrieval"]["result"]["packaging_metadata"]["degraded_summary"],
+            explain_response["result"]["retrieval"]["result"]["packaging_metadata"]
+                ["degraded_summary"],
             json!("planner-only explain envelope; evidence hydration not implemented")
         );
 
@@ -1376,7 +1544,10 @@ mod tests {
         .await;
 
         assert_eq!(zero_id_response["error"]["code"], json!(-32602));
-        assert_eq!(zero_id_response["error"]["message"], json!("id must be at least 1"));
+        assert_eq!(
+            zero_id_response["error"]["message"],
+            json!("id must be at least 1")
+        );
 
         let fractional_id_response = send_request(
             &socket_path,
@@ -1435,7 +1606,10 @@ mod tests {
         .await;
 
         assert_eq!(response["error"]["code"], json!(-32602));
-        assert_eq!(response["error"]["message"], json!("limit must be at least 1"));
+        assert_eq!(
+            response["error"]["message"],
+            json!("limit must be at least 1")
+        );
 
         let shutdown_response = send_request(
             &socket_path,
@@ -1596,6 +1770,70 @@ mod tests {
         )
         .await;
         assert_eq!(shutdown_response["result"]["shutting_down"], json!(true));
+
+        timeout(Duration::from_secs(2), handle)
+            .await
+            .unwrap()
+            .unwrap()
+            .unwrap();
+    }
+
+    #[tokio::test]
+    async fn runtime_does_not_reply_to_notifications_cancelled_while_waiting_for_capacity() {
+        let socket_path = unique_path("notification-shutdown-capacity");
+        let mut config = DaemonRuntimeConfig::new(&socket_path);
+        config.request_concurrency = 1;
+        config.maintenance_interval = Duration::from_secs(3600);
+        let handle = spawn_runtime(config).await;
+
+        timeout(Duration::from_secs(2), async {
+            while tokio::fs::metadata(&socket_path).await.is_err() {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .unwrap();
+
+        let sleep_socket = socket_path.clone();
+        let inflight = tokio::spawn(async move {
+            send_request(
+                &sleep_socket,
+                json!({"jsonrpc":"2.0","method":"sleep","params":{"millis":300},"id":"sleep"}),
+            )
+            .await
+        });
+
+        tokio::time::sleep(Duration::from_millis(50)).await;
+
+        let notify_socket = socket_path.clone();
+        let notification = tokio::spawn(async move {
+            send_notification(
+                &notify_socket,
+                json!({"jsonrpc":"2.0","method":"status","params":{}}),
+            )
+            .await
+        });
+
+        let idle_stream = UnixStream::connect(&socket_path).await.unwrap();
+
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        let shutdown_response = send_request(
+            &socket_path,
+            json!({"jsonrpc":"2.0","method":"shutdown","params":{},"id":"shutdown"}),
+        )
+        .await;
+        assert_eq!(shutdown_response["result"]["shutting_down"], json!(true));
+
+        notification.await.unwrap();
+
+        let inflight_response = inflight.await.unwrap();
+        assert_eq!(inflight_response["error"]["code"], json!(-32002));
+        assert_eq!(
+            inflight_response["error"]["data"]["reason"],
+            json!("server_shutdown")
+        );
+
+        drop(idle_stream);
 
         timeout(Duration::from_secs(2), handle)
             .await

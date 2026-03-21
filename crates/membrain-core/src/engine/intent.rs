@@ -260,7 +260,12 @@ const INTENT_RULES: &[IntentRule] = &[
         "lately",
         940,
     ),
-    IntentRule::new(QueryIntent::RecentFirst, IntentSignalKind::Temporal, "today", 900),
+    IntentRule::new(
+        QueryIntent::RecentFirst,
+        IntentSignalKind::Temporal,
+        "today",
+        900,
+    ),
     IntentRule::new(
         QueryIntent::RecentFirst,
         IntentSignalKind::Temporal,
@@ -285,7 +290,12 @@ const INTENT_RULES: &[IntentRule] = &[
         "critical",
         920,
     ),
-    IntentRule::new(QueryIntent::StrengthWeighted, IntentSignalKind::Token, "key", 850),
+    IntentRule::new(
+        QueryIntent::StrengthWeighted,
+        IntentSignalKind::Token,
+        "key",
+        850,
+    ),
     IntentRule::new(
         QueryIntent::StrengthWeighted,
         IntentSignalKind::Token,
@@ -310,14 +320,24 @@ const INTENT_RULES: &[IntentRule] = &[
         "not sure",
         940,
     ),
-    IntentRule::new(QueryIntent::UncertaintyFocused, IntentSignalKind::Token, "might", 860),
+    IntentRule::new(
+        QueryIntent::UncertaintyFocused,
+        IntentSignalKind::Token,
+        "might",
+        860,
+    ),
     IntentRule::new(
         QueryIntent::UncertaintyFocused,
         IntentSignalKind::Token,
         "possibly",
         860,
     ),
-    IntentRule::new(QueryIntent::UncertaintyFocused, IntentSignalKind::Token, "unsure", 930),
+    IntentRule::new(
+        QueryIntent::UncertaintyFocused,
+        IntentSignalKind::Token,
+        "unsure",
+        930,
+    ),
     IntentRule::new(
         QueryIntent::TemporalAnchor,
         IntentSignalKind::Temporal,
@@ -342,7 +362,12 @@ const INTENT_RULES: &[IntentRule] = &[
         "timeline",
         920,
     ),
-    IntentRule::new(QueryIntent::TemporalAnchor, IntentSignalKind::Temporal, "era", 900),
+    IntentRule::new(
+        QueryIntent::TemporalAnchor,
+        IntentSignalKind::Temporal,
+        "era",
+        900,
+    ),
     IntentRule::new(
         QueryIntent::DiverseSample,
         IntentSignalKind::Token,
@@ -414,6 +439,8 @@ impl IntentEngine {
     pub fn classify(&self, query: &str) -> IntentClassification {
         let normalized_query = normalize_query(query);
         let mut matched_signals = Vec::new();
+        let mut selected_intent = QueryIntent::SemanticBroad;
+        let mut strongest_rule_weight = 0;
 
         for rule in INTENT_RULES {
             if normalized_query.contains(rule.pattern) {
@@ -423,6 +450,10 @@ impl IntentEngine {
                     matched_text: rule.pattern.to_string(),
                     weight: rule.weight,
                 });
+                if rule.weight > strongest_rule_weight {
+                    strongest_rule_weight = rule.weight;
+                    selected_intent = rule.intent;
+                }
             }
         }
 
@@ -439,18 +470,7 @@ impl IntentEngine {
             });
         }
 
-        let selected_intent = matched_signals
-            .iter()
-            .max_by_key(|signal| signal.weight)
-            .and_then(|signal| {
-                INTENT_RULES
-                    .iter()
-                    .find(|rule| rule.pattern == signal.pattern)
-                    .map(|rule| rule.intent)
-            })
-            .unwrap_or(QueryIntent::SemanticBroad);
-
-        let low_confidence_fallback = matched_signals.is_empty();
+        let low_confidence_fallback = strongest_rule_weight == 0;
         if low_confidence_fallback {
             matched_signals.push(IntentSignalMatch {
                 kind: IntentSignalKind::Fallback,
@@ -555,7 +575,8 @@ fn route_inputs_for(intent: QueryIntent) -> IntentRouteInputs {
 }
 
 fn normalize_query(query: &str) -> String {
-    query.split_whitespace()
+    query
+        .split_whitespace()
         .map(|part| {
             part.trim_matches(|c: char| !c.is_ascii_alphanumeric())
                 .to_ascii_lowercase()
@@ -662,9 +683,39 @@ mod tests {
             IntentRankingProfile::StrengthBiased,
         );
         assert_eq!(classification.matched_signals.len(), 1);
-        assert_eq!(classification.matched_signals[0].kind, IntentSignalKind::Fallback);
-        assert_eq!(classification.matched_signals[0].pattern, "default_semantic_broad");
+        assert_eq!(
+            classification.matched_signals[0].kind,
+            IntentSignalKind::Fallback
+        );
+        assert_eq!(
+            classification.matched_signals[0].pattern,
+            "default_semantic_broad"
+        );
         assert_eq!(classification.confidence, 0.35);
+    }
+
+    #[test]
+    fn question_form_only_queries_still_take_the_explicit_fallback_path() {
+        let classification = IntentEngine.classify("what rust borrow checker notes exist");
+
+        assert_eq!(classification.intent, QueryIntent::SemanticBroad);
+        assert!(classification.low_confidence_fallback);
+        assert_eq!(classification.route_inputs.query_path, QueryPath::Hybrid);
+        assert_eq!(classification.confidence, 0.35);
+        assert_eq!(classification.matched_signals.len(), 2);
+        assert_eq!(
+            classification.matched_signals[0].kind,
+            IntentSignalKind::QuestionForm
+        );
+        assert_eq!(classification.matched_signals[0].pattern, "what|which");
+        assert_eq!(
+            classification.matched_signals[1].kind,
+            IntentSignalKind::Fallback
+        );
+        assert_eq!(
+            classification.matched_signals[1].pattern,
+            "default_semantic_broad"
+        );
     }
 
     #[test]
@@ -689,12 +740,19 @@ mod tests {
         let classification = IntentEngine.classify("I am not sure whether this repair is safe");
 
         assert_eq!(classification.intent, QueryIntent::UncertaintyFocused);
-        assert_eq!(classification.route_inputs.query_path, QueryPath::PartialCue);
+        assert_eq!(
+            classification.route_inputs.query_path,
+            QueryPath::PartialCue
+        );
         assert_eq!(
             classification.route_inputs.ranking_profile,
             IntentRankingProfile::Balanced,
         );
-        assert!(classification.route_inputs.prefer_preview_only_on_low_confidence);
+        assert!(
+            classification
+                .route_inputs
+                .prefer_preview_only_on_low_confidence
+        );
         assert!(classification.route_inputs.high_stakes);
     }
 }

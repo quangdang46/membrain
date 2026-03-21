@@ -251,6 +251,7 @@ pub struct Tier1HotRecord {
 
 impl Tier1HotRecord {
     /// Builds a metadata-only Tier1 record.
+    #[allow(clippy::too_many_arguments)]
     pub fn metadata_only(
         namespace: NamespaceId,
         memory_id: MemoryId,

@@ -154,7 +154,10 @@ fn tier2_metadata_index_key_matches_namespace_safe_identity_fields() {
         layout.metadata.normalization_generation
     );
     assert_eq!(key.payload_locator, layout.metadata.payload_locator);
-    assert_eq!(key.payload_locator.hydration_path(), "tier2://team.alpha/payload/0063/99");
+    assert_eq!(
+        key.payload_locator.hydration_path(),
+        "tier2://team.alpha/payload/0063/99"
+    );
     assert!(layout.index_key_stays_metadata_only());
 }
 
@@ -200,8 +203,14 @@ fn tier2_payload_hydration_path_escapes_namespace_separators() {
 
     let layout = store.layout_item(namespace, MemoryId(41), SessionId(7), 991, &envelope);
 
-    assert_eq!(layout.payload.payload_locator.namespace.as_str(), "team/alpha");
-    assert_eq!(layout.payload_hydration_path(), "tier2://team%2Falpha/payload/0029/41");
+    assert_eq!(
+        layout.payload.payload_locator.namespace.as_str(),
+        "team/alpha"
+    );
+    assert_eq!(
+        layout.payload_hydration_path(),
+        "tier2://team%2Falpha/payload/0029/41"
+    );
     assert_eq!(
         layout.payload.payload_locator.hydration_path(),
         layout.payload_hydration_path()
@@ -257,10 +266,23 @@ fn tier2_metadata_preserves_landmark_and_era_fields_for_durable_recall() {
         &envelope,
     );
 
+    let prefilter = layout.prefilter_view();
+    let index_key = layout.metadata_index_key();
+
     assert!(layout.metadata.landmark.is_landmark);
     assert_eq!(layout.metadata.landmark, envelope.landmark);
-    assert_eq!(layout.prefilter_view().landmark, &envelope.landmark);
-    assert_eq!(layout.metadata_index_key().landmark, &envelope.landmark);
+    assert_eq!(prefilter.landmark, &envelope.landmark);
+    assert_eq!(index_key.landmark, &envelope.landmark);
+    assert_eq!(
+        prefilter.landmark_label(),
+        Some("project launch deadline was moved")
+    );
+    assert_eq!(prefilter.era_id(), Some("era-projectlaunc-0088"));
+    assert_eq!(
+        index_key.landmark_label(),
+        Some("project launch deadline was moved")
+    );
+    assert_eq!(index_key.era_id(), Some("era-projectlaunc-0088"));
 }
 
 #[test]
@@ -275,16 +297,16 @@ fn tier2_non_landmarks_remain_explicitly_non_landmarks_in_metadata_views() {
         124,
         &envelope,
     );
+    let prefilter = layout.prefilter_view();
+    let index_key = layout.metadata_index_key();
 
     assert_eq!(layout.metadata.landmark, LandmarkMetadata::non_landmark());
-    assert_eq!(
-        layout.prefilter_view().landmark,
-        &LandmarkMetadata::non_landmark()
-    );
-    assert_eq!(
-        layout.metadata_index_key().landmark,
-        &LandmarkMetadata::non_landmark()
-    );
+    assert_eq!(prefilter.landmark, &LandmarkMetadata::non_landmark());
+    assert_eq!(index_key.landmark, &LandmarkMetadata::non_landmark());
+    assert_eq!(prefilter.landmark_label(), None);
+    assert_eq!(prefilter.era_id(), None);
+    assert_eq!(index_key.landmark_label(), None);
+    assert_eq!(index_key.era_id(), None);
 }
 
 #[test]

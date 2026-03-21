@@ -50,6 +50,8 @@ impl ContradictionKind {
 /// State of contradiction resolution.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
 pub enum ResolutionState {
+    /// No contradiction metadata applies to this result.
+    None,
     /// Contradiction detected but not yet resolved.
     Unresolved,
     /// Automatically resolved by the system (e.g. duplicate suppression).
@@ -64,6 +66,7 @@ impl ResolutionState {
     /// Stable machine-readable name for this resolution state.
     pub const fn as_str(self) -> &'static str {
         match self {
+            Self::None => "none",
             Self::Unresolved => "unresolved",
             Self::AutoResolved => "auto_resolved",
             Self::ManuallyResolved => "manually_resolved",
@@ -73,7 +76,7 @@ impl ResolutionState {
 
     /// Whether this state represents a terminal resolution.
     pub const fn is_resolved(self) -> bool {
-        !matches!(self, Self::Unresolved)
+        !matches!(self, Self::None | Self::Unresolved)
     }
 }
 
@@ -127,7 +130,15 @@ pub struct ContradictionRecord {
     /// Stable confidence signal for the current preferred-answer decision (0..1000).
     pub confidence_signal: u16,
     /// Machine-readable reason for the current resolution.
-    pub resolution_reason: Option<&'static str>,
+    pub resolution_reason: Option<String>,
+    /// Current archive status for retention-sensitive contradiction evidence.
+    pub archived: bool,
+    /// Whether governance has placed this contradiction under legal hold.
+    pub legal_hold: bool,
+    /// Whether this record is still the last authoritative evidence for the conflict set.
+    pub authoritative_evidence: bool,
+    /// Machine-readable reason for the current archive or legal-hold state.
+    pub retention_reason: Option<String>,
     /// Similarity or conflict score between the two memories (0..1000).
     pub conflict_score: u16,
 }
@@ -153,6 +164,10 @@ impl ContradictionRecord {
             preferred_answer_state: PreferredAnswerState::Unset,
             confidence_signal: 0,
             resolution_reason: None,
+            archived: false,
+            legal_hold: false,
+            authoritative_evidence: true,
+            retention_reason: None,
             conflict_score,
         }
     }
@@ -167,12 +182,15 @@ impl ContradictionRecord {
         if !state.is_resolved() {
             return Err(ContradictionError::InvalidResolutionState);
         }
+        if preferred != self.memory_a && preferred != self.memory_b {
+            return Err(ContradictionError::InvalidPreference);
+        }
 
         self.resolution = state;
         self.preferred_memory = Some(preferred);
         self.preferred_answer_state = PreferredAnswerState::Preferred;
         self.confidence_signal = preferred_answer_confidence(self.kind, self.conflict_score, state);
-        self.resolution_reason = Some(reason);
+        self.resolution_reason = Some(reason.to_string());
         Ok(())
     }
 
@@ -208,6 +226,30 @@ impl ContradictionRecord {
             PreferredAnswerState::ActiveContradiction
         )
     }
+
+    /// Applies archive or restore policy while preventing silent destruction of last authoritative evidence.
+    pub fn apply_retention_policy(
+        &mut self,
+        archived: bool,
+        legal_hold: bool,
+        authoritative_evidence: bool,
+        reason: &'static str,
+    ) -> Result<(), ContradictionError> {
+        if archived && authoritative_evidence && !legal_hold {
+            return Err(ContradictionError::AuthoritativeEvidenceRequired);
+        }
+
+        self.archived = archived;
+        self.legal_hold = legal_hold;
+        self.authoritative_evidence = authoritative_evidence;
+        self.retention_reason = Some(reason.to_string());
+        Ok(())
+    }
+
+    /// Returns whether this record should remain visible in audit and explain outputs.
+    pub const fn audit_visible(&self) -> bool {
+        self.legal_hold || !self.archived || self.is_unresolved() || self.authoritative_evidence
+    }
 }
 
 const fn preferred_answer_confidence(
@@ -226,7 +268,7 @@ const fn preferred_answer_confidence(
         ResolutionState::AuthoritativelyResolved => 70,
         ResolutionState::ManuallyResolved => 40,
         ResolutionState::AutoResolved => 20,
-        ResolutionState::Unresolved => 0,
+        ResolutionState::Unresolved | ResolutionState::None => 0,
     };
     let conflict_bonus = conflict_score / 10;
     let confidence = base + state_bonus + conflict_bonus;
@@ -260,10 +302,26 @@ pub struct ContradictionExplain {
     pub confidence_signal: u16,
     /// The other memory in the contradiction pair.
     pub conflicting_memory: MemoryId,
+    /// Stable ordered pair showing the full contradiction lineage.
+    pub lineage_pair: [MemoryId; 2],
     /// Whether the current result was the preferred or superseded memory.
     pub result_is_preferred: bool,
+    /// Which memory lost preference, if the contradiction resolved.
+    pub superseded_memory: Option<MemoryId>,
+    /// Machine-readable reason for the current contradiction state.
+    pub resolution_reason: Option<String>,
     /// Whether the contradiction remains active and user-visible.
     pub active_contradiction: bool,
+    /// Whether this contradiction is currently archived.
+    pub archived: bool,
+    /// Whether governance has placed this contradiction under legal hold.
+    pub legal_hold: bool,
+    /// Whether this record is still the last authoritative evidence for the conflict set.
+    pub authoritative_evidence: bool,
+    /// Machine-readable reason for the current archive or legal-hold state.
+    pub retention_reason: Option<String>,
+    /// Whether this contradiction should remain visible in audit surfaces.
+    pub audit_visible: bool,
 }
 
 // ── Contradiction detection ──────────────────────────────────────────────────
@@ -322,6 +380,16 @@ pub trait ContradictionStore {
     /// Returns the explain payload for a memory's contradictions.
     fn explain_for_memory(&self, memory_id: MemoryId) -> Vec<ContradictionExplain>;
 
+    /// Applies archive or restore policy to an existing contradiction.
+    fn apply_retention_policy(
+        &mut self,
+        id: ContradictionId,
+        archived: bool,
+        legal_hold: bool,
+        authoritative_evidence: bool,
+        reason: &'static str,
+    ) -> Result<(), ContradictionError>;
+
     /// Returns the total count of contradictions in a namespace.
     fn count_in_namespace(&self, namespace: &NamespaceId) -> usize;
 
@@ -342,6 +410,8 @@ pub enum ContradictionError {
     InvalidResolutionState,
     /// A duplicate contradiction record already exists for this pair.
     DuplicateRecord,
+    /// Retention policy would silently destroy the last authoritative evidence.
+    AuthoritativeEvidenceRequired,
 }
 
 // ── In-memory contradiction engine ───────────────────────────────────────────
@@ -467,9 +537,7 @@ impl ContradictionStore for ContradictionEngine {
                     record.memory_a
                 };
 
-                let result_is_preferred = record
-                    .preferred_memory
-                    .map_or(false, |preferred| preferred == memory_id);
+                let result_is_preferred = record.preferred_memory == Some(memory_id);
 
                 ContradictionExplain {
                     contradiction_id: record.id,
@@ -479,11 +547,35 @@ impl ContradictionStore for ContradictionEngine {
                     preferred_memory: record.preferred_memory,
                     confidence_signal: record.confidence_signal,
                     conflicting_memory,
+                    lineage_pair: [record.memory_a, record.memory_b],
                     result_is_preferred,
+                    superseded_memory: record.superseded_memory(),
+                    resolution_reason: record.resolution_reason.clone(),
                     active_contradiction: record.has_active_contradiction(),
+                    archived: record.archived,
+                    legal_hold: record.legal_hold,
+                    authoritative_evidence: record.authoritative_evidence,
+                    retention_reason: record.retention_reason.clone(),
+                    audit_visible: record.audit_visible(),
                 }
             })
             .collect()
+    }
+
+    fn apply_retention_policy(
+        &mut self,
+        id: ContradictionId,
+        archived: bool,
+        legal_hold: bool,
+        authoritative_evidence: bool,
+        reason: &'static str,
+    ) -> Result<(), ContradictionError> {
+        let record = self
+            .records
+            .iter_mut()
+            .find(|r| r.id == id)
+            .ok_or(ContradictionError::NotFound)?;
+        record.apply_retention_policy(archived, legal_hold, authoritative_evidence, reason)
     }
 
     fn count_in_namespace(&self, namespace: &NamespaceId) -> usize {
@@ -581,7 +673,10 @@ mod tests {
         let found = engine.find_by_memory(MemoryId(10));
         assert_eq!(found[0].resolution, ResolutionState::AutoResolved);
         assert_eq!(found[0].preferred_memory, Some(MemoryId(20)));
-        assert_eq!(found[0].preferred_answer_state, PreferredAnswerState::Preferred);
+        assert_eq!(
+            found[0].preferred_answer_state,
+            PreferredAnswerState::Preferred
+        );
         assert_eq!(found[0].confidence_signal, 930);
         assert_eq!(found[0].superseded_memory(), Some(MemoryId(10)));
     }
@@ -723,6 +818,16 @@ mod tests {
         assert_eq!(explain_preferred[0].confidence_signal, 1000);
         assert!(!explain_preferred[0].active_contradiction);
         assert_eq!(explain_preferred[0].conflicting_memory, MemoryId(10));
+        assert_eq!(
+            explain_preferred[0].lineage_pair,
+            [MemoryId(10), MemoryId(20)]
+        );
+        assert_eq!(explain_preferred[0].superseded_memory, Some(MemoryId(10)));
+        assert_eq!(
+            explain_preferred[0].resolution_reason,
+            Some("authoritative source".to_string())
+        );
+        assert!(explain_preferred[0].audit_visible);
 
         // Explain for the superseded memory
         let explain_superseded = engine.explain_for_memory(MemoryId(10));
@@ -735,6 +840,16 @@ mod tests {
         assert_eq!(explain_superseded[0].confidence_signal, 1000);
         assert!(!explain_superseded[0].active_contradiction);
         assert_eq!(explain_superseded[0].conflicting_memory, MemoryId(20));
+        assert_eq!(
+            explain_superseded[0].lineage_pair,
+            [MemoryId(10), MemoryId(20)]
+        );
+        assert_eq!(explain_superseded[0].superseded_memory, Some(MemoryId(10)));
+        assert_eq!(
+            explain_superseded[0].resolution_reason,
+            Some("authoritative source".to_string())
+        );
+        assert!(explain_superseded[0].audit_visible);
     }
 
     #[test]
@@ -754,5 +869,52 @@ mod tests {
             PreferredAnswerState::ActiveContradiction.as_str(),
             "active_contradiction"
         );
+    }
+
+    #[test]
+    fn resolution_state_names_include_none() {
+        assert_eq!(ResolutionState::None.as_str(), "none");
+        assert!(!ResolutionState::None.is_resolved());
+    }
+
+    #[test]
+    fn retention_policy_blocks_archiving_last_authoritative_evidence_without_legal_hold() {
+        let mut engine = ContradictionEngine::new();
+        let record = make_record(ns("test"), 10, 20, ContradictionKind::Supersession);
+        let id = engine.record(record).unwrap();
+
+        let err = engine
+            .apply_retention_policy(id, true, false, true, "archive superseded contradiction")
+            .unwrap_err();
+
+        assert_eq!(err, ContradictionError::AuthoritativeEvidenceRequired);
+    }
+
+    #[test]
+    fn retention_policy_allows_legal_hold_to_keep_archived_contradiction_audit_visible() {
+        let mut engine = ContradictionEngine::new();
+        let record = make_record(ns("test"), 10, 20, ContradictionKind::Supersession);
+        let id = engine.record(record).unwrap();
+
+        engine
+            .apply_retention_policy(
+                id,
+                true,
+                true,
+                true,
+                "legal hold keeps archived contradiction",
+            )
+            .unwrap();
+
+        let explain = engine.explain_for_memory(MemoryId(10));
+        assert_eq!(explain.len(), 1);
+        assert!(explain[0].archived);
+        assert!(explain[0].legal_hold);
+        assert!(explain[0].authoritative_evidence);
+        assert_eq!(
+            explain[0].retention_reason,
+            Some("legal hold keeps archived contradiction".to_string())
+        );
+        assert!(explain[0].audit_visible);
     }
 }

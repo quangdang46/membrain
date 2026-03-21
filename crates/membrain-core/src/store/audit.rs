@@ -1,5 +1,8 @@
 use crate::api::NamespaceId;
+use crate::engine::contradiction::ContradictionRecord;
 use crate::observability::{AuditEventCategory, AuditEventKind};
+use crate::policy::{OperationClass, PolicyGateway, SafeguardRequest};
+use crate::store::AuditLogStoreApi;
 use crate::types::{MemoryId, SessionId};
 use std::collections::VecDeque;
 
@@ -11,6 +14,81 @@ impl AuditLogStore {
     /// Builds a bounded append-only audit log with a hard row cap.
     pub fn new_log(&self, capacity: usize) -> AppendOnlyAuditLog {
         AppendOnlyAuditLog::new(capacity)
+    }
+
+    /// Records contradiction archive or legal-hold policy decisions without dropping the durable row.
+    pub fn record_contradiction_retention(
+        &self,
+        log: &mut AppendOnlyAuditLog,
+        contradiction: &ContradictionRecord,
+        policy: &impl PolicyGateway,
+        request_id: &str,
+    ) -> AuditLogEntry {
+        let safeguard = policy.evaluate_safeguard(SafeguardRequest {
+            operation_class: OperationClass::ContradictionArchive,
+            preview_only: false,
+            namespace_bound: true,
+            policy_allowed: !contradiction.legal_hold,
+            requires_confirmation: contradiction.archived,
+            local_confirmation: !contradiction.archived || contradiction.legal_hold,
+            force_allowed: contradiction.legal_hold,
+            generation_bound: Some(contradiction.id.0),
+            generation_matches: true,
+            snapshot_required: contradiction.archived,
+            snapshot_available: !contradiction.authoritative_evidence || contradiction.legal_hold,
+            maintenance_window_required: false,
+            maintenance_window_active: true,
+            dependencies_ready: true,
+            scope_precise: true,
+            authoritative_input_readable: true,
+            confidence_ready: true,
+            can_degrade: false,
+            legal_hold: contradiction.legal_hold,
+        });
+
+        let detail = contradiction.retention_reason.clone().unwrap_or_else(|| {
+            if contradiction.legal_hold {
+                "contradiction retained under legal hold".to_string()
+            } else if contradiction.archived {
+                "contradiction archived after supersession".to_string()
+            } else {
+                "contradiction retained as durable evidence".to_string()
+            }
+        });
+
+        let entry = AuditLogEntry::new(
+            AuditEventCategory::Archive,
+            AuditEventKind::ArchiveRecorded,
+            contradiction.namespace.clone(),
+            "contradiction_policy",
+            detail,
+        )
+        .with_memory_id(
+            contradiction
+                .preferred_memory
+                .unwrap_or(contradiction.memory_a),
+        )
+        .with_request_id(request_id)
+        .with_related_run(
+            safeguard
+                .audit
+                .related_run
+                .unwrap_or("contradiction-archive-run"),
+        );
+
+        let entry = if safeguard.policy_summary.decision == crate::policy::PolicyDecision::Deny {
+            entry.with_redaction()
+        } else {
+            entry
+        };
+
+        log.append(entry)
+    }
+}
+
+impl AuditLogStoreApi for AuditLogStore {
+    fn component_name(&self) -> &'static str {
+        "store.audit"
     }
 }
 
@@ -178,6 +256,24 @@ impl AppendOnlyAuditLog {
             .collect()
     }
 
+    /// Returns retained audit rows for one request correlation handle in append order.
+    pub fn entries_for_request_id(&self, request_id: &str) -> Vec<AuditLogEntry> {
+        self.entries
+            .iter()
+            .filter(|entry| entry.request_id.as_deref() == Some(request_id))
+            .cloned()
+            .collect()
+    }
+
+    /// Returns retained audit rows for one related run correlation handle in append order.
+    pub fn entries_for_related_run(&self, related_run: &str) -> Vec<AuditLogEntry> {
+        self.entries
+            .iter()
+            .filter(|entry| entry.related_run.as_deref() == Some(related_run))
+            .cloned()
+            .collect()
+    }
+
     /// Returns retained audit rows for one event kind in append order.
     pub fn entries_for_kind(&self, kind: AuditEventKind) -> Vec<AuditLogEntry> {
         self.entries
@@ -192,7 +288,12 @@ impl AppendOnlyAuditLog {
 mod tests {
     use super::{AppendOnlyAuditLog, AuditLogEntry, AuditLogStore};
     use crate::api::NamespaceId;
+    use crate::engine::contradiction::{
+        ContradictionId, ContradictionKind, ContradictionRecord, PreferredAnswerState,
+        ResolutionState,
+    };
     use crate::observability::{AuditEventCategory, AuditEventKind};
+    use crate::policy::PolicyModule;
     use crate::types::{MemoryId, SessionId};
 
     fn team_alpha() -> NamespaceId {
@@ -310,9 +411,14 @@ mod tests {
         ));
 
         let memory_entries = log.entries_for_memory(MemoryId(41));
+        let request_entries = log.entries_for_request_id("req-policy-41");
+        let incident_entries = log.entries_for_related_run("incident-2026-03-20");
         let migration_entries = log.entries_for_kind(AuditEventKind::MaintenanceMigrationApplied);
+        let migration_run_entries = log.entries_for_related_run("migration-0042");
 
         assert_eq!(memory_entries.len(), 2);
+        assert_eq!(request_entries.len(), 1);
+        assert_eq!(incident_entries.len(), 1);
         assert!(memory_entries[0].redacted);
         assert_eq!(
             memory_entries[0].request_id.as_deref(),
@@ -322,12 +428,16 @@ mod tests {
             memory_entries[0].related_run.as_deref(),
             Some("incident-2026-03-20")
         );
+        assert_eq!(request_entries[0], memory_entries[0]);
+        assert_eq!(incident_entries[0], memory_entries[0]);
         assert_eq!(migration_entries.len(), 1);
+        assert_eq!(migration_run_entries.len(), 1);
         assert_eq!(migration_entries[0].actor_source, "migration_runner");
         assert_eq!(
             migration_entries[0].related_run.as_deref(),
             Some("migration-0042")
         );
+        assert_eq!(migration_run_entries[0], migration_entries[0]);
     }
 
     #[test]
@@ -380,5 +490,46 @@ mod tests {
         assert_eq!(entries[0].kind, AuditEventKind::RecallServed);
         assert_eq!(entries[1].sequence, 3);
         assert_eq!(entries[1].kind, AuditEventKind::ArchiveRecorded);
+    }
+
+    #[test]
+    fn contradiction_retention_audit_keeps_archive_event_and_request_correlation() {
+        let store = AuditLogStore;
+        let mut log = store.new_log(8);
+        let namespace = team_alpha();
+        let contradiction = ContradictionRecord {
+            id: ContradictionId(9),
+            namespace: namespace.clone(),
+            memory_a: MemoryId(10),
+            memory_b: MemoryId(20),
+            kind: ContradictionKind::Supersession,
+            resolution: ResolutionState::AuthoritativelyResolved,
+            preferred_memory: Some(MemoryId(20)),
+            preferred_answer_state: PreferredAnswerState::Preferred,
+            confidence_signal: 960,
+            resolution_reason: Some("authoritative source".to_string()),
+            archived: true,
+            legal_hold: true,
+            authoritative_evidence: true,
+            retention_reason: Some("legal hold keeps archived contradiction".to_string()),
+            conflict_score: 880,
+        };
+
+        let entry = store.record_contradiction_retention(
+            &mut log,
+            &contradiction,
+            &PolicyModule,
+            "req-contradiction-9",
+        );
+
+        assert_eq!(entry.kind, AuditEventKind::ArchiveRecorded);
+        assert_eq!(entry.request_id.as_deref(), Some("req-contradiction-9"));
+        assert_eq!(
+            entry.related_run.as_deref(),
+            Some("contradiction-archive-run")
+        );
+        assert_eq!(entry.memory_id, Some(MemoryId(20)));
+        assert!(entry.redacted);
+        assert_eq!(log.entries_for_request_id("req-contradiction-9").len(), 1);
     }
 }

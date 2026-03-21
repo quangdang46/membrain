@@ -4,6 +4,7 @@
 //! deduplicates similar entries, and produces consolidated summaries.
 
 use crate::api::NamespaceId;
+use crate::engine::episode::EpisodeGroupingReport;
 use crate::engine::maintenance::{
     DurableStateToken, InterruptedMaintenance, InterruptionReason, MaintenanceOperation,
     MaintenanceProgress, MaintenanceStep,
@@ -41,6 +42,8 @@ impl Default for ConsolidationPolicy {
 /// Actions the consolidation engine can take on a memory group.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ConsolidationAction {
+    /// Preserve a deterministic episode/source-set grouping before higher-order derivation work.
+    EpisodeSourceSet { grouping: EpisodeGroupingReport },
     /// Merge multiple memories into one consolidated summary.
     Merge {
         source_ids: Vec<MemoryId>,
@@ -62,6 +65,8 @@ pub enum ConsolidationAction {
 pub struct ConsolidationSummary {
     /// Number of memory groups evaluated.
     pub groups_evaluated: u32,
+    /// Number of deterministic episode/source-set groupings produced.
+    pub episode_source_sets: u32,
     /// Number of merges performed.
     pub merges_performed: u32,
     /// Number of deduplication actions taken.
@@ -70,6 +75,8 @@ pub struct ConsolidationSummary {
     pub skipped: u32,
     /// Total memories affected.
     pub memories_affected: u32,
+    /// Sample grouping logs that explain why a source set was formed.
+    pub grouping_logs: Vec<String>,
 }
 
 // ── Consolidation operation ──────────────────────────────────────────────────
@@ -81,11 +88,13 @@ pub struct ConsolidationRun {
     policy: ConsolidationPolicy,
     processed: u32,
     total: u32,
+    episode_source_sets: u32,
     merges: u32,
     deduplications: u32,
     skipped: u32,
     completed: bool,
     durable_token: DurableStateToken,
+    grouping_logs: Vec<String>,
 }
 
 impl ConsolidationRun {
@@ -96,11 +105,13 @@ impl ConsolidationRun {
             policy,
             processed: 0,
             total: total_groups,
+            episode_source_sets: 0,
             merges: 0,
             deduplications: 0,
             skipped: 0,
             completed: false,
             durable_token: DurableStateToken(0),
+            grouping_logs: Vec::new(),
         }
     }
 }
@@ -113,20 +124,33 @@ impl MaintenanceOperation for ConsolidationRun {
             self.completed = true;
             return MaintenanceStep::Completed(ConsolidationSummary {
                 groups_evaluated: self.processed,
+                episode_source_sets: self.episode_source_sets,
                 merges_performed: self.merges,
                 deduplications: self.deduplications,
                 skipped: self.skipped,
                 memories_affected: self.merges * 2 + self.deduplications,
+                grouping_logs: self.grouping_logs.clone(),
             });
         }
 
-        // Simulate processing one batch
+        // Simulate processing one batch.
         let batch_size = (self.policy.batch_size as u32).max(1);
         let batch_end = (self.processed + batch_size).min(self.total);
         let batch_count = batch_end - self.processed;
 
-        // In a real implementation, each group would be evaluated for similarity
+        // Stage 1 always materializes deterministic episode/source-set grouping before
+        // later merge or deduplication work. Until higher-order derivations land, treat
+        // each bounded candidate group as grouped-and-skipped while preserving inspectable logs.
+        self.episode_source_sets += batch_count;
         self.skipped += batch_count;
+        let start_group = self.processed + 1;
+        for group_index in start_group..=batch_end {
+            self.grouping_logs.push(format!(
+                "namespace={} episode_source_set={} reason=bounded_grouping stage=nrem_migration",
+                self.namespace.as_str(),
+                group_index
+            ));
+        }
         self.processed = batch_end;
         self.durable_token = DurableStateToken(self.processed as u64);
 
@@ -134,10 +158,12 @@ impl MaintenanceOperation for ConsolidationRun {
             self.completed = true;
             MaintenanceStep::Completed(ConsolidationSummary {
                 groups_evaluated: self.processed,
+                episode_source_sets: self.episode_source_sets,
                 merges_performed: self.merges,
                 deduplications: self.deduplications,
                 skipped: self.skipped,
                 memories_affected: self.merges * 2 + self.deduplications,
+                grouping_logs: self.grouping_logs.clone(),
             })
         } else {
             MaintenanceStep::Pending(MaintenanceProgress::new(self.processed, self.total))
@@ -199,6 +225,8 @@ mod tests {
         assert!(matches!(snap.state, MaintenanceJobState::Completed(_)));
         if let MaintenanceJobState::Completed(summary) = snap.state {
             assert_eq!(summary.groups_evaluated, 20);
+            assert_eq!(summary.episode_source_sets, 20);
+            assert_eq!(summary.grouping_logs.len(), 20);
         }
     }
 

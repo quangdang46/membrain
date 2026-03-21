@@ -336,7 +336,12 @@ impl EngramStore {
         let member_memory_ids = self
             .members_by_engram
             .get(&engram_id)
-            .map(|members| members.iter().map(|member| member.memory_id).collect::<Vec<_>>())
+            .map(|members| {
+                members
+                    .iter()
+                    .map(|member| member.memory_id)
+                    .collect::<Vec<_>>()
+            })
             .unwrap_or_default();
         let member_embeddings = member_memory_ids
             .iter()
@@ -364,7 +369,8 @@ impl EngramStore {
     }
 
     pub fn rebuild_from_memberships(&self) -> Self {
-        let mut rebuilt = Self::new(self.similarity_threshold).with_lookup_cap(self.similar_lookup_cap);
+        let mut rebuilt =
+            Self::new(self.similarity_threshold).with_lookup_cap(self.similar_lookup_cap);
         rebuilt.next_engram_id = self.next_engram_id;
         rebuilt.memory_embeddings = self.memory_embeddings.clone();
         rebuilt.memory_to_engram = self.memory_to_engram.clone();
@@ -383,7 +389,9 @@ impl EngramStore {
         }
 
         for (engram_id, members) in &self.members_by_engram {
-            rebuilt.members_by_engram.insert(*engram_id, members.clone());
+            rebuilt
+                .members_by_engram
+                .insert(*engram_id, members.clone());
         }
 
         let refresh_order = rebuilt.clusters.keys().copied().collect::<Vec<_>>();
@@ -467,10 +475,30 @@ impl BoundedExpansionPlanner {
         Self { constraints }
     }
 
+    fn should_follow_edge(&self, current: EntityId, edge: &GraphEdge) -> bool {
+        if edge.from == current {
+            true
+        } else if edge.to == current {
+            !edge.relation.is_directed() || self.constraints.follow_reverse
+        } else {
+            false
+        }
+    }
+
     /// Run a bounded petgraph BFS from a local subgraph.
-    pub fn plan_bfs<F>(
+    pub fn plan_bfs<F>(&self, seed: EntityId, fetch_neighbors: F) -> (Neighborhood, GraphExplain)
+    where
+        F: FnMut(EntityId) -> Vec<(GraphEdge, GraphEntity)>,
+    {
+        self.plan_bfs_with_additional_seeds(seed, &[], fetch_neighbors)
+    }
+
+    /// Run a bounded petgraph BFS from a primary seed plus additional bounded seeds
+    /// such as the top-hit engram membership set.
+    pub fn plan_bfs_with_additional_seeds<F>(
         &self,
         seed: EntityId,
+        additional_seeds: &[EntityId],
         mut fetch_neighbors: F,
     ) -> (Neighborhood, GraphExplain)
     where
@@ -481,6 +509,11 @@ impl BoundedExpansionPlanner {
 
         let mut visited = HashSet::new();
         visited.insert(seed);
+        for extra_seed in additional_seeds {
+            if visited.insert(*extra_seed) {
+                queue.push_back((*extra_seed, 0));
+            }
+        }
 
         let mut neighborhood = Neighborhood {
             seed,
@@ -491,7 +524,9 @@ impl BoundedExpansionPlanner {
         };
 
         let mut explain = GraphExplain {
-            seeds: vec![seed],
+            seeds: std::iter::once(seed)
+                .chain(additional_seeds.iter().copied())
+                .collect(),
             expanded_nodes: 0,
             edges_followed: 0,
             cutoff_reasons: Vec::new(),
@@ -514,6 +549,7 @@ impl BoundedExpansionPlanner {
                 explain
                     .cutoff_reasons
                     .push(CutoffReason::MaxNodesReached(explain.expanded_nodes));
+                explain.cutoff_reasons.push(CutoffReason::BudgetExhausted);
                 neighborhood.truncated = true;
                 break;
             }
@@ -522,7 +558,9 @@ impl BoundedExpansionPlanner {
 
             let neighbors = fetch_neighbors(current);
             for (edge, entity) in neighbors {
-                if edge.strength < self.constraints.min_strength {
+                if edge.strength < self.constraints.min_strength
+                    || !self.should_follow_edge(current, &edge)
+                {
                     continue;
                 }
 
@@ -530,6 +568,7 @@ impl BoundedExpansionPlanner {
                     explain
                         .cutoff_reasons
                         .push(CutoffReason::MaxNodesReached(self.constraints.max_entities));
+                    explain.cutoff_reasons.push(CutoffReason::BudgetExhausted);
                     neighborhood.truncated = true;
                     break;
                 }
@@ -733,7 +772,10 @@ mod tests {
         assert!(!joined.created_new_cluster);
         assert_eq!(joined.engram_id, created.engram_id);
         assert_eq!(joined.similar_candidates.len(), 1);
-        assert_eq!(store.lookup_for_memory(MemoryId(2)), Some(created.engram_id));
+        assert_eq!(
+            store.lookup_for_memory(MemoryId(2)),
+            Some(created.engram_id)
+        );
     }
 
     #[test]
@@ -780,8 +822,14 @@ mod tests {
 
         assert_eq!(rebuilt_cluster.member_count, 2);
         assert_eq!(rebuilt_cluster.centroid, vec![0.975, 0.025]);
-        assert_eq!(rebuilt.lookup_for_memory(MemoryId(1)), Some(assignment.engram_id));
-        assert_eq!(rebuilt.lookup_for_memory(MemoryId(2)), Some(assignment.engram_id));
+        assert_eq!(
+            rebuilt.lookup_for_memory(MemoryId(1)),
+            Some(assignment.engram_id)
+        );
+        assert_eq!(
+            rebuilt.lookup_for_memory(MemoryId(2)),
+            Some(assignment.engram_id)
+        );
     }
 
     #[test]
@@ -789,7 +837,10 @@ mod tests {
         let mut store = EngramStore::new(0.90);
         let assignment = store.assign_memory(MemoryId(77), vec![0.7, 0.3], 10, "embed.v1");
 
-        assert_eq!(store.lookup_for_memory(MemoryId(77)), Some(assignment.engram_id));
+        assert_eq!(
+            store.lookup_for_memory(MemoryId(77)),
+            Some(assignment.engram_id)
+        );
         assert_eq!(store.lookup_for_memory(MemoryId(999)), None);
     }
 
@@ -863,6 +914,155 @@ mod tests {
         assert!(ex
             .cutoff_reasons
             .contains(&CutoffReason::MaxNodesReached(1)));
+    }
+
+    #[test]
+    fn bfs_supports_multi_seed_expansion_for_top_hit_engram_membership() {
+        let planner = BoundedExpansionPlanner::new(ExpansionConstraints {
+            max_depth: 2,
+            max_entities: 6,
+            min_strength: 50,
+            follow_reverse: false,
+        });
+
+        let seed = EntityId(1);
+        let additional_seeds = [EntityId(9)];
+        let (nb, ex) =
+            planner.plan_bfs_with_additional_seeds(
+                seed,
+                &additional_seeds,
+                |current| match current {
+                    EntityId(1) => vec![(
+                        GraphEdge {
+                            from: current,
+                            to: EntityId(2),
+                            relation: RelationKind::Mentions,
+                            strength: 100,
+                        },
+                        GraphEntity {
+                            id: EntityId(2),
+                            kind: EntityKind::Concept,
+                            label: "seed-neighbor".into(),
+                            namespace: NamespaceId::new("ns").unwrap(),
+                            memory_id: None,
+                        },
+                    )],
+                    EntityId(9) => vec![(
+                        GraphEdge {
+                            from: current,
+                            to: EntityId(10),
+                            relation: RelationKind::SharedTopic,
+                            strength: 100,
+                        },
+                        GraphEntity {
+                            id: EntityId(10),
+                            kind: EntityKind::Memory,
+                            label: "engram-member-neighbor".into(),
+                            namespace: NamespaceId::new("ns").unwrap(),
+                            memory_id: Some(MemoryId(10)),
+                        },
+                    )],
+                    _ => Vec::new(),
+                },
+            );
+
+        assert_eq!(ex.seeds, vec![EntityId(1), EntityId(9)]);
+        assert_eq!(ex.expanded_nodes, 4);
+        assert_eq!(ex.edges_followed, 2);
+        assert_eq!(nb.entities.len(), 2);
+        assert!(!nb.truncated);
+    }
+
+    #[test]
+    fn bfs_skips_reverse_directed_edges_without_follow_reverse() {
+        let planner = BoundedExpansionPlanner::new(ExpansionConstraints {
+            max_depth: 2,
+            max_entities: 4,
+            min_strength: 50,
+            follow_reverse: false,
+        });
+
+        let seed = EntityId(2);
+        let (nb, ex) = planner.plan_bfs(seed, |current| {
+            if current == seed {
+                vec![(
+                    GraphEdge {
+                        from: EntityId(1),
+                        to: current,
+                        relation: RelationKind::DerivedFrom,
+                        strength: 100,
+                    },
+                    GraphEntity {
+                        id: EntityId(1),
+                        kind: EntityKind::Memory,
+                        label: "reverse-only".into(),
+                        namespace: NamespaceId::new("ns").unwrap(),
+                        memory_id: Some(MemoryId(1)),
+                    },
+                )]
+            } else {
+                Vec::new()
+            }
+        });
+
+        assert!(nb.entities.is_empty());
+        assert_eq!(ex.edges_followed, 0);
+        assert!(!nb.truncated);
+    }
+
+    #[test]
+    fn bfs_can_follow_reverse_directed_edges_when_enabled() {
+        let planner = BoundedExpansionPlanner::new(ExpansionConstraints {
+            max_depth: 2,
+            max_entities: 4,
+            min_strength: 50,
+            follow_reverse: true,
+        });
+
+        let seed = EntityId(2);
+        let (nb, ex) = planner.plan_bfs(seed, |current| {
+            if current == seed {
+                vec![(
+                    GraphEdge {
+                        from: EntityId(1),
+                        to: current,
+                        relation: RelationKind::DerivedFrom,
+                        strength: 100,
+                    },
+                    GraphEntity {
+                        id: EntityId(1),
+                        kind: EntityKind::Memory,
+                        label: "reverse-allowed".into(),
+                        namespace: NamespaceId::new("ns").unwrap(),
+                        memory_id: Some(MemoryId(1)),
+                    },
+                )]
+            } else {
+                Vec::new()
+            }
+        });
+
+        assert_eq!(nb.entities.len(), 1);
+        assert_eq!(nb.entities[0].id, EntityId(1));
+        assert_eq!(ex.edges_followed, 1);
+    }
+
+    #[test]
+    fn bfs_reports_budget_exhaustion_when_seed_queue_hits_entity_cap() {
+        let planner = BoundedExpansionPlanner::new(ExpansionConstraints {
+            max_depth: 2,
+            max_entities: 1,
+            min_strength: 50,
+            follow_reverse: false,
+        });
+
+        let (_, ex) =
+            planner.plan_bfs_with_additional_seeds(EntityId(1), &[EntityId(9)], |_| Vec::new());
+
+        assert!(ex
+            .cutoff_reasons
+            .contains(&CutoffReason::MaxNodesReached(1)));
+        assert!(ex.cutoff_reasons.contains(&CutoffReason::BudgetExhausted));
     }
 
     #[test]

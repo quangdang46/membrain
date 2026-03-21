@@ -388,8 +388,14 @@ mod tests {
         assert_eq!(explain.signal_breakdown.len(), 5);
         assert_eq!(explain.signal_breakdown[0], (ScoreFamily::Recency, 800, 15));
         assert_eq!(explain.signal_breakdown[1], (ScoreFamily::Salience, 0, 30));
-        assert_eq!(explain.signal_breakdown[2], (ScoreFamily::Strength, 900, 50));
-        assert_eq!(explain.signal_breakdown[3], (ScoreFamily::Provenance, 300, 10));
+        assert_eq!(
+            explain.signal_breakdown[2],
+            (ScoreFamily::Strength, 900, 50)
+        );
+        assert_eq!(
+            explain.signal_breakdown[3],
+            (ScoreFamily::Provenance, 300, 10)
+        );
         assert_eq!(
             explain.signal_breakdown[4],
             (ScoreFamily::ConflictAdjustment, 0, 5)

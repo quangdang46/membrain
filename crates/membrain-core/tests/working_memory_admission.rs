@@ -155,6 +155,36 @@ fn pinned_items_are_not_evicted_during_overflow() {
 }
 
 #[test]
+fn overflow_evicts_lowest_id_when_attention_scores_tie() {
+    let mut controller = WorkingMemoryController::new(test_config());
+    controller
+        .admit(WorkingMemoryItem::new(WorkingMemoryId(71), 450))
+        .expect("first tied item should admit");
+    controller
+        .admit(WorkingMemoryItem::new(WorkingMemoryId(70), 450))
+        .expect("second tied item should admit");
+
+    let incoming = WorkingMemoryItem::new(WorkingMemoryId(72), 500);
+    let admission = controller
+        .admit(incoming.clone())
+        .expect("overflow should resolve deterministically");
+
+    assert_eq!(admission.outcome, AdmissionOutcomeKind::Buffered);
+    assert_eq!(
+        admission.evicted_item,
+        Some(WorkingMemoryItem::new(WorkingMemoryId(70), 450))
+    );
+    assert!(admission.promoted_item.is_none());
+    assert!(controller
+        .slots()
+        .contains(&WorkingMemoryItem::new(WorkingMemoryId(71), 450)));
+    assert!(controller.slots().contains(&incoming));
+    assert!(!controller
+        .slots()
+        .contains(&WorkingMemoryItem::new(WorkingMemoryId(70), 450)));
+}
+
+#[test]
 fn all_pinned_slots_block_overflow_admission() {
     let mut controller = WorkingMemoryController::new(test_config());
     controller

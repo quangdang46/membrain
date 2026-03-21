@@ -736,6 +736,7 @@ impl<T> ResponseContext<T> {
     }
 
     /// Attaches shared explain-trace schema fields to this response.
+    #[allow(clippy::too_many_arguments)]
     pub fn with_trace_schema(
         mut self,
         route_summary: RouteSummary,
@@ -801,7 +802,7 @@ impl<T> ResponseContext<T> {
             partial_success: false,
             remediation: Some(RemediationHint::for_error(
                 error_kind,
-                format!("{}", error_kind.as_str()),
+                error_kind.as_str().to_string(),
             )),
             availability: None,
             policy_filters_applied: Vec::new(),
@@ -1806,7 +1807,7 @@ mod tests {
         assert!(blocked_response.ok);
         assert_eq!(blocked_response.error_kind, None);
         assert_eq!(blocked_response.outcome_class, OutcomeClass::Blocked);
-        assert!(blocked_response.partial_success == false);
+        assert!(!blocked_response.partial_success);
         assert!(blocked_response
             .safeguard
             .as_ref()
