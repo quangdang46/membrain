@@ -6,6 +6,13 @@
 /// Stable durable schema objects owned by the canonical storage contract.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum DurableSchemaObject {
+    MemoryItemsTable,
+    MemoryPayloadsTable,
+    MemoryLineageEdgesTable,
+    MemoryEntityRefsTable,
+    MemoryRelationRefsTable,
+    MemoryTagsTable,
+    ConflictRecordsTable,
     DurableMemoryRecords,
     EngramsTable,
     EngramMembershipTable,
@@ -16,6 +23,13 @@ impl DurableSchemaObject {
     /// Stable machine-readable table/object name.
     pub const fn as_str(self) -> &'static str {
         match self {
+            Self::MemoryItemsTable => "memory_items",
+            Self::MemoryPayloadsTable => "memory_payloads",
+            Self::MemoryLineageEdgesTable => "memory_lineage_edges",
+            Self::MemoryEntityRefsTable => "memory_entity_refs",
+            Self::MemoryRelationRefsTable => "memory_relation_refs",
+            Self::MemoryTagsTable => "memory_tags",
+            Self::ConflictRecordsTable => "conflict_records",
             Self::DurableMemoryRecords => "durable_memory_records",
             Self::EngramsTable => "engrams_table",
             Self::EngramMembershipTable => "engram_membership_table",
@@ -96,6 +110,13 @@ impl MigrationModule {
         DurableSchemaManifest {
             version: SchemaVersion::CURRENT,
             authoritative_tables: vec![
+                DurableSchemaObject::MemoryItemsTable,
+                DurableSchemaObject::MemoryPayloadsTable,
+                DurableSchemaObject::MemoryLineageEdgesTable,
+                DurableSchemaObject::MemoryEntityRefsTable,
+                DurableSchemaObject::MemoryRelationRefsTable,
+                DurableSchemaObject::MemoryTagsTable,
+                DurableSchemaObject::ConflictRecordsTable,
                 DurableSchemaObject::DurableMemoryRecords,
                 DurableSchemaObject::EngramsTable,
                 DurableSchemaObject::EngramMembershipTable,
@@ -173,11 +194,32 @@ mod tests {
     }
 
     #[test]
-    fn durable_schema_manifest_exposes_engram_tables_as_first_class_objects() {
+    fn durable_schema_manifest_exposes_split_tier2_tables_as_first_class_objects() {
         let module = MigrationModule;
         let manifest = module.durable_schema_manifest();
 
         assert_eq!(manifest.version, SchemaVersion::CURRENT);
+        assert!(manifest
+            .authoritative_tables
+            .contains(&DurableSchemaObject::MemoryItemsTable));
+        assert!(manifest
+            .authoritative_tables
+            .contains(&DurableSchemaObject::MemoryPayloadsTable));
+        assert!(manifest
+            .authoritative_tables
+            .contains(&DurableSchemaObject::MemoryLineageEdgesTable));
+        assert!(manifest
+            .authoritative_tables
+            .contains(&DurableSchemaObject::MemoryEntityRefsTable));
+        assert!(manifest
+            .authoritative_tables
+            .contains(&DurableSchemaObject::MemoryRelationRefsTable));
+        assert!(manifest
+            .authoritative_tables
+            .contains(&DurableSchemaObject::MemoryTagsTable));
+        assert!(manifest
+            .authoritative_tables
+            .contains(&DurableSchemaObject::ConflictRecordsTable));
         assert!(manifest
             .authoritative_tables
             .contains(&DurableSchemaObject::EngramsTable));
@@ -191,6 +233,28 @@ mod tests {
 
     #[test]
     fn durable_schema_object_names_stay_machine_readable() {
+        assert_eq!(DurableSchemaObject::MemoryItemsTable.as_str(), "memory_items");
+        assert_eq!(
+            DurableSchemaObject::MemoryPayloadsTable.as_str(),
+            "memory_payloads"
+        );
+        assert_eq!(
+            DurableSchemaObject::MemoryLineageEdgesTable.as_str(),
+            "memory_lineage_edges"
+        );
+        assert_eq!(
+            DurableSchemaObject::MemoryEntityRefsTable.as_str(),
+            "memory_entity_refs"
+        );
+        assert_eq!(
+            DurableSchemaObject::MemoryRelationRefsTable.as_str(),
+            "memory_relation_refs"
+        );
+        assert_eq!(DurableSchemaObject::MemoryTagsTable.as_str(), "memory_tags");
+        assert_eq!(
+            DurableSchemaObject::ConflictRecordsTable.as_str(),
+            "conflict_records"
+        );
         assert_eq!(DurableSchemaObject::EngramsTable.as_str(), "engrams_table");
         assert_eq!(
             DurableSchemaObject::EngramMembershipTable.as_str(),

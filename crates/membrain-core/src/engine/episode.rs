@@ -88,12 +88,21 @@ pub struct EpisodeFormationExplain {
     pub terminal_memory_id: MemoryId,
 }
 
+/// Explicit lineage payload preserved for grouped source sets.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct EpisodeLineage {
+    pub source_memory_ids: Vec<MemoryId>,
+    pub continuity_keys: Vec<&'static str>,
+}
+
 /// A formed episode or source set.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SourceGroup {
     pub episode_id: EpisodeId,
+    pub fixture_name: String,
     pub source_set_kind: SourceSetKind,
     pub members: Vec<MemoryId>,
+    pub lineage: EpisodeLineage,
     pub explain: EpisodeFormationExplain,
 }
 
@@ -101,6 +110,7 @@ pub struct SourceGroup {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct EpisodeGroupingReport {
     pub groups: Vec<SourceGroup>,
+    pub heuristics_summary: String,
     pub sample_logs: Vec<String>,
 }
 
@@ -188,6 +198,7 @@ impl EpisodeGroupingModule {
         let sample_logs = groups.iter().map(Self::sample_log_line).collect();
         EpisodeGroupingReport {
             groups,
+            heuristics_summary: Self::heuristics_summary(heuristics),
             sample_logs,
         }
     }
@@ -244,10 +255,25 @@ impl EpisodeGroupingModule {
             }
         }
 
+        let fixture_name = format!(
+            "episode_{}_{}_{}_{}",
+            episode_id.0,
+            source_set_kind.as_str(),
+            first.memory_id.0,
+            last.memory_id.0
+        );
+        let continuity_keys = matching_fields.clone();
+        let source_memory_ids = members.iter().map(|c| c.memory_id).collect();
+
         SourceGroup {
             episode_id,
+            fixture_name,
             source_set_kind,
             members: members.iter().map(|c| c.memory_id).collect(),
+            lineage: EpisodeLineage {
+                source_memory_ids,
+                continuity_keys,
+            },
             explain: EpisodeFormationExplain {
                 primary_reason,
                 time_span_ms,
@@ -288,14 +314,31 @@ impl EpisodeGroupingModule {
         }
     }
 
+    fn heuristics_summary(heuristics: &GroupingHeuristics) -> String {
+        format!(
+            "temporal_proximity_ms={} max_episode_span_ms={} honor_session_bounds={} honor_task_bounds={} require_entity_overlap={}",
+            heuristics.temporal_proximity_ms,
+            heuristics.max_episode_span_ms,
+            heuristics.honor_session_bounds,
+            heuristics.honor_task_bounds,
+            heuristics.require_entity_overlap,
+        )
+    }
+
     fn sample_log_line(group: &SourceGroup) -> String {
         format!(
-            "episode={} kind={} anchor={} terminal={} members={:?} reason={} fields={:?}",
+            "fixture={} episode={} kind={} anchor={} terminal={} members={:?} lineage={:?} reason={} fields={:?}",
+            group.fixture_name,
             group.episode_id.0,
             group.source_set_kind.as_str(),
             group.explain.anchor_memory_id.0,
             group.explain.terminal_memory_id.0,
             group.members.iter().map(|id| id.0).collect::<Vec<_>>(),
+            group.lineage
+                .source_memory_ids
+                .iter()
+                .map(|id| id.0)
+                .collect::<Vec<_>>(),
             group.explain.primary_reason,
             group.explain.matching_fields,
         )
@@ -461,8 +504,18 @@ mod tests {
         assert_eq!(report.groups.len(), 1);
         assert_eq!(report.sample_logs.len(), 1);
         assert_eq!(
+            report.heuristics_summary,
+            "temporal_proximity_ms=600000 max_episode_span_ms=3600000 honor_session_bounds=true honor_task_bounds=true require_entity_overlap=false"
+        );
+        assert_eq!(report.groups[0].fixture_name, "episode_1_task_cluster_1_2");
+        assert_eq!(report.groups[0].lineage.source_memory_ids, vec![MemoryId(1), MemoryId(2)]);
+        assert_eq!(
+            report.groups[0].lineage.continuity_keys,
+            vec!["task_cluster", "task_id", "entity_overlap"]
+        );
+        assert_eq!(
             report.sample_logs[0],
-            "episode=1 kind=task_cluster anchor=1 terminal=2 members=[1, 2] reason=task_cluster fields=[\"task_cluster\", \"task_id\", \"entity_overlap\"]"
+            "fixture=episode_1_task_cluster_1_2 episode=1 kind=task_cluster anchor=1 terminal=2 members=[1, 2] lineage=[1, 2] reason=task_cluster fields=[\"task_cluster\", \"task_id\", \"entity_overlap\"]"
         );
     }
 

@@ -393,6 +393,7 @@ mod tests {
         assert_eq!(prepared.prefilter_trace.metadata_candidate_count, 1);
         assert_eq!(prepared.prefilter_trace.payload_fetch_count, 0);
         assert!(prepared.prefilter_stays_metadata_only());
+        assert!(prepared.layout.payload_size_matches_raw_body());
     }
 
     #[test]
@@ -460,13 +461,22 @@ mod tests {
     }
 
     #[test]
-    fn tier2_authoritative_schema_objects_expose_durable_memory_records() {
+    fn tier2_authoritative_schema_objects_expose_split_durable_memory_tables() {
         let store = BrainStore::default();
         let schema_objects = store.tier2_authoritative_schema_objects();
 
         assert_eq!(
             schema_objects,
-            vec![DurableSchemaObject::DurableMemoryRecords]
+            vec![
+                DurableSchemaObject::MemoryItemsTable,
+                DurableSchemaObject::MemoryPayloadsTable,
+                DurableSchemaObject::MemoryLineageEdgesTable,
+                DurableSchemaObject::MemoryEntityRefsTable,
+                DurableSchemaObject::MemoryRelationRefsTable,
+                DurableSchemaObject::MemoryTagsTable,
+                DurableSchemaObject::ConflictRecordsTable,
+                DurableSchemaObject::DurableMemoryRecords,
+            ]
         );
     }
 

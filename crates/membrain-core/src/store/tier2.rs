@@ -123,6 +123,11 @@ impl Tier2DurableItemLayout {
         &self.payload
     }
 
+    /// Returns whether the durable metadata size still matches the detached raw payload body.
+    pub fn payload_size_matches_raw_body(&self) -> bool {
+        self.metadata.payload_size_bytes == self.payload.raw_size_bytes
+    }
+
     /// Returns the stable hydration path for fetching the deferred heavyweight payload body.
     pub fn payload_hydration_path(&self) -> String {
         self.metadata.payload_locator.hydration_path()

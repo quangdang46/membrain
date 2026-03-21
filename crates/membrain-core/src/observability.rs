@@ -625,6 +625,7 @@ fn source_reference_label(source_reference: &str) -> &'static str {
         "memory_id" => "memory_id",
         "result_builder" => "result_builder",
         "result_set" => "result_set",
+        "temporal_recall" => "temporal_recall",
         _ => "custom_source_reference",
     }
 }
@@ -865,6 +866,7 @@ mod tests {
                 graph_assistance: "none".to_string(),
                 degraded_summary: None,
                 packaging_mode: "evidence_only".to_string(),
+                rerank_metadata: None,
             },
             output_mode: crate::engine::result::DualOutputMode::Balanced,
             truncated: false,
@@ -893,6 +895,26 @@ mod tests {
                 detail: "candidate survived bounded ranking".to_string(),
             }]
         );
+    }
+
+    #[test]
+    fn explain_trace_provenance_preserves_temporal_recall_source_reference() {
+        let provenance = ProvenanceSummary {
+            source_kind: "retrieval_pipeline".to_string(),
+            source_reference: "temporal_recall".to_string(),
+            source_agent: "core_engine".to_string(),
+            original_namespace: NamespaceId::new("team.temporal").unwrap(),
+            derived_from: None,
+            lineage_ancestors: Vec::new(),
+            relation_to_seed: None,
+            graph_seed: None,
+        };
+
+        let trace = super::TraceProvenanceSummary::from_provenance(&provenance);
+
+        assert_eq!(trace.source_kind, "retrieval_pipeline");
+        assert_eq!(trace.source_reference, "temporal_recall");
+        assert!(trace.lineage_ancestors.is_empty());
     }
 
     #[test]
@@ -984,6 +1006,7 @@ mod tests {
                     graph_assistance: "none".to_string(),
                     degraded_summary: None,
                     packaging_mode: "evidence_only".to_string(),
+                    rerank_metadata: None,
                 },
                 output_mode: crate::engine::result::DualOutputMode::Balanced,
                 truncated: false,
@@ -1059,6 +1082,7 @@ mod tests {
                 graph_assistance: "none".to_string(),
                 degraded_summary: None,
                 packaging_mode: "evidence_only".to_string(),
+                rerank_metadata: None,
             },
             output_mode: crate::engine::result::DualOutputMode::Balanced,
             truncated: false,
@@ -1140,6 +1164,7 @@ mod tests {
                 graph_assistance: "none".to_string(),
                 degraded_summary: None,
                 packaging_mode: "evidence_only".to_string(),
+                rerank_metadata: None,
             },
             output_mode: crate::engine::result::DualOutputMode::Balanced,
             truncated: false,
@@ -1253,6 +1278,7 @@ mod tests {
                 graph_assistance: "none".to_string(),
                 degraded_summary: None,
                 packaging_mode: "evidence_only".to_string(),
+                rerank_metadata: None,
             },
             output_mode: crate::engine::result::DualOutputMode::Balanced,
             truncated: false,
@@ -1340,6 +1366,7 @@ mod tests {
                 graph_assistance: "none".to_string(),
                 degraded_summary: None,
                 packaging_mode: "evidence_only".to_string(),
+                rerank_metadata: None,
             },
             output_mode: crate::engine::result::DualOutputMode::Balanced,
             truncated: false,

@@ -311,7 +311,7 @@ impl EncodeEngine {
             .split_whitespace()
             .collect::<Vec<_>>()
             .join(" ");
-        let payload_size_bytes = compact_text.len();
+        let payload_size_bytes = input.raw_text.len();
 
         let landmark = input
             .landmark_signals
@@ -625,6 +625,14 @@ mod tests {
             .observation_chunk_id
             .as_deref()
             .is_some_and(|chunk_id| chunk_id.starts_with("obs-")));
+        assert_eq!(
+            prepared.normalized.payload_size_bytes,
+            "camera summary noted a recurring hallway blockage".len()
+        );
+        assert!(
+            prepared.normalized.payload_size_bytes
+                > prepared.normalized.compact_text.len()
+        );
     }
 
     #[test]

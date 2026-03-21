@@ -18,6 +18,7 @@ pub enum McpRequest {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct EncodeParams {
     pub content: String,
     pub namespace: String,
@@ -26,6 +27,7 @@ pub struct EncodeParams {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct RecallParams {
     pub query: String,
     pub namespace: String,
@@ -34,12 +36,14 @@ pub struct RecallParams {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct InspectParams {
     pub id: u64,
     pub namespace: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct ExplainParams {
     pub query: String,
     pub namespace: String,
@@ -53,6 +57,7 @@ pub struct ExplainParams {
 /// same stable envelope family as CLI JSON and daemon/JSON-RPC instead of hiding it behind an
 /// untyped blob.
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct McpResponse {
     pub status: String,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -94,12 +99,28 @@ impl McpResponse {
 
 /// MCP retrieval payload preserving the canonical retrieval-result envelope families.
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct McpRetrievalPayload {
     pub request_id: RequestId,
     pub namespace: NamespaceId,
     pub outcome_class: OutcomeClass,
     pub partial_success: bool,
+    pub explain_trace: McpExplainTrace,
     pub result: RetrievalResultSet,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct McpExplainTrace {
+    pub route_summary: serde_json::Value,
+    pub trace_stages: Vec<String>,
+    pub result_reasons: serde_json::Value,
+    pub omitted_summary: serde_json::Value,
+    pub policy_summary: serde_json::Value,
+    pub provenance_summary: serde_json::Value,
+    pub freshness_markers: serde_json::Value,
+    pub conflict_markers: serde_json::Value,
+    pub uncertainty_markers: serde_json::Value,
 }
 
 impl McpRetrievalPayload {
@@ -108,23 +129,43 @@ impl McpRetrievalPayload {
         namespace: NamespaceId,
         partial_success: bool,
         result: RetrievalResultSet,
-    ) -> Self {
+    ) -> Result<Self, serde_json::Error> {
         let partial_success = partial_success
             || matches!(result.outcome_class, OutcomeClass::Partial)
             || result.truncated;
         let outcome_class = result.outcome_class;
+        let (route_summary, trace_stages) = result.explain_route();
+        let result_reasons = result.explain_result_reasons();
+        let (policy_summary, provenance_summary) = result.explain_policy_and_provenance();
+        let (freshness_markers, conflict_markers, uncertainty_markers) = result.explain_markers();
+        let explain_trace = McpExplainTrace {
+            route_summary: serde_json::to_value(&route_summary)?,
+            trace_stages: trace_stages
+                .into_iter()
+                .map(|stage| stage.as_str().to_string())
+                .collect(),
+            result_reasons: serde_json::to_value(&result_reasons)?,
+            omitted_summary: serde_json::to_value(&result.omitted_summary)?,
+            policy_summary: serde_json::to_value(&policy_summary)?,
+            provenance_summary: serde_json::to_value(&provenance_summary)?,
+            freshness_markers: serde_json::to_value(&freshness_markers)?,
+            conflict_markers: serde_json::to_value(&conflict_markers)?,
+            uncertainty_markers: serde_json::to_value(&uncertainty_markers)?,
+        };
 
-        Self {
+        Ok(Self {
             request_id,
             namespace,
             outcome_class,
             partial_success,
+            explain_trace,
             result,
-        }
+        })
     }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct McpError {
     pub code: String,
     pub message: String,
@@ -142,9 +183,11 @@ pub struct McpResource {
 
 #[cfg(test)]
 mod tests {
-    use super::{ExplainParams, McpError, McpRequest, McpResponse, McpRetrievalPayload};
-    use membrain_core::api::NamespaceId;
-    use membrain_core::api::RequestId;
+    use super::{
+        EncodeParams, ExplainParams, InspectParams, McpError, McpRequest, McpResponse,
+        McpRetrievalPayload, RecallParams,
+    };
+    use membrain_core::api::{NamespaceId, RequestId};
     use membrain_core::engine::recall::RecallPlanKind;
     use membrain_core::engine::result::RetrievalExplain;
     use membrain_core::engine::result::RetrievalResultSet;
@@ -208,6 +251,7 @@ mod tests {
                 graph_assistance: "none".to_string(),
                 degraded_summary: None,
                 packaging_mode: "bounded".to_string(),
+                rerank_metadata: None,
             },
             output_mode: DualOutputMode::Balanced,
             truncated: false,
@@ -222,7 +266,8 @@ mod tests {
             NamespaceId::new("mcp.team").unwrap(),
             false,
             sample_result_set(),
-        );
+        )
+        .unwrap();
 
         let json = serde_json::to_value(&payload).unwrap();
         assert_eq!(json["request_id"], "req-1");
@@ -237,6 +282,13 @@ mod tests {
         assert!(json["result"].get("freshness_markers").is_some());
         assert!(json["result"].get("packaging_metadata").is_some());
         assert!(json["result"].get("explain").is_some());
+        assert_eq!(json["explain_trace"]["route_summary"]["route_family"], "exact_id_tier1");
+        assert!(json["explain_trace"].get("omitted_summary").is_some());
+        assert!(json["explain_trace"].get("policy_summary").is_some());
+        assert!(json["explain_trace"].get("provenance_summary").is_some());
+        assert!(json["explain_trace"].get("freshness_markers").is_some());
+        assert!(json["explain_trace"].get("conflict_markers").is_some());
+        assert!(json["explain_trace"].get("uncertainty_markers").is_some());
     }
 
     #[test]
@@ -246,10 +298,14 @@ mod tests {
             NamespaceId::new("mcp.team").unwrap(),
             true,
             sample_result_set(),
-        );
+        )
+        .unwrap();
 
         assert_eq!(payload.outcome_class, OutcomeClass::Accepted);
         assert_eq!(payload.result.outcome_class, OutcomeClass::Accepted);
+        assert_eq!(payload.explain_trace.omitted_summary["budget_capped"], 0);
+        assert_eq!(payload.explain_trace.policy_summary["effective_namespace"], "mcp.team");
+        assert_eq!(payload.explain_trace.provenance_summary["source_reference"], "result_set");
         assert!(payload.partial_success);
     }
 
@@ -263,7 +319,8 @@ mod tests {
             NamespaceId::new("mcp.team").unwrap(),
             false,
             result,
-        );
+        )
+        .unwrap();
 
         assert_eq!(payload.outcome_class, OutcomeClass::Partial);
         assert_eq!(payload.result.outcome_class, OutcomeClass::Partial);
@@ -272,16 +329,20 @@ mod tests {
 
     #[test]
     fn retrieval_success_uses_typed_transport_slot() {
-        let response = McpResponse::retrieval_success(McpRetrievalPayload::from_result(
-            RequestId::new("req-3").unwrap(),
-            NamespaceId::new("mcp.team").unwrap(),
-            false,
-            sample_result_set(),
-        ));
+        let response = McpResponse::retrieval_success(
+            McpRetrievalPayload::from_result(
+                RequestId::new("req-3").unwrap(),
+                NamespaceId::new("mcp.team").unwrap(),
+                false,
+                sample_result_set(),
+            )
+            .unwrap(),
+        );
 
         let json = serde_json::to_value(&response).unwrap();
         assert_eq!(json["status"], "ok");
         assert!(json.get("retrieval").is_some());
+        assert!(json["retrieval"].get("explain_trace").is_some());
         assert!(json.get("payload").is_none());
         assert!(json.get("error").is_none());
     }
@@ -296,7 +357,8 @@ mod tests {
             NamespaceId::new("mcp.team").unwrap(),
             false,
             result,
-        );
+        )
+        .unwrap();
 
         assert_eq!(payload.outcome_class, OutcomeClass::Accepted);
         assert_eq!(payload.result.outcome_class, OutcomeClass::Accepted);
@@ -337,6 +399,43 @@ mod tests {
     }
 
     #[test]
+    fn mcp_param_structs_reject_unknown_fields() {
+        let encode_error = serde_json::from_value::<EncodeParams>(serde_json::json!({
+            "content": "hello",
+            "namespace": "team.alpha",
+            "unexpected": true
+        }))
+        .unwrap_err();
+        assert!(encode_error.to_string().contains("unknown field `unexpected`"));
+
+        let recall_error = serde_json::from_value::<RecallParams>(serde_json::json!({
+            "query": "session:7",
+            "namespace": "team.alpha",
+            "limit": 3,
+            "unexpected": true
+        }))
+        .unwrap_err();
+        assert!(recall_error.to_string().contains("unknown field `unexpected`"));
+
+        let inspect_error = serde_json::from_value::<InspectParams>(serde_json::json!({
+            "id": 7,
+            "namespace": "team.alpha",
+            "unexpected": true
+        }))
+        .unwrap_err();
+        assert!(inspect_error.to_string().contains("unknown field `unexpected`"));
+
+        let explain_error = serde_json::from_value::<ExplainParams>(serde_json::json!({
+            "query": "session:7",
+            "namespace": "team.alpha",
+            "limit": 2,
+            "unexpected": true
+        }))
+        .unwrap_err();
+        assert!(explain_error.to_string().contains("unknown field `unexpected`"));
+    }
+
+    #[test]
     fn failure_response_preserves_policy_denial_metadata() {
         let response = McpResponse::failure(McpError {
             code: "policy_denied".to_string(),
@@ -354,5 +453,79 @@ mod tests {
             "namespace isolation prevents export"
         );
         assert_eq!(json["error"]["is_policy_denial"], true);
+    }
+
+    #[test]
+    fn mcp_response_rejects_unknown_top_level_fields() {
+        let error = serde_json::from_value::<McpResponse>(serde_json::json!({
+            "status": "ok",
+            "retrieval": {
+                "request_id": "req-5",
+                "namespace": "mcp.team",
+                "outcome_class": "Accepted",
+                "partial_success": false,
+                "explain_trace": {
+                    "route_summary": {"route_family": "exact_id_tier1"},
+                    "trace_stages": ["tier1_exact"],
+                    "result_reasons": [],
+                    "omitted_summary": {"budget_capped": 0},
+                    "policy_summary": {"effective_namespace": "mcp.team"},
+                    "provenance_summary": {"source_reference": "result_set"},
+                    "freshness_markers": [],
+                    "conflict_markers": [],
+                    "uncertainty_markers": []
+                },
+                "result": serde_json::to_value(sample_result_set()).unwrap()
+            },
+            "unexpected": true
+        }))
+        .unwrap_err();
+
+        assert!(error.to_string().contains("unknown field `unexpected`"));
+    }
+
+    #[test]
+    fn mcp_response_rejects_unknown_retrieval_fields() {
+        let error = serde_json::from_value::<McpResponse>(serde_json::json!({
+            "status": "ok",
+            "retrieval": {
+                "request_id": "req-6",
+                "namespace": "mcp.team",
+                "outcome_class": "Accepted",
+                "partial_success": false,
+                "explain_trace": {
+                    "route_summary": {"route_family": "exact_id_tier1"},
+                    "trace_stages": ["tier1_exact"],
+                    "result_reasons": [],
+                    "omitted_summary": {"budget_capped": 0},
+                    "policy_summary": {"effective_namespace": "mcp.team"},
+                    "provenance_summary": {"source_reference": "result_set"},
+                    "freshness_markers": [],
+                    "conflict_markers": [],
+                    "uncertainty_markers": []
+                },
+                "result": serde_json::to_value(sample_result_set()).unwrap(),
+                "unexpected": true
+            }
+        }))
+        .unwrap_err();
+
+        assert!(error.to_string().contains("unknown field `unexpected`"));
+    }
+
+    #[test]
+    fn mcp_response_rejects_unknown_error_fields() {
+        let error = serde_json::from_value::<McpResponse>(serde_json::json!({
+            "status": "error",
+            "error": {
+                "code": "policy_denied",
+                "message": "namespace isolation prevents export",
+                "is_policy_denial": true,
+                "unexpected": true
+            }
+        }))
+        .unwrap_err();
+
+        assert!(error.to_string().contains("unknown field `unexpected`"));
     }
 }

@@ -157,10 +157,10 @@ pub enum WarmSource {
     EntityNeighborhood,
     SummaryCache,
     AnnProbeCache,
-    PrefetchQueue,
+    PrefetchHints,
     SessionWarmup,
-    GoalCache,
-    ColdStartCache,
+    GoalConditioned,
+    ColdStartMitigation,
 }
 
 impl WarmSource {
@@ -173,10 +173,10 @@ impl WarmSource {
             Self::EntityNeighborhood => "entity_neighborhood",
             Self::SummaryCache => "summary_cache",
             Self::AnnProbeCache => "ann_probe_cache",
-            Self::PrefetchQueue => "prefetch_queue",
+            Self::PrefetchHints => "prefetch_hints",
             Self::SessionWarmup => "session_warmup",
-            Self::GoalCache => "goal_cache",
-            Self::ColdStartCache => "cold_start_cache",
+            Self::GoalConditioned => "goal_conditioned",
+            Self::ColdStartMitigation => "cold_start_mitigation",
         }
     }
 }
@@ -830,10 +830,10 @@ fn family_to_warm_source(family: CacheFamily) -> WarmSource {
         CacheFamily::EntityNeighborhood => WarmSource::EntityNeighborhood,
         CacheFamily::SummaryCache => WarmSource::SummaryCache,
         CacheFamily::AnnProbeCache => WarmSource::AnnProbeCache,
-        CacheFamily::PrefetchHints => WarmSource::PrefetchQueue,
+        CacheFamily::PrefetchHints => WarmSource::PrefetchHints,
         CacheFamily::SessionWarmup => WarmSource::SessionWarmup,
-        CacheFamily::GoalConditioned => WarmSource::GoalCache,
-        CacheFamily::ColdStartMitigation => WarmSource::ColdStartCache,
+        CacheFamily::GoalConditioned => WarmSource::GoalConditioned,
+        CacheFamily::ColdStartMitigation => WarmSource::ColdStartMitigation,
     }
 }
 
@@ -980,7 +980,7 @@ impl PrefetchController {
         let hint = PrefetchHint {
             namespace,
             trigger,
-            warm_source: WarmSource::PrefetchQueue,
+            warm_source: WarmSource::PrefetchHints,
             predicted_ids,
             submitted_at_tick: self.tick,
         };
@@ -1677,7 +1677,7 @@ mod tests {
 
         let hint = pf.consume_hint(&ns("team.alpha")).expect("matching hint");
         assert_eq!(hint.trigger, PrefetchTrigger::SessionRecency);
-        assert_eq!(hint.warm_source, WarmSource::PrefetchQueue);
+        assert_eq!(hint.warm_source, WarmSource::PrefetchHints);
         assert_eq!(pf.metrics.hints_submitted, 2);
         assert_eq!(pf.metrics.hints_consumed, 1);
     }
@@ -2065,7 +2065,7 @@ mod tests {
             family: CacheFamily::PrefetchHints,
             event: CacheEvent::Hit,
             reason: None,
-            warm_source: Some(WarmSource::PrefetchQueue),
+            warm_source: Some(WarmSource::PrefetchHints),
             generation_status: GenerationStatus::Valid,
             memory_ids: vec![MemoryId(7)],
             candidates_after: 1,

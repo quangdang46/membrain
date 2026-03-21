@@ -1,5 +1,5 @@
 use crate::engine::encode::PassiveObservationInspect;
-use crate::engine::result::RetrievalResultSet;
+use crate::engine::result::{OmissionSummary, RetrievalResultSet};
 use crate::observability::OutcomeClass;
 use crate::policy::{
     PolicyGateway, PolicySummary, SafeguardOutcome as PolicySafeguardOutcome, SharingAccessOutcome,
@@ -612,6 +612,38 @@ pub struct TraceProvenanceSummary {
     pub lineage_ancestors: Vec<MemoryId>,
 }
 
+/// Shared omission summary for explain surfaces.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+pub struct TraceOmissionSummary {
+    pub policy_redacted: usize,
+    pub threshold_dropped: usize,
+    pub dedup_dropped: usize,
+    pub budget_capped: usize,
+    pub duplicate_collapsed: usize,
+    pub low_confidence_suppressed: usize,
+    pub stale_bypassed: usize,
+}
+
+impl TraceOmissionSummary {
+    /// Builds the shared omission summary from canonical retrieval omission state.
+    pub const fn from_omission(omission: &OmissionSummary) -> Self {
+        Self {
+            policy_redacted: omission.policy_redacted,
+            threshold_dropped: omission.threshold_dropped,
+            dedup_dropped: omission.dedup_dropped,
+            budget_capped: omission.budget_capped,
+            duplicate_collapsed: omission.duplicate_collapsed,
+            low_confidence_suppressed: omission.low_confidence_suppressed,
+            stale_bypassed: omission.stale_bypassed,
+        }
+    }
+
+    /// Builds the shared omission summary from one retrieval result set.
+    pub const fn from_result_set(result_set: &RetrievalResultSet) -> Self {
+        Self::from_omission(&result_set.omitted_summary)
+    }
+}
+
 impl RouteSummary {
     /// Builds the shared machine-readable route summary from a canonical retrieval result set.
     pub fn from_result_set(result_set: &RetrievalResultSet) -> Self {
@@ -842,6 +874,7 @@ pub struct ExplainTraceSchema {
     pub route_summary: RouteSummary,
     pub trace_stages: Vec<TraceStage>,
     pub result_reasons: Vec<ResultReason>,
+    pub omitted_summary: TraceOmissionSummary,
     pub score_components: Vec<TraceScoreComponent>,
     pub policy_summary: TracePolicySummary,
     pub provenance_summary: TraceProvenanceSummary,
@@ -915,6 +948,7 @@ impl<T> ResponseContext<T> {
         route_summary: RouteSummary,
         trace_stages: Vec<TraceStage>,
         result_reasons: Vec<ResultReason>,
+        omitted_summary: TraceOmissionSummary,
         score_components: Vec<TraceScoreComponent>,
         policy_summary: TracePolicySummary,
         provenance_summary: TraceProvenanceSummary,
@@ -926,6 +960,7 @@ impl<T> ResponseContext<T> {
             route_summary: route_summary.clone(),
             trace_stages: trace_stages.clone(),
             result_reasons: result_reasons.clone(),
+            omitted_summary,
             score_components,
             policy_summary: policy_summary.clone(),
             provenance_summary: provenance_summary.clone(),
@@ -1047,8 +1082,8 @@ mod tests {
         ContextValidationError, ErrorKind, ExplainTraceSchema, FieldPresence, FreshnessMarker,
         NamespaceId, PassiveObservationInspectSummary, PolicyContext, PolicyFilterSummary,
         RemediationHint, RemediationStep, RequestContext, RequestId, ResponseContext,
-        ResponseWarning, ResultReason, RouteSummary, TracePolicySummary, TraceProvenanceSummary,
-        TraceScoreComponent, TraceStage, UncertaintyMarker,
+        ResponseWarning, ResultReason, RouteSummary, TraceOmissionSummary, TracePolicySummary,
+        TraceProvenanceSummary, TraceScoreComponent, TraceStage, UncertaintyMarker,
     };
     use crate::engine::recall::{RecallPlanKind, RecallTraceStage};
     use crate::engine::result::{
@@ -1572,6 +1607,7 @@ mod tests {
                 graph_assistance: "none".to_string(),
                 degraded_summary: None,
                 packaging_mode: "evidence_only".to_string(),
+                rerank_metadata: None,
             },
             output_mode: DualOutputMode::Balanced,
             truncated: false,
@@ -1643,6 +1679,15 @@ mod tests {
                 policy_filter_applied: false,
                 detail: "candidate survived bounded ranking",
             }],
+            TraceOmissionSummary {
+                policy_redacted: 0,
+                threshold_dropped: 0,
+                dedup_dropped: 0,
+                budget_capped: 2,
+                duplicate_collapsed: 1,
+                low_confidence_suppressed: 0,
+                stale_bypassed: 0,
+            },
             vec![
                 TraceScoreComponent {
                     signal_family: "relevance",
@@ -1757,6 +1802,24 @@ mod tests {
             2
         );
         assert_eq!(
+            response
+                .explain_trace
+                .as_ref()
+                .unwrap()
+                .omitted_summary
+                .budget_capped,
+            2
+        );
+        assert_eq!(
+            response
+                .explain_trace
+                .as_ref()
+                .unwrap()
+                .omitted_summary
+                .duplicate_collapsed,
+            1
+        );
+        assert_eq!(
             response.explain_trace.as_ref().unwrap().score_components[0].signal_family,
             "relevance"
         );
@@ -1854,6 +1917,15 @@ mod tests {
                 route_summary: response.route_summary.clone().unwrap(),
                 trace_stages: response.trace_stages.clone(),
                 result_reasons: response.result_reasons.clone(),
+                omitted_summary: TraceOmissionSummary {
+                    policy_redacted: 0,
+                    threshold_dropped: 0,
+                    dedup_dropped: 0,
+                    budget_capped: 2,
+                    duplicate_collapsed: 1,
+                    low_confidence_suppressed: 0,
+                    stale_bypassed: 0,
+                },
                 score_components: vec![
                     TraceScoreComponent {
                         signal_family: "relevance",
@@ -1911,6 +1983,15 @@ mod tests {
                 policy_filter_applied: false,
                 detail: "candidate survived bounded ranking",
             }],
+            TraceOmissionSummary {
+                policy_redacted: 0,
+                threshold_dropped: 0,
+                dedup_dropped: 0,
+                budget_capped: 1,
+                duplicate_collapsed: 0,
+                low_confidence_suppressed: 0,
+                stale_bypassed: 0,
+            },
             vec![TraceScoreComponent {
                 signal_family: "relevance",
                 raw_value: 820,
@@ -2006,6 +2087,13 @@ mod tests {
                 .and_then(Value::as_object)
                 .unwrap()["policy_summary"]["filters"][0]["policy_family"],
             "namespace"
+        );
+        assert_eq!(
+            value
+                .get("explain_trace")
+                .and_then(Value::as_object)
+                .unwrap()["omitted_summary"]["budget_capped"],
+            1
         );
         assert_eq!(
             value.get("safeguard").and_then(Value::as_object).unwrap()["blocked_reasons"][0],

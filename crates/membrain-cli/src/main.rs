@@ -1,12 +1,16 @@
 use clap::{Parser, Subcommand};
-use membrain_core::api::NamespaceId;
+use membrain_core::api::{
+    AvailabilityReason, AvailabilitySummary, NamespaceId, RemediationStep,
+};
 use membrain_core::engine::maintenance::{
     MaintenanceController, MaintenanceJobHandle, MaintenanceJobState,
 };
 use membrain_core::engine::repair::{IndexRepairEntrypoint, RepairTarget};
+use membrain_core::health::{BrainHealthInputs, BrainHealthReport, FeatureAvailabilityEntry};
 use membrain_core::index::{IndexApi, IndexModule};
 use membrain_core::observability::{AuditEventCategory, AuditEventKind};
 use membrain_core::store::audit::{AppendOnlyAuditLog, AuditLogEntry, AuditLogStore};
+use membrain_core::store::cache::CacheManager;
 use membrain_core::types::{MemoryId, SessionId};
 use membrain_core::{BrainStore, RuntimeConfig};
 use membrain_daemon::daemon::{DaemonRuntime, DaemonRuntimeConfig};
@@ -153,7 +157,7 @@ struct RepairReportRow {
     rebuilt_outputs: Vec<&'static str>,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, PartialEq, Serialize)]
 struct DoctorReport {
     status: &'static str,
     action: &'static str,
@@ -164,6 +168,7 @@ struct DoctorReport {
     repair_engine_component: &'static str,
     repair_reports: Vec<RepairReportRow>,
     warnings: Vec<&'static str>,
+    health: BrainHealthReport,
 }
 
 impl From<AuditLogEntry> for AuditRow {
@@ -320,9 +325,9 @@ fn sample_runtime_status() -> RuntimeStatus {
 
 fn doctor_report() -> DoctorReport {
     let status = sample_runtime_status();
-    let indexes = IndexModule
-        .health_reports()
-        .into_iter()
+    let index_reports = IndexModule.health_reports();
+    let indexes = index_reports
+        .iter()
         .map(|report| DoctorIndexRow {
             family: report.family.as_str(),
             health: report.health.as_str(),
@@ -350,7 +355,7 @@ fn doctor_report() -> DoctorReport {
     let namespace = NamespaceId::new("doctor.system").expect("doctor namespace should be valid");
     let mut repair_handle = MaintenanceJobHandle::new(
         repair_engine.create_targeted(
-            namespace,
+            namespace.clone(),
             vec![RepairTarget::LexicalIndex, RepairTarget::MetadataIndex],
             IndexRepairEntrypoint::RebuildIfNeeded,
         ),
@@ -358,13 +363,14 @@ fn doctor_report() -> DoctorReport {
     );
     repair_handle.start();
     let mut repair_reports = Vec::new();
+    let mut health_repair_summary = None;
     loop {
         let snapshot = repair_handle.poll();
         match snapshot.state {
             MaintenanceJobState::Completed(summary) => {
                 repair_reports = summary
                     .results
-                    .into_iter()
+                    .iter()
                     .map(|result| RepairReportRow {
                         target: result.target.as_str(),
                         status: result.status.as_str(),
@@ -372,15 +378,69 @@ fn doctor_report() -> DoctorReport {
                         rebuild_entrypoint: result
                             .rebuild_entrypoint
                             .map(IndexRepairEntrypoint::as_str),
-                        rebuilt_outputs: result.rebuilt_outputs,
+                        rebuilt_outputs: result.rebuilt_outputs.clone(),
                     })
                     .collect();
+                health_repair_summary = Some(summary);
                 break;
             }
             MaintenanceJobState::Running { .. } => continue,
             _ => break,
         }
     }
+
+    let availability = (!status.degraded_reasons.is_empty()).then(|| {
+        AvailabilitySummary::degraded(
+            vec!["doctor", "health", "audit"],
+            vec!["encode", "maintenance"],
+            vec![AvailabilityReason::RepairInFlight],
+            vec![RemediationStep::CheckHealth, RemediationStep::RunRepair],
+        )
+    });
+
+    let mut cache = CacheManager::new(4, 4);
+    cache.result.disable();
+    cache.prefetch.submit_hint(namespace.clone(),
+        membrain_core::store::cache::PrefetchTrigger::SessionRecency,
+        vec![],
+    );
+
+    let health = BrainHealthReport::from_inputs(
+        BrainHealthInputs {
+            hot_memories: 76,
+            hot_capacity: 100,
+            cold_memories: 12,
+            avg_strength: 0.71,
+            avg_confidence: 0.84,
+            low_confidence_count: 3,
+            decay_rate: 0.012,
+            archive_count: 5,
+            total_engrams: 14,
+            avg_cluster_size: 2.5,
+            top_engrams: vec![("ops".to_string(), 4)],
+            landmark_count: 2,
+            unresolved_conflicts: 1,
+            uncertain_count: 3,
+            dream_links_total: 9,
+            last_dream_tick: Some(42),
+            total_recalls: 55,
+            total_encodes: 12,
+            current_tick: 200,
+            daemon_uptime_ticks: 180,
+            index_reports,
+            availability,
+            feature_availability: vec![FeatureAvailabilityEntry {
+                feature: "health".to_string(),
+                posture: membrain_core::api::AvailabilityPosture::Full,
+                note: Some("cli_doctor_embeds_brain_health_report".to_string()),
+            }],
+            previous_total_recalls: Some(44),
+            previous_total_encodes: Some(10),
+            previous_repair_queue_depth: Some(0),
+        },
+        &cache,
+        health_repair_summary.as_ref(),
+    );
 
     DoctorReport {
         status: overall_status,
@@ -392,6 +452,7 @@ fn doctor_report() -> DoctorReport {
         repair_engine_component: repair_engine.component_name(),
         repair_reports,
         warnings,
+        health,
     }
 }
 

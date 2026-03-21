@@ -13,6 +13,8 @@ pub mod embed;
 pub mod engine;
 /// Bounded lineage and neighborhood expansion primitives.
 pub mod graph;
+/// Shared health aggregation and operator-report types.
+pub mod health;
 /// Candidate-generation and index maintenance seams.
 pub mod index;
 /// Durable schema migration and compatibility surfaces.

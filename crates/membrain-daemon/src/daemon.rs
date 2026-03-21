@@ -556,13 +556,9 @@ impl DaemonRuntime {
                 let step_delay = Duration::from_millis(step_delay_ms.unwrap_or(25));
                 tokio::spawn(async move {
                     let _guard = BackgroundJobGuard::new(Arc::clone(&state_clone));
-                    for _ in 0..polls_budget {
-                        if state_clone.is_shutdown() {
-                            break;
-                        }
-                        sleep(step_delay).await;
+                    if Self::run_maintenance_budget(&state_clone, polls_budget, step_delay).await {
+                        state_clone.record_maintenance_run(maintenance_id).await;
                     }
-                    state_clone.record_maintenance_run(maintenance_id).await;
                 });
                 JsonRpcResponse::success(
                     request_id,
@@ -653,7 +649,8 @@ impl DaemonRuntime {
         result.packaging_metadata.result_budget = result_budget;
         result.packaging_metadata.degraded_summary = Some(degraded_summary.to_string());
         result.truncated = false;
-        let payload = McpRetrievalPayload::from_result(request_id, namespace, false, result);
+        let payload = McpRetrievalPayload::from_result(request_id, namespace, false, result)
+            .map_err(|err| err.to_string())?;
         Ok(McpResponse::retrieval_success(payload))
     }
 
@@ -681,6 +678,20 @@ impl DaemonRuntime {
         }
 
         limit.unwrap_or(10)
+    }
+
+    async fn run_maintenance_budget(
+        state: &RuntimeState,
+        polls_budget: u32,
+        step_delay: Duration,
+    ) -> bool {
+        for _ in 0..polls_budget {
+            if state.is_shutdown() {
+                return false;
+            }
+            sleep(step_delay).await;
+        }
+        !state.is_shutdown()
     }
 
     fn validate_preflight_namespace(namespace: &str) -> Result<(), String> {
@@ -824,13 +835,9 @@ impl DaemonRuntime {
                     let polls_budget = config.maintenance_poll_budget;
                     tokio::spawn(async move {
                         let _guard = BackgroundJobGuard::new(Arc::clone(&state_clone));
-                        for _ in 0..polls_budget {
-                            if state_clone.is_shutdown() {
-                                break;
-                            }
-                            sleep(step_delay).await;
+                        if Self::run_maintenance_budget(&state_clone, polls_budget, step_delay).await {
+                            state_clone.record_maintenance_run(maintenance_id).await;
                         }
-                        state_clone.record_maintenance_run(maintenance_id).await;
                     });
                 }
             }
@@ -939,6 +946,7 @@ mod tests {
     use crate::rpc::RuntimeStatus;
     use serde_json::{json, Value};
     use std::path::PathBuf;
+    use std::sync::Arc;
     use std::time::{SystemTime, UNIX_EPOCH};
     use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
     use tokio::net::UnixStream;
@@ -1331,6 +1339,81 @@ mod tests {
         assert_eq!(
             recall_response["result"]["retrieval"]["result"]["packaging_metadata"]["result_budget"],
             json!(1)
+        );
+        assert!(
+            recall_response["result"]["retrieval"]
+                .get("explain_trace")
+                .is_some()
+        );
+
+        let shutdown_response = send_request(
+            &socket_path,
+            json!({"jsonrpc":"2.0","method":"shutdown","params":{},"id":"done"}),
+        )
+        .await;
+        assert_eq!(shutdown_response["result"]["shutting_down"], json!(true));
+        timeout(Duration::from_secs(5), handle)
+            .await
+            .unwrap()
+            .unwrap()
+            .unwrap();
+    }
+
+    #[tokio::test]
+    async fn runtime_recall_keeps_canonical_payload_families_out_of_generic_payload_slot() {
+        let socket_path = unique_path("recall-canonical-payload-families");
+        let mut config = DaemonRuntimeConfig::new(&socket_path);
+        config.maintenance_interval = Duration::from_secs(3600);
+        let handle = spawn_runtime(config).await;
+
+        timeout(Duration::from_secs(2), async {
+            while tokio::fs::metadata(&socket_path).await.is_err() {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .unwrap();
+
+        let recall_response = send_request(
+            &socket_path,
+            json!({
+                "jsonrpc":"2.0",
+                "method":"recall",
+                "params":{"query":"memory:42","namespace":"team.alpha","limit":3},
+                "id":"recall-canonical-payload-families"
+            }),
+        )
+        .await;
+
+        let result = &recall_response["result"];
+        assert_eq!(result["status"], json!("ok"));
+        assert!(result.get("payload").is_none());
+        assert!(result.get("error").is_none());
+
+        let retrieval = &result["retrieval"];
+        assert_eq!(retrieval["request_id"], json!("daemon-recall-1"));
+        assert_eq!(retrieval["outcome_class"], json!("Degraded"));
+        assert_eq!(retrieval["partial_success"], json!(false));
+        assert!(retrieval["result"].get("evidence_pack").is_some());
+        assert!(retrieval["result"].get("action_pack").is_some());
+        assert!(retrieval["result"].get("deferred_payloads").is_some());
+        assert!(retrieval["result"].get("omitted_summary").is_some());
+        assert!(retrieval["result"].get("policy_summary").is_some());
+        assert!(retrieval["result"].get("provenance_summary").is_some());
+        assert!(retrieval["result"].get("freshness_markers").is_some());
+        assert!(retrieval["result"].get("packaging_metadata").is_some());
+        assert!(retrieval["result"].get("explain").is_some());
+        assert!(retrieval.get("explain_trace").is_some());
+        assert!(retrieval["explain_trace"].get("route_summary").is_some());
+        assert!(retrieval["explain_trace"].get("omitted_summary").is_some());
+        assert!(retrieval["explain_trace"].get("policy_summary").is_some());
+        assert!(retrieval["explain_trace"].get("provenance_summary").is_some());
+        assert!(retrieval["explain_trace"].get("freshness_markers").is_some());
+        assert!(retrieval["explain_trace"].get("conflict_markers").is_some());
+        assert!(retrieval["explain_trace"].get("uncertainty_markers").is_some());
+        assert_eq!(
+            retrieval["result"]["packaging_metadata"]["degraded_summary"],
+            json!("planner-only recall envelope; evidence hydration not implemented")
         );
 
         let shutdown_response = send_request(
@@ -1757,6 +1840,11 @@ mod tests {
                 ["degraded_summary"],
             json!("planner-only inspect envelope; item hydration not implemented")
         );
+        assert!(
+            inspect_response["result"]["retrieval"]
+                .get("explain_trace")
+                .is_some()
+        );
 
         let shutdown_response = send_request(
             &socket_path,
@@ -1815,6 +1903,11 @@ mod tests {
             explain_response["result"]["retrieval"]["result"]["packaging_metadata"]
                 ["degraded_summary"],
             json!("planner-only explain envelope; evidence hydration not implemented")
+        );
+        assert!(
+            explain_response["result"]["retrieval"]
+                .get("explain_trace")
+                .is_some()
         );
 
         let shutdown_response = send_request(
@@ -2230,6 +2323,25 @@ mod tests {
             .unwrap()
             .unwrap()
             .unwrap();
+    }
+
+    #[tokio::test]
+    async fn shutdown_skips_manual_run_maintenance_accounting_when_cancelled_before_first_step() {
+        let config = DaemonRuntimeConfig::new(unique_path("maintenance-budget-cancelled").as_path());
+        let state = Arc::new(super::RuntimeState::new(&config));
+
+        let maintenance_finished = super::DaemonRuntime::run_maintenance_budget(
+            state.as_ref(),
+            1,
+            Duration::from_millis(500),
+        );
+        tokio::pin!(maintenance_finished);
+
+        tokio::task::yield_now().await;
+        state.request_shutdown();
+
+        assert!(!maintenance_finished.await);
+        assert_eq!(state.status().await.metrics.maintenance_runs, 0);
     }
 
     #[tokio::test]

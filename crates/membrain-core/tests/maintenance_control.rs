@@ -716,7 +716,7 @@ fn repair_run_full_scan_rebuild_if_needed_keeps_doctor_surfaces_explainable() {
     assert_eq!(summary.healthy, 0);
     assert_eq!(summary.degraded, 0);
     assert_eq!(summary.corrupt, 0);
-    assert_eq!(summary.rebuilt, 6);
+    assert_eq!(summary.rebuilt, 7);
     assert_eq!(summary.results.len(), 10);
     assert_eq!(summary.operator_reports.len(), 10);
     assert_eq!(summary.verification_artifacts.len(), 10);
@@ -727,6 +727,7 @@ fn repair_run_full_scan_rebuild_if_needed_keeps_doctor_surfaces_explainable() {
         RepairTarget::MetadataIndex,
         RepairTarget::SemanticHotIndex,
         RepairTarget::SemanticColdIndex,
+        RepairTarget::GraphConsistency,
         RepairTarget::CacheWarmState,
         RepairTarget::EngramIndex,
     ] {
@@ -765,7 +766,6 @@ fn repair_run_full_scan_rebuild_if_needed_keeps_doctor_surfaces_explainable() {
     for target in [
         RepairTarget::HotStoreConsistency,
         RepairTarget::PayloadIntegrity,
-        RepairTarget::GraphConsistency,
         RepairTarget::ContradictionConsistency,
     ] {
         let result = summary
@@ -822,4 +822,68 @@ fn repair_run_full_scan_rebuild_if_needed_keeps_doctor_surfaces_explainable() {
     assert_eq!(handle.start(), handle.snapshot());
     assert_eq!(handle.poll(), handle.snapshot());
     assert_eq!(handle.cancel(), handle.snapshot());
+}
+
+#[test]
+fn completed_repair_snapshots_keep_verification_artifacts_and_operator_reports_stable() {
+    let namespace = NamespaceId::new("repair.stability").unwrap();
+    let engine = RepairEngine;
+    let run = engine.create_targeted(
+        namespace,
+        vec![RepairTarget::LexicalIndex, RepairTarget::MetadataIndex],
+        IndexRepairEntrypoint::ForceRebuild,
+    );
+    let mut handle = MaintenanceJobHandle::new(run, 10);
+
+    handle.start();
+    let _ = handle.poll();
+    let completed = handle.poll();
+    let MaintenanceJobState::Completed(summary) = completed.state.clone() else {
+        panic!("expected completed repair summary after second poll");
+    };
+
+    let lexical_artifact = summary
+        .verification_artifacts
+        .get(&RepairTarget::LexicalIndex)
+        .expect("lexical artifact should be present")
+        .clone();
+    let metadata_artifact = summary
+        .verification_artifacts
+        .get(&RepairTarget::MetadataIndex)
+        .expect("metadata artifact should be present")
+        .clone();
+    let lexical_report = summary
+        .operator_reports
+        .iter()
+        .find(|report| report.target == RepairTarget::LexicalIndex)
+        .expect("lexical report should be present")
+        .clone();
+    let metadata_report = summary
+        .operator_reports
+        .iter()
+        .find(|report| report.target == RepairTarget::MetadataIndex)
+        .expect("metadata report should be present")
+        .clone();
+
+    for terminal_snapshot in [handle.snapshot(), handle.start(), handle.poll(), handle.cancel()] {
+        let MaintenanceJobState::Completed(terminal_summary) = terminal_snapshot.state else {
+            panic!("expected completed repair summary to stay stable");
+        };
+        assert_eq!(terminal_summary.targets_checked, 2);
+        assert_eq!(terminal_summary.rebuilt, 2);
+        assert_eq!(
+            terminal_summary.verification_artifacts.get(&RepairTarget::LexicalIndex),
+            Some(&lexical_artifact)
+        );
+        assert_eq!(
+            terminal_summary.verification_artifacts.get(&RepairTarget::MetadataIndex),
+            Some(&metadata_artifact)
+        );
+        assert!(terminal_summary.operator_reports.contains(&lexical_report));
+        assert!(terminal_summary.operator_reports.contains(&metadata_report));
+        assert!(lexical_report.operator_log.contains(lexical_artifact.artifact_name));
+        assert!(lexical_report.operator_log.contains(lexical_artifact.parity_check));
+        assert!(metadata_report.operator_log.contains(metadata_artifact.artifact_name));
+        assert!(metadata_report.operator_log.contains(metadata_artifact.parity_check));
+    }
 }

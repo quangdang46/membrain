@@ -32,7 +32,16 @@ pub trait Tier2StoreApi {
 
     /// Returns the authoritative durable schema objects this store owns.
     fn authoritative_schema_objects(&self) -> Vec<DurableSchemaObject> {
-        vec![DurableSchemaObject::DurableMemoryRecords]
+        vec![
+            DurableSchemaObject::MemoryItemsTable,
+            DurableSchemaObject::MemoryPayloadsTable,
+            DurableSchemaObject::MemoryLineageEdgesTable,
+            DurableSchemaObject::MemoryEntityRefsTable,
+            DurableSchemaObject::MemoryRelationRefsTable,
+            DurableSchemaObject::MemoryTagsTable,
+            DurableSchemaObject::ConflictRecordsTable,
+            DurableSchemaObject::DurableMemoryRecords,
+        ]
     }
 }
 

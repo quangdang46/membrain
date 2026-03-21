@@ -473,6 +473,11 @@ impl PlannerStage {
         }
     }
 
+    /// Returns whether this stage participates in the bounded rerank slice.
+    pub const fn is_rerank_stage(self) -> bool {
+        matches!(self, Self::Float32Rescore)
+    }
+
     /// Returns true if this is a Tier2 stage.
     pub const fn is_tier2(self) -> bool {
         matches!(
@@ -654,6 +659,8 @@ pub struct StageTrace {
     pub was_bypassed: bool,
     /// Execution hint for logging.
     pub execution_hint: &'static str,
+    /// Whether this stage contributed to the bounded rerank slice.
+    pub rerank_related: bool,
 }
 
 impl StageTrace {
@@ -671,6 +678,7 @@ impl StageTrace {
             stage_budget,
             was_bypassed: false,
             execution_hint: "normal",
+            rerank_related: stage.is_rerank_stage(),
         }
     }
 
@@ -683,24 +691,32 @@ impl StageTrace {
             stage_budget,
             was_bypassed: true,
             execution_hint: "bypassed",
+            rerank_related: stage.is_rerank_stage(),
         }
     }
 
     /// Returns a human-readable summary.
     pub fn summary(&self) -> String {
+        let rerank_suffix = if self.rerank_related {
+            ", rerank slice"
+        } else {
+            ""
+        };
         if self.was_bypassed {
             format!(
-                "[{}] BYPASSED (budget cap {})",
+                "[{}] BYPASSED (budget cap {}{})",
                 self.stage.as_str(),
-                self.stage_budget
+                self.stage_budget,
+                rerank_suffix
             )
         } else {
             format!(
-                "[{}] {} → {} candidates (budget cap {})",
+                "[{}] {} → {} candidates (budget cap {}{})",
                 self.stage.as_str(),
                 self.candidates_in,
                 self.candidates_out,
-                self.stage_budget
+                self.stage_budget,
+                rerank_suffix
             )
         }
     }
@@ -876,12 +892,12 @@ impl RetrievalPlan {
         // Stage 2: Hot semantic search (if applicable)
         if request.requires_semantic_search() {
             stages.push(PlannerStage::HotSemanticSearch);
-            stage_budgets.push(100); // Bounded top-K for HNSW
+            stage_budgets.push(request.candidate_budget.min(100)); // Bounded top-K for HNSW
         }
 
         // Stage 3: Float32 rescore
         stages.push(PlannerStage::Float32Rescore);
-        stage_budgets.push(20); // Bounded rescore set
+        stage_budgets.push(request.limit.min(request.candidate_budget).min(20)); // Final bounded rerank slice
 
         // Stage 4: Tier3 fallback (conditional)
         if request.enable_tier3_fallback {
@@ -1384,6 +1400,12 @@ mod tests {
             20,
             100,
         ));
+        trace.add_stage(StageTrace::executed(
+            PlannerStage::Float32Rescore,
+            20,
+            10,
+            10,
+        ));
         trace.set_final_candidates(10);
         trace.set_tier3_triggered(EscalationReason::Tier2Underfill);
 
@@ -1393,6 +1415,7 @@ mod tests {
         assert!(summary.contains("lexical_query: terms=\"test\""));
         assert!(summary.contains("budget cap 5000"));
         assert!(summary.contains("budget cap 100"));
+        assert!(summary.contains("rerank slice"));
         assert!(summary.contains("tier2_underfill"));
     }
 
@@ -1443,5 +1466,18 @@ mod tests {
 
         assert!(PlannerStage::Tier3ColdSearch.is_tier3());
         assert!(!PlannerStage::HotSemanticSearch.is_tier3());
+        assert!(PlannerStage::Float32Rescore.is_rerank_stage());
+        assert!(!PlannerStage::GraphExpansion.is_rerank_stage());
+    }
+
+    #[test]
+    fn stage_budgets_respect_request_limit_for_rerank_slice() {
+        let ns = test_namespace();
+        let request = RetrievalRequest::hybrid(ns, "test", 7).with_budget(80);
+
+        let plan = RetrievalPlan::new(request);
+
+        assert_eq!(plan.budget_for_stage(PlannerStage::HotSemanticSearch), Some(80));
+        assert_eq!(plan.budget_for_stage(PlannerStage::Float32Rescore), Some(7));
     }
 }

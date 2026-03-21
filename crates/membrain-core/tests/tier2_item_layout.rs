@@ -1,5 +1,7 @@
 use membrain_core::api::NamespaceId;
+use membrain_core::migrate::DurableSchemaObject;
 use membrain_core::store::tier2::Tier2Store;
+use membrain_core::store::Tier2StoreApi;
 use membrain_core::types::{
     LandmarkMetadata, MemoryId, NormalizedMemoryEnvelope, RawEncodeInput, RawIntakeKind, SessionId,
 };
@@ -105,6 +107,7 @@ fn tier2_layout_separates_metadata_from_raw_payload_body_and_preserves_namespace
         layout.payload_hydration_path()
     );
     assert_eq!(layout.payload.raw_size_bytes, envelope.raw_text.len());
+    assert!(layout.payload_size_matches_raw_body());
     assert_eq!(
         layout.payload.raw_text,
         "full payload with more detail than the compact prefilter text"
@@ -131,6 +134,7 @@ fn tier2_prefilter_view_exposes_namespace_safe_metadata_fields() {
     assert!(layout.prefilter_stays_metadata_only());
     assert_eq!(trace.metadata_candidate_count, 1);
     assert_eq!(trace.payload_fetch_count, 0);
+    assert!(layout.payload_size_matches_raw_body());
 }
 
 #[test]
@@ -418,4 +422,23 @@ fn tier2_landmark_prefilter_trace_stays_metadata_first_for_temporal_recall_consu
     assert_eq!(key.landmark, &envelope.landmark);
     assert_eq!(key.landmark_label(), Some("launch milestone"));
     assert_eq!(key.era_id(), Some("era-launch-milestone-0001"));
+}
+
+#[test]
+fn tier2_store_schema_objects_match_split_durable_layout_contract() {
+    let store = Tier2Store;
+
+    assert_eq!(
+        store.authoritative_schema_objects(),
+        vec![
+            DurableSchemaObject::MemoryItemsTable,
+            DurableSchemaObject::MemoryPayloadsTable,
+            DurableSchemaObject::MemoryLineageEdgesTable,
+            DurableSchemaObject::MemoryEntityRefsTable,
+            DurableSchemaObject::MemoryRelationRefsTable,
+            DurableSchemaObject::MemoryTagsTable,
+            DurableSchemaObject::ConflictRecordsTable,
+            DurableSchemaObject::DurableMemoryRecords,
+        ]
+    );
 }

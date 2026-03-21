@@ -181,11 +181,11 @@ impl Tier1HotMetadataStore {
                 break;
             }
 
+            inspected += 1;
             let Some(record) = self.exact.get(key) else {
                 stale_candidates_skipped += 1;
                 continue;
             };
-            inspected += 1;
             if &record.namespace == namespace && record.session_id == session_id {
                 records.push(record.clone());
                 if records.len() >= bounded_limit {
@@ -213,9 +213,7 @@ impl Tier1HotMetadataStore {
     }
 
     fn touch_recent(&mut self, key: (NamespaceId, MemoryId)) {
-        if let Some(position) = self.recent.iter().position(|candidate| candidate == &key) {
-            self.recent.remove(position);
-        }
+        self.recent.retain(|candidate| candidate != &key);
         self.recent.push_back(key);
     }
 }
@@ -225,6 +223,12 @@ impl Tier1HotMetadataStore {
     fn inject_stale_recent_reference(&mut self, namespace: &str, memory_id: u64) {
         self.recent
             .push_back((NamespaceId::new(namespace).unwrap(), MemoryId(memory_id)));
+    }
+
+    fn inject_duplicate_recent_reference(&mut self, namespace: &str, memory_id: u64) {
+        let key = (NamespaceId::new(namespace).unwrap(), MemoryId(memory_id));
+        self.recent.push_back(key.clone());
+        self.recent.push_back(key);
     }
 }
 
@@ -410,6 +414,22 @@ mod tests {
         assert_eq!(recent.trace.outcome, Tier1LookupOutcome::StaleBypass);
         assert!(!recent.trace.session_window_hit);
         assert_eq!(recent.trace.recent_candidates_inspected, 0);
+    }
+
+    #[test]
+    fn exact_lookup_deduplicates_all_prior_recent_references() {
+        let namespace = NamespaceId::new("team.alpha").unwrap();
+        let mut store = Tier1HotMetadataStore::new(3);
+        store.seed(seed_record("team.alpha", 1, 10, "older"));
+        store.inject_duplicate_recent_reference("team.alpha", 1);
+
+        let exact = store.exact_lookup(&namespace, MemoryId(1));
+        let recent = store.recent_for_session(&namespace, SessionId(10), 3);
+
+        assert!(exact.record.is_some());
+        assert_eq!(recent.records.len(), 1);
+        assert_eq!(recent.records[0].memory_id, MemoryId(1));
+        assert_eq!(recent.trace.recent_candidates_inspected, 1);
     }
 
     #[test]

@@ -5,6 +5,7 @@
 //! score. It produces explain payloads that downstream surfaces can inspect.
 
 use crate::engine::contradiction::ContradictionExplain;
+use crate::types::MemoryId;
 
 // ── Score components ─────────────────────────────────────────────────────────
 
@@ -143,6 +144,53 @@ pub struct RankingInput {
     pub conflict: u16,
 }
 
+/// Declared local reranker mode for the final bounded candidate slice.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub enum LocalRerankerMode {
+    /// Only the cheap float32 rescore ran.
+    Disabled,
+    /// A bounded local reranker is available for the final slice.
+    Bounded,
+}
+
+impl LocalRerankerMode {
+    /// Stable machine-readable name.
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Disabled => "disabled",
+            Self::Bounded => "bounded",
+        }
+    }
+}
+
+/// Explainable rerank metadata preserved for inspect surfaces.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct RerankMetadata {
+    /// Authoritative float32 rescore candidate cap applied before the final cut.
+    pub float32_rescore_limit: usize,
+    /// Final candidate cut before optional local reranking.
+    pub candidate_cut_limit: usize,
+    /// Local reranker mode applied to the final slice.
+    pub local_reranker_mode: LocalRerankerMode,
+    /// Whether the optional local reranker actually ran.
+    pub local_reranker_applied: bool,
+    /// Bounded score delta introduced by reranking, when known.
+    pub rerank_score_delta: i32,
+}
+
+impl RerankMetadata {
+    /// Metadata for float32 rescore only.
+    pub const fn float32_only(float32_rescore_limit: usize, candidate_cut_limit: usize) -> Self {
+        Self {
+            float32_rescore_limit,
+            candidate_cut_limit,
+            local_reranker_mode: LocalRerankerMode::Disabled,
+            local_reranker_applied: false,
+            rerank_score_delta: 0,
+        }
+    }
+}
+
 /// Fused ranking result with full explain trace.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RankingResult {
@@ -154,6 +202,8 @@ pub struct RankingResult {
     pub profile_name: &'static str,
     /// Contradiction explain payloads attached to this result.
     pub contradiction_explains: Vec<ContradictionExplain>,
+    /// Bounded rerank metadata preserved for explain and inspect surfaces.
+    pub rerank_metadata: RerankMetadata,
 }
 
 /// Fuses ranking signals into a final score using the given profile.
@@ -172,6 +222,7 @@ pub fn fuse_scores(input: RankingInput, profile: RankingProfile) -> RankingResul
 
     let total_weighted: u32 = signals.iter().map(|s| s.weighted_value).sum();
     let final_score = total_weighted.min(1000) as u16;
+    let rerank_limit = signals.len();
 
     let profile_name = if profile == RankingProfile::balanced() {
         "balanced"
@@ -188,6 +239,7 @@ pub fn fuse_scores(input: RankingInput, profile: RankingProfile) -> RankingResul
         signals,
         profile_name,
         contradiction_explains: Vec::new(),
+        rerank_metadata: RerankMetadata::float32_only(rerank_limit, rerank_limit),
     }
 }
 
@@ -393,6 +445,7 @@ mod tests {
             ],
             profile_name: "custom",
             contradiction_explains: Vec::new(),
+            rerank_metadata: RerankMetadata::float32_only(3, 3),
         };
 
         let explain = RankingExplain::from_result(&result);
@@ -429,5 +482,18 @@ mod tests {
         };
         let result = engine.rank_candidate(input, RankingProfile::balanced());
         assert_eq!(result.final_score, 500);
+        assert_eq!(result.rerank_metadata.local_reranker_mode.as_str(), "disabled");
+        assert!(!result.rerank_metadata.local_reranker_applied);
+    }
+
+    #[test]
+    fn float32_only_rerank_metadata_defaults_to_no_local_reranker() {
+        let metadata = RerankMetadata::float32_only(20, 8);
+
+        assert_eq!(metadata.float32_rescore_limit, 20);
+        assert_eq!(metadata.candidate_cut_limit, 8);
+        assert_eq!(metadata.local_reranker_mode, LocalRerankerMode::Disabled);
+        assert!(!metadata.local_reranker_applied);
+        assert_eq!(metadata.rerank_score_delta, 0);
     }
 }

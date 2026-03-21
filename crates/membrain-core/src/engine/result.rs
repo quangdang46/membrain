@@ -6,7 +6,7 @@
 use crate::api::{FieldPresence, NamespaceId, PolicyFilterSummary};
 use crate::brain_store::PreparedTier2Layout;
 use crate::engine::contradiction::{ContradictionExplain, ResolutionState};
-use crate::engine::ranking::{RankingExplain, RankingResult};
+use crate::engine::ranking::{RankingExplain, RankingResult, RerankMetadata};
 use crate::engine::recall::{RecallPlan, RecallPlanKind, RecallTraceStage};
 use crate::graph::{EntityId, RelationKind};
 use crate::observability::OutcomeClass;
@@ -169,6 +169,8 @@ pub struct RetrievalResult {
     pub uncertainty_markers: UncertaintyMarkers,
     /// Tier that answered the query.
     pub answered_from: AnsweredFrom,
+    /// Bounded rerank metadata preserved for inspect/explain surfaces.
+    pub rerank_metadata: RerankMetadata,
 }
 
 /// Which storage tier serviced this result.
@@ -272,6 +274,7 @@ pub struct PackagingMetadata {
     pub graph_assistance: String,
     pub degraded_summary: Option<String>,
     pub packaging_mode: String,
+    pub rerank_metadata: Option<RerankMetadata>,
 }
 
 /// Operating mode for dual memory output.
@@ -363,6 +366,7 @@ impl RetrievalResultSet {
                 graph_assistance: "none".to_string(),
                 degraded_summary: None,
                 packaging_mode: "evidence_only".to_string(),
+                rerank_metadata: None,
             },
             output_mode: DualOutputMode::Balanced,
             truncated: false,
@@ -664,6 +668,7 @@ impl ResultBuilder {
                 missing_evidence_uncertainty: None,
             },
             answered_from,
+            rerank_metadata: ranking_result.rerank_metadata.clone(),
         };
 
         let provenance_summary = ProvenanceSummary {
@@ -707,6 +712,15 @@ impl ResultBuilder {
             "evidence_only"
         };
         self.evidence_pack.truncate(self.max_results);
+        let rerank_metadata = self
+            .evidence_pack
+            .first()
+            .and_then(|first| {
+                self.evidence_pack
+                    .iter()
+                    .all(|item| item.result.rerank_metadata == first.result.rerank_metadata)
+                    .then(|| first.result.rerank_metadata.clone())
+            });
 
         let contradictions_found = self
             .evidence_pack
@@ -770,6 +784,7 @@ impl ResultBuilder {
                 graph_assistance: "none".to_string(),
                 degraded_summary: None,
                 packaging_mode: packaging_mode.to_string(),
+                rerank_metadata,
             },
             output_mode: DualOutputMode::Balanced,
             truncated,
@@ -786,6 +801,7 @@ mod tests {
     use crate::engine::contradiction::{
         ContradictionExplain, ContradictionId, ContradictionKind, PreferredAnswerState,
     };
+    use crate::engine::recall::{RecallEngine, RecallRequest, RecallRuntime};
     use crate::engine::ranking::{fuse_scores, RankingInput, RankingProfile};
     use crate::types::{LandmarkSignals, RawEncodeInput, RawIntakeKind};
 
@@ -889,6 +905,14 @@ mod tests {
             result_set.packaging_metadata.packaging_mode,
             "evidence_only"
         );
+        assert_eq!(
+            result_set
+                .packaging_metadata
+                .rerank_metadata
+                .as_ref()
+                .map(|metadata| metadata.local_reranker_mode.as_str()),
+            Some("disabled")
+        );
         assert!(result_set.deferred_payloads.is_empty());
         // Highest score first
         assert!(
@@ -989,6 +1013,73 @@ mod tests {
             "evidence_only"
         );
         assert_eq!(result_set.omitted_summary.budget_capped, 0);
+    }
+
+    #[test]
+    fn result_builder_suppresses_pack_level_rerank_metadata_when_retained_items_disagree() {
+        let mut builder = ResultBuilder::new(2, ns("test"));
+        let mut top_ranked = fuse_scores(
+            RankingInput {
+                recency: 900,
+                salience: 850,
+                strength: 800,
+                provenance: 750,
+                conflict: 0,
+            },
+            RankingProfile::balanced(),
+        );
+        top_ranked.rerank_metadata = crate::engine::ranking::RerankMetadata {
+            float32_rescore_limit: 8,
+            candidate_cut_limit: 4,
+            local_reranker_mode: crate::engine::ranking::LocalRerankerMode::Bounded,
+            local_reranker_applied: true,
+            rerank_score_delta: 35,
+        };
+
+        let mut second_ranked = fuse_scores(
+            RankingInput {
+                recency: 820,
+                salience: 810,
+                strength: 790,
+                provenance: 780,
+                conflict: 0,
+            },
+            RankingProfile::balanced(),
+        );
+        second_ranked.rerank_metadata = crate::engine::ranking::RerankMetadata::float32_only(5, 5);
+
+        builder.add(
+            MemoryId(1),
+            ns("test"),
+            SessionId(1),
+            CanonicalMemoryType::Event,
+            "top ranked result".to_string(),
+            &top_ranked,
+            AnsweredFrom::Tier1Hot,
+        );
+        builder.add(
+            MemoryId(2),
+            ns("test"),
+            SessionId(1),
+            CanonicalMemoryType::Event,
+            "second ranked result".to_string(),
+            &second_ranked,
+            AnsweredFrom::Tier2Indexed,
+        );
+
+        let plan = RecallEngine.plan_recall(
+            RecallRequest::small_session_lookup(SessionId(1)),
+            RuntimeConfig::default(),
+        );
+        let result_set = builder.build(RetrievalExplain::from_plan(&plan, "balanced"));
+
+        assert_eq!(result_set.count(), 2);
+        assert!(result_set.packaging_metadata.rerank_metadata.is_none());
+        assert!(result_set.evidence_pack[0].result.rerank_metadata.local_reranker_applied);
+        assert_eq!(
+            result_set.evidence_pack[1].result.rerank_metadata.local_reranker_mode.as_str(),
+            "disabled"
+        );
     }
 
     #[test]

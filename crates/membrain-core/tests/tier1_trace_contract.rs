@@ -94,6 +94,7 @@ fn recent_tier1_result_set() -> RetrievalResultSet {
             graph_assistance: "none".to_string(),
             degraded_summary: None,
             packaging_mode: "evidence_only".to_string(),
+            rerank_metadata: None,
         },
         output_mode: membrain_core::engine::result::DualOutputMode::Balanced,
         truncated: false,

@@ -4,7 +4,7 @@
 //! deduplicates similar entries, and produces consolidated summaries.
 
 use crate::api::NamespaceId;
-use crate::engine::episode::EpisodeGroupingReport;
+use crate::engine::episode::{EpisodeCandidate, EpisodeGroupingModule, EpisodeGroupingReport};
 use crate::engine::maintenance::{
     DurableStateToken, InterruptedMaintenance, InterruptionReason, MaintenanceOperation,
     MaintenanceProgress, MaintenanceStep,
@@ -75,6 +75,10 @@ pub struct ConsolidationSummary {
     pub skipped: u32,
     /// Total memories affected.
     pub memories_affected: u32,
+    /// Stable grouping fixtures emitted for deterministic validation.
+    pub named_fixtures: Vec<String>,
+    /// Summary of the heuristics used for this bounded grouping pass.
+    pub heuristics_summary: Option<String>,
     /// Sample grouping logs that explain why a source set was formed.
     pub grouping_logs: Vec<String>,
 }
@@ -86,6 +90,7 @@ pub struct ConsolidationSummary {
 pub struct ConsolidationRun {
     namespace: NamespaceId,
     policy: ConsolidationPolicy,
+    grouping_module: EpisodeGroupingModule,
     processed: u32,
     total: u32,
     episode_source_sets: u32,
@@ -94,6 +99,8 @@ pub struct ConsolidationRun {
     skipped: u32,
     completed: bool,
     durable_token: DurableStateToken,
+    named_fixtures: Vec<String>,
+    heuristics_summary: Option<String>,
     grouping_logs: Vec<String>,
 }
 
@@ -103,6 +110,7 @@ impl ConsolidationRun {
         Self {
             namespace,
             policy,
+            grouping_module: EpisodeGroupingModule,
             processed: 0,
             total: total_groups,
             episode_source_sets: 0,
@@ -111,6 +119,8 @@ impl ConsolidationRun {
             skipped: 0,
             completed: false,
             durable_token: DurableStateToken(0),
+            named_fixtures: Vec::new(),
+            heuristics_summary: None,
             grouping_logs: Vec::new(),
         }
     }
@@ -129,6 +139,8 @@ impl MaintenanceOperation for ConsolidationRun {
                 deduplications: self.deduplications,
                 skipped: self.skipped,
                 memories_affected: self.merges * 2 + self.deduplications,
+                named_fixtures: self.named_fixtures.clone(),
+                heuristics_summary: self.heuristics_summary.clone(),
                 grouping_logs: self.grouping_logs.clone(),
             });
         }
@@ -136,21 +148,34 @@ impl MaintenanceOperation for ConsolidationRun {
         // Simulate processing one batch.
         let batch_size = (self.policy.batch_size as u32).max(1);
         let batch_end = (self.processed + batch_size).min(self.total);
-        let batch_count = batch_end - self.processed;
 
         // Stage 1 always materializes deterministic episode/source-set grouping before
         // later merge or deduplication work. Until higher-order derivations land, treat
         // each bounded candidate group as grouped-and-skipped while preserving inspectable logs.
-        self.episode_source_sets += batch_count;
-        self.skipped += batch_count;
         let start_group = self.processed + 1;
-        for group_index in start_group..=batch_end {
-            self.grouping_logs.push(format!(
-                "namespace={} episode_source_set={} reason=bounded_grouping stage=nrem_migration",
-                self.namespace.as_str(),
-                group_index
-            ));
-        }
+        let candidates: Vec<EpisodeCandidate> = (start_group..=batch_end)
+            .map(|group_index| EpisodeCandidate {
+                memory_id: MemoryId(group_index as u64),
+                timestamp_ms: group_index as u64 * 700_000,
+                session_id: None,
+                task_id: None,
+                entities: Vec::new(),
+                goal_context: None,
+                tool_chain_context: None,
+                failure_retry_flag: false,
+            })
+            .collect();
+        let grouping = self
+            .grouping_module
+            .grouping_report(&Default::default(), &candidates);
+        self.episode_source_sets += grouping.groups.len() as u32;
+        self.skipped += grouping.groups.len() as u32;
+        self.named_fixtures
+            .extend(grouping.groups.iter().map(|group| group.fixture_name.clone()));
+        self.heuristics_summary = Some(grouping.heuristics_summary.clone());
+        self.grouping_logs.extend(grouping.sample_logs.iter().map(|log| {
+            format!("namespace={} stage=nrem_migration {}", self.namespace.as_str(), log)
+        }));
         self.processed = batch_end;
         self.durable_token = DurableStateToken(self.processed as u64);
 
@@ -163,6 +188,8 @@ impl MaintenanceOperation for ConsolidationRun {
                 deduplications: self.deduplications,
                 skipped: self.skipped,
                 memories_affected: self.merges * 2 + self.deduplications,
+                named_fixtures: self.named_fixtures.clone(),
+                heuristics_summary: self.heuristics_summary.clone(),
                 grouping_logs: self.grouping_logs.clone(),
             })
         } else {
@@ -226,7 +253,10 @@ mod tests {
         if let MaintenanceJobState::Completed(summary) = snap.state {
             assert_eq!(summary.groups_evaluated, 20);
             assert_eq!(summary.episode_source_sets, 20);
+            assert_eq!(summary.named_fixtures.len(), 20);
+            assert_eq!(summary.heuristics_summary.as_deref(), Some("temporal_proximity_ms=600000 max_episode_span_ms=3600000 honor_session_bounds=true honor_task_bounds=true require_entity_overlap=false"));
             assert_eq!(summary.grouping_logs.len(), 20);
+            assert!(summary.grouping_logs[0].contains("fixture=episode_1_singleton_1_1"));
         }
     }
 

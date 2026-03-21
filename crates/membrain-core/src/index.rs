@@ -19,7 +19,7 @@ use crate::types::{CanonicalMemoryType, MemoryId, SessionId};
 // ── Index types ──────────────────────────────────────────────────────────────
 
 /// Supported index families for candidate generation.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, serde::Serialize)]
 pub enum IndexFamily {
     /// FTS5 full-text lexical index for hot memories.
     Fts5Lexical,
@@ -747,7 +747,7 @@ impl EntityQuery {
 // ── Index health ─────────────────────────────────────────────────────────────
 
 /// Health status of one index.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
 pub enum IndexHealth {
     Healthy,
     Stale,
@@ -772,12 +772,25 @@ impl IndexHealth {
 }
 
 /// Health report for a specific index.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
 pub struct IndexHealthReport {
     pub family: IndexFamily,
     pub health: IndexHealth,
     pub entry_count: usize,
     pub generation: &'static str,
+    pub hit_rate: u8,
+    pub miss_rate: u8,
+    pub stale_index_ratio: u8,
+    pub repair_backlog: usize,
+    pub rebuild_duration_hint: &'static str,
+    pub item_count_divergence: usize,
+}
+
+impl IndexHealthReport {
+    /// Returns whether durable truth and derived rows are still in parity.
+    pub const fn is_in_parity(&self) -> bool {
+        self.item_count_divergence == 0
+    }
 }
 
 // ── Index trace ──────────────────────────────────────────────────────────────
@@ -925,6 +938,12 @@ impl IndexApi for IndexModule {
                 health: IndexHealth::Healthy,
                 entry_count: 0,
                 generation: "v0.1",
+                hit_rate: 100,
+                miss_rate: 0,
+                stale_index_ratio: 0,
+                repair_backlog: 0,
+                rebuild_duration_hint: "not_needed",
+                item_count_divergence: 0,
             })
             .collect()
     }
@@ -955,6 +974,14 @@ mod tests {
         let reports = module.health_reports();
         assert_eq!(reports.len(), 8);
         assert!(reports.iter().all(|r| r.health == IndexHealth::Healthy));
+        assert!(reports.iter().all(|r| r.hit_rate == 100));
+        assert!(reports.iter().all(|r| r.miss_rate == 0));
+        assert!(reports.iter().all(|r| r.stale_index_ratio == 0));
+        assert!(reports.iter().all(|r| r.repair_backlog == 0));
+        assert!(reports
+            .iter()
+            .all(|r| r.rebuild_duration_hint == "not_needed"));
+        assert!(reports.iter().all(IndexHealthReport::is_in_parity));
     }
 
     #[test]
@@ -1136,5 +1163,36 @@ mod tests {
         assert!(IndexHealth::Stale.is_usable());
         assert!(!IndexHealth::NeedsRebuild.is_usable());
         assert!(!IndexHealth::Missing.is_usable());
+    }
+
+    #[test]
+    fn index_health_report_tracks_durable_truth_parity_signal() {
+        let healthy = IndexHealthReport {
+            family: IndexFamily::Fts5Lexical,
+            health: IndexHealth::Healthy,
+            entry_count: 24,
+            generation: "v0.1",
+            hit_rate: 97,
+            miss_rate: 3,
+            stale_index_ratio: 0,
+            repair_backlog: 0,
+            rebuild_duration_hint: "not_needed",
+            item_count_divergence: 0,
+        };
+        let diverged = IndexHealthReport {
+            family: IndexFamily::EntityPrefilter,
+            health: IndexHealth::Stale,
+            entry_count: 21,
+            generation: "v0.1",
+            hit_rate: 88,
+            miss_rate: 12,
+            stale_index_ratio: 9,
+            repair_backlog: 2,
+            rebuild_duration_hint: "bounded_rebuild",
+            item_count_divergence: 3,
+        };
+
+        assert!(healthy.is_in_parity());
+        assert!(!diverged.is_in_parity());
     }
 }
