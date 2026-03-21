@@ -76,6 +76,7 @@ The mega-plan contains these major regions:
 
 ### Cross-batch capability lenses
 - **Trust and historical introspection**: use this lens when discussing later-stage user value across batches. It currently groups Belief Versioning (F2), Causal Chain Tracking (F11), Snapshots + Time Travel (F12), Semantic Diff (F14), and Audit Log (F19).
+- **Human-like memory follow-ons**: use this lens when discussing later-stage work that makes memory feel more human-like without reopening the bounded core execution spine. It currently spans refinements to Cognitive Blackboard, Resumable Goals, Dream Mode, Skill Extraction, Schema Compression, and Emotional Trajectory, plus deferred follow-on framing for autobiographical continuity, self-relevance, source trust, social memory, and richer reconsolidation/interference observability.
 - These lenses complement the canonical batch chronology; they do not replace milestone order or reopen the core execution spine.
 
 ### Phase 4 follow-on framing

@@ -240,6 +240,12 @@ Each benchmark artifact bundle should include:
 - bounded-work or routing evidence relevant to the measured path, such as candidate counts, tier hits or escalations, cache hit or miss state, deferred payload-fetch counts, or foreground latency delta for background jobs
 - an explicit note when the run is exploratory and therefore cannot close a stage gate
 
+### Human-like-memory evaluation lenses
+
+For later-stage follow-ons that claim to improve how memory behaves rather than only raw speed, benchmark and evaluation bundles should make the claimed gain explicit. Useful lenses include persistence quality, active-work continuity, procedural reuse, autobiographical continuity, interference resilience, source-trust calibration, schema usefulness, and dream-synthesis utility.
+
+These lenses do not replace the existing stage-gate benchmarks above. They complement them, and any feature using them still owes bounded-work, route, cache, denial, and foreground-latency evidence where relevant.
+
 ### Review checklist for benchmark proof
 
 Use this checklist when a PR or handoff cites benchmark evidence as part of its acceptance story:

@@ -9887,9 +9887,11 @@ Each section below is written in English and focuses on **how to build the featu
    - `Checklist`
    - `ReflectionArtifact`
 4. Keep reflection artifacts derived from evidence; do not pretend they are raw facts.
+5. Later-stage procedural-memory follow-ons may promote successful reflections or extracted skills into stronger reusable procedure surfaces only when lineage, supersession, and repeated-use usefulness remain inspectable.
 
 **Minimum release rule**
 - Reflection is advisory until validated by repeated usefulness or human approval.
+- Any later accepted procedure must preserve source lineage, deprecation/supersession visibility, and enough evidence to explain why it became reusable guidance instead of remaining tentative.
 
 ---
 
@@ -9914,6 +9916,7 @@ Each section below is written in English and focuses on **how to build the featu
 3. Let retrieval promote items into the blackboard instead of exposing raw floods of candidates.
 4. Treat the blackboard as a visible, namespace-aware working-state projection over selected evidence and active task metadata rather than a second authoritative memory store.
 5. Any persisted `blackboard.snapshot` or summary remains a lineage-bearing checkpoint artifact for inspect/resume/handoff; durable memory identity, policy, contradiction state, and canonical relation truth still live in the authoritative stores.
+6. Later-stage working-memory refinements may add clearer focus, pinning, dismissal, rehearsal, or active-work continuity semantics, but they must remain bounded controller state and must not become a hidden retrieval override or a second truth source.
 
 **Minimum API**
 - `blackboard.get`
@@ -9963,6 +9966,7 @@ Each section below is written in English and focuses on **how to build the featu
 - resume must reconstruct task state without guessing from scratch
 - stale, policy-incompatible, or partially reconstructable checkpoints must degrade explicitly instead of silently widening scope
 - abandon must preserve enough checkpoint or audit metadata for later inspection without leaving the goal implicitly active
+- active-work continuity should be benchmarkable and inspectable as a later-stage quality dimension rather than inferred from anecdote alone
 
 ---
 
@@ -15046,6 +15050,8 @@ graph edge between them. It creates new synthetic engram links autonomously.
 This mirrors REM sleep — cross-domain association formation without conscious input.
 The system becomes smarter while idle.
 
+Dream Mode remains a later-stage, maintenance-class synthesis surface. Its outputs are bounded, lineage-backed proposals or accepted derived links, not a replacement truth system. Promotion should stay evidence-gated: useful dream output must remain inspectable, namespace-aware, policy-aware, and explicitly non-blocking to the foreground recall and encode spine.
+
 **Schema Changes**
 
 ```sql
@@ -15122,6 +15128,11 @@ MCP tool: dream()
 
 Implement after **Milestone 7 (Engram Graph)**. Requires: engram BFS, graph_edges table,
 usearch ANN. Add as optional sub-step in Milestone 7 or early Milestone 8.
+
+**Acceptance posture**
+- candidate selection, emitted links, and any merge follow-on must stay bounded and replayable enough for inspect and benchmark evidence
+- accepted dream outputs must preserve enough lineage and proposal metadata to explain why they were kept
+- disabling Dream Mode should change only maintenance posture, not the canonical meaning of stored memories or graph truth
 
 ---
 
@@ -15694,6 +15705,11 @@ MCP tool: extract_skills()
 Implement after **Milestone 7 (Engram Graph)**. The extraction pass runs as part
 of the **Milestone 6 (Consolidation Engine)** background cycle — natural fit
 alongside NREM/REM equivalents. Add `extracted_procedural_id` to schema in Milestone 1.
+
+**Acceptance posture**
+- extracted procedures remain tentative or advisory until repeated usefulness or explicit approval promotes them into stronger reusable guidance
+- accepted procedures must preserve source engram lineage, confidence/uncertainty markers, and visible deprecation or supersession paths when later evidence changes the guidance
+- procedural retrieval should improve repeated-task reuse without deleting or hiding the source episodic evidence that justified the procedure
 
 ---
 
@@ -16742,6 +16758,11 @@ MCP tool: schemas(top_n?)
 Implement during **Milestone 6 (Consolidation Engine)** as a compression sub-pass.
 Add `compressed_into` column to schema in **Milestone 1**.
 
+**Acceptance posture**
+- schema memories remain derived gist or situation-pattern overlays rather than replacements for the source episodes
+- source evidence, open disagreement, uncertainty, and applicability limits must stay inspectable enough that schema recall does not collapse contradiction into one opaque story
+- compression may reduce source-episode strength, but it must not delete or hide the evidence required to audit why a schema exists or where it may fail to apply
+
 ---
 
 ### 47.8 Emotional Trajectory Tracking
@@ -16833,6 +16854,11 @@ MCP tool: recall(query, mood_congruent?: bool, ...)
 Schema columns in **Milestone 1**. `snapshot_encoding_mood()` in **Milestone 2 (Encoding)**.
 `emit_timeline_row()` in **Milestone 6 (Consolidation)**. Mood-congruent retrieval in
 **Milestone 4** as opt-in. CLI in **Milestone 10**.
+
+**Acceptance posture**
+- emotional trajectory remains introspection-first and read-only from the operator perspective
+- any mood-congruent ranking bonus must stay opt-in, additive, and explainable, never a hidden default retrieval mode or a scope-widening shortcut
+- later emotional-controller refinements may improve prioritization or desensitization behavior only when they remain bounded, inspectable, and subordinate to stronger direct evidence and policy constraints
 
 ---
 
@@ -17093,3 +17119,22 @@ CREATE TABLE fork_merge_log ( ... );     -- Feature 15
 
 > Full CREATE TABLE statements are in each feature section above.
 > Tables created at M1 but unused until their respective milestone are zero-cost.
+
+---
+
+### 47.13 Human-Like Memory Follow-On Lens
+
+This lens keeps later-stage ambition visible without reopening the bounded core execution spine. It is not a second milestone system and does not replace the canonical batch chronology above.
+
+Use it when discussing deferred work that aims to make memory more human-like while preserving the current thesis that foreground work stays bounded, provenance and contradiction remain visible, and research mechanisms are promoted only when benchmarked and inspectable.
+
+Near-term canon-worthy follow-on families in this lens are:
+- **autobiographical continuity and self-relevance** as later-stage, bounded retrieval and inspect refinements over existing goal, preference, timeline, and belief surfaces rather than a new hidden identity store
+- **reconsolidation outcome and interference observability** as richer explain, audit, and evaluation framing for how recall reshapes future recall without permitting silent overwrite or unbounded controller behavior
+- **source-trust and social-memory calibration** as later-stage, explainable ranking and inspect support that remains subordinate to provenance, contradiction visibility, and policy constraints
+- **human-like evaluation and promotion vocabulary** so later-stage memory features are judged by persistence quality, active-work continuity, procedural reuse, autobiographical continuity, interference resilience, source-trust calibration, schema usefulness, and dream-synthesis utility rather than by anecdote alone
+
+Promotion rule for this lens:
+- no feature in this family becomes canonical merely because it sounds cognitively rich
+- promotion requires measurable utility, bounded foreground cost, inspectability, replayable or deterministic-enough evaluation, and no conflict with the current non-negotiable invariants
+- later-stage follow-ons in this lens may refine existing Batch 1 or Batch 2 features, but they must not turn deferred introspection or synthesis work into hidden prerequisites for the core retrieval, contradiction, repair, or governance spine

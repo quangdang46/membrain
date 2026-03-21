@@ -375,6 +375,17 @@ Any change to startup bootstrap, durable-state replay, derived-surface rebuild, 
 - split logic remains reproducible enough for operational debugging
 - if Dream Mode is included, the synthesis pass remains background-only, namespace/policy-aware, lineage-backed, and visibly non-blocking to foreground latency budgets
 
+### Later-stage human-like-memory evaluation families
+
+When later-stage follow-ons claim to make memory more human-like, the verification story should stay explicit and bounded rather than relying on anecdote. Suitable proof families include:
+- active-work continuity and bounded resume quality for blackboard/checkpoint follow-ons
+- procedural reuse and deprecation/supersession visibility for skill/procedure follow-ons
+- autobiographical continuity and self-relevance explainability for long-horizon inspect/ranking follow-ons
+- reconsolidation outcome and interference observability for recall-reshape behavior
+- source-trust calibration and losing-evidence visibility for social-memory follow-ons
+- schema usefulness versus source-evidence preservation for gist/compression follow-ons
+- dream usefulness and false-positive containment for offline synthesis follow-ons
+
 ## Required exit artifacts for a completed stage
 
 Every stage completion should leave behind:

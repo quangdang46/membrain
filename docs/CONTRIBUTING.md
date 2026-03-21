@@ -112,6 +112,8 @@ These are contract-level review inputs, not optional nice-to-haves. If a change 
 - Performance-sensitive changes must include both benchmark evidence and the observability hook needed to detect regressions.
 - Governance-sensitive changes must include governance analysis, and also a rollback note when the change alters externally visible behavior.
 - Schema changes must include migration notes even when the schema surface is small.
+- Later-stage human-like-memory work must also name the bounded-work proof, explainability/inspectability proof, and the benchmark or evaluation artifact family that justifies the feature's value instead of relying on anecdotal usefulness alone.
+- If a change touches self-relevance, source trust, schema/gist behavior, dream synthesis, or emotional ranking posture, the proof should explicitly show how contradiction visibility, provenance, and losing evidence remain preserved.
 
 ### Change-type evidence matrix
 
