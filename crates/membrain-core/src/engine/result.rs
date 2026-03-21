@@ -85,7 +85,8 @@ impl EntryLane {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ScoreSummary {
     pub final_score: u16,
-    pub signal_breakdown: Vec<(String, u16, u8)>,
+    pub total_weighted_score: u32,
+    pub signal_breakdown: Vec<(String, u16, u8, u32)>,
     pub profile: String,
 }
 
@@ -94,11 +95,17 @@ impl ScoreSummary {
     pub fn from_ranking_explain(explain: &RankingExplain) -> Self {
         Self {
             final_score: explain.final_score,
+            total_weighted_score: explain.total_weighted_score,
             signal_breakdown: explain
                 .signal_breakdown
                 .iter()
-                .map(|(family, raw_value, weight)| {
-                    (family.as_str().to_string(), *raw_value, *weight)
+                .map(|(family, raw_value, weight, weighted_value)| {
+                    (
+                        family.as_str().to_string(),
+                        *raw_value,
+                        *weight,
+                        *weighted_value,
+                    )
                 })
                 .collect(),
             profile: explain.profile.clone(),
@@ -896,6 +903,19 @@ mod tests {
             result_set.evidence_pack[0].result.score_summary.final_score,
             result_set.evidence_pack[0].result.score
         );
+        assert_eq!(
+            result_set.evidence_pack[0].result.score_summary.total_weighted_score,
+            result_set.evidence_pack[0]
+                .result
+                .ranking_explain
+                .total_weighted_score
+        );
+        assert!(result_set.evidence_pack[0]
+            .result
+            .score_summary
+            .signal_breakdown
+            .iter()
+            .all(|(_, _, _, weighted_value)| *weighted_value <= 1000));
         assert_eq!(
             result_set.policy_summary.filters[0].effective_namespace,
             "test".to_string()

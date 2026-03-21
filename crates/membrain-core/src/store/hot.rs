@@ -298,6 +298,27 @@ mod tests {
     }
 
     #[test]
+    fn zero_budget_lookups_leave_capacity_and_resident_count_unchanged() {
+        let namespace = NamespaceId::new("team.alpha").unwrap();
+        let mut store = Tier1HotMetadataStore::new(3);
+        store.seed(seed_record("team.alpha", 1, 10, "older"));
+        store.seed(seed_record("team.alpha", 2, 10, "newer"));
+
+        assert_eq!(store.capacity(), 3);
+        assert_eq!(store.len(), 2);
+        assert!(!store.is_empty());
+
+        let exact = store.exact_lookup_with_budget(&namespace, MemoryId(1), 0);
+        let recent = store.recent_for_session_with_budget(&namespace, SessionId(10), 2, 0);
+
+        assert_eq!(exact.trace.outcome, Tier1LookupOutcome::Bypass);
+        assert_eq!(recent.trace.outcome, Tier1LookupOutcome::Bypass);
+        assert_eq!(store.capacity(), 3);
+        assert_eq!(store.len(), 2);
+        assert!(!store.is_empty());
+    }
+
+    #[test]
     fn default_recent_lookup_scans_past_interleaved_foreign_session_entries() {
         let namespace = NamespaceId::new("team.alpha").unwrap();
         let mut store = Tier1HotMetadataStore::new(4);

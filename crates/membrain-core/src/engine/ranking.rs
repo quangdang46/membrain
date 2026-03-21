@@ -198,8 +198,10 @@ pub fn fuse_scores(input: RankingInput, profile: RankingProfile) -> RankingResul
 pub struct RankingExplain {
     /// Final fused score.
     pub final_score: u16,
+    /// Sum of per-signal weighted contributions before final capping.
+    pub total_weighted_score: u32,
     /// Named signal breakdown.
-    pub signal_breakdown: Vec<(ScoreFamily, u16, u8)>,
+    pub signal_breakdown: Vec<(ScoreFamily, u16, u8, u32)>,
     /// Profile that was applied.
     pub profile: String,
     /// Whether the result was in a contradiction.
@@ -216,8 +218,15 @@ impl RankingExplain {
                 .signals
                 .iter()
                 .find(|signal| signal.name == family.as_str())
-                .map(|signal| (family, signal.raw_value, signal.weight))
-                .unwrap_or((family, 0, family.default_weight()))
+                .map(|signal| {
+                    (
+                        family,
+                        signal.raw_value,
+                        signal.weight,
+                        signal.weighted_value,
+                    )
+                })
+                .unwrap_or((family, 0, family.default_weight(), 0))
         };
 
         let signal_breakdown = vec![
@@ -230,6 +239,7 @@ impl RankingExplain {
 
         Self {
             final_score: result.final_score,
+            total_weighted_score: result.signals.iter().map(|signal| signal.weighted_value).sum(),
             signal_breakdown,
             profile: result.profile_name.to_string(),
             has_conflict: !result.contradiction_explains.is_empty(),
@@ -366,8 +376,10 @@ mod tests {
         assert_eq!(explain.final_score, result.final_score);
         assert_eq!(explain.profile, "balanced");
         assert!(!explain.has_conflict);
+        assert_eq!(explain.total_weighted_score, result.signals.iter().map(|signal| signal.weighted_value).sum::<u32>());
         assert_eq!(explain.signal_breakdown.len(), 5);
         assert_eq!(explain.signal_breakdown[0].0, ScoreFamily::Recency);
+        assert_eq!(explain.signal_breakdown[0].3, result.signals[0].weighted_value);
     }
 
     #[test]
@@ -386,19 +398,20 @@ mod tests {
         let explain = RankingExplain::from_result(&result);
 
         assert_eq!(explain.signal_breakdown.len(), 5);
-        assert_eq!(explain.signal_breakdown[0], (ScoreFamily::Recency, 800, 15));
-        assert_eq!(explain.signal_breakdown[1], (ScoreFamily::Salience, 0, 30));
+        assert_eq!(explain.total_weighted_score, 600);
+        assert_eq!(explain.signal_breakdown[0], (ScoreFamily::Recency, 800, 15, 120));
+        assert_eq!(explain.signal_breakdown[1], (ScoreFamily::Salience, 0, 30, 0));
         assert_eq!(
             explain.signal_breakdown[2],
-            (ScoreFamily::Strength, 900, 50)
+            (ScoreFamily::Strength, 900, 50, 450)
         );
         assert_eq!(
             explain.signal_breakdown[3],
-            (ScoreFamily::Provenance, 300, 10)
+            (ScoreFamily::Provenance, 300, 10, 30)
         );
         assert_eq!(
             explain.signal_breakdown[4],
-            (ScoreFamily::ConflictAdjustment, 0, 5)
+            (ScoreFamily::ConflictAdjustment, 0, 5, 0)
         );
     }
 

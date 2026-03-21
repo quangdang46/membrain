@@ -20,6 +20,10 @@ use membrain_core::types::{
 };
 use membrain_core::{BrainStore, RuntimeConfig};
 
+use membrain_daemon::mcp::{McpError, McpResponse};
+use membrain_daemon::rpc::{JsonRpcResponse, RuntimeMethodRequest};
+use serde_json::json;
+
 #[test]
 fn cli_depends_on_core_api() {
     let _: membrain_core::CoreApiVersion = membrain_cli::core_api_version();
@@ -33,6 +37,42 @@ fn requires_ranking<E: RankingRuntime>(_surface: &E) {}
 fn requires_hot_store<E: HotStoreApi>(_surface: &E) {}
 fn requires_tier2_store<E: Tier2StoreApi>(_surface: &E) {}
 fn requires_cold_store<E: ColdStoreApi>(_surface: &E) {}
+
+#[test]
+fn cli_surfaces_same_error_taxonomy_as_daemon_wrappers() {
+    let rpc_response =
+        JsonRpcResponse::error(Some(json!("req-1")), -32602, "missing namespace", None);
+    assert_eq!(rpc_response.error.as_ref().unwrap().code, -32602);
+    assert_eq!(
+        rpc_response.error.as_ref().unwrap().message,
+        "missing namespace"
+    );
+
+    let parsed = RuntimeMethodRequest {
+        jsonrpc: "1.0".to_string(),
+        method: "status".to_string(),
+        params: json!({}),
+        id: Some(json!("req-2")),
+    }
+    .parse_method()
+    .unwrap_err();
+    assert_eq!(parsed.code, -32600);
+    assert_eq!(parsed.message, "unsupported jsonrpc version");
+    assert_eq!(parsed.data, Some(json!({"expected":"2.0","actual":"1.0"})));
+
+    let mcp_response = McpResponse::failure(McpError {
+        code: "policy_denied".to_string(),
+        message: "namespace isolation prevents export".to_string(),
+        is_policy_denial: true,
+    });
+    assert_eq!(mcp_response.status, "error");
+    assert!(mcp_response.retrieval.is_none());
+    assert!(mcp_response.payload.is_none());
+    let mcp_error = mcp_response.error.as_ref().unwrap();
+    assert_eq!(mcp_error.code, "policy_denied");
+    assert_eq!(mcp_error.message, "namespace isolation prevents export");
+    assert!(mcp_error.is_policy_denial);
+}
 
 #[test]
 fn cli_depends_on_shared_core_boundaries() {

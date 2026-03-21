@@ -1,4 +1,5 @@
 use crate::engine::encode::PassiveObservationInspect;
+use crate::engine::result::RetrievalResultSet;
 use crate::observability::OutcomeClass;
 use crate::policy::{
     PolicyGateway, PolicySummary, SafeguardOutcome as PolicySafeguardOutcome, SharingAccessOutcome,
@@ -259,6 +260,7 @@ pub enum RemediationStep {
     RetryWithHigherBudget,
     RunDoctor,
     RunRepair,
+    RollbackRecentChange,
     InspectState,
 }
 
@@ -273,6 +275,7 @@ impl RemediationStep {
             Self::RetryWithHigherBudget => "retry_with_higher_budget",
             Self::RunDoctor => "run_doctor",
             Self::RunRepair => "run_repair",
+            Self::RollbackRecentChange => "rollback_recent_change",
             Self::InspectState => "inspect_state",
         }
     }
@@ -337,6 +340,8 @@ pub enum AvailabilityReason {
     IndexBypassed,
     CacheInvalidated,
     RepairInFlight,
+    RepairRollbackRequired,
+    RepairRollbackInProgress,
     AuthoritativeInputUnreadable,
 }
 
@@ -348,6 +353,8 @@ impl AvailabilityReason {
             Self::IndexBypassed => "index_bypassed",
             Self::CacheInvalidated => "cache_invalidated",
             Self::RepairInFlight => "repair_in_flight",
+            Self::RepairRollbackRequired => "repair_rollback_required",
+            Self::RepairRollbackInProgress => "repair_rollback_in_progress",
             Self::AuthoritativeInputUnreadable => "authoritative_input_unreadable",
         }
     }
@@ -603,6 +610,172 @@ pub struct TraceProvenanceSummary {
     pub source_kind: &'static str,
     pub source_reference: &'static str,
     pub lineage_ancestors: Vec<MemoryId>,
+}
+
+impl RouteSummary {
+    /// Builds the shared machine-readable route summary from a canonical retrieval result set.
+    pub fn from_result_set(result_set: &RetrievalResultSet) -> Self {
+        let route_family = match result_set.explain.recall_plan {
+            crate::engine::recall::RecallPlanKind::ExactIdTier1 => "exact_id_tier1",
+            crate::engine::recall::RecallPlanKind::RecentTier1ThenTier2Exact => {
+                "recent_tier1_then_tier2_exact"
+            }
+            crate::engine::recall::RecallPlanKind::Tier2ExactThenTier3Fallback => {
+                "tier2_exact_then_tier3_fallback"
+            }
+        };
+        let route_reason = match result_set.explain.route_reason.as_str() {
+            "exact memory id provided" | "exact memory id selects the direct Tier1 handle lane" => {
+                "exact_memory_id"
+            }
+            "small lookup for active session can stay on hot recent window before durable fallback"
+            | "small session lookup scans the Tier1 recent window before Tier2 exact" => {
+                "small_session_lookup"
+            }
+            "request needs broader durable retrieval before cold fallback"
+            | "request lacks a direct Tier1 answer and escalates to deeper indexed retrieval" => {
+                "broader_durable_retrieval"
+            }
+            _ => "custom_route_reason",
+        };
+        let fallback_reason = result_set
+            .explain
+            .trace_stages
+            .last()
+            .and_then(|stage| match stage {
+                crate::engine::recall::RecallTraceStage::Tier3Fallback => Some("tier3_fallback"),
+                crate::engine::recall::RecallTraceStage::Tier2Exact
+                    if !result_set.explain.tier1_answered_directly
+                        && result_set.explain.trace_stages.iter().any(|stage| {
+                            matches!(stage, crate::engine::recall::RecallTraceStage::Tier1RecentWindow)
+                        }) => Some("tier1_recent_insufficient"),
+                _ => None,
+            });
+
+        Self {
+            route_family,
+            route_reason,
+            tier1_consulted_first: matches!(
+                result_set.explain.trace_stages.first(),
+                Some(
+                    crate::engine::recall::RecallTraceStage::Tier1ExactHandle
+                        | crate::engine::recall::RecallTraceStage::Tier1RecentWindow
+                )
+            ),
+            tier1_answered_directly: result_set.explain.tier1_answered_directly,
+            routes_to_deeper_tiers: result_set.explain.trace_stages.iter().any(|stage| {
+                matches!(
+                    stage,
+                    crate::engine::recall::RecallTraceStage::Tier2Exact
+                        | crate::engine::recall::RecallTraceStage::Tier3Fallback
+                )
+            }),
+            candidate_budget: Some(result_set.explain.candidate_budget),
+            pre_route_candidate_count: Some(result_set.total_candidates),
+            post_route_candidate_count: Some(result_set.evidence_pack.len()),
+            fallback_reason,
+        }
+    }
+}
+
+impl ResultReason {
+    /// Builds the shared explain reason shape from canonical retrieval reasoning.
+    pub fn from_result_reason(reason: &crate::engine::result::ResultReason) -> Self {
+        let reason_code = match reason.reason_code.as_str() {
+            "score_kept" => "score_kept",
+            "no_match" => "no_match",
+            "tier2_exact_match" => "tier2_exact_match",
+            "temporal_prefilter_metadata_only" => "temporal_prefilter_metadata_only",
+            "temporal_payload_deferred" => "temporal_payload_deferred",
+            "temporal_landmark_selected" => "temporal_landmark_selected",
+            "temporal_landmark_not_selected" => "temporal_landmark_not_selected",
+            "contradiction_selected" => "contradiction_selected",
+            "contradiction_visible" => "contradiction_visible",
+            "contradiction_retained_under_legal_hold" => "contradiction_retained_under_legal_hold",
+            _ => "custom_reason_code",
+        };
+        let reason_family = match reason_code {
+            "score_kept" | "no_match" | "tier2_exact_match" => "selection",
+            "temporal_prefilter_metadata_only"
+            | "temporal_payload_deferred"
+            | "temporal_landmark_selected"
+            | "temporal_landmark_not_selected" => "temporal",
+            "contradiction_selected"
+            | "contradiction_visible"
+            | "contradiction_retained_under_legal_hold" => "conflict",
+            _ => "custom",
+        };
+        let route_stage = match reason_code {
+            "score_kept" | "no_match" | "tier2_exact_match"
+            | "temporal_prefilter_metadata_only"
+            | "temporal_payload_deferred"
+            | "temporal_landmark_selected"
+            | "temporal_landmark_not_selected"
+            | "contradiction_selected"
+            | "contradiction_visible"
+            | "contradiction_retained_under_legal_hold" => TraceStage::Tier2Exact,
+            _ => TraceStage::Packaging,
+        };
+
+        Self {
+            memory_id: reason.memory_id,
+            reason_code,
+            reason_family,
+            route_stage,
+            policy_filter_applied: false,
+            detail: Box::leak(reason.detail.clone().into_boxed_str()),
+        }
+    }
+}
+
+impl TracePolicySummary {
+    /// Builds the shared policy summary from one retrieval result set.
+    pub fn from_result_set(result_set: &RetrievalResultSet) -> Self {
+        Self {
+            effective_namespace: result_set.policy_summary.namespace_applied.as_str().to_string(),
+            policy_family: "namespace",
+            outcome_class: result_set.policy_summary.outcome_class,
+            blocked_stage: "not_blocked",
+            redaction_fields: if result_set.policy_summary.redactions_applied {
+                vec!["raw_text"]
+            } else {
+                Vec::new()
+            },
+            retention_state: FieldPresence::Absent,
+            sharing_scope: FieldPresence::Absent,
+            filters: result_set
+                .policy_summary
+                .filters
+                .iter()
+                .map(|filter| PolicyFilterSummary::new(
+                    filter.effective_namespace.clone(),
+                    filter.policy_family.clone(),
+                    filter.outcome_class,
+                    filter.blocked_stage.clone(),
+                    filter.sharing_scope.clone(),
+                    filter.retention_marker.clone(),
+                    filter.redaction_fields.clone(),
+                ))
+                .collect(),
+        }
+    }
+}
+
+impl TraceProvenanceSummary {
+    /// Builds the shared provenance summary from one retrieval result set.
+    pub fn from_result_set(result_set: &RetrievalResultSet) -> Self {
+        Self {
+            source_kind: Box::leak(result_set.provenance_summary.source_kind.clone().into_boxed_str()),
+            source_reference: Box::leak(
+                result_set
+                    .provenance_summary
+                    .source_reference
+                    .clone()
+                    .into_boxed_str(),
+            ),
+            lineage_ancestors: result_set.provenance_summary.lineage_ancestors.clone(),
+        }
+    }
 }
 
 /// Shared inspect summary for passive-observation provenance and retention semantics.
@@ -876,6 +1049,11 @@ mod tests {
         RemediationHint, RemediationStep, RequestContext, RequestId, ResponseContext,
         ResponseWarning, ResultReason, RouteSummary, TracePolicySummary, TraceProvenanceSummary,
         TraceScoreComponent, TraceStage, UncertaintyMarker,
+    };
+    use crate::engine::recall::{RecallPlanKind, RecallTraceStage};
+    use crate::engine::result::{
+        DualOutputMode, FreshnessMarkers, OmissionSummary, PackagingMetadata, PolicySummary,
+        ProvenanceSummary, RetrievalExplain, RetrievalResultSet,
     };
     use crate::observability::OutcomeClass;
     use crate::policy::{
@@ -1336,6 +1514,103 @@ mod tests {
     }
 
     #[test]
+    fn route_summary_from_result_set_preserves_temporal_recall_and_candidate_counts() {
+        let result_set = RetrievalResultSet {
+            outcome_class: OutcomeClass::Accepted,
+            evidence_pack: Vec::new(),
+            action_pack: None,
+            deferred_payloads: Vec::new(),
+            explain: RetrievalExplain {
+                recall_plan: RecallPlanKind::RecentTier1ThenTier2Exact,
+                route_reason: "small session lookup scans the Tier1 recent window before Tier2 exact"
+                    .to_string(),
+                tiers_consulted: vec!["tier1_recent".to_string(), "tier2_exact".to_string()],
+                trace_stages: vec![RecallTraceStage::Tier1RecentWindow, RecallTraceStage::Tier2Exact],
+                tier1_answered_directly: false,
+                candidate_budget: 8,
+                time_consumed_ms: Some(7),
+                ranking_profile: "balanced".to_string(),
+                contradictions_found: 0,
+                result_reasons: Vec::new(),
+            },
+            policy_summary: PolicySummary {
+                namespace_applied: NamespaceId::new("team.temporal").unwrap(),
+                outcome_class: OutcomeClass::Accepted,
+                redactions_applied: false,
+                restrictions_active: Vec::new(),
+                filters: Vec::new(),
+            },
+            provenance_summary: ProvenanceSummary {
+                source_kind: "retrieval_pipeline".to_string(),
+                source_reference: "temporal_recall".to_string(),
+                source_agent: "core_engine".to_string(),
+                original_namespace: NamespaceId::new("team.temporal").unwrap(),
+                derived_from: None,
+                lineage_ancestors: Vec::new(),
+                relation_to_seed: None,
+                graph_seed: None,
+            },
+            omitted_summary: OmissionSummary {
+                policy_redacted: 0,
+                threshold_dropped: 0,
+                dedup_dropped: 0,
+                budget_capped: 0,
+                duplicate_collapsed: 0,
+                low_confidence_suppressed: 0,
+                stale_bypassed: 0,
+            },
+            freshness_markers: FreshnessMarkers {
+                oldest_item_days: 0,
+                newest_item_days: 0,
+                volatile_items_included: false,
+                stale_warning: false,
+                as_of_tick: Some(42),
+            },
+            packaging_metadata: PackagingMetadata {
+                result_budget: 5,
+                token_budget: None,
+                graph_assistance: "none".to_string(),
+                degraded_summary: None,
+                packaging_mode: "evidence_only".to_string(),
+            },
+            output_mode: DualOutputMode::Balanced,
+            truncated: false,
+            total_candidates: 3,
+        };
+
+        let summary = RouteSummary::from_result_set(&result_set);
+
+        assert_eq!(summary.route_family, "recent_tier1_then_tier2_exact");
+        assert_eq!(summary.route_reason, "small_session_lookup");
+        assert!(summary.tier1_consulted_first);
+        assert!(!summary.tier1_answered_directly);
+        assert!(summary.routes_to_deeper_tiers);
+        assert_eq!(summary.candidate_budget, Some(8));
+        assert_eq!(summary.pre_route_candidate_count, Some(3));
+        assert_eq!(summary.post_route_candidate_count, Some(0));
+        assert_eq!(summary.fallback_reason, Some("tier1_recent_insufficient"));
+    }
+
+    #[test]
+    fn result_reason_from_temporal_reason_maps_temporal_family_and_stage() {
+        let reason = crate::engine::result::ResultReason {
+            memory_id: Some(crate::types::MemoryId(21)),
+            reason_code: "temporal_landmark_selected".to_string(),
+            detail: "landmark \"launch milestone\" opened era \"era-launch-milestone-0001\""
+                .to_string(),
+        };
+
+        let mapped = ResultReason::from_result_reason(&reason);
+
+        assert_eq!(mapped.memory_id, Some(crate::types::MemoryId(21)));
+        assert_eq!(mapped.reason_code, "temporal_landmark_selected");
+        assert_eq!(mapped.reason_family, "temporal");
+        assert_eq!(mapped.route_stage, TraceStage::Tier2Exact);
+        assert!(!mapped.policy_filter_applied);
+        assert!(mapped.detail.contains("launch milestone"));
+    }
+
+    #[test]
     fn trace_schema_fields_attach_with_stable_machine_names() {
         let response = ResponseContext::success(
             NamespaceId::new("team.gamma").unwrap(),
@@ -1773,6 +2048,30 @@ mod tests {
         assert_eq!(
             availability.recovery_condition_names(),
             vec!["run_doctor", "inspect_state"],
+        );
+
+        let repair_rollback = AvailabilitySummary::degraded(
+            vec!["inspect", "durable_lookup"],
+            vec!["preview_only"],
+            vec![
+                AvailabilityReason::RepairRollbackRequired,
+                AvailabilityReason::RepairRollbackInProgress,
+            ],
+            vec![
+                RemediationStep::RollbackRecentChange,
+                RemediationStep::RunDoctor,
+            ],
+        );
+        assert_eq!(
+            repair_rollback.reason_names(),
+            vec![
+                "repair_rollback_required",
+                "repair_rollback_in_progress",
+            ],
+        );
+        assert_eq!(
+            repair_rollback.recovery_condition_names(),
+            vec!["rollback_recent_change", "run_doctor"],
         );
 
         let degraded = ResponseContext::success(

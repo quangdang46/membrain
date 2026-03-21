@@ -21,6 +21,7 @@ pub enum McpRequest {
 pub struct EncodeParams {
     pub content: String,
     pub namespace: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub payload_type: Option<String>,
 }
 
@@ -28,6 +29,7 @@ pub struct EncodeParams {
 pub struct RecallParams {
     pub query: String,
     pub namespace: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub limit: Option<usize>,
 }
 
@@ -41,6 +43,7 @@ pub struct InspectParams {
 pub struct ExplainParams {
     pub query: String,
     pub namespace: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub limit: Option<usize>,
 }
 
@@ -139,7 +142,7 @@ pub struct McpResource {
 
 #[cfg(test)]
 mod tests {
-    use super::{ExplainParams, McpRequest, McpResponse, McpRetrievalPayload};
+    use super::{ExplainParams, McpError, McpRequest, McpResponse, McpRetrievalPayload};
     use membrain_core::api::NamespaceId;
     use membrain_core::api::RequestId;
     use membrain_core::engine::recall::RecallPlanKind;
@@ -330,7 +333,26 @@ mod tests {
         });
 
         let json = serde_json::to_value(&request).unwrap();
-        assert!(json["params"].get("limit").is_some());
-        assert!(json["params"]["limit"].is_null());
+        assert!(json["params"].get("limit").is_none());
+    }
+
+    #[test]
+    fn failure_response_preserves_policy_denial_metadata() {
+        let response = McpResponse::failure(McpError {
+            code: "policy_denied".to_string(),
+            message: "namespace isolation prevents export".to_string(),
+            is_policy_denial: true,
+        });
+
+        let json = serde_json::to_value(&response).unwrap();
+        assert_eq!(json["status"], "error");
+        assert!(json.get("retrieval").is_none());
+        assert!(json.get("payload").is_none());
+        assert_eq!(json["error"]["code"], "policy_denied");
+        assert_eq!(
+            json["error"]["message"],
+            "namespace isolation prevents export"
+        );
+        assert_eq!(json["error"]["is_policy_denial"], true);
     }
 }

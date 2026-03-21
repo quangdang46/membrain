@@ -186,6 +186,7 @@ pub struct RepairOperatorReport {
     pub rebuild_entrypoint: Option<IndexRepairEntrypoint>,
     pub rebuilt_outputs: Vec<&'static str>,
     pub verification_artifact_name: &'static str,
+    pub operator_log: String,
 }
 
 /// Operator-visible parity proof for a rebuilt or verified derived index.
@@ -227,6 +228,37 @@ pub struct RepairRun {
 }
 
 impl RepairRun {
+    fn operator_log_for_result(
+        result: &RepairCheckResult,
+        artifact: &VerificationArtifact,
+    ) -> String {
+        let entrypoint = result
+            .rebuild_entrypoint
+            .map(IndexRepairEntrypoint::as_str)
+            .unwrap_or("none");
+        let rebuilt_outputs = if result.rebuilt_outputs.is_empty() {
+            "none".to_string()
+        } else {
+            result.rebuilt_outputs.join(",")
+        };
+
+        format!(
+            "target={} status={} verification_passed={} entrypoint={} rebuilt_outputs={} artifact={} parity_check={} authoritative_rows={} derived_rows={} authoritative_generation={} derived_generation={} detail={}",
+            result.target.as_str(),
+            result.status.as_str(),
+            result.verification_passed,
+            entrypoint,
+            rebuilt_outputs,
+            artifact.artifact_name,
+            artifact.parity_check,
+            artifact.authoritative_rows,
+            artifact.derived_rows,
+            artifact.authoritative_generation,
+            artifact.derived_generation,
+            result.detail,
+        )
+    }
+
     /// Creates a new repair run scanning the given targets.
     pub fn new(
         namespace: NamespaceId,
@@ -301,6 +333,7 @@ impl RepairRun {
                     rebuild_entrypoint: result.rebuild_entrypoint,
                     rebuilt_outputs: result.rebuilt_outputs.clone(),
                     verification_artifact_name: artifact.artifact_name,
+                    operator_log: Self::operator_log_for_result(result, artifact),
                 }
             })
             .collect();
@@ -609,15 +642,20 @@ mod tests {
                     assert_eq!(summary.results.len(), 10);
                     assert_eq!(summary.verification_artifacts.len(), 10);
                     assert_eq!(summary.operator_reports.len(), 10);
+                    let semantic_hot_report = summary
+                        .operator_reports
+                        .iter()
+                        .find(|report| report.target == RepairTarget::SemanticHotIndex)
+                        .unwrap();
                     assert_eq!(
-                        summary
-                            .operator_reports
-                            .iter()
-                            .find(|report| report.target == RepairTarget::SemanticHotIndex)
-                            .unwrap()
-                            .verification_artifact_name,
+                        semantic_hot_report.verification_artifact_name,
                         "usearch_hot_parity"
                     );
+                    assert!(semantic_hot_report
+                        .operator_log
+                        .contains("target=semantic_hot_index"));
+                    assert!(semantic_hot_report.operator_log.contains("status=healthy"));
+                    assert!(semantic_hot_report.operator_log.contains("entrypoint=none"));
                     assert_eq!(
                         summary
                             .verification_artifacts
@@ -996,6 +1034,11 @@ mod tests {
         assert!(summary.operator_reports.iter().all(|report| {
             report.rebuild_entrypoint == Some(IndexRepairEntrypoint::ForceRebuild)
                 && report.verification_passed
+                && report.operator_log.contains("status=rebuilt")
+                && report.operator_log.contains("entrypoint=force_rebuild")
+                && report
+                    .operator_log
+                    .contains(report.verification_artifact_name)
         }));
         assert_eq!(
             summary.operator_reports[0].verification_artifact_name,

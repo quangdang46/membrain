@@ -143,6 +143,16 @@ impl IntentClassification {
                 .iter()
                 .map(|signal| signal.pattern)
                 .collect(),
+            matched_texts: self
+                .matched_signals
+                .iter()
+                .map(|signal| signal.matched_text.clone())
+                .collect(),
+            matched_signal_weights: self
+                .matched_signals
+                .iter()
+                .map(|signal| signal.weight)
+                .collect(),
         }
     }
 }
@@ -161,6 +171,8 @@ pub struct IntentClassificationLog {
     pub low_confidence_fallback: bool,
     pub matched_signal_kinds: Vec<&'static str>,
     pub matched_patterns: Vec<&'static str>,
+    pub matched_texts: Vec<String>,
+    pub matched_signal_weights: Vec<u16>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -733,6 +745,8 @@ mod tests {
         assert!(!log.low_confidence_fallback);
         assert!(log.matched_signal_kinds.contains(&"phrase"));
         assert!(log.matched_patterns.contains(&"how to"));
+        assert!(log.matched_texts.contains(&"how to".to_string()));
+        assert!(log.matched_signal_weights.contains(&980));
     }
 
     #[test]

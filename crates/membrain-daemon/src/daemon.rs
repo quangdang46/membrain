@@ -1,4 +1,7 @@
 use crate::mcp::{McpResponse, McpRetrievalPayload};
+use crate::preflight::{
+    PreflightAllowRequest, PreflightExplainResponse, PreflightOutcome, PreflightRunRequest,
+};
 use crate::rpc::{
     busy_payload, cancelled_payload, JsonRpcRequest, JsonRpcResponse, RuntimeDoctorIndex,
     RuntimeDoctorReport, RuntimeMaintenanceAccepted, RuntimeMethodRequest, RuntimeMetrics,
@@ -467,6 +470,45 @@ impl DaemonRuntime {
                 Ok(response) => JsonRpcResponse::success(request_id, json!(response)),
                 Err(message) => JsonRpcResponse::error(request_id, -32602, message, None),
             },
+            RuntimeRequest::PreflightRun {
+                namespace,
+                original_query,
+                proposed_action,
+            } => match Self::handle_preflight_run(
+                &namespace,
+                &original_query,
+                &proposed_action,
+                request_correlation_id,
+            ) {
+                Ok(response) => JsonRpcResponse::success(request_id, json!(response)),
+                Err(message) => JsonRpcResponse::error(request_id, -32602, message, None),
+            },
+            RuntimeRequest::PreflightExplain {
+                namespace,
+                original_query,
+                proposed_action,
+            } => match Self::handle_preflight_explain(
+                &namespace,
+                &original_query,
+                &proposed_action,
+                request_correlation_id,
+            ) {
+                Ok(response) => JsonRpcResponse::success(request_id, json!(response)),
+                Err(message) => JsonRpcResponse::error(request_id, -32602, message, None),
+            },
+            RuntimeRequest::PreflightAllow {
+                namespace,
+                authorization_token,
+                bypass_flags,
+            } => match Self::handle_preflight_allow(
+                &namespace,
+                &authorization_token,
+                &bypass_flags,
+                request_correlation_id,
+            ) {
+                Ok(response) => JsonRpcResponse::success(request_id, json!(response)),
+                Err(message) => JsonRpcResponse::error(request_id, -32602, message, None),
+            },
             RuntimeRequest::Sleep { millis } => {
                 tokio::select! {
                     _ = state.shutdown_notify.notified() => {
@@ -639,6 +681,127 @@ impl DaemonRuntime {
         }
 
         limit.unwrap_or(10)
+    }
+
+    fn validate_preflight_namespace(namespace: &str) -> Result<(), String> {
+        NamespaceId::new(namespace)
+            .map(|_| ())
+            .map_err(|err| err.to_string())
+    }
+
+    fn handle_preflight_run(
+        namespace: &str,
+        original_query: &str,
+        proposed_action: &str,
+        request_correlation_id: u64,
+    ) -> Result<PreflightOutcome, String> {
+        Self::validate_preflight_namespace(namespace)?;
+        let _request = PreflightRunRequest {
+            namespace: namespace.to_string(),
+            original_query: original_query.to_string(),
+            proposed_action: proposed_action.to_string(),
+        };
+        let preflight_id = format!("preflight-{request_correlation_id}");
+        let execution_id = format!("exec-{request_correlation_id}");
+        let lowered = proposed_action.to_ascii_lowercase();
+        let blocked_reasons = if lowered.contains("purge") || lowered.contains("delete") {
+            vec!["confirmation_required".to_string()]
+        } else {
+            Vec::new()
+        };
+        let preflight_state = if blocked_reasons.is_empty() {
+            "ready"
+        } else {
+            "blocked"
+        };
+        Ok(PreflightOutcome {
+            success: blocked_reasons.is_empty(),
+            preflight_state: preflight_state.to_string(),
+            blocked_reasons,
+            request_id: Some(format!("daemon-preflight-run-{request_correlation_id}")),
+            preflight_id: Some(preflight_id),
+            execution_id: Some(execution_id),
+            degraded: false,
+            confirmation_reason: None,
+        })
+    }
+
+    fn handle_preflight_explain(
+        namespace: &str,
+        original_query: &str,
+        proposed_action: &str,
+        request_correlation_id: u64,
+    ) -> Result<PreflightExplainResponse, String> {
+        Self::validate_preflight_namespace(namespace)?;
+        let _request = PreflightRunRequest {
+            namespace: namespace.to_string(),
+            original_query: original_query.to_string(),
+            proposed_action: proposed_action.to_string(),
+        };
+        let lowered = proposed_action.to_ascii_lowercase();
+        let blocked_reasons = if lowered.contains("purge") || lowered.contains("delete") {
+            vec!["confirmation_required".to_string()]
+        } else {
+            Vec::new()
+        };
+        let blocked_reason = blocked_reasons
+            .first()
+            .map(|_| "destructive action requires explicit confirmation".to_string());
+        let allowed = blocked_reasons.is_empty();
+        let required_overrides = if allowed {
+            Vec::new()
+        } else {
+            vec!["human_confirmation".to_string()]
+        };
+        Ok(PreflightExplainResponse {
+            allowed,
+            preflight_state: if allowed { "ready" } else { "blocked" }.to_string(),
+            blocked_reasons,
+            blocked_reason,
+            required_overrides,
+            policy_context: format!("namespace {namespace} preflight safeguard evaluation"),
+            request_id: Some(format!("daemon-preflight-explain-{request_correlation_id}")),
+            preflight_id: Some(format!("preflight-{request_correlation_id}")),
+        })
+    }
+
+    fn handle_preflight_allow(
+        namespace: &str,
+        authorization_token: &str,
+        bypass_flags: &[String],
+        request_correlation_id: u64,
+    ) -> Result<PreflightOutcome, String> {
+        Self::validate_preflight_namespace(namespace)?;
+        let _request = PreflightAllowRequest {
+            namespace: namespace.to_string(),
+            authorization_token: authorization_token.to_string(),
+            bypass_flags: bypass_flags.to_vec(),
+        };
+        let confirmed = authorization_token.starts_with("allow-")
+            && bypass_flags.iter().any(|flag| flag == "manual_override");
+        let blocked_reasons = if confirmed {
+            Vec::new()
+        } else {
+            vec!["confirmation_required".to_string()]
+        };
+        Ok(PreflightOutcome {
+            success: confirmed,
+            preflight_state: if confirmed { "ready" } else { "blocked" }.to_string(),
+            blocked_reasons,
+            request_id: Some(format!("daemon-preflight-allow-{request_correlation_id}")),
+            preflight_id: Some(format!("preflight-{request_correlation_id}")),
+            execution_id: if confirmed {
+                Some(format!("exec-{request_correlation_id}"))
+            } else {
+                None
+            },
+            degraded: false,
+            confirmation_reason: if confirmed {
+                Some("operator confirmed exact previewed scope".to_string())
+            } else {
+                None
+            },
+        })
     }
 
     async fn maintenance_loop(state: Arc<RuntimeState>, config: DaemonRuntimeConfig) {
@@ -1386,6 +1549,170 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn runtime_preflight_methods_serve_canonical_jsonrpc_shapes() {
+        let socket_path = unique_path("preflight-methods");
+        let mut config = DaemonRuntimeConfig::new(&socket_path);
+        config.maintenance_interval = Duration::from_secs(3600);
+        let handle = spawn_runtime(config).await;
+
+        timeout(Duration::from_secs(2), async {
+            while tokio::fs::metadata(&socket_path).await.is_err() {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .unwrap();
+
+        let explain_response = send_request(
+            &socket_path,
+            json!({
+                "jsonrpc":"2.0",
+                "method":"preflight.explain",
+                "params":{
+                    "namespace":"team.alpha",
+                    "original_query":"delete prior audit events",
+                    "proposed_action":"purge namespace audit history"
+                },
+                "id":"preflight-explain"
+            }),
+        )
+        .await;
+        assert_eq!(explain_response["result"]["allowed"], json!(false));
+        assert_eq!(explain_response["result"]["preflight_state"], json!("blocked"));
+        assert_eq!(
+            explain_response["result"]["blocked_reasons"],
+            json!(["confirmation_required"])
+        );
+        assert_eq!(
+            explain_response["result"]["required_overrides"],
+            json!(["human_confirmation"])
+        );
+        assert_eq!(
+            explain_response["result"]["policy_context"],
+            json!("namespace team.alpha preflight safeguard evaluation")
+        );
+
+        let run_response = send_request(
+            &socket_path,
+            json!({
+                "jsonrpc":"2.0",
+                "method":"preflight.run",
+                "params":{
+                    "namespace":"team.alpha",
+                    "original_query":"show maintenance summary",
+                    "proposed_action":"inspect maintenance status"
+                },
+                "id":"preflight-run"
+            }),
+        )
+        .await;
+        assert_eq!(run_response["result"]["success"], json!(true));
+        assert_eq!(run_response["result"]["preflight_state"], json!("ready"));
+        assert_eq!(run_response["result"]["blocked_reasons"], json!([]));
+        assert_eq!(run_response["result"]["degraded"], json!(false));
+        assert!(run_response["result"].get("execution_id").is_some());
+
+        let allow_response = send_request(
+            &socket_path,
+            json!({
+                "jsonrpc":"2.0",
+                "method":"preflight.allow",
+                "params":{
+                    "namespace":"team.alpha",
+                    "authorization_token":"allow-123",
+                    "bypass_flags":["manual_override"]
+                },
+                "id":"preflight-allow"
+            }),
+        )
+        .await;
+        assert_eq!(allow_response["result"]["success"], json!(true));
+        assert_eq!(allow_response["result"]["preflight_state"], json!("ready"));
+        assert_eq!(
+            allow_response["result"]["confirmation_reason"],
+            json!("operator confirmed exact previewed scope")
+        );
+
+        let shutdown_response = send_request(
+            &socket_path,
+            json!({"jsonrpc":"2.0","method":"shutdown","params":{},"id":"done"}),
+        )
+        .await;
+        assert_eq!(shutdown_response["result"]["shutting_down"], json!(true));
+        timeout(Duration::from_secs(2), handle)
+            .await
+            .unwrap()
+            .unwrap()
+            .unwrap();
+    }
+
+    #[tokio::test]
+    async fn runtime_preflight_rejects_invalid_namespace_and_missing_confirmation() {
+        let socket_path = unique_path("preflight-invalid");
+        let mut config = DaemonRuntimeConfig::new(&socket_path);
+        config.maintenance_interval = Duration::from_secs(3600);
+        let handle = spawn_runtime(config).await;
+
+        timeout(Duration::from_secs(2), async {
+            while tokio::fs::metadata(&socket_path).await.is_err() {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .unwrap();
+
+        let invalid_namespace = send_request(
+            &socket_path,
+            json!({
+                "jsonrpc":"2.0",
+                "method":"preflight.run",
+                "params":{
+                    "namespace":"bad namespace",
+                    "original_query":"delete prior audit events",
+                    "proposed_action":"purge namespace audit history"
+                },
+                "id":"preflight-bad-namespace"
+            }),
+        )
+        .await;
+        assert_eq!(invalid_namespace["error"]["code"], json!(-32602));
+
+        let denied_allow = send_request(
+            &socket_path,
+            json!({
+                "jsonrpc":"2.0",
+                "method":"preflight.allow",
+                "params":{
+                    "namespace":"team.alpha",
+                    "authorization_token":"token-123",
+                    "bypass_flags":[]
+                },
+                "id":"preflight-denied-allow"
+            }),
+        )
+        .await;
+        assert_eq!(denied_allow["result"]["success"], json!(false));
+        assert_eq!(denied_allow["result"]["preflight_state"], json!("blocked"));
+        assert_eq!(
+            denied_allow["result"]["blocked_reasons"],
+            json!(["confirmation_required"])
+        );
+        assert!(denied_allow["result"].get("execution_id").is_none());
+
+        let shutdown_response = send_request(
+            &socket_path,
+            json!({"jsonrpc":"2.0","method":"shutdown","params":{},"id":"done"}),
+        )
+        .await;
+        assert_eq!(shutdown_response["result"]["shutting_down"], json!(true));
+        timeout(Duration::from_secs(2), handle)
+            .await
+            .unwrap()
+            .unwrap()
+            .unwrap();
+    }
+
+    #[tokio::test]
     async fn runtime_inspect_returns_typed_mcp_retrieval_payload() {
         let socket_path = unique_path("inspect");
         let mut config = DaemonRuntimeConfig::new(&socket_path);
@@ -1488,6 +1815,68 @@ mod tests {
             explain_response["result"]["retrieval"]["result"]["packaging_metadata"]
                 ["degraded_summary"],
             json!("planner-only explain envelope; evidence hydration not implemented")
+        );
+
+        let shutdown_response = send_request(
+            &socket_path,
+            json!({"jsonrpc":"2.0","method":"shutdown","params":{},"id":"done"}),
+        )
+        .await;
+        assert_eq!(shutdown_response["result"]["shutting_down"], json!(true));
+        timeout(Duration::from_secs(2), handle)
+            .await
+            .unwrap()
+            .unwrap()
+            .unwrap();
+    }
+
+    #[tokio::test]
+    async fn runtime_inspect_keeps_canonical_payload_families_out_of_generic_payload_slot() {
+        let socket_path = unique_path("inspect-canonical-payload-families");
+        let mut config = DaemonRuntimeConfig::new(&socket_path);
+        config.maintenance_interval = Duration::from_secs(3600);
+        let handle = spawn_runtime(config).await;
+
+        timeout(Duration::from_secs(2), async {
+            while tokio::fs::metadata(&socket_path).await.is_err() {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .unwrap();
+
+        let inspect_response = send_request(
+            &socket_path,
+            json!({
+                "jsonrpc":"2.0",
+                "method":"inspect",
+                "params":{"id":42,"namespace":"team.alpha"},
+                "id":"inspect-canonical-payload-families"
+            }),
+        )
+        .await;
+
+        let result = &inspect_response["result"];
+        assert_eq!(result["status"], json!("ok"));
+        assert!(result.get("payload" ).is_none());
+        assert!(result.get("error").is_none());
+
+        let retrieval = &result["retrieval"];
+        assert_eq!(retrieval["request_id"], json!("daemon-inspect-1"));
+        assert_eq!(retrieval["outcome_class"], json!("Degraded"));
+        assert_eq!(retrieval["partial_success"], json!(false));
+        assert!(retrieval["result"].get("evidence_pack").is_some());
+        assert!(retrieval["result"].get("action_pack").is_some());
+        assert!(retrieval["result"].get("deferred_payloads").is_some());
+        assert!(retrieval["result"].get("omitted_summary").is_some());
+        assert!(retrieval["result"].get("policy_summary").is_some());
+        assert!(retrieval["result"].get("provenance_summary").is_some());
+        assert!(retrieval["result"].get("freshness_markers").is_some());
+        assert!(retrieval["result"].get("packaging_metadata").is_some());
+        assert!(retrieval["result"].get("explain").is_some());
+        assert_eq!(
+            retrieval["result"]["packaging_metadata"]["degraded_summary"],
+            json!("planner-only inspect envelope; item hydration not implemented")
         );
 
         let shutdown_response = send_request(
@@ -1610,6 +1999,71 @@ mod tests {
             response["error"]["message"],
             json!("limit must be at least 1")
         );
+
+        let shutdown_response = send_request(
+            &socket_path,
+            json!({"jsonrpc":"2.0","method":"shutdown","params":{},"id":"done"}),
+        )
+        .await;
+        assert_eq!(shutdown_response["result"]["shutting_down"], json!(true));
+        timeout(Duration::from_secs(2), handle)
+            .await
+            .unwrap()
+            .unwrap()
+            .unwrap();
+    }
+
+    #[tokio::test]
+    async fn runtime_reuses_error_model_for_invalid_jsonrpc_and_unknown_methods() {
+        let socket_path = unique_path("error-model-parity");
+        let mut config = DaemonRuntimeConfig::new(&socket_path);
+        config.maintenance_interval = Duration::from_secs(3600);
+        let handle = spawn_runtime(config).await;
+
+        timeout(Duration::from_secs(2), async {
+            while tokio::fs::metadata(&socket_path).await.is_err() {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .unwrap();
+
+        let invalid_jsonrpc = send_request(
+            &socket_path,
+            json!({
+                "jsonrpc":"1.0",
+                "method":"status",
+                "params":{},
+                "id":"invalid-jsonrpc"
+            }),
+        )
+        .await;
+        assert_eq!(invalid_jsonrpc["error"]["code"], json!(-32600));
+        assert_eq!(
+            invalid_jsonrpc["error"]["message"],
+            json!("unsupported jsonrpc version")
+        );
+        assert_eq!(
+            invalid_jsonrpc["error"]["data"],
+            json!({"expected":"2.0","actual":"1.0"})
+        );
+
+        let unknown_method = send_request(
+            &socket_path,
+            json!({
+                "jsonrpc":"2.0",
+                "method":"not_a_real_method",
+                "params":{},
+                "id":"unknown-method"
+            }),
+        )
+        .await;
+        assert_eq!(unknown_method["error"]["code"], json!(-32601));
+        assert_eq!(
+            unknown_method["error"]["message"],
+            json!("unknown method 'not_a_real_method'")
+        );
+        assert_eq!(unknown_method["error"]["data"], json!(null));
 
         let shutdown_response = send_request(
             &socket_path,

@@ -374,6 +374,75 @@ mod tests {
     }
 
     #[test]
+    fn audit_log_retains_degraded_and_rollback_maintenance_events() {
+        let mut log = AuditLogStore.new_log(8);
+        let namespace = team_alpha();
+
+        log.append(
+            AuditLogEntry::new(
+                AuditEventCategory::Maintenance,
+                AuditEventKind::MaintenanceRepairDegraded,
+                namespace.clone(),
+                "repair_engine",
+                "repair run left cache warm state degraded",
+            )
+            .with_request_id("req-repair-degraded")
+            .with_related_run("repair-run-17"),
+        );
+        log.append(
+            AuditLogEntry::new(
+                AuditEventCategory::Maintenance,
+                AuditEventKind::MaintenanceRepairRollbackTriggered,
+                namespace.clone(),
+                "repair_engine",
+                "rollback required after derived-state mismatch",
+            )
+            .with_request_id("req-repair-rollback")
+            .with_related_run("repair-run-17"),
+        );
+        log.append(
+            AuditLogEntry::new(
+                AuditEventCategory::Maintenance,
+                AuditEventKind::MaintenanceRepairRollbackCompleted,
+                namespace.clone(),
+                "repair_engine",
+                "rollback completed and durable generation restored",
+            )
+            .with_related_run("repair-run-17"),
+        );
+
+        let namespace_entries = log.entries_for_namespace(&namespace);
+        let rollback_entries = log.entries_for_related_run("repair-run-17");
+        let degraded_entries =
+            log.entries_for_kind(AuditEventKind::MaintenanceRepairDegraded);
+        let rollback_trigger_entries =
+            log.entries_for_kind(AuditEventKind::MaintenanceRepairRollbackTriggered);
+        let rollback_completed_entries =
+            log.entries_for_kind(AuditEventKind::MaintenanceRepairRollbackCompleted);
+
+        assert_eq!(namespace_entries.len(), 3);
+        assert!(namespace_entries
+            .iter()
+            .all(|entry| entry.category == AuditEventCategory::Maintenance));
+        assert_eq!(rollback_entries.len(), 3);
+        assert_eq!(degraded_entries.len(), 1);
+        assert_eq!(rollback_trigger_entries.len(), 1);
+        assert_eq!(rollback_completed_entries.len(), 1);
+        assert_eq!(
+            degraded_entries[0].request_id.as_deref(),
+            Some("req-repair-degraded")
+        );
+        assert_eq!(
+            rollback_trigger_entries[0].request_id.as_deref(),
+            Some("req-repair-rollback")
+        );
+        assert_eq!(
+            rollback_completed_entries[0].related_run.as_deref(),
+            Some("repair-run-17")
+        );
+    }
+
+    #[test]
     fn audit_log_filters_by_memory_kind_and_redaction_metadata() {
         let mut log = AppendOnlyAuditLog::new(8);
         let namespace = team_alpha();
@@ -531,5 +600,47 @@ mod tests {
         assert_eq!(entry.memory_id, Some(MemoryId(20)));
         assert!(entry.redacted);
         assert_eq!(log.entries_for_request_id("req-contradiction-9").len(), 1);
+    }
+
+    #[test]
+    fn contradiction_retention_audit_uses_stable_fallback_detail_without_redaction() {
+        let store = AuditLogStore;
+        let mut log = store.new_log(8);
+        let namespace = team_alpha();
+        let contradiction = ContradictionRecord {
+            id: ContradictionId(10),
+            namespace,
+            memory_a: MemoryId(30),
+            memory_b: MemoryId(40),
+            kind: ContradictionKind::Supersession,
+            resolution: ResolutionState::AuthoritativelyResolved,
+            preferred_memory: None,
+            preferred_answer_state: PreferredAnswerState::Unset,
+            confidence_signal: 910,
+            resolution_reason: None,
+            archived: true,
+            legal_hold: false,
+            authoritative_evidence: true,
+            retention_reason: None,
+            conflict_score: 840,
+        };
+
+        let entry = store.record_contradiction_retention(
+            &mut log,
+            &contradiction,
+            &PolicyModule,
+            "req-contradiction-10",
+        );
+
+        assert_eq!(entry.kind, AuditEventKind::ArchiveRecorded);
+        assert_eq!(entry.detail, "contradiction archived after supersession");
+        assert_eq!(entry.memory_id, Some(MemoryId(30)));
+        assert_eq!(entry.request_id.as_deref(), Some("req-contradiction-10"));
+        assert_eq!(
+            entry.related_run.as_deref(),
+            Some("contradiction-archive-run")
+        );
+        assert!(!entry.redacted);
+        assert_eq!(log.entries_for_request_id("req-contradiction-10"), vec![entry]);
     }
 }

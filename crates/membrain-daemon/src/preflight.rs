@@ -2,6 +2,7 @@ use serde::{Deserialize, Serialize};
 
 /// Preflight safeguard contract and API (`mb-23u.7.4`)
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct PreflightRunRequest {
     pub namespace: String,
     pub original_query: String,
@@ -9,18 +10,23 @@ pub struct PreflightRunRequest {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct PreflightExplainResponse {
     pub allowed: bool,
     pub preflight_state: String,
     pub blocked_reasons: Vec<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub blocked_reason: Option<String>,
     pub required_overrides: Vec<String>,
     pub policy_context: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub request_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub preflight_id: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct PreflightAllowRequest {
     pub namespace: String,
     pub authorization_token: String,
@@ -28,14 +34,19 @@ pub struct PreflightAllowRequest {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct PreflightOutcome {
     pub success: bool,
     pub preflight_state: String,
     pub blocked_reasons: Vec<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub request_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub preflight_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub execution_id: Option<String>,
     pub degraded: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub confirmation_reason: Option<String>,
 }
 
@@ -175,5 +186,103 @@ mod tests {
             decoded_outcome.confirmation_reason.as_deref(),
             Some("operator approved fallback mode")
         );
+    }
+
+    #[test]
+    fn preflight_responses_omit_missing_optional_fields_but_still_round_trip() {
+        let explain = PreflightExplainResponse {
+            allowed: true,
+            preflight_state: "preview_only".to_string(),
+            blocked_reasons: Vec::new(),
+            blocked_reason: None,
+            required_overrides: Vec::new(),
+            policy_context: "safe read-only preview".to_string(),
+            request_id: None,
+            preflight_id: None,
+        };
+        let outcome = PreflightOutcome {
+            success: false,
+            preflight_state: "blocked".to_string(),
+            blocked_reasons: vec!["legal_hold".to_string()],
+            request_id: None,
+            preflight_id: None,
+            execution_id: None,
+            degraded: false,
+            confirmation_reason: None,
+        };
+
+        let explain_value = serde_json::to_value(&explain).unwrap();
+        let outcome_value = serde_json::to_value(&outcome).unwrap();
+
+        assert!(explain_value.get("blocked_reason").is_none());
+        assert!(explain_value.get("request_id").is_none());
+        assert!(explain_value.get("preflight_id").is_none());
+        assert!(outcome_value.get("request_id").is_none());
+        assert!(outcome_value.get("preflight_id").is_none());
+        assert!(outcome_value.get("execution_id").is_none());
+        assert!(outcome_value.get("confirmation_reason").is_none());
+
+        let decoded_explain: PreflightExplainResponse =
+            serde_json::from_value(explain_value).unwrap();
+        let decoded_outcome: PreflightOutcome = serde_json::from_value(outcome_value).unwrap();
+
+        assert!(decoded_explain.blocked_reason.is_none());
+        assert!(decoded_explain.request_id.is_none());
+        assert!(decoded_explain.preflight_id.is_none());
+        assert!(decoded_outcome.request_id.is_none());
+        assert!(decoded_outcome.preflight_id.is_none());
+        assert!(decoded_outcome.execution_id.is_none());
+        assert!(decoded_outcome.confirmation_reason.is_none());
+        assert_eq!(decoded_outcome.blocked_reasons, vec!["legal_hold"]);
+    }
+
+    #[test]
+    fn preflight_run_request_rejects_unknown_fields() {
+        let error = serde_json::from_value::<PreflightRunRequest>(json!({
+            "namespace": "tenant.alpha",
+            "original_query": "delete all prior audit events",
+            "proposed_action": "purge namespace audit history",
+            "unexpected": true
+        }))
+        .unwrap_err();
+
+        assert!(error.to_string().contains("unknown field `unexpected`"));
+    }
+
+    #[test]
+    fn preflight_responses_and_allow_requests_reject_unknown_fields() {
+        let explain_error = serde_json::from_value::<PreflightExplainResponse>(json!({
+            "allowed": false,
+            "preflight_state": "blocked",
+            "blocked_reasons": ["confirmation_required"],
+            "required_overrides": ["human_confirmation"],
+            "policy_context": "namespace tenant.alpha preflight safeguard evaluation",
+            "unexpected": true
+        }))
+        .unwrap_err();
+        assert!(explain_error
+            .to_string()
+            .contains("unknown field `unexpected`"));
+
+        let allow_error = serde_json::from_value::<PreflightAllowRequest>(json!({
+            "namespace": "tenant.alpha",
+            "authorization_token": "allow-123",
+            "bypass_flags": ["manual_override"],
+            "unexpected": true
+        }))
+        .unwrap_err();
+        assert!(allow_error.to_string().contains("unknown field `unexpected`"));
+
+        let outcome_error = serde_json::from_value::<PreflightOutcome>(json!({
+            "success": true,
+            "preflight_state": "ready",
+            "blocked_reasons": [],
+            "degraded": false,
+            "unexpected": true
+        }))
+        .unwrap_err();
+        assert!(outcome_error
+            .to_string()
+            .contains("unknown field `unexpected`"));
     }
 }

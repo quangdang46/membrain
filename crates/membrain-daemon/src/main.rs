@@ -125,4 +125,22 @@ mod tests {
             );
         }
     }
+
+    #[test]
+    fn cli_rejects_non_numeric_runtime_maintenance_flags() {
+        for args in [
+            ["membrain-daemon", "--request-concurrency", "abc"],
+            ["membrain-daemon", "--max-queue-depth", "abc"],
+            ["membrain-daemon", "--maintenance-interval-secs", "abc"],
+            ["membrain-daemon", "--maintenance-poll-budget", "abc"],
+            ["membrain-daemon", "--maintenance-step-delay-ms", "abc"],
+        ] {
+            let error = Cli::try_parse_from(args).expect_err("non-numeric value should be rejected");
+            let rendered = error.to_string();
+            assert!(
+                rendered.contains("invalid integer value: abc"),
+                "unexpected clap error: {rendered}"
+            );
+        }
+    }
 }

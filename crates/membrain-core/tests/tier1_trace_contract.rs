@@ -382,3 +382,38 @@ fn explain_route_appends_packaging_stage_after_policy_gate_once() {
         1
     );
 }
+
+#[test]
+fn explain_route_keeps_existing_policy_gate_without_duplication() {
+    let mut result_set = recent_tier1_result_set();
+    result_set.explain.trace_stages = vec![
+        RecallTraceStage::Tier1RecentWindow,
+        RecallTraceStage::Tier2Exact,
+    ];
+
+    let (_, stages) = result_set.explain_route();
+
+    assert_eq!(
+        stages,
+        vec![
+            TraceStage::Tier1RecentWindow,
+            TraceStage::Tier2Exact,
+            TraceStage::PolicyGate,
+            TraceStage::Packaging,
+        ]
+    );
+    assert_eq!(
+        stages
+            .iter()
+            .filter(|stage| **stage == TraceStage::PolicyGate)
+            .count(),
+        1
+    );
+    assert_eq!(
+        stages
+            .iter()
+            .filter(|stage| **stage == TraceStage::Packaging)
+            .count(),
+        1
+    );
+}

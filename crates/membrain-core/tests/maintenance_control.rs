@@ -381,7 +381,13 @@ fn repair_runs_expose_verification_artifacts_through_maintenance_handle() {
                 assert_eq!(summary.verification_artifacts.len(), 3);
                 assert_eq!(summary.operator_reports.len(), 3);
                 assert!(summary.operator_reports.iter().all(|report| {
-                    report.rebuild_entrypoint.is_none() && report.verification_passed
+                    report.rebuild_entrypoint.is_none()
+                        && report.verification_passed
+                        && report.operator_log.contains("status=healthy")
+                        && report.operator_log.contains("entrypoint=none")
+                        && report
+                            .operator_log
+                            .contains(report.verification_artifact_name)
                 }));
 
                 let lexical = summary
@@ -490,6 +496,16 @@ fn repair_runs_preserve_index_rebuild_entrypoint_contracts_in_verification_artif
         semantic_cold_report.verification_artifact_name,
         "usearch_cold_parity"
     );
+    assert!(semantic_cold_report
+        .operator_log
+        .contains("target=semantic_cold_index"));
+    assert!(semantic_cold_report.operator_log.contains("status=rebuilt"));
+    assert!(semantic_cold_report
+        .operator_log
+        .contains("entrypoint=force_rebuild"));
+    assert!(semantic_cold_report
+        .operator_log
+        .contains("rebuilt_outputs=usearch_cold_ann,cold_embedding_lookup"));
 
     let semantic_cold = summary
         .verification_artifacts

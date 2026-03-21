@@ -309,8 +309,14 @@ mod tests {
     use super::{BrainStore, PreparedTier2Layout};
     use crate::api::NamespaceId;
     use crate::migrate::DurableSchemaObject;
-    use crate::store::{LifecycleState, TierOwnership, TierRoutingInput, TierRoutingReason};
-    use crate::types::{CanonicalMemoryType, MemoryId, RawEncodeInput, RawIntakeKind, SessionId};
+    use crate::observability::Tier1LookupOutcome;
+    use crate::store::{
+        HotStoreApi, LifecycleState, TierOwnership, TierRoutingInput, TierRoutingReason,
+    };
+    use crate::types::{
+        CanonicalMemoryType, FastPathRouteFamily, MemoryId, RawEncodeInput, RawIntakeKind,
+        SessionId, Tier1HotRecord,
+    };
 
     #[test]
     fn prepare_tier2_layout_from_encode_preserves_landmark_metadata() {
@@ -394,6 +400,56 @@ mod tests {
         let store = BrainStore::default();
 
         assert_eq!(store.hot_store_component_name(), "store.hot");
+    }
+
+    #[test]
+    fn brain_store_hot_store_zero_budget_lookups_preserve_tier1_bypass_invariants() {
+        let store = BrainStore::default();
+        let namespace = NamespaceId::new("tests/tier1-zero-budget").unwrap();
+        let mut hot = store.hot_store().new_metadata_store(3);
+        hot.seed(Tier1HotRecord::metadata_only(
+            namespace.clone(),
+            MemoryId(1),
+            SessionId(10),
+            CanonicalMemoryType::Event,
+            FastPathRouteFamily::Event,
+            "older",
+            10,
+            500,
+            4_096,
+        ));
+        hot.seed(Tier1HotRecord::metadata_only(
+            namespace.clone(),
+            MemoryId(2),
+            SessionId(10),
+            CanonicalMemoryType::Event,
+            FastPathRouteFamily::Event,
+            "newer",
+            20,
+            500,
+            4_096,
+        ));
+
+        assert_eq!(
+            store.hot_store_component_name(),
+            store.hot_store().component_name()
+        );
+        assert_eq!(hot.capacity(), 3);
+        assert_eq!(hot.len(), 2);
+        assert!(!hot.is_empty());
+
+        let exact = hot.exact_lookup_with_budget(&namespace, MemoryId(1), 0);
+        let recent = hot.recent_for_session_with_budget(&namespace, SessionId(10), 2, 0);
+
+        assert_eq!(exact.trace.outcome, Tier1LookupOutcome::Bypass);
+        assert_eq!(recent.trace.outcome, Tier1LookupOutcome::Bypass);
+        assert_eq!(exact.trace.payload_fetch_count, 0);
+        assert_eq!(recent.trace.payload_fetch_count, 0);
+        assert_eq!(exact.trace.recent_candidates_inspected, 0);
+        assert_eq!(recent.trace.recent_candidates_inspected, 0);
+        assert_eq!(hot.capacity(), 3);
+        assert_eq!(hot.len(), 2);
+        assert!(!hot.is_empty());
     }
 
     #[test]

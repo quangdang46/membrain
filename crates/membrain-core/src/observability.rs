@@ -36,6 +36,9 @@ pub enum AuditEventKind {
     PolicyRedacted,
     MaintenanceRepairStarted,
     MaintenanceRepairCompleted,
+    MaintenanceRepairDegraded,
+    MaintenanceRepairRollbackTriggered,
+    MaintenanceRepairRollbackCompleted,
     MaintenanceMigrationApplied,
     MaintenanceCompactionApplied,
     IncidentRecorded,
@@ -54,6 +57,9 @@ impl AuditEventKind {
             Self::PolicyRedacted => "policy_redacted",
             Self::MaintenanceRepairStarted => "maintenance_repair_started",
             Self::MaintenanceRepairCompleted => "maintenance_repair_completed",
+            Self::MaintenanceRepairDegraded => "maintenance_repair_degraded",
+            Self::MaintenanceRepairRollbackTriggered => "maintenance_repair_rollback_triggered",
+            Self::MaintenanceRepairRollbackCompleted => "maintenance_repair_rollback_completed",
             Self::MaintenanceMigrationApplied => "maintenance_migration_applied",
             Self::MaintenanceCompactionApplied => "maintenance_compaction_applied",
             Self::IncidentRecorded => "incident_recorded",
@@ -69,6 +75,9 @@ impl AuditEventKind {
             Self::PolicyDenied | Self::PolicyRedacted => AuditEventCategory::Policy,
             Self::MaintenanceRepairStarted
             | Self::MaintenanceRepairCompleted
+            | Self::MaintenanceRepairDegraded
+            | Self::MaintenanceRepairRollbackTriggered
+            | Self::MaintenanceRepairRollbackCompleted
             | Self::MaintenanceMigrationApplied
             | Self::MaintenanceCompactionApplied
             | Self::IncidentRecorded => AuditEventCategory::Maintenance,
@@ -714,9 +723,9 @@ pub struct CacheEvalTrace {
 #[cfg(test)]
 mod tests {
     use super::{
-        AdmissionOutcomeKind, CacheLookupOutcome, EncodeFastPathStage, ExplainResultReason,
-        ObservabilityModule, OutcomeClass, Tier1LookupLane, Tier1LookupOutcome,
-        Tier2PrefilterOutcome, TraceStage,
+        AdmissionOutcomeKind, AuditEventCategory, AuditEventKind, CacheLookupOutcome,
+        EncodeFastPathStage, ExplainResultReason, ObservabilityModule, OutcomeClass,
+        Tier1LookupLane, Tier1LookupOutcome, Tier2PrefilterOutcome, TraceStage,
     };
     use crate::api::NamespaceId;
     use crate::engine::recall::{RecallPlanKind, RecallTraceStage};
@@ -750,6 +759,34 @@ mod tests {
         assert_eq!(Tier1LookupOutcome::StaleBypass.as_str(), "stale_bypass");
         assert_eq!(Tier2PrefilterOutcome::Ready.as_str(), "ready");
         assert_eq!(Tier2PrefilterOutcome::Bypass.as_str(), "bypass");
+    }
+
+    #[test]
+    fn maintenance_repair_audit_event_labels_cover_degraded_and_rollback() {
+        assert_eq!(
+            AuditEventKind::MaintenanceRepairDegraded.as_str(),
+            "maintenance_repair_degraded"
+        );
+        assert_eq!(
+            AuditEventKind::MaintenanceRepairRollbackTriggered.as_str(),
+            "maintenance_repair_rollback_triggered"
+        );
+        assert_eq!(
+            AuditEventKind::MaintenanceRepairRollbackCompleted.as_str(),
+            "maintenance_repair_rollback_completed"
+        );
+        assert_eq!(
+            AuditEventKind::MaintenanceRepairDegraded.category(),
+            AuditEventCategory::Maintenance
+        );
+        assert_eq!(
+            AuditEventKind::MaintenanceRepairRollbackTriggered.category(),
+            AuditEventCategory::Maintenance
+        );
+        assert_eq!(
+            AuditEventKind::MaintenanceRepairRollbackCompleted.category(),
+            AuditEventCategory::Maintenance
+        );
     }
 
     #[test]
@@ -1041,6 +1078,106 @@ mod tests {
     }
 
     #[test]
+    fn explain_result_reasons_preserve_temporal_landmark_selection_codes() {
+        let selected = RetrievalResultSet {
+            outcome_class: OutcomeClass::Accepted,
+            evidence_pack: Vec::new(),
+            action_pack: None,
+            deferred_payloads: Vec::new(),
+            explain: RetrievalExplain {
+                recall_plan: RecallPlanKind::Tier2ExactThenTier3Fallback,
+                route_reason: "request needs broader durable retrieval before cold fallback"
+                    .to_string(),
+                tiers_consulted: vec!["tier2_exact".to_string()],
+                trace_stages: vec![RecallTraceStage::Tier2Exact],
+                tier1_answered_directly: false,
+                candidate_budget: 4,
+                time_consumed_ms: Some(3),
+                ranking_profile: "balanced".to_string(),
+                contradictions_found: 0,
+                result_reasons: vec![ResultReason {
+                    memory_id: Some(crate::types::MemoryId(21)),
+                    reason_code: "temporal_landmark_selected".to_string(),
+                    detail: "landmark \"launch milestone\" opened era \"era-launch-milestone-0001\" while staying on metadata-only Tier2 planning".to_string(),
+                }],
+            },
+            policy_summary: PolicySummary {
+                namespace_applied: NamespaceId::new("team.gamma").unwrap(),
+                outcome_class: OutcomeClass::Accepted,
+                redactions_applied: false,
+                restrictions_active: Vec::new(),
+                filters: Vec::new(),
+            },
+            provenance_summary: ProvenanceSummary {
+                source_kind: "retrieval_pipeline".to_string(),
+                source_reference: "result_set".to_string(),
+                source_agent: "core_engine".to_string(),
+                original_namespace: NamespaceId::new("team.gamma").unwrap(),
+                derived_from: None,
+                lineage_ancestors: Vec::new(),
+                relation_to_seed: None,
+                graph_seed: None,
+            },
+            omitted_summary: OmissionSummary {
+                policy_redacted: 0,
+                threshold_dropped: 0,
+                dedup_dropped: 0,
+                budget_capped: 0,
+                duplicate_collapsed: 0,
+                low_confidence_suppressed: 0,
+                stale_bypassed: 0,
+            },
+            freshness_markers: FreshnessMarkers {
+                oldest_item_days: 0,
+                newest_item_days: 0,
+                volatile_items_included: false,
+                stale_warning: false,
+                as_of_tick: Some(7),
+            },
+            packaging_metadata: PackagingMetadata {
+                result_budget: 1,
+                token_budget: None,
+                graph_assistance: "none".to_string(),
+                degraded_summary: None,
+                packaging_mode: "evidence_only".to_string(),
+            },
+            output_mode: crate::engine::result::DualOutputMode::Balanced,
+            truncated: false,
+            total_candidates: 1,
+        };
+        let not_selected = RetrievalResultSet {
+            explain: RetrievalExplain {
+                result_reasons: vec![ResultReason {
+                    memory_id: Some(crate::types::MemoryId(34)),
+                    reason_code: "temporal_landmark_not_selected".to_string(),
+                    detail: "memory stayed recallable without landmark promotion or era creation"
+                        .to_string(),
+                }],
+                ..selected.explain.clone()
+            },
+            ..selected.clone()
+        };
+
+        assert_eq!(
+            ObservabilityModule.explain_result_reasons(&selected),
+            vec![ExplainResultReason {
+                memory_id: Some(21),
+                reason_code: "temporal_landmark_selected",
+                detail: "landmark \"launch milestone\" opened era \"era-launch-milestone-0001\" while staying on metadata-only Tier2 planning".to_string(),
+            }]
+        );
+        assert_eq!(
+            ObservabilityModule.explain_result_reasons(&not_selected),
+            vec![ExplainResultReason {
+                memory_id: Some(34),
+                reason_code: "temporal_landmark_not_selected",
+                detail: "memory stayed recallable without landmark promotion or era creation"
+                    .to_string(),
+            }]
+        );
+    }
+
+    #[test]
     fn explain_result_reasons_preserve_contradiction_reason_codes() {
         let result_set = RetrievalResultSet {
             outcome_class: OutcomeClass::Accepted,
@@ -1072,7 +1209,8 @@ mod tests {
                     ResultReason {
                         memory_id: Some(crate::types::MemoryId(45)),
                         reason_code: "contradiction_retained_under_legal_hold".to_string(),
-                        detail: "legal hold keeps archived authoritative evidence visible".to_string(),
+                        detail: "legal hold keeps archived authoritative evidence visible"
+                            .to_string(),
                     },
                 ],
             },
@@ -1124,7 +1262,10 @@ mod tests {
         let reasons = ObservabilityModule.explain_result_reasons(&result_set);
 
         assert_eq!(
-            reasons.iter().map(|reason| reason.reason_code).collect::<Vec<_>>(),
+            reasons
+                .iter()
+                .map(|reason| reason.reason_code)
+                .collect::<Vec<_>>(),
             vec![
                 "contradiction_selected",
                 "contradiction_visible",
