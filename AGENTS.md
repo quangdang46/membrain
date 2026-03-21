@@ -1,82 +1,323 @@
-## linehash — Stable Line-Anchored Editing
+## why — Git History Archaeology CLI
 
-`linehash` is installed in this environment and must always be used for file-targeted reads and edits when a shell-based edit workflow is appropriate.
+`why` is a code-archaeology CLI that answers "why does this code exist?" by analyzing git history and synthesizing explanations via LLM. It provides risk assessment, ownership signals, and change context before you modify unfamiliar code.
 
-### Why to Prefer It
+### Why It's Useful
 
-- Uses content-hashed line anchors like `12:ab` instead of fragile exact-text matching
-- Rejects stale or ambiguous edits instead of guessing
-- Works well for agent-driven file editing and concurrent-change detection
+- **Prevents accidental deletions:** Understand why code was written before removing "dead-looking" functions
+- **Risk-aware changes:** Get HIGH/MEDIUM/LOW risk signals based on commit history and keywords
+- **Ownership discovery:** Find who knows the code and bus-factor risks with `--team`
+- **Co-change awareness:** See coupled files before broad refactors with `--coupled`
+- **Incident context:** Link code to past hotfixes, security patches, and incidents
+- **LLM-powered synthesis:** One LLM call per query with structured git data as input
 
-### Preferred Workflow
+### Quick Start
 
-1. Read with anchors:
+```bash
+# Basic query
+why src/auth.rs:verify_token
+
+# Validate config and test LLM connectivity
+why doctor
+```
+
+### Query Syntax
+
+| Form | Example | Description |
+|------|---------|-------------|
+| `<file>:<line>` | `why src/auth.rs:42` | Query specific line |
+| `<file>:<symbol>` | `why src/auth.rs:verify_token` | Query function/method |
+| `<file>:<Type::method>` | `why src/auth.rs:AuthService::login` | Qualified Rust method |
+| `<file> --lines <start:end>` | `why src/auth.rs --lines 40:45` | Query line range |
+
+### Command Reference
+
+**Core Queries:**
+| Command | Purpose |
+|---------|---------|
+| `why <target>` | Basic archaeology query with LLM synthesis |
+| `why <target> --no-llm` | Heuristic-only mode (no LLM call) |
+| `why <target> --json` | Machine-readable output |
+| `why <target> --since 30` | Limit to recent 30 days |
+
+**Risk & History:**
+| Command | Purpose |
+|---------|---------|
+| `why <target> --blame-chain` | Walk past mechanical edits to true origin |
+| `why <target> --evolution` | Rename-aware target history timeline |
+| `why <target> --team` | Show ownership and bus-factor signals |
+| `why <target> --coupled` | Show file-level co-change coupling |
+
+**Code Actions:**
+| Command | Purpose |
+|---------|---------|
+| `why <target> --annotate` | Write evidence-backed doc annotation |
+| `why <target> --split` | Show archaeology-guided split suggestions |
+| `why <target> --rename-safe` | Assess whether Rust symbol rename is safe |
+| `why <target> --watch` | Refresh report when file changes |
+
+**Repo-Wide Commands:**
+| Command | Purpose |
+|---------|---------|
+| `why hotspots --limit 10` | Top churn × risk files |
+| `why health` | Repo health dashboard |
+| `why health --ci 80` | CI gate with threshold |
+| `why time-bombs` | Aged TODOs and expired markers |
+| `why ghost --limit 10` | Uncalled high-risk functions |
+| `why onboard --limit 10` | Top symbols for new engineers |
+| `why diff-review --no-llm` | Review staged diff |
+| `why pr-template` | Generate PR template from staged diff |
+
+**Config & Diagnostics:**
+| Command | Purpose |
+|---------|---------|
+| `why config init` | Interactive setup (main entry point) |
+| `why config init --local` | Create repo-local config |
+| `why config get` | Show current effective config |
+| `why doctor` | Validate config and test LLM |
+| `why doctor --json` | Machine-readable diagnostics |
+
+### Typical Agent Workflow
+
+1. **Before deleting or refactoring unfamiliar code:**
    ```bash
-   linehash read <file>
+   why src/legacy.rs:old_function --no-llm
    ```
-2. Apply targeted edits by anchor:
+   Check risk level and history before touching.
+
+2. **For broader refactors:**
    ```bash
-   linehash edit <file> <line:hash> <new-content>
-   linehash edit <file> <start:hash>..<end:hash> <new-content>
-   linehash insert <file> <line:hash> <new-content>
-   linehash delete <file> <line:hash>
+   why src/auth.rs:verify_token --coupled --team
    ```
-3. If an anchor is stale or ambiguous, re-run `linehash read <file>` and retry using the new anchors.
+   See coupled files and ownership before planning scope.
 
-### Rules
+3. **For rename operations:**
+   ```bash
+   why src/auth.rs:verify_token --rename-safe
+   ```
+   Check caller risk to assess rename safety.
 
-- Prefer `linehash` over ad-hoc text replacement when editing specific file lines
-- Use `linehash read` to refresh anchors before editing files that may have changed
-- Treat stale-anchor failures as a signal to re-read, not to force the edit
+4. **Before PR:**
+   ```bash
+   why diff-review --no-llm
+   why pr-template
+   ```
+   Review staged changes and generate template.
+
+5. **Health check:**
+   ```bash
+   why health --json
+   why hotspots --limit 5
+   ```
+   Understand repo-wide debt signals.
+
+### Risk Levels
+
+| Level | Meaning |
+|-------|---------|
+| **HIGH** | Stop and investigate. Likely security, incident, or critical business logic. |
+| **MEDIUM** | Review carefully. Migration, integration, or compatibility-sensitive code. |
+| **LOW** | Routine code. Standard review practices apply. |
+
+### Supported Languages
+
+Symbol resolution works for: Rust (`.rs`), Go (`.go`), JavaScript (`.js`), TypeScript (`.ts`, `.tsx`), Java (`.java`), Python (`.py`)
+
+### Cache Behavior
+
+- Query results cached in `.why/cache.jsonl`
+- Health snapshots stored in `.why/health.jsonl`
+- Use `--no-cache` to bypass cache
+- Cache keys include `HEAD` hash prefix for natural invalidation
+
+### Common Pitfalls
+
+- **"could not find repository"**: Run from inside a git repo, or use repo-wide commands like `why doctor` from anywhere
+- **Ambiguous symbol**: Use qualified name like `Module::function` instead of just `function`
+- **No LLM synthesis**: Check `why doctor` for config/auth issues; fallback to `--no-llm` for heuristic-only
+- **Missing credentials**: Run `why config init` or set `ANTHROPIC_API_KEY`/`OPENAI_API_KEY`/`ZAI_API_KEY`
+
+### Rules for Agents
+
+- **Always run `why` before deleting unfamiliar code** — it may be a security fix or incident response
+- Treat `HIGH` risk output as a stop-and-investigate signal
+- Use `--blame-chain` to find true origin, not just last mechanical edit
+- Use `--coupled` and `--team` before broader refactors
+- Use `--no-llm` in CI or when LLM is unavailable
+- Use `why doctor` to diagnose config/auth issues
 
 ---
+## linehash — Hash-Anchored File Editing
 
-## Flywheel Swarm Required Operating Rules
+`linehash` is a file editing tool that uses content-hashed line anchors (`12:ab3f`) instead of fragile exact-text matching. It's designed for agent-driven editing where concurrent changes are expected and edit safety is critical.
 
-These rules are mandatory for every swarm agent working in this repository.
+### Why It's Useful
 
-1. **Rule 0 — Override:** Human instructions override `AGENTS.md`, backlog guidance, prior agent plans, and default workflow suggestions.
-2. **Rule 1 — No deletion:** Never delete files or directories without explicit human permission.
-3. **No destructive git:** Never run destructive git commands such as `git reset --hard`, `git clean -fd`, `git checkout -- <path>`, `git restore <path>`, `git push --force`, or equivalent history-rewriting shortcuts.
-4. **Branch policy:** Work on `main`; never target or create `master` for this repository.
-5. **No script edits:** Make code and documentation changes manually; do not mass-edit repository files with scripts unless the human explicitly asks for it.
-6. **No file proliferation:** Do not create duplicate variants like `mainV2.rs`, `main_improved.rs`, `foo_new.py`, or parallel doc copies; edit the canonical file instead.
-7. **Validation after changes:** Run validation appropriate to the changed surface before handoff. If you change Rust code, run `cargo check --all-targets` and then any bead-specific checks.
-8. **Multi-agent awareness:** Expect concurrent edits from other agents. Never stash, revert, overwrite, or otherwise disturb changes just because you did not author them.
-9. **Post-compaction reset:** After any compaction or major context loss, reread `AGENTS.md` before continuing.
+- **Stable anchors:** Uses `line:hash` format that survives nearby edits—line numbers shift but hashes stay valid
+- **Concurrent-safe:** Detects stale anchors when content changed; fails explicitly instead of guessing
+- **Audit trail:** Optional `--receipt` and `--audit-log` for tracking edit history
+- **No merge conflicts:** Each edit is independent; no patch files that conflict
+- **Works with any text:** Language-agnostic; no parsing required
 
-### Swarm Tool Blur Review
+### The Anchor Format
 
-- **`br`:** Canonical task state, dependencies, and status transitions.
-- **`bv`:** Graph-aware routing and prioritization; use only `--robot-*` flags in agent workflows.
-- **Agent Mail:** Agent identity, inbox/outbox threads, file reservations, and handoff coordination.
-- **`cass` / `cm`:** Reuse prior session knowledge and procedural memory; avoid interactive modes and prefer automation-safe commands like `cass ... --robot|--json` and `cm context ... --json`.
-- **`ubs`:** Bug-scan the changed surface before commit; fix real findings or document a justified deferral.
-- **`dcg`:** Destructive Command Guard; treat blocked commands as safety signals and find a safer path instead of bypassing the guard.
+Anchors are `line_number:content_hash` pairs like `42:a3f2`:
 
----
+- **line_number**: 1-based line number (for human readability)
+- **content_hash**: First 4+ chars of SHA-256 of line content (for stability)
 
-## Documentation Precedence and Conflict Resolution
+Example output from `linehash read`:
+```
+  1:a1b2  fn main() {
+  2:c3d4      println!("hello");
+  3:e5f6  }
+```
 
-Use this order whenever docs disagree or when backlog work needs a canonical interpretation:
+### Command Reference
 
-1. `docs/PLAN.md` is the canonical design contract.
-2. Subsystem docs under `docs/` elaborate `PLAN.md`; they do not override it.
-3. `docs/ARCHITECTURE.md` freezes workspace shape, module ownership seams, and read/write-path boundaries derived from `PLAN.md`.
-4. `docs/INDEX.md` and `docs/CONTRIBUTING.md` define doc hierarchy, contributor evidence rules, and PR discipline that must stay aligned with `PLAN.md`.
-5. `AGENTS.md` translates repository workflow, coordination, and execution discipline for active contributors; it should clarify how to operate within the canon, not invent competing product behavior, module ownership, or evidence thresholds.
-6. Historical artifacts, legacy command references, logs, scratch plans, and older snapshot prose are informative only; they do not override the canonical contract.
+**Reading:**
+| Command | Purpose |
+|---------|---------|
+| `linehash read <file>` | Show file with line:hash anchors |
+| `linehash read <file> --anchor 42:a3f2` | Show context around specific anchor |
+| `linehash read <file> --context 10` | Set context lines (default: 5) |
+| `linehash index <file>` | Show just anchors, no content |
 
-### Conflict-Resolution Procedure
+**Editing:**
+| Command | Purpose |
+|---------|---------|
+| `linehash edit <file> <anchor> <content>` | Replace line at anchor |
+| `linehash edit <file> <start>..<end> <content>` | Replace line range |
+| `linehash insert <file> <anchor> <content>` | Insert after anchor |
+| `linehash insert <file> <anchor> <content> --before` | Insert before anchor |
+| `linehash delete <file> <anchor>` | Delete line at anchor |
+| `linehash delete <file> <start>..<end>` | Delete line range |
 
-- If a subsystem doc disagrees with `PLAN.md`, `PLAN.md` wins until the conflict is resolved explicitly.
-- If two non-canonical docs disagree, do not average them together or guess based on convenience; trace both back to `PLAN.md` and the active bead.
-- Resolve ambiguity locally only when the canonical interpretation is directly supported by `PLAN.md` plus the established hierarchy in `docs/INDEX.md` and `docs/CONTRIBUTING.md`, and the fix does not invent new product behavior.
-- Pause implementation on that point when the canonical interpretation is still ambiguous, when multiple reasonable readings would change product or workflow behavior, or when fixing the conflict would require creating new contract language rather than applying existing guidance.
-- If implementation pauses, capture the conflict in the active bead; if no bead cleanly owns it, create a focused follow-up bead for the doc or workflow gap, note which files or sections conflict, and state the blocked decision that should not be guessed through.
-- Patch documentation directly only when the change is a faithful clarification of already-canonical behavior; if the update changes scope, introduces new rules, or resolves a true contract gap, update or create the corresponding bead first so the backlog remains the audit trail.
-- Notify other agents in the matching Agent Mail thread when you open or escalate the conflict so parallel contributors do not silently diverge.
-- When `PLAN.md` contains older merged-snapshot text that conflicts with its explicit canonical corrections, thesis, invariants, or restrictions, the explicit canonical overlays win.
+**Searching:**
+| Command | Purpose |
+|---------|---------|
+| `linehash grep <file> <pattern>` | Search with anchor output |
+| `linehash grep <file> <pattern> --case-insensitive` | Case-insensitive search |
+| `linehash annotate <file> <query>` | Find and annotate matching lines |
+| `linehash annotate <file> <regex> --regex` | Regex search |
+| `linehash find-block <file> <anchor>` | Find enclosing block (brace/indent) |
+
+**Utilities:**
+| Command | Purpose |
+|---------|---------|
+| `linehash verify <file>` | Verify file integrity |
+| `linehash stats <file>` | File statistics |
+| `linehash patch <file> <patch-file>` | Apply patch by anchors |
+| `linehash swap <file> <anchor1> <anchor2>` | Swap two lines |
+| `linehash move <file> <anchor> <target-anchor>` | Move line to new position |
+| `linehash indent <file> <anchor> <levels>` | Adjust indentation |
+
+**Advanced:**
+| Command | Purpose |
+|---------|---------|
+| `linehash from-diff <diff-file>` | Convert diff to anchor edits |
+| `linehash merge-patches <file> <patch1> <patch2>` | Merge multiple patches |
+| `linehash watch <file>` | Watch file for changes |
+| `linehash explode <file>` | Split file into per-line files |
+| `linehash implode <file>` | Reassemble from per-line files |
+
+### Typical Agent Workflow
+
+1. **Read file with anchors:**
+   ```bash
+   linehash read src/main.rs
+   ```
+
+2. **Find specific content:**
+   ```bash
+   linehash grep src/main.rs "fn process" --json
+   ```
+
+3. **Apply targeted edit:**
+   ```bash
+   linehash edit src/main.rs 42:a3f2 "fn process_data(input: &str) -> Result<()> {"
+   ```
+
+4. **Verify change:**
+   ```bash
+   linehash read src/main.rs --anchor 42:a3f2
+   ```
+
+5. **If anchor is stale, re-read and retry:**
+   ```bash
+   linehash read src/main.rs  # Get fresh anchors
+   linehash edit src/main.rs 42:new_hash "..."
+   ```
+
+### Range Edits
+
+Replace multiple lines with range syntax:
+
+```bash
+# Replace lines 10-15
+linehash edit src/main.rs 10:a1b2..15:c3d4 "new content\nspanning\nmultiple lines"
+
+# Delete lines 20-25
+linehash delete src/main.rs 20:e5f6..25:g7h8
+```
+
+### Safety Features
+
+**Stale anchor detection:**
+```
+Error: anchor 42:a3f2 is stale (line content changed)
+Hint: re-run `linehash read src/main.rs` to get fresh anchors
+```
+
+**Ambiguous anchor detection:**
+```
+Error: anchor 42:a3 matches multiple lines
+Hint: use more hash characters: 42:a3f2e1
+```
+
+**Dry-run mode:**
+```bash
+linehash edit src/main.rs 42:a3f2 "new content" --dry-run
+```
+
+**Audit logging:**
+```bash
+linehash edit src/main.rs 42:a3f2 "new content" --receipt --audit-log edits.jsonl
+```
+
+### JSON Output
+
+All commands support `--json` for machine-readable output:
+
+```bash
+linehash read src/main.rs --json
+linehash grep src/main.rs "fn " --json
+linehash edit src/main.rs 42:a3f2 "new" --json
+```
+
+### Common Pitfalls
+
+- **Stale anchor:** Content changed since last read → re-run `linehash read`
+- **Ambiguous anchor:** Hash too short → use more characters from original hash
+- **Line shifted:** Nearby edits changed line numbers → hash still works, just re-read
+- **File deleted:** Obviously fails → check file exists before editing
+- **Binary file:** Only works on text files → don't use on binaries
+
+### Rules for Agents
+
+- **Always prefer `linehash` over `sed`/`awk`** for targeted line edits
+- **Re-read before editing** if file may have changed (other agents, user edits)
+- **Treat stale-anchor failures as safety signals**, not errors to bypass
+- **Use `--dry-run` first** when editing critical files
+- **Use `--json` output** for parsing in scripts
+- **Never force an edit** when anchor is stale—always re-read and retry
+
+### When NOT to Use linehash
+
+- **Large insertions:** For adding many lines, use a heredoc or write the whole file
+- **Whole-file rewrites:** Just use `Write` tool directly
+- **Binary files:** linehash only works on text
+- **Complex refactors:** Use tree-sitter based tools for AST-aware changes
 
 ---
 
@@ -92,48 +333,29 @@ A mail-like layer that lets coding agents coordinate asynchronously via MCP tool
 
 ### Same Repository Workflow
 
-1. **Register identity at session start:**
+1. **Register identity:**
    ```
    ensure_project(project_key=<abs-path>)
    register_agent(project_key, program, model)
    ```
-   Do this before sending mail, reserving files, or claiming active collaboration state.
 
-2. **Reserve the smallest practical edit surface before editing:**
+2. **Reserve files before editing:**
    ```
    file_reservation_paths(project_key, agent_name, ["src/**"], ttl_seconds=3600, exclusive=true)
    ```
-   Prefer narrow file or glob reservations over broad repo-wide claims. Use exclusive reservations for active edits and shared reservations only when observing or coordinating without mutating the same surface.
 
-3. **Coordinate in issue-linked threads:**
+3. **Communicate with threads:**
    ```
    send_message(..., thread_id="FEAT-123")
    fetch_inbox(project_key, agent_name)
    acknowledge_message(project_key, agent_name, message_id)
    ```
-   Use the Bead ID as the thread ID when possible. Post a start message when claiming work, progress replies when plans or scope change materially, a completion message when done, and a handoff message when leaving unfinished or partially validated work.
 
-4. **Acknowledge and maintain reservations:**
-   Poll your inbox often enough to catch coordination changes, acknowledge messages that request acknowledgement, renew reservations if work is still active near TTL expiry, and release reservations promptly when the edit surface is no longer needed. If work is being handed off directly, transfer reservations explicitly in-thread by naming the recipient, reserved paths, and remaining TTL; the handoff is not complete until the receiving agent acknowledges takeover.
-
-### Reservation Hygiene
-
-- Reserve the smallest practical set of files or globs that covers the edit you are actually making; narrow existing reservations instead of broadening them reflexively.
-- Use **exclusive** reservations when you expect to modify the surface; use **shared** reservations only for read-heavy collaboration or investigation that should not block active editors.
-- Prefer adding another small reservation for a newly discovered file over grabbing an entire directory preemptively.
-- If a reservation conflicts, first narrow your pattern, wait for expiry when the work is truly overlapping, or coordinate in-thread before escalating scope.
-- Renew TTL only while the work is actively in progress; release reservations as soon as the protected surface is no longer being edited.
-- If work is handed off mid-stream, prefer an explicit transfer message in the existing Agent Mail thread over silent reservation expiry; the receiving agent should acknowledge before the original holder treats the surface as handed off.
-- Do not treat reservations as ownership of a whole feature area; they are short-lived collision-avoidance hints for specific edit surfaces.
-
-5. **Quick reads:**
+4. **Quick reads:**
    ```
    resource://inbox/{Agent}?project=<abs-path>&limit=20
    resource://thread/{id}?project=<abs-path>&include_bodies=true
    ```
-
-6. **Keep Agent Mail distinct from Beads:**
-   Use Agent Mail for coordination, reservations, and handoff narrative; use Beads for task status, dependencies, and backlog truth.
 
 ### Macros vs Granular Tools
 
@@ -154,58 +376,49 @@ Beads provides a lightweight, dependency-aware issue database and CLI (`br` - be
 
 **Important:** `br` is non-invasive—it NEVER runs git commands automatically. You must manually commit changes after `br sync --flush-only`.
 
-**Workspace contract for this repo:** `.beads/` is already initialized here. Preserve the live workspace and the issue IDs already present in `.beads/issues.jsonl` instead of re-running init or changing prefixes to match generic examples or older defaults. Before assuming the workspace is missing or unhealthy, validate it with `br info` and `br doctor`.
-
 ### Conventions
 
 - **Single source of truth:** Beads for task status/priority/dependencies; Agent Mail for conversation and audit
-- **Existing workspace first:** Build on the current backlog state and preserve this repo’s existing issue-ID family (currently `mb-...`) rather than inventing a new prefix or reinitializing Beads
-- **Shared identifiers:** Use the current Beads issue ID verbatim (e.g., `mb-1ga.5`) as Mail `thread_id` and prefix subjects with `[mb-1ga.5]`
+- **Shared identifiers:** Use Beads issue ID (e.g., `br-123`) as Mail `thread_id` and prefix subjects with `[br-123]`
 - **Reservations:** When starting a task, call `file_reservation_paths()` with the issue ID in `reason`
 
 ### Typical Agent Flow
 
-1. **Validate workspace health when needed:**
-   ```bash
-   br info
-   br doctor
-   ```
-
-2. **Pick ready work (Beads):**
+1. **Pick ready work (Beads):**
    ```bash
    br ready --json  # Choose highest priority, no blockers
    ```
 
-3. **Reserve edit surface (Mail):**
+2. **Reserve edit surface (Mail):**
    ```
-   file_reservation_paths(project_key, agent_name, ["src/**"], ttl_seconds=3600, exclusive=true, reason="mb-1ga.5")
-   ```
-
-4. **Announce start (Mail):**
-   ```
-   send_message(..., thread_id="mb-1ga.5", subject="[mb-1ga.5] Start: <title>", ack_required=true)
+   file_reservation_paths(project_key, agent_name, ["src/**"], ttl_seconds=3600, exclusive=true, reason="br-123")
    ```
 
-5. **Work and update:** Reply in-thread with progress
+3. **Announce start (Mail):**
+   ```
+   send_message(..., thread_id="br-123", subject="[br-123] Start: <title>", ack_required=true)
+   ```
 
-6. **Complete and release:**
+4. **Work and update:** Reply in-thread with progress
+
+5. **Complete and release:**
    ```bash
-   br close mb-1ga.5 --reason "Completed"
+   br close 123 --reason "Completed"
    br sync --flush-only  # Export to JSONL (no git operations)
    ```
    ```
    release_file_reservations(project_key, agent_name, paths=["src/**"])
    ```
-   Final Mail reply: `[mb-1ga.5] Completed` with summary
+   Final Mail reply: `[br-123] Completed` with summary
 
 ### Mapping Cheat Sheet
 
 | Concept | Value |
 |---------|-------|
-| Mail `thread_id` | Current Beads issue ID (e.g., `mb-1ga.5`) |
-| Mail subject | `[<issue-id>] ...` |
-| File reservation `reason` | `<issue-id>` |
-| Commit messages | Include `<issue-id>` for traceability |
+| Mail `thread_id` | `br-###` |
+| Mail subject | `[br-###] ...` |
+| File reservation `reason` | `br-###` |
+| Commit messages | Include `br-###` for traceability |
 
 ---
 
@@ -358,57 +571,23 @@ git push                # Push to remote
 
 <!-- end-bv-agent-instructions -->
 
-## Contributor Golden Path and Troubleshooting
-
-Use this as the safe default path for both humans and agents working in this repository.
-
-### Golden Path
-
-1. **Orient on the canon first** — read `docs/PLAN.md` for product contract questions, `docs/INDEX.md` and `docs/CONTRIBUTING.md` for doc hierarchy and review/evidence rules, and `AGENTS.md` for execution, coordination, and handoff workflow.
-2. **Pick work from ready backlog** — use `bv --robot-triage` or `br ready --json` to choose ready work instead of guessing or starting from blocked items.
-3. **Claim the bead explicitly** — move the selected Bead to `in_progress` before editing so the shared backlog reflects reality.
-4. **Reserve only the edit surface you need** — use Agent Mail reservations for the smallest practical file or glob set, and keep Beads state separate from coordination narrative.
-5. **Announce start in the bead thread** — send a start message with the Bead ID, planned surface, and any expected validation so other contributors can deconflict early.
-6. **Implement with the repo’s workflow rules** — use `linehash` for shell-based targeted edits when appropriate, refresh stale anchors instead of forcing them, and keep changes bounded to the bead’s actual scope.
-7. **Validate the changed surface** — run the quality gates that fit the surface you changed, including targeted checks and any required benchmark, lint, or bug-scan steps, and note anything intentionally deferred.
-8. **Sync shared state before handoff** — update Bead status, run `br sync --flush-only`, release or transfer reservations, and send a completion or handoff message with what changed, what was validated, and what remains.
-
-### Troubleshooting Guideposts
-
-- **Stale `linehash` anchors:** re-run `linehash read <file>` and retry with the refreshed anchors instead of forcing an edit.
-- **Doc conflicts or ambiguity:** trace the question back through `docs/PLAN.md`, then `docs/INDEX.md` / `docs/CONTRIBUTING.md`; if the canon is still ambiguous, pause that point and capture the conflict in the active bead instead of guessing.
-- **Reservation conflicts:** narrow the reservation, wait if the overlap is real, or coordinate in-thread before broadening scope.
-- **Unexpected concurrent diffs:** treat them as normal shared work, not cleanup targets; never stash, revert, overwrite, or delete them just because you did not author them.
-- **Workflow uncertainty:** prefer `bv --robot-triage`, `br ready --json`, and the existing bead thread over ad-hoc assumptions about what to work on next.
-- **Blocked validation or partial completion:** say so explicitly in the handoff, keep the bead state accurate, and create follow-up beads for newly discovered or deferred work rather than hiding TODOs in prose.
-
 ## Landing the Plane (Session Completion)
 
 **When ending a work session**, you MUST complete ALL steps below.
 
 **MANDATORY WORKFLOW:**
 
-1. **File issues for remaining work** - Create follow-up beads for anything unfinished, newly discovered, or intentionally deferred instead of leaving implicit TODOs.
-2. **Run quality gates** - Run the tests, linters, builds, benchmarks, or targeted checks appropriate to the changed surface, and note anything intentionally deferred.
-3. **Update issue status** - Close finished work, keep partial work accurately open or in progress, and preserve blocker or dependency state needed for the next contributor.
-4. **Sync beads** - `br sync --flush-only` to export JSONL after status updates.
-5. **Hand off** - Leave enough context for the next contributor to resume safely without re-deriving what changed, what was validated, what remains, and which reservations, mail threads, or status transitions still matter.
+1. **File issues for remaining work** - Create issues for anything that needs follow-up
+2. **Run quality gates** (if code changed) - Tests, linters, builds
+3. **Update issue status** - Close finished work, update in-progress items
+4. **Sync beads** - `br sync --flush-only` to export to JSONL
+5. **Hand off** - Provide context for next session
 
-**Session-close rules:**
+### Commit Discipline
 
-- Unexpected worktree edits are normal concurrent work from other agents and are **not** cleanup targets.
-- Never stash, revert, overwrite, delete, or otherwise disturb concurrent edits just because you did not author them.
-- If the user explicitly asks for the built-in TODO functionality, comply; otherwise keep Beads as the canonical shared-work tracker.
-- If validation is blocked or deferred, say so explicitly in the handoff instead of implying completion.
-
-**Minimum handoff payload:**
-
-- Bead IDs touched, with final status for each (`completed`, still `in_progress`, blocked, or intentionally deferred).
-- Files, docs, commands, or surfaces changed so the next contributor knows where to look first.
-- Validation already run, including what passed, what failed, and what was intentionally not run.
-- Open risks, unresolved questions, or decisions that should not be resumed blindly.
-- The next recommended step, including whether a follow-up bead already exists or still needs to be created.
-- Any active reservations, relevant Agent Mail thread IDs, or coordination state that still matters, including whether reservations were released or explicitly transferred to another agent.
+- **Always run checks before committing**: For any code change, run tests, linters, builds,,format and `ubs $(git diff --name-only --cached)` on staged files before creating a commit.
+- **Only commit when checks pass**: Do not commit if tests, linters, builds, or UBS are failing, unless you are explicitly committing a known-broken state with a clear reason in the commit message and associated issue.
+- **Treat every change as commit-ready**: Work as if any local change could be committed; keep changes small, coherent, and fully validated before `git commit`.
 
 ---
 
@@ -461,10 +640,6 @@ UBS stands for "Ultimate Bug Scanner": **The AI Coding Agent's Secret Weapon: Fl
 **Install:** `curl -sSL https://raw.githubusercontent.com/Dicklesworthstone/ultimate_bug_scanner/master/install.sh | bash`
 
 **Golden Rule:** `ubs <changed-files>` before every commit. Exit 0 = safe. Exit >0 = fix & re-run.
-**Workflow Contract:**
-- Prefer explicit changed files or staged files, not whole-repo scans, unless the change truly spans the whole project
-- Treat `ubs` as a required bug-finding pass for the surface you changed, not as optional cleanup
-- Investigate every finding, fix the real issue when valid, and re-run `ubs` on the changed surface until it passes or you explicitly document a justified deferral in the handoff
 
 **Commands:**
 ```bash
@@ -513,12 +688,6 @@ Parse: `file:line:col` → location | 💡 → how to fix | Exit 0/1 → pass/fa
 `cass` indexes prior agent conversations (Claude Code, Codex, Cursor, Gemini, ChatGPT, etc.) so we can reuse solved problems.
 
 **Rules:** Never run bare `cass` (TUI). Always use `--robot` or `--json`.
-
-**Workflow Contract:**
-- Use `cass` before re-investigating a bug, failure mode, design question, or workflow problem that may already have been solved in earlier sessions
-- Prefer narrow, automation-safe queries first (`search`, `view`, `expand`, `capabilities`, `robot-docs`) and keep output lean with flags like `--fields minimal`, `--agent`, and `--days N`
-- Treat `cass` as a reuse and orientation tool: extract prior solutions or context, then verify them against the current repository state before acting
-- Never use interactive cass modes in agent workflows
 
 ### Examples
 
