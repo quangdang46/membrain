@@ -96,6 +96,14 @@ fn tier2_layout_separates_metadata_from_raw_payload_body_and_preserves_namespace
         layout.payload.payload_locator.namespace.as_str(),
         "team.alpha"
     );
+    assert_eq!(
+        layout.payload_hydration_path(),
+        "tier2://team.alpha/payload/0029/41"
+    );
+    assert_eq!(
+        layout.payload.payload_locator.hydration_path(),
+        layout.payload_hydration_path()
+    );
     assert_eq!(layout.payload.raw_size_bytes, envelope.raw_text.len());
     assert_eq!(
         layout.payload.raw_text,
@@ -146,6 +154,7 @@ fn tier2_metadata_index_key_matches_namespace_safe_identity_fields() {
         layout.metadata.normalization_generation
     );
     assert_eq!(key.payload_locator, layout.metadata.payload_locator);
+    assert_eq!(key.payload_locator.hydration_path(), "tier2://team.alpha/payload/0063/99");
     assert!(layout.index_key_stays_metadata_only());
 }
 
@@ -180,6 +189,22 @@ fn tier2_payload_locator_changes_with_namespace_for_same_memory_id() {
     assert_eq!(
         alpha.payload.payload_locator.shard,
         beta.payload.payload_locator.shard
+    );
+}
+
+#[test]
+fn tier2_payload_hydration_path_escapes_namespace_separators() {
+    let store = Tier2Store;
+    let namespace = NamespaceId::new("team/alpha").unwrap();
+    let envelope = normalized_event("raw source evidence", "compact summary");
+
+    let layout = store.layout_item(namespace, MemoryId(41), SessionId(7), 991, &envelope);
+
+    assert_eq!(layout.payload.payload_locator.namespace.as_str(), "team/alpha");
+    assert_eq!(layout.payload_hydration_path(), "tier2://team%2Falpha/payload/0029/41");
+    assert_eq!(
+        layout.payload.payload_locator.hydration_path(),
+        layout.payload_hydration_path()
     );
 }
 

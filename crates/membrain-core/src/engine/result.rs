@@ -500,6 +500,14 @@ impl RetrievalExplain {
             reason_code: "temporal_prefilter_metadata_only".to_string(),
             detail: metadata_detail,
         });
+        self.result_reasons.push(ResultReason {
+            memory_id,
+            reason_code: "temporal_payload_deferred".to_string(),
+            detail: format!(
+                "heavyweight Tier2 payload remained deferred until hydration path {}",
+                prepared.layout.payload_hydration_path()
+            ),
+        });
 
         if landmark.is_landmark {
             let mut detail = match (&landmark.landmark_label, &landmark.era_id) {
@@ -537,6 +545,7 @@ impl RetrievalExplain {
 #[derive(Debug, Clone)]
 pub struct ResultBuilder {
     evidence_pack: Vec<EvidenceItem>,
+    deferred_payloads: Vec<DeferredPayload>,
     pub action_pack: Option<Vec<ActionArtifact>>,
     max_results: usize,
     total_candidates: usize,
@@ -548,6 +557,7 @@ impl ResultBuilder {
     pub fn new(max_results: usize, namespace_applied: NamespaceId) -> Self {
         Self {
             evidence_pack: Vec::new(),
+            deferred_payloads: Vec::new(),
             action_pack: None,
             max_results,
             total_candidates: 0,
@@ -660,7 +670,7 @@ impl ResultBuilder {
             },
             evidence_pack: self.evidence_pack,
             action_pack: self.action_pack,
-            deferred_payloads: Vec::new(),
+            deferred_payloads: self.deferred_payloads,
             explain,
             policy_summary: PolicySummary {
                 namespace_applied: self.namespace_applied.clone(),
@@ -737,9 +747,9 @@ mod tests {
             RankingInput {
                 recency: 100,
                 salience: 100,
-                relevance: 100,
+                strength: 100,
+                provenance: 100,
                 conflict: 500,
-                access: 100,
             },
             RankingProfile::balanced(),
         );
@@ -747,9 +757,9 @@ mod tests {
             RankingInput {
                 recency: 500,
                 salience: 500,
-                relevance: 500,
+                strength: 500,
+                provenance: 500,
                 conflict: 500,
-                access: 500,
             },
             RankingProfile::balanced(),
         );
@@ -757,9 +767,9 @@ mod tests {
             RankingInput {
                 recency: 900,
                 salience: 900,
-                relevance: 900,
+                strength: 900,
+                provenance: 900,
                 conflict: 500,
-                access: 900,
             },
             RankingProfile::balanced(),
         );
@@ -879,9 +889,9 @@ mod tests {
             RankingInput {
                 recency: 700,
                 salience: 650,
-                relevance: 800,
+                strength: 800,
+                provenance: 600,
                 conflict: 500,
-                access: 600,
             },
             RankingProfile::balanced(),
         );
@@ -895,6 +905,12 @@ mod tests {
             &ranked,
             AnsweredFrom::Tier2Indexed,
         );
+        builder.deferred_payloads.push(DeferredPayload {
+            memory_id: MemoryId(7),
+            payload_state: PayloadState::Deferred,
+            reason: "tier2 payload intentionally deferred past bounded result packaging".to_string(),
+            hydration_path: "tier2://test/payload/0007/7".to_string(),
+        });
 
         let original = builder.build(RetrievalExplain {
             recall_plan: RecallPlanKind::Tier2ExactThenTier3Fallback,
@@ -922,6 +938,13 @@ mod tests {
         assert_eq!(decoded, original);
         assert_eq!(decoded.count(), 1);
         assert_eq!(decoded.top().unwrap().result.memory_id, MemoryId(7));
+        assert_eq!(decoded.deferred_payloads.len(), 1);
+        assert_eq!(decoded.deferred_payloads[0].memory_id, MemoryId(7));
+        assert_eq!(decoded.deferred_payloads[0].payload_state, PayloadState::Deferred);
+        assert_eq!(
+            decoded.deferred_payloads[0].hydration_path,
+            "tier2://test/payload/0007/7"
+        );
         assert_eq!(
             decoded.explain.result_reasons[0].reason_code,
             "tier2_exact_match"
@@ -953,7 +976,7 @@ mod tests {
 
         explain.push_temporal_landmark_reasons_from_prepared_layout(&prepared);
 
-        assert_eq!(explain.result_reasons.len(), 2);
+        assert_eq!(explain.result_reasons.len(), 3);
         assert_eq!(explain.result_reasons[0].memory_id, Some(MemoryId(21)));
         assert_eq!(
             explain.result_reasons[0].reason_code,
@@ -964,12 +987,19 @@ mod tests {
             .contains("fetched 0 payload(s)"));
         assert_eq!(
             explain.result_reasons[1].reason_code,
-            "temporal_landmark_selected"
+            "temporal_payload_deferred"
         );
         assert!(explain.result_reasons[1]
             .detail
+            .contains("tier2://timeline/payload/0015/21"));
+        assert_eq!(
+            explain.result_reasons[2].reason_code,
+            "temporal_landmark_selected"
+        );
+        assert!(explain.result_reasons[2]
+            .detail
             .contains("metadata-only Tier2 planning"));
-        assert!(explain.result_reasons[1].detail.contains("launch"));
+        assert!(explain.result_reasons[2].detail.contains("launch"));
     }
 
     #[test]
@@ -996,12 +1026,19 @@ mod tests {
 
         explain.push_temporal_landmark_reasons_from_prepared_layout(&prepared);
 
-        assert_eq!(explain.result_reasons.len(), 2);
+        assert_eq!(explain.result_reasons.len(), 3);
         assert_eq!(
             explain.result_reasons[1].reason_code,
-            "temporal_landmark_not_selected"
+            "temporal_payload_deferred"
         );
         assert!(explain.result_reasons[1]
+            .detail
+            .contains("tier2://timeline/payload/0022/34"));
+        assert_eq!(
+            explain.result_reasons[2].reason_code,
+            "temporal_landmark_not_selected"
+        );
+        assert!(explain.result_reasons[2]
             .detail
             .contains("without landmark promotion or era creation"));
     }

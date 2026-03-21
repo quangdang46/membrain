@@ -52,6 +52,18 @@ impl RepairTarget {
         }
     }
 
+    /// Returns whether this target exposes a rebuild plan from durable truth.
+    pub const fn supports_index_rebuild(self) -> bool {
+        matches!(
+            self,
+            Self::LexicalIndex
+                | Self::MetadataIndex
+                | Self::SemanticHotIndex
+                | Self::SemanticColdIndex
+                | Self::EngramIndex
+        )
+    }
+
     /// Stable operator-facing verification artifact identifier.
     pub const fn verification_artifact_name(self) -> &'static str {
         match self {
@@ -332,6 +344,10 @@ impl RepairEngine {
         target: RepairTarget,
         entrypoint: IndexRepairEntrypoint,
     ) -> Option<IndexRepairPlan> {
+        if !target.supports_index_rebuild() {
+            return None;
+        }
+
         let (durable_sources, authoritative_schema_objects, rebuilt_outputs) = match target {
             RepairTarget::LexicalIndex => (
                 vec![
@@ -382,7 +398,7 @@ impl RepairEngine {
                     "engram_adjacency_accelerator",
                 ],
             ),
-            _ => return None,
+            _ => unreachable!("non-index repair target filtered before rebuild planning"),
         };
 
         Some(IndexRepairPlan {
@@ -669,13 +685,45 @@ mod tests {
     }
 
     #[test]
+    fn supports_index_rebuild_matches_rebuild_plan_coverage() {
+        let engine = RepairEngine;
+        let targets = [
+            RepairTarget::LexicalIndex,
+            RepairTarget::MetadataIndex,
+            RepairTarget::SemanticHotIndex,
+            RepairTarget::SemanticColdIndex,
+            RepairTarget::HotStoreConsistency,
+            RepairTarget::PayloadIntegrity,
+            RepairTarget::GraphConsistency,
+            RepairTarget::EngramIndex,
+            RepairTarget::ContradictionConsistency,
+        ];
+
+        for target in targets {
+            assert_eq!(
+                target.supports_index_rebuild(),
+                engine
+                    .plan_index_rebuild(target, IndexRepairEntrypoint::VerifyOnly)
+                    .is_some(),
+                "unexpected rebuild-plan support mismatch for {}",
+                target.as_str()
+            );
+        }
+    }
+
+    #[test]
     fn non_index_targets_do_not_expose_index_rebuild_plans() {
         let engine = RepairEngine;
-        assert!(engine
-            .plan_index_rebuild(
-                RepairTarget::GraphConsistency,
-                IndexRepairEntrypoint::VerifyOnly,
-            )
-            .is_none());
+        for target in [
+            RepairTarget::HotStoreConsistency,
+            RepairTarget::PayloadIntegrity,
+            RepairTarget::GraphConsistency,
+            RepairTarget::ContradictionConsistency,
+        ] {
+            assert!(!target.supports_index_rebuild());
+            assert!(engine
+                .plan_index_rebuild(target, IndexRepairEntrypoint::VerifyOnly)
+                .is_none());
+        }
     }
 }

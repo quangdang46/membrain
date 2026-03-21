@@ -257,6 +257,12 @@ pub struct TierRouter {
     config: TierRoutingConfig,
 }
 
+impl Default for TierRouter {
+    fn default() -> Self {
+        Self::with_defaults()
+    }
+}
+
 impl TierRouter {
     /// Creates a new tier router with the given configuration.
     pub fn new(config: TierRoutingConfig) -> Self {

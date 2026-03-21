@@ -158,12 +158,22 @@ impl ContradictionRecord {
     }
 
     /// Resolves this contradiction by preferring one memory.
-    pub fn resolve(&mut self, state: ResolutionState, preferred: MemoryId, reason: &'static str) {
+    pub fn resolve(
+        &mut self,
+        state: ResolutionState,
+        preferred: MemoryId,
+        reason: &'static str,
+    ) -> Result<(), ContradictionError> {
+        if !state.is_resolved() {
+            return Err(ContradictionError::InvalidResolutionState);
+        }
+
         self.resolution = state;
         self.preferred_memory = Some(preferred);
         self.preferred_answer_state = PreferredAnswerState::Preferred;
         self.confidence_signal = preferred_answer_confidence(self.kind, self.conflict_score, state);
         self.resolution_reason = Some(reason);
+        Ok(())
     }
 
     /// Marks the contradiction as still active with no preferred answer.
@@ -328,6 +338,8 @@ pub enum ContradictionError {
     AlreadyResolved,
     /// The preferred memory is not part of this contradiction.
     InvalidPreference,
+    /// Preferred-answer selection requires a resolved contradiction state.
+    InvalidResolutionState,
     /// A duplicate contradiction record already exists for this pair.
     DuplicateRecord,
 }
@@ -428,8 +440,7 @@ impl ContradictionStore for ContradictionEngine {
             return Err(ContradictionError::InvalidPreference);
         }
 
-        record.resolve(state, preferred, reason);
-        Ok(())
+        record.resolve(state, preferred, reason)
     }
 
     fn find_by_memory(&self, memory_id: MemoryId) -> Vec<&ContradictionRecord> {
@@ -606,6 +617,26 @@ mod tests {
             .resolve(id, ResolutionState::ManuallyResolved, MemoryId(99), "wrong")
             .unwrap_err();
         assert_eq!(err, ContradictionError::InvalidPreference);
+    }
+
+    #[test]
+    fn unresolved_state_cannot_be_used_for_preferred_answer_selection() {
+        let mut engine = ContradictionEngine::new();
+        let record = make_record(ns("test"), 30, 40, ContradictionKind::Revision);
+
+        let id = engine.record(record).unwrap();
+        let err = engine
+            .resolve(id, ResolutionState::Unresolved, MemoryId(40), "should fail")
+            .unwrap_err();
+
+        assert_eq!(err, ContradictionError::InvalidResolutionState);
+
+        let found = engine.find_by_memory(MemoryId(30));
+        assert_eq!(found.len(), 1);
+        assert_eq!(found[0].resolution, ResolutionState::Unresolved);
+        assert_eq!(found[0].preferred_memory, None);
+        assert_eq!(found[0].preferred_answer_state, PreferredAnswerState::Unset);
+        assert_eq!(found[0].confidence_signal, 0);
     }
 
     #[test]

@@ -19,6 +19,7 @@ use crate::store::audit::AuditLogStore;
 use crate::store::cold::ColdStore;
 use crate::store::hot::HotStore;
 use crate::store::tier2::{Tier2DurableItemLayout, Tier2Store};
+use crate::store::tier_router::{TierRouter, TierRoutingInput, TierRoutingTrace};
 use crate::store::Tier2StoreApi;
 use crate::types::{CoreApiVersion, MemoryId, RawEncodeInput, SessionId};
 
@@ -53,6 +54,7 @@ pub struct BrainStore {
     repair: RepairEngine,
     hot_store: HotStore,
     tier2_store: Tier2Store,
+    tier_router: TierRouter,
     cold_store: ColdStore,
     audit_log_store: AuditLogStore,
     graph: GraphModule,
@@ -79,6 +81,7 @@ impl BrainStore {
             repair: RepairEngine,
             hot_store: HotStore,
             tier2_store: Tier2Store,
+            tier_router: TierRouter::default(),
             cold_store: ColdStore,
             audit_log_store: AuditLogStore,
             graph: GraphModule,
@@ -239,6 +242,16 @@ impl BrainStore {
         }
     }
 
+    /// Returns the canonical Tier2 routing surface owned by the core crate.
+    pub fn tier_router(&self) -> &TierRouter {
+        &self.tier_router
+    }
+
+    /// Evaluates one inspectable Tier2 routing decision through the shared core facade.
+    pub fn evaluate_tier_routing(&self, input: &TierRoutingInput) -> TierRoutingTrace {
+        self.tier_router.evaluate_with_trace(input)
+    }
+
     /// Returns the canonical cold storage surface owned by the core crate.
     pub fn cold_store(&self) -> &ColdStore {
         &self.cold_store
@@ -286,7 +299,12 @@ mod tests {
     use super::{BrainStore, PreparedTier2Layout};
     use crate::api::NamespaceId;
     use crate::migrate::DurableSchemaObject;
-    use crate::types::{MemoryId, RawEncodeInput, RawIntakeKind, SessionId};
+    use crate::store::{
+        LifecycleState, TierOwnership, TierRoutingInput, TierRoutingReason,
+    };
+    use crate::types::{
+        CanonicalMemoryType, MemoryId, RawEncodeInput, RawIntakeKind, SessionId,
+    };
 
     #[test]
     fn prepare_tier2_layout_from_encode_preserves_landmark_metadata() {
@@ -381,5 +399,37 @@ mod tests {
         let store = BrainStore::default();
 
         assert!(store.tier2_schema_matches_migration_manifest());
+    }
+
+    #[test]
+    fn evaluate_tier_routing_exposes_inspectable_trace_through_brain_store() {
+        let store = BrainStore::default();
+        let trace = store.evaluate_tier_routing(&TierRoutingInput {
+            namespace: NamespaceId::new("tests/tier2").unwrap(),
+            memory_id: MemoryId(91),
+            session_id: SessionId(12),
+            memory_type: CanonicalMemoryType::Event,
+            current_tier: TierOwnership::Cold,
+            lifecycle_state: LifecycleState::Active,
+            salience: 850,
+            ticks_since_recall: 0,
+            payload_size_bytes: 4_096,
+            pinned: false,
+        });
+
+        assert_eq!(trace.memory_id, MemoryId(91));
+        assert_eq!(trace.lifecycle_state, LifecycleState::Active);
+        assert_eq!(trace.salience, 850);
+        assert_eq!(trace.ticks_since_recall, 0);
+        assert_eq!(trace.payload_size_bytes, 4_096);
+        assert!(!trace.pinned);
+        assert!(matches!(
+            trace.decision,
+            crate::store::TierRoutingDecision::PromoteToHot {
+                reason: TierRoutingReason::RecallActivity
+            }
+        ));
+        assert!(trace.summary().contains("PROMOTE to hot"));
+        assert!(trace.summary().contains("salience=850"));
     }
 }

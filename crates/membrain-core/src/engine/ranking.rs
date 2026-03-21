@@ -1,8 +1,8 @@
 //! Ranking, score-fusion, and explainability surfaces.
 //!
 //! This module owns the scoring formulas that combine recency, salience,
-//! relevance, and conflict signals into a final retrieval score. It
-//! produces explain payloads that downstream surfaces can inspect.
+//! strength, provenance, and contradiction state into a final retrieval
+//! score. It produces explain payloads that downstream surfaces can inspect.
 
 use crate::engine::contradiction::ContradictionExplain;
 
@@ -40,12 +40,12 @@ pub enum ScoreFamily {
     Recency,
     /// First-pass importance estimate from the encode path.
     Salience,
-    /// Query-match quality from retrieval (lexical + semantic).
-    Relevance,
+    /// Reinforced durability after recall and decay updates.
+    Strength,
+    /// Provenance confidence carried from source authoritativeness and lineage.
+    Provenance,
     /// Contradiction-aware penalty or boost.
     ConflictAdjustment,
-    /// Access-frequency signal from recall history.
-    AccessFrequency,
 }
 
 impl ScoreFamily {
@@ -54,20 +54,20 @@ impl ScoreFamily {
         match self {
             Self::Recency => "recency",
             Self::Salience => "salience",
-            Self::Relevance => "relevance",
+            Self::Strength => "strength",
+            Self::Provenance => "provenance",
             Self::ConflictAdjustment => "conflict_adjustment",
-            Self::AccessFrequency => "access_frequency",
         }
     }
 
     /// Default weight for this signal family (0..100).
     pub const fn default_weight(self) -> u8 {
         match self {
-            Self::Relevance => 40,
-            Self::Recency => 25,
-            Self::Salience => 20,
-            Self::ConflictAdjustment => 10,
-            Self::AccessFrequency => 5,
+            Self::Recency => 30,
+            Self::Salience => 30,
+            Self::Strength => 25,
+            Self::Provenance => 10,
+            Self::ConflictAdjustment => 5,
         }
     }
 }
@@ -79,9 +79,9 @@ impl ScoreFamily {
 pub struct RankingProfile {
     pub recency_weight: u8,
     pub salience_weight: u8,
-    pub relevance_weight: u8,
+    pub strength_weight: u8,
+    pub provenance_weight: u8,
     pub conflict_weight: u8,
-    pub access_weight: u8,
 }
 
 impl RankingProfile {
@@ -90,31 +90,31 @@ impl RankingProfile {
         Self {
             recency_weight: ScoreFamily::Recency.default_weight(),
             salience_weight: ScoreFamily::Salience.default_weight(),
-            relevance_weight: ScoreFamily::Relevance.default_weight(),
+            strength_weight: ScoreFamily::Strength.default_weight(),
+            provenance_weight: ScoreFamily::Provenance.default_weight(),
             conflict_weight: ScoreFamily::ConflictAdjustment.default_weight(),
-            access_weight: ScoreFamily::AccessFrequency.default_weight(),
         }
     }
 
     /// Recency-biased profile for "what happened recently" queries.
     pub const fn recency_biased() -> Self {
         Self {
-            recency_weight: 50,
-            salience_weight: 15,
-            relevance_weight: 25,
+            recency_weight: 45,
+            salience_weight: 25,
+            strength_weight: 15,
+            provenance_weight: 10,
             conflict_weight: 5,
-            access_weight: 5,
         }
     }
 
-    /// Relevance-biased profile for semantic search queries.
-    pub const fn relevance_biased() -> Self {
+    /// Strength-biased profile for reinforced-memory queries.
+    pub const fn strength_biased() -> Self {
         Self {
-            recency_weight: 10,
-            salience_weight: 15,
-            relevance_weight: 60,
-            conflict_weight: 10,
-            access_weight: 5,
+            recency_weight: 15,
+            salience_weight: 20,
+            strength_weight: 50,
+            provenance_weight: 10,
+            conflict_weight: 5,
         }
     }
 }
@@ -134,13 +134,13 @@ pub struct RankingInput {
     pub recency: u16,
     /// Provisional salience from the encode path (0..1000).
     pub salience: u16,
-    /// Query relevance from retrieval matching (0..1000).
-    pub relevance: u16,
+    /// Reinforced durability after recall and decay updates (0..1000).
+    pub strength: u16,
+    /// Provenance confidence from source authoritativeness and lineage (0..1000).
+    pub provenance: u16,
     /// Conflict adjustment: positive boosts preferred, negative penalizes superseded.
     /// Stored as 500 = neutral, 0 = max penalty, 1000 = max boost.
     pub conflict: u16,
-    /// Access frequency signal (0..1000).
-    pub access: u16,
 }
 
 /// Fused ranking result with full explain trace.
@@ -161,25 +161,24 @@ pub fn fuse_scores(input: RankingInput, profile: RankingProfile) -> RankingResul
     let signals = vec![
         ScoreSignal::new("recency", input.recency, profile.recency_weight),
         ScoreSignal::new("salience", input.salience, profile.salience_weight),
-        ScoreSignal::new("relevance", input.relevance, profile.relevance_weight),
+        ScoreSignal::new("strength", input.strength, profile.strength_weight),
+        ScoreSignal::new("provenance", input.provenance, profile.provenance_weight),
         ScoreSignal::new(
             "conflict_adjustment",
             input.conflict,
             profile.conflict_weight,
         ),
-        ScoreSignal::new("access_frequency", input.access, profile.access_weight),
     ];
 
     let total_weighted: u32 = signals.iter().map(|s| s.weighted_value).sum();
-    // Normalize back to 0..1000 range
-    let final_score = (total_weighted).min(1000) as u16;
+    let final_score = total_weighted.min(1000) as u16;
 
     let profile_name = if profile == RankingProfile::balanced() {
         "balanced"
     } else if profile == RankingProfile::recency_biased() {
         "recency_biased"
-    } else if profile == RankingProfile::relevance_biased() {
-        "relevance_biased"
+    } else if profile == RankingProfile::strength_biased() {
+        "strength_biased"
     } else {
         "custom"
     };
@@ -224,9 +223,9 @@ impl RankingExplain {
         let signal_breakdown = vec![
             signal_for(ScoreFamily::Recency),
             signal_for(ScoreFamily::Salience),
-            signal_for(ScoreFamily::Relevance),
+            signal_for(ScoreFamily::Strength),
+            signal_for(ScoreFamily::Provenance),
             signal_for(ScoreFamily::ConflictAdjustment),
-            signal_for(ScoreFamily::AccessFrequency),
         ];
 
         Self {
@@ -273,9 +272,9 @@ mod tests {
         let p = RankingProfile::balanced();
         let total = p.recency_weight as u16
             + p.salience_weight as u16
-            + p.relevance_weight as u16
-            + p.conflict_weight as u16
-            + p.access_weight as u16;
+            + p.strength_weight as u16
+            + p.provenance_weight as u16
+            + p.conflict_weight as u16;
         assert_eq!(total, 100);
     }
 
@@ -284,9 +283,20 @@ mod tests {
         let p = RankingProfile::recency_biased();
         let total = p.recency_weight as u16
             + p.salience_weight as u16
-            + p.relevance_weight as u16
-            + p.conflict_weight as u16
-            + p.access_weight as u16;
+            + p.strength_weight as u16
+            + p.provenance_weight as u16
+            + p.conflict_weight as u16;
+        assert_eq!(total, 100);
+    }
+
+    #[test]
+    fn strength_biased_profile_weights_sum_to_100() {
+        let p = RankingProfile::strength_biased();
+        let total = p.recency_weight as u16
+            + p.salience_weight as u16
+            + p.strength_weight as u16
+            + p.provenance_weight as u16
+            + p.conflict_weight as u16;
         assert_eq!(total, 100);
     }
 
@@ -295,9 +305,9 @@ mod tests {
         let input = RankingInput {
             recency: 1000,
             salience: 1000,
-            relevance: 1000,
+            strength: 1000,
+            provenance: 1000,
             conflict: 1000,
-            access: 1000,
         };
         let result = fuse_scores(input, RankingProfile::balanced());
         assert_eq!(result.final_score, 1000);
@@ -309,36 +319,36 @@ mod tests {
         let input = RankingInput {
             recency: 0,
             salience: 0,
-            relevance: 0,
+            strength: 0,
+            provenance: 0,
             conflict: 0,
-            access: 0,
         };
         let result = fuse_scores(input, RankingProfile::balanced());
         assert_eq!(result.final_score, 0);
     }
 
     #[test]
-    fn relevance_biased_profile_ranks_relevance_higher() {
-        let high_relevance = RankingInput {
+    fn strength_biased_profile_ranks_strength_higher() {
+        let high_strength = RankingInput {
             recency: 200,
             salience: 200,
-            relevance: 1000,
+            strength: 1000,
+            provenance: 300,
             conflict: 500,
-            access: 100,
         };
         let high_recency = RankingInput {
             recency: 1000,
             salience: 200,
-            relevance: 200,
+            strength: 200,
+            provenance: 300,
             conflict: 500,
-            access: 100,
         };
 
-        let profile = RankingProfile::relevance_biased();
-        let score_relevance = fuse_scores(high_relevance, profile).final_score;
+        let profile = RankingProfile::strength_biased();
+        let score_strength = fuse_scores(high_strength, profile).final_score;
         let score_recency = fuse_scores(high_recency, profile).final_score;
 
-        assert!(score_relevance > score_recency);
+        assert!(score_strength > score_recency);
     }
 
     #[test]
@@ -346,9 +356,9 @@ mod tests {
         let input = RankingInput {
             recency: 800,
             salience: 600,
-            relevance: 900,
+            strength: 900,
+            provenance: 700,
             conflict: 500,
-            access: 300,
         };
         let result = fuse_scores(input, RankingProfile::balanced());
         let explain = RankingExplain::from_result(&result);
@@ -365,9 +375,9 @@ mod tests {
         let result = RankingResult {
             final_score: 777,
             signals: vec![
-                ScoreSignal::new("relevance", 900, 60),
-                ScoreSignal::new("access_frequency", 300, 5),
-                ScoreSignal::new("recency", 800, 10),
+                ScoreSignal::new("strength", 900, 50),
+                ScoreSignal::new("provenance", 300, 10),
+                ScoreSignal::new("recency", 800, 15),
             ],
             profile_name: "custom",
             contradiction_explains: Vec::new(),
@@ -376,16 +386,13 @@ mod tests {
         let explain = RankingExplain::from_result(&result);
 
         assert_eq!(explain.signal_breakdown.len(), 5);
-        assert_eq!(explain.signal_breakdown[0], (ScoreFamily::Recency, 800, 10));
-        assert_eq!(explain.signal_breakdown[1], (ScoreFamily::Salience, 0, 20));
-        assert_eq!(explain.signal_breakdown[2], (ScoreFamily::Relevance, 900, 60));
-        assert_eq!(
-            explain.signal_breakdown[3],
-            (ScoreFamily::ConflictAdjustment, 0, 10)
-        );
+        assert_eq!(explain.signal_breakdown[0], (ScoreFamily::Recency, 800, 15));
+        assert_eq!(explain.signal_breakdown[1], (ScoreFamily::Salience, 0, 30));
+        assert_eq!(explain.signal_breakdown[2], (ScoreFamily::Strength, 900, 50));
+        assert_eq!(explain.signal_breakdown[3], (ScoreFamily::Provenance, 300, 10));
         assert_eq!(
             explain.signal_breakdown[4],
-            (ScoreFamily::AccessFrequency, 300, 5)
+            (ScoreFamily::ConflictAdjustment, 0, 5)
         );
     }
 
@@ -397,9 +404,9 @@ mod tests {
         let input = RankingInput {
             recency: 500,
             salience: 500,
-            relevance: 500,
+            strength: 500,
+            provenance: 500,
             conflict: 500,
-            access: 500,
         };
         let result = engine.rank_candidate(input, RankingProfile::balanced());
         assert_eq!(result.final_score, 500);

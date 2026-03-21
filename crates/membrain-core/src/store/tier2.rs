@@ -122,6 +122,11 @@ impl Tier2DurableItemLayout {
     pub fn payload_record(&self) -> &Tier2PayloadRecord {
         &self.payload
     }
+
+    /// Returns the stable hydration path for fetching the deferred heavyweight payload body.
+    pub fn payload_hydration_path(&self) -> String {
+        self.metadata.payload_locator.hydration_path()
+    }
 }
 
 /// Stable locator for the heavyweight Tier2 payload body stored outside metadata rows.
@@ -140,6 +145,20 @@ impl Tier2PayloadLocator {
             shard: (memory_id.0 % 1024) as u16,
             slot: memory_id.0,
         }
+    }
+
+    /// Returns the stable hydration path used to materialize the deferred Tier2 payload.
+    pub fn hydration_path(&self) -> String {
+        format!(
+            "tier2://{}/payload/{:04x}/{}",
+            self.namespace_segment(),
+            self.shard,
+            self.slot
+        )
+    }
+
+    fn namespace_segment(&self) -> String {
+        self.namespace.as_str().replace('/', "%2F")
     }
 }
 

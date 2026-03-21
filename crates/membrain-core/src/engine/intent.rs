@@ -73,7 +73,7 @@ pub struct IntentSignalMatch {
 pub enum IntentRankingProfile {
     Balanced,
     RecencyBiased,
-    RelevanceBiased,
+    StrengthBiased,
 }
 
 impl IntentRankingProfile {
@@ -82,7 +82,7 @@ impl IntentRankingProfile {
         match self {
             Self::Balanced => "balanced",
             Self::RecencyBiased => "recency_biased",
-            Self::RelevanceBiased => "relevance_biased",
+            Self::StrengthBiased => "strength_biased",
         }
     }
 
@@ -91,7 +91,7 @@ impl IntentRankingProfile {
         match self {
             Self::Balanced => RankingProfile::balanced(),
             Self::RecencyBiased => RankingProfile::recency_biased(),
-            Self::RelevanceBiased => RankingProfile::relevance_biased(),
+            Self::StrengthBiased => RankingProfile::strength_biased(),
         }
     }
 }
@@ -483,7 +483,7 @@ fn route_inputs_for(intent: QueryIntent) -> IntentRouteInputs {
     match intent {
         QueryIntent::SemanticBroad => IntentRouteInputs {
             query_path: QueryPath::Hybrid,
-            ranking_profile: IntentRankingProfile::RelevanceBiased,
+            ranking_profile: IntentRankingProfile::StrengthBiased,
             prefer_small_lookup: false,
             prefer_preview_only_on_low_confidence: false,
             high_stakes: false,
@@ -504,7 +504,7 @@ fn route_inputs_for(intent: QueryIntent) -> IntentRouteInputs {
         },
         QueryIntent::StrengthWeighted => IntentRouteInputs {
             query_path: QueryPath::Hybrid,
-            ranking_profile: IntentRankingProfile::Balanced,
+            ranking_profile: IntentRankingProfile::StrengthBiased,
             prefer_small_lookup: true,
             prefer_preview_only_on_low_confidence: false,
             high_stakes: true,
@@ -532,7 +532,7 @@ fn route_inputs_for(intent: QueryIntent) -> IntentRouteInputs {
         },
         QueryIntent::DiverseSample => IntentRouteInputs {
             query_path: QueryPath::Hybrid,
-            ranking_profile: IntentRankingProfile::RelevanceBiased,
+            ranking_profile: IntentRankingProfile::StrengthBiased,
             prefer_small_lookup: false,
             prefer_preview_only_on_low_confidence: false,
             high_stakes: false,
@@ -636,6 +636,21 @@ mod tests {
     }
 
     #[test]
+    fn strength_weighted_queries_select_strength_biased_ranking() {
+        let classification =
+            IntentEngine.classify("what is most important about the rollback plan?");
+
+        assert_eq!(classification.intent, QueryIntent::StrengthWeighted);
+        assert_eq!(classification.route_inputs.query_path, QueryPath::Hybrid);
+        assert_eq!(
+            classification.route_inputs.ranking_profile,
+            IntentRankingProfile::StrengthBiased
+        );
+        assert!(classification.route_inputs.prefer_small_lookup);
+        assert!(classification.route_inputs.high_stakes);
+    }
+
+    #[test]
     fn default_semantic_broad_fallback_stays_explicit_and_low_confidence() {
         let classification = IntentEngine.classify("rust borrow checker notes");
 
@@ -644,7 +659,7 @@ mod tests {
         assert_eq!(classification.route_inputs.query_path, QueryPath::Hybrid);
         assert_eq!(
             classification.route_inputs.ranking_profile,
-            IntentRankingProfile::RelevanceBiased,
+            IntentRankingProfile::StrengthBiased,
         );
         assert_eq!(classification.matched_signals.len(), 1);
         assert_eq!(classification.matched_signals[0].kind, IntentSignalKind::Fallback);
