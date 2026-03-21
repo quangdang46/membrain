@@ -1,7 +1,9 @@
+use crate::engine::recall::{RecallPlanKind, RecallTraceStage};
+use crate::engine::result::{PolicySummary, ProvenanceSummary, ResultReason, RetrievalResultSet};
 use crate::types::{CanonicalMemoryType, FastPathRouteFamily, LandmarkMetadata, LandmarkSignals};
 
 /// High-level audit event families preserved in append-only storage.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
 pub enum AuditEventCategory {
     Encode,
     Recall,
@@ -24,7 +26,7 @@ impl AuditEventCategory {
 }
 
 /// Stable audit event taxonomy for append-only log rows.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
 pub enum AuditEventKind {
     EncodeAccepted,
     EncodeRejected,
@@ -101,7 +103,7 @@ impl OutcomeClass {
 }
 
 /// Ordered synchronous stages on the encode fast path.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum EncodeFastPathStage {
     Normalize,
     Fingerprint,
@@ -147,7 +149,7 @@ pub struct EncodeFastPathTrace {
 }
 
 /// Tier1 lookup lanes that remain inspectable on the request path.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum Tier1LookupLane {
     ExactHandle,
     RecentWindow,
@@ -164,7 +166,7 @@ impl Tier1LookupLane {
 }
 
 /// Machine-readable Tier1 outcomes for exact and recent hot-set reuse.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum Tier1LookupOutcome {
     Hit,
     Miss,
@@ -185,7 +187,7 @@ impl Tier1LookupOutcome {
 }
 
 /// Stable trace artifact for Tier1 exact and recent lookups.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct Tier1LookupTrace {
     /// Which Tier1 lane fired on the request path.
     pub lane: Tier1LookupLane,
@@ -200,7 +202,7 @@ pub struct Tier1LookupTrace {
 }
 
 /// Machine-readable Tier2 outcomes for metadata-first durable item planning.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum Tier2PrefilterOutcome {
     Ready,
     Bypass,
@@ -217,7 +219,7 @@ impl Tier2PrefilterOutcome {
 }
 
 /// Stable trace artifact for Tier2 metadata-first prefilter and index planning.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct Tier2PrefilterTrace {
     /// Whether the operation stayed on metadata-only durable rows.
     pub outcome: Tier2PrefilterOutcome,
@@ -228,7 +230,7 @@ pub struct Tier2PrefilterTrace {
 }
 
 /// Machine-readable admission outcomes for the working-memory controller.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum AdmissionOutcomeKind {
     /// The candidate was dropped before entering controller state.
     Discarded,
@@ -250,7 +252,7 @@ impl AdmissionOutcomeKind {
 }
 
 /// Stable trace artifact for working-memory admission decisions.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct WorkingMemoryTrace {
     /// The final admission outcome.
     pub outcome: AdmissionOutcomeKind,
@@ -262,6 +264,176 @@ pub struct WorkingMemoryTrace {
     pub overflowed: bool,
 }
 
+/// Machine-readable top-level route summary preserved across surfaces.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct RouteSummary {
+    pub route_family: &'static str,
+    pub route_reason: &'static str,
+    pub tier1_consulted_first: bool,
+    pub routes_to_deeper_tiers: bool,
+}
+
+impl RouteSummary {
+    /// Builds a shared route summary from the canonical retrieval result envelope.
+    pub fn from_result_set(result_set: &RetrievalResultSet) -> Self {
+        let explain = &result_set.explain;
+        Self {
+            route_family: route_family(explain.recall_plan),
+            route_reason: route_reason_label(&explain.route_reason),
+            tier1_consulted_first: explain
+                .trace_stages
+                .iter()
+                .all(|stage| !matches!(stage, RecallTraceStage::Tier2Exact | RecallTraceStage::Tier3Fallback))
+                || explain
+                    .trace_stages
+                    .iter()
+                    .position(|stage| matches!(stage, RecallTraceStage::Tier1ExactHandle | RecallTraceStage::Tier1RecentWindow))
+                    .is_some_and(|tier1_pos| {
+                        explain
+                            .trace_stages
+                            .iter()
+                            .position(|stage| matches!(stage, RecallTraceStage::Tier2Exact | RecallTraceStage::Tier3Fallback))
+                            .is_none_or(|deeper_pos| tier1_pos < deeper_pos)
+                    }),
+            routes_to_deeper_tiers: explain
+                .trace_stages
+                .iter()
+                .any(|stage| matches!(stage, RecallTraceStage::Tier2Exact | RecallTraceStage::Tier3Fallback)),
+        }
+    }
+}
+
+/// Stable trace-stage vocabulary for cross-surface explain payloads.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub enum TraceStage {
+    Tier1ExactHandle,
+    Tier1RecentWindow,
+    Tier2Exact,
+    Tier3Fallback,
+    PolicyGate,
+    Packaging,
+}
+
+impl TraceStage {
+    /// Returns the stable machine-readable stage name.
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Tier1ExactHandle => "tier1_exact_handle",
+            Self::Tier1RecentWindow => "tier1_recent_window",
+            Self::Tier2Exact => "tier2_exact",
+            Self::Tier3Fallback => "tier3_fallback",
+            Self::PolicyGate => "policy_gate",
+            Self::Packaging => "packaging",
+        }
+    }
+
+    /// Maps a retrieval trace stage into the shared cross-surface stage vocabulary.
+    pub const fn from_recall(stage: RecallTraceStage) -> Self {
+        match stage {
+            RecallTraceStage::Tier1ExactHandle => Self::Tier1ExactHandle,
+            RecallTraceStage::Tier1RecentWindow => Self::Tier1RecentWindow,
+            RecallTraceStage::Tier2Exact => Self::Tier2Exact,
+            RecallTraceStage::Tier3Fallback => Self::Tier3Fallback,
+        }
+    }
+}
+
+/// Shared freshness marker for explain surfaces.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct FreshnessMarker {
+    pub code: &'static str,
+    pub detail: &'static str,
+}
+
+/// Shared conflict marker for explain surfaces.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct ConflictMarker {
+    pub code: &'static str,
+    pub detail: &'static str,
+}
+
+/// Shared uncertainty marker for explain surfaces.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct UncertaintyMarker {
+    pub code: &'static str,
+    pub detail: &'static str,
+}
+
+/// Shared policy summary for explain surfaces.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct TracePolicySummary {
+    pub effective_namespace: String,
+    pub policy_family: &'static str,
+    pub outcome_class: OutcomeClass,
+    pub blocked_stage: &'static str,
+    pub redaction_fields: Vec<&'static str>,
+    pub retention_state: &'static str,
+    pub sharing_scope: &'static str,
+}
+
+impl TracePolicySummary {
+    /// Builds a shared policy summary from the canonical retrieval result envelope.
+    pub fn from_result_set(result_set: &RetrievalResultSet) -> Self {
+        let policy = &result_set.policy_summary;
+        Self {
+            effective_namespace: policy.namespace_applied.as_str().to_string(),
+            policy_family: policy_family(policy),
+            outcome_class: policy.outcome_class,
+            blocked_stage: blocked_stage(policy),
+            redaction_fields: redaction_fields(policy),
+            retention_state: retention_state(policy),
+            sharing_scope: sharing_scope(policy),
+        }
+    }
+}
+
+/// Shared provenance summary for explain surfaces.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct TraceProvenanceSummary {
+    pub source_kind: &'static str,
+    pub source_reference: &'static str,
+    pub lineage_ancestors: Vec<u64>,
+}
+
+impl TraceProvenanceSummary {
+    /// Builds a shared provenance summary from the canonical retrieval result envelope.
+    pub fn from_result_set(result_set: &RetrievalResultSet) -> Self {
+        Self::from_provenance(&result_set.provenance_summary)
+    }
+
+    /// Builds a shared provenance summary from canonical provenance state.
+    pub fn from_provenance(provenance: &ProvenanceSummary) -> Self {
+        Self {
+            source_kind: source_kind_label(&provenance.source_kind),
+            source_reference: source_reference_label(&provenance.source_reference),
+            lineage_ancestors: provenance
+                .lineage_ancestors
+                .iter()
+                .map(|memory_id| memory_id.0)
+                .collect(),
+        }
+    }
+}
+
+/// Machine-readable reason describing why an item appeared or was omitted.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct ExplainResultReason {
+    pub memory_id: Option<u64>,
+    pub reason_code: &'static str,
+    pub detail: String,
+}
+
+impl ExplainResultReason {
+    /// Builds a shared explain reason from canonical retrieval reasoning.
+    pub fn from_result_reason(reason: &ResultReason) -> Self {
+        Self {
+            memory_id: reason.memory_id.map(|memory_id| memory_id.0),
+            reason_code: reason_code_label(&reason.reason_code),
+            detail: reason.detail.clone(),
+        }
+    }
+}
+
 /// Stable observability boundary for shared trace and audit vocabularies.
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
 pub struct ObservabilityModule;
@@ -271,10 +443,207 @@ impl ObservabilityModule {
     pub const fn component_name(&self) -> &'static str {
         "observability"
     }
+
+    /// Builds the shared route summary and trace stage family from a result set.
+    pub fn explain_route(&self, result_set: &RetrievalResultSet) -> (RouteSummary, Vec<TraceStage>) {
+        let route_summary = RouteSummary::from_result_set(result_set);
+        let mut trace_stages = result_set
+            .explain
+            .trace_stages
+            .iter()
+            .copied()
+            .map(TraceStage::from_recall)
+            .collect::<Vec<_>>();
+        trace_stages.push(TraceStage::PolicyGate);
+        trace_stages.push(TraceStage::Packaging);
+        (route_summary, trace_stages)
+    }
+
+    /// Builds the shared explain reason family from a result set.
+    pub fn explain_result_reasons(&self, result_set: &RetrievalResultSet) -> Vec<ExplainResultReason> {
+        result_set
+            .explain
+            .result_reasons
+            .iter()
+            .map(ExplainResultReason::from_result_reason)
+            .collect()
+    }
+
+    /// Builds the shared policy and provenance summaries from a result set.
+    pub fn explain_policy_and_provenance(
+        &self,
+        result_set: &RetrievalResultSet,
+    ) -> (TracePolicySummary, TraceProvenanceSummary) {
+        (
+            TracePolicySummary::from_result_set(result_set),
+            TraceProvenanceSummary::from_result_set(result_set),
+        )
+    }
+
+    /// Builds the shared freshness, conflict, and uncertainty marker families.
+    pub fn explain_markers(
+        &self,
+        result_set: &RetrievalResultSet,
+    ) -> (
+        Vec<FreshnessMarker>,
+        Vec<ConflictMarker>,
+        Vec<UncertaintyMarker>,
+    ) {
+        let freshness = vec![freshness_marker(&result_set.freshness_markers)];
+        let conflict = result_set
+            .evidence_pack
+            .iter()
+            .filter_map(|item| conflict_marker(&item.result.conflict_markers))
+            .collect();
+        let uncertainty = result_set
+            .evidence_pack
+            .iter()
+            .map(|item| uncertainty_marker(&item.result.uncertainty_markers))
+            .collect();
+        (freshness, conflict, uncertainty)
+    }
+}
+
+fn route_family(plan: RecallPlanKind) -> &'static str {
+    match plan {
+        RecallPlanKind::ExactIdTier1 => "exact_id_tier1",
+        RecallPlanKind::RecentTier1ThenTier2Exact => "recent_tier1_then_tier2_exact",
+        RecallPlanKind::Tier2ExactThenTier3Fallback => "tier2_exact_then_tier3_fallback",
+    }
+}
+
+fn route_reason_label(reason: &str) -> &'static str {
+    match reason {
+        "exact memory id provided" => "exact_memory_id",
+        "small lookup for active session can stay on hot recent window before durable fallback" => {
+            "small_session_lookup"
+        }
+        "request needs broader durable retrieval before cold fallback" => "broader_durable_retrieval",
+        _ => "custom_route_reason",
+    }
+}
+
+fn policy_family(policy: &PolicySummary) -> &'static str {
+    if policy.filters.is_empty() {
+        "none"
+    } else {
+        "namespace"
+    }
+}
+
+fn blocked_stage(policy: &PolicySummary) -> &'static str {
+    match policy.outcome_class {
+        OutcomeClass::Blocked | OutcomeClass::Rejected => "policy_gate",
+        _ => "not_blocked",
+    }
+}
+
+fn redaction_fields(policy: &PolicySummary) -> Vec<&'static str> {
+    if policy.redactions_applied {
+        vec!["payload"]
+    } else {
+        Vec::new()
+    }
+}
+
+fn retention_state(policy: &PolicySummary) -> &'static str {
+    if policy.restrictions_active.iter().any(|restriction| restriction == "retention") {
+        "retained"
+    } else {
+        "absent"
+    }
+}
+
+fn sharing_scope(policy: &PolicySummary) -> &'static str {
+    let Some(scope) = policy.filters.iter().find_map(|filter| match &filter.sharing_scope {
+        crate::api::FieldPresence::Present(scope) => Some(scope.as_str()),
+        crate::api::FieldPresence::Absent | crate::api::FieldPresence::Redacted => None,
+    }) else {
+        return "same_namespace";
+    };
+
+    match scope {
+        "namespace_only" => "namespace_only",
+        "approved_shared" => "approved_shared",
+        "same_namespace" => "same_namespace",
+        _ => "custom_sharing_scope",
+    }
+}
+
+fn source_kind_label(source_kind: &str) -> &'static str {
+    match source_kind {
+        "memory" => "memory",
+        "retrieval_pipeline" => "retrieval_pipeline",
+        _ => "custom_source_kind",
+    }
+}
+
+fn source_reference_label(source_reference: &str) -> &'static str {
+    match source_reference {
+        "memory_id" => "memory_id",
+        "result_builder" => "result_builder",
+        "result_set" => "result_set",
+        _ => "custom_source_reference",
+    }
+}
+
+fn reason_code_label(reason_code: &str) -> &'static str {
+    match reason_code {
+        "score_kept" => "score_kept",
+        "no_match" => "no_match",
+        "tier2_exact_match" => "tier2_exact_match",
+        "temporal_prefilter_metadata_only" => "temporal_prefilter_metadata_only",
+        "temporal_landmark_selected" => "temporal_landmark_selected",
+        "temporal_landmark_not_selected" => "temporal_landmark_not_selected",
+        _ => "custom_reason_code",
+    }
+}
+
+fn freshness_marker(markers: &crate::engine::result::FreshnessMarkers) -> FreshnessMarker {
+    if markers.stale_warning {
+        FreshnessMarker {
+            code: "stale_warning",
+            detail: "result set includes stale or aging evidence",
+        }
+    } else {
+        FreshnessMarker {
+            code: "fresh",
+            detail: "result set freshness remained within the default packaging window",
+        }
+    }
+}
+
+fn conflict_marker(
+    markers: &crate::engine::result::ConflictMarkers,
+) -> Option<ConflictMarker> {
+    if markers.conflict_record_ids.is_empty() {
+        None
+    } else {
+        Some(ConflictMarker {
+            code: "open_conflict",
+            detail: "result retained contradiction-bearing evidence",
+        })
+    }
+}
+
+fn uncertainty_marker(
+    markers: &crate::engine::result::UncertaintyMarkers,
+) -> UncertaintyMarker {
+    if markers.uncertainty_score >= 500 {
+        UncertaintyMarker {
+            code: "high_uncertainty",
+            detail: "bounded evidence carried elevated uncertainty",
+        }
+    } else {
+        UncertaintyMarker {
+            code: "low_uncertainty",
+            detail: "bounded evidence had low uncertainty",
+        }
+    }
 }
 
 /// Machine-readable cache lookup outcome for the observability trace stream.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum CacheLookupOutcome {
     Hit,
     Miss,
@@ -297,7 +666,7 @@ impl CacheLookupOutcome {
 }
 
 /// Stable trace artifact for one cache-family evaluation on the request path.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct CacheEvalTrace {
     /// Which cache family was evaluated.
     pub outcome: CacheLookupOutcome,
@@ -312,9 +681,16 @@ pub struct CacheEvalTrace {
 #[cfg(test)]
 mod tests {
     use super::{
-        AdmissionOutcomeKind, CacheLookupOutcome, EncodeFastPathStage, OutcomeClass,
-        Tier1LookupLane, Tier1LookupOutcome, Tier2PrefilterOutcome,
+        AdmissionOutcomeKind, CacheLookupOutcome, EncodeFastPathStage, ExplainResultReason,
+        ObservabilityModule, OutcomeClass, Tier1LookupLane, Tier1LookupOutcome,
+        Tier2PrefilterOutcome, TraceStage,
     };
+    use crate::engine::recall::{RecallPlanKind, RecallTraceStage};
+    use crate::engine::result::{
+        FreshnessMarkers, OmissionSummary, PackagingMetadata, PolicySummary, ProvenanceSummary,
+        ResultReason, RetrievalExplain, RetrievalResultSet,
+    };
+    use crate::api::NamespaceId;
 
     #[test]
     fn retrieval_outcome_class_labels_match_contract() {
@@ -353,5 +729,186 @@ mod tests {
         assert_eq!(CacheLookupOutcome::Bypass.as_str(), "bypass");
         assert_eq!(CacheLookupOutcome::StaleWarning.as_str(), "stale_warning");
         assert_eq!(CacheLookupOutcome::Disabled.as_str(), "disabled");
+    }
+
+    #[test]
+    fn explain_builders_project_shared_summary_families() {
+        let result_set = RetrievalResultSet {
+            outcome_class: OutcomeClass::Accepted,
+            evidence_pack: Vec::new(),
+            action_pack: None,
+            deferred_payloads: Vec::new(),
+            explain: RetrievalExplain {
+                recall_plan: RecallPlanKind::RecentTier1ThenTier2Exact,
+                route_reason:
+                    "small lookup for active session can stay on hot recent window before durable fallback"
+                        .to_string(),
+                tiers_consulted: vec!["tier1_recent".to_string(), "tier2_exact".to_string()],
+                trace_stages: vec![RecallTraceStage::Tier1RecentWindow, RecallTraceStage::Tier2Exact],
+                tier1_answered_directly: false,
+                candidate_budget: 8,
+                time_consumed_ms: Some(12),
+                ranking_profile: "balanced".to_string(),
+                contradictions_found: 0,
+                result_reasons: vec![ResultReason {
+                    memory_id: None,
+                    reason_code: "tier2_exact_match".to_string(),
+                    detail: "candidate survived bounded ranking".to_string(),
+                }],
+            },
+            policy_summary: PolicySummary {
+                namespace_applied: NamespaceId::new("team.gamma").unwrap(),
+                outcome_class: OutcomeClass::Accepted,
+                redactions_applied: false,
+                restrictions_active: Vec::new(),
+                filters: Vec::new(),
+            },
+            provenance_summary: ProvenanceSummary {
+                source_kind: "retrieval_pipeline".to_string(),
+                source_reference: "result_builder".to_string(),
+                source_agent: "core_engine".to_string(),
+                original_namespace: NamespaceId::new("team.gamma").unwrap(),
+                derived_from: None,
+                lineage_ancestors: Vec::new(),
+                relation_to_seed: None,
+                graph_seed: None,
+            },
+            omitted_summary: OmissionSummary {
+                policy_redacted: 0,
+                threshold_dropped: 0,
+                dedup_dropped: 0,
+                budget_capped: 0,
+                duplicate_collapsed: 0,
+                low_confidence_suppressed: 0,
+                stale_bypassed: 0,
+            },
+            freshness_markers: FreshnessMarkers {
+                oldest_item_days: 1,
+                newest_item_days: 0,
+                volatile_items_included: false,
+                stale_warning: false,
+                as_of_tick: Some(42),
+            },
+            packaging_metadata: PackagingMetadata {
+                result_budget: 5,
+                token_budget: None,
+                graph_assistance: "none".to_string(),
+                degraded_summary: None,
+                packaging_mode: "evidence_only".to_string(),
+            },
+            output_mode: crate::engine::result::DualOutputMode::Balanced,
+            truncated: false,
+            total_candidates: 1,
+        };
+
+        let (route, stages) = ObservabilityModule.explain_route(&result_set);
+        let reasons = ObservabilityModule.explain_result_reasons(&result_set);
+        let (policy, provenance) = ObservabilityModule.explain_policy_and_provenance(&result_set);
+        let (freshness, conflict, uncertainty) = ObservabilityModule.explain_markers(&result_set);
+
+        assert_eq!(route.route_family, "recent_tier1_then_tier2_exact");
+        assert_eq!(route.route_reason, "small_session_lookup");
+        assert_eq!(stages, vec![
+            TraceStage::Tier1RecentWindow,
+            TraceStage::Tier2Exact,
+            TraceStage::PolicyGate,
+            TraceStage::Packaging,
+        ]);
+        assert_eq!(
+            reasons,
+            vec![ExplainResultReason {
+                memory_id: None,
+                reason_code: "tier2_exact_match",
+                detail: "candidate survived bounded ranking".to_string(),
+            }]
+        );
+        assert_eq!(policy.policy_family, "none");
+        assert_eq!(policy.blocked_stage, "not_blocked");
+        assert_eq!(policy.sharing_scope, "same_namespace");
+        assert_eq!(provenance.source_kind, "retrieval_pipeline");
+        assert_eq!(provenance.source_reference, "result_builder");
+        assert_eq!(freshness[0].code, "fresh");
+        assert!(conflict.is_empty());
+        assert!(uncertainty.is_empty());
+    }
+
+    #[test]
+    fn explain_policy_summary_uses_policy_filter_sharing_scope_when_present() {
+        let result_set = RetrievalResultSet {
+            outcome_class: OutcomeClass::Accepted,
+            evidence_pack: Vec::new(),
+            action_pack: None,
+            deferred_payloads: Vec::new(),
+            explain: RetrievalExplain {
+                recall_plan: RecallPlanKind::ExactIdTier1,
+                route_reason: "exact memory id provided".to_string(),
+                tiers_consulted: vec!["tier1_exact".to_string()],
+                trace_stages: vec![RecallTraceStage::Tier1ExactHandle],
+                tier1_answered_directly: true,
+                candidate_budget: 1,
+                time_consumed_ms: Some(1),
+                ranking_profile: "balanced".to_string(),
+                contradictions_found: 0,
+                result_reasons: Vec::new(),
+            },
+            policy_summary: PolicySummary {
+                namespace_applied: NamespaceId::new("team.beta").unwrap(),
+                outcome_class: OutcomeClass::Accepted,
+                redactions_applied: true,
+                restrictions_active: Vec::new(),
+                filters: vec![crate::api::PolicyFilterSummary::new(
+                    "team.beta",
+                    "namespace",
+                    OutcomeClass::Accepted,
+                    "not_blocked",
+                    crate::api::FieldPresence::Present("approved_shared".to_string()),
+                    crate::api::FieldPresence::Absent,
+                    vec!["payload".to_string()],
+                )],
+            },
+            provenance_summary: ProvenanceSummary {
+                source_kind: "memory".to_string(),
+                source_reference: "memory_id".to_string(),
+                source_agent: "core_engine".to_string(),
+                original_namespace: NamespaceId::new("team.beta").unwrap(),
+                derived_from: None,
+                lineage_ancestors: Vec::new(),
+                relation_to_seed: None,
+                graph_seed: None,
+            },
+            omitted_summary: OmissionSummary {
+                policy_redacted: 1,
+                threshold_dropped: 0,
+                dedup_dropped: 0,
+                budget_capped: 0,
+                duplicate_collapsed: 0,
+                low_confidence_suppressed: 0,
+                stale_bypassed: 0,
+            },
+            freshness_markers: FreshnessMarkers {
+                oldest_item_days: 0,
+                newest_item_days: 0,
+                volatile_items_included: false,
+                stale_warning: false,
+                as_of_tick: Some(7),
+            },
+            packaging_metadata: PackagingMetadata {
+                result_budget: 1,
+                token_budget: None,
+                graph_assistance: "none".to_string(),
+                degraded_summary: None,
+                packaging_mode: "evidence_only".to_string(),
+            },
+            output_mode: crate::engine::result::DualOutputMode::Balanced,
+            truncated: false,
+            total_candidates: 1,
+        };
+
+        let (policy, provenance) = ObservabilityModule.explain_policy_and_provenance(&result_set);
+
+        assert_eq!(policy.sharing_scope, "approved_shared");
+        assert_eq!(policy.redaction_fields, vec!["payload"]);
+        assert_eq!(provenance.source_kind, "memory");
+        assert_eq!(provenance.source_reference, "memory_id");
     }
 }

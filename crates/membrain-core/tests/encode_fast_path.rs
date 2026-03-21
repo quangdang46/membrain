@@ -239,6 +239,26 @@ fn qualified_landmark_signals_stay_visible_in_fast_path_trace_for_temporal_consu
 }
 
 #[test]
+fn landmark_era_slug_falls_back_when_text_has_no_ascii_alphanumerics() {
+    let engine = test_engine();
+    let prepared = engine.prepare_fast_path(
+        RawEncodeInput::new(RawIntakeKind::Event, "   !!! ###   ")
+            .with_landmark_signals(LandmarkSignals::new(0.95, 0.92, 0.10, 88)),
+    );
+
+    assert!(prepared.normalized.landmark.is_landmark);
+    assert_eq!(
+        prepared.normalized.landmark.landmark_label.as_deref(),
+        Some("!!! ###")
+    );
+    assert_eq!(
+        prepared.normalized.landmark.era_id.as_deref(),
+        Some("era-landmark-0088")
+    );
+    assert_eq!(prepared.trace.landmark, prepared.normalized.landmark);
+}
+
+#[test]
 fn contradiction_branching_records_an_explicit_artifact_instead_of_overwrite() {
     let mut store = BrainStore::default();
     let namespace = NamespaceId::new("tests/contradictions").unwrap();

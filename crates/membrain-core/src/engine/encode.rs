@@ -382,14 +382,20 @@ impl EncodeEngine {
         } else {
             label
         };
+        let era_slug = compact_text
+            .chars()
+            .filter(|ch| ch.is_ascii_alphanumeric())
+            .take(12)
+            .collect::<String>()
+            .to_ascii_lowercase();
+        let era_slug = if era_slug.is_empty() {
+            String::from("landmark")
+        } else {
+            era_slug
+        };
         let era_id = format!(
             "era-{}-{:04}",
-            compact_text
-                .chars()
-                .filter(|ch| ch.is_ascii_alphanumeric())
-                .take(12)
-                .collect::<String>()
-                .to_ascii_lowercase(),
+            era_slug,
             signals.ticks_since_last_landmark.min(9_999)
         );
 
@@ -587,24 +593,31 @@ mod tests {
         );
         assert_eq!(prepared.write_decision, PassiveObservationDecision::Capture);
         assert!(prepared.captured_as_observation);
-        assert_eq!(prepared.passive_observation_inspect.source_kind, "observation");
+        assert_eq!(
+            prepared.passive_observation_inspect.source_kind,
+            "observation"
+        );
         assert_eq!(
             prepared.passive_observation_inspect.write_decision,
             PassiveObservationDecision::Capture.as_str()
         );
-        assert!(prepared
-            .passive_observation_inspect
-            .captured_as_observation);
+        assert!(prepared.passive_observation_inspect.captured_as_observation);
         assert_eq!(
             prepared.passive_observation_inspect.retention_marker,
             "volatile_observation"
         );
         assert_eq!(
-            prepared.passive_observation_inspect.observation_source.as_deref(),
+            prepared
+                .passive_observation_inspect
+                .observation_source
+                .as_deref(),
             prepared.normalized.observation_source.as_deref()
         );
         assert_eq!(
-            prepared.passive_observation_inspect.observation_chunk_id.as_deref(),
+            prepared
+                .passive_observation_inspect
+                .observation_chunk_id
+                .as_deref(),
             prepared.normalized.observation_chunk_id.as_deref()
         );
         assert!(prepared

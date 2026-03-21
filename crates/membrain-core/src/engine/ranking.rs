@@ -212,32 +212,21 @@ pub struct RankingExplain {
 impl RankingExplain {
     /// Builds an explain payload from a ranking result.
     pub fn from_result(result: &RankingResult) -> Self {
+        let signal_for = |family: ScoreFamily| {
+            result
+                .signals
+                .iter()
+                .find(|signal| signal.name == family.as_str())
+                .map(|signal| (family, signal.raw_value, signal.weight))
+                .unwrap_or((family, 0, family.default_weight()))
+        };
+
         let signal_breakdown = vec![
-            (
-                ScoreFamily::Recency,
-                result.signals[0].raw_value,
-                result.signals[0].weight,
-            ),
-            (
-                ScoreFamily::Salience,
-                result.signals[1].raw_value,
-                result.signals[1].weight,
-            ),
-            (
-                ScoreFamily::Relevance,
-                result.signals[2].raw_value,
-                result.signals[2].weight,
-            ),
-            (
-                ScoreFamily::ConflictAdjustment,
-                result.signals[3].raw_value,
-                result.signals[3].weight,
-            ),
-            (
-                ScoreFamily::AccessFrequency,
-                result.signals[4].raw_value,
-                result.signals[4].weight,
-            ),
+            signal_for(ScoreFamily::Recency),
+            signal_for(ScoreFamily::Salience),
+            signal_for(ScoreFamily::Relevance),
+            signal_for(ScoreFamily::ConflictAdjustment),
+            signal_for(ScoreFamily::AccessFrequency),
         ];
 
         Self {
@@ -369,6 +358,35 @@ mod tests {
         assert!(!explain.has_conflict);
         assert_eq!(explain.signal_breakdown.len(), 5);
         assert_eq!(explain.signal_breakdown[0].0, ScoreFamily::Recency);
+    }
+
+    #[test]
+    fn explain_payload_maps_signals_by_name_instead_of_position() {
+        let result = RankingResult {
+            final_score: 777,
+            signals: vec![
+                ScoreSignal::new("relevance", 900, 60),
+                ScoreSignal::new("access_frequency", 300, 5),
+                ScoreSignal::new("recency", 800, 10),
+            ],
+            profile_name: "custom",
+            contradiction_explains: Vec::new(),
+        };
+
+        let explain = RankingExplain::from_result(&result);
+
+        assert_eq!(explain.signal_breakdown.len(), 5);
+        assert_eq!(explain.signal_breakdown[0], (ScoreFamily::Recency, 800, 10));
+        assert_eq!(explain.signal_breakdown[1], (ScoreFamily::Salience, 0, 20));
+        assert_eq!(explain.signal_breakdown[2], (ScoreFamily::Relevance, 900, 60));
+        assert_eq!(
+            explain.signal_breakdown[3],
+            (ScoreFamily::ConflictAdjustment, 0, 10)
+        );
+        assert_eq!(
+            explain.signal_breakdown[4],
+            (ScoreFamily::AccessFrequency, 300, 5)
+        );
     }
 
     #[test]

@@ -83,6 +83,28 @@ impl ResolutionState {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
 pub struct ContradictionId(pub u64);
 
+/// Which selection state a contradiction currently exposes to retrieval surfaces.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
+pub enum PreferredAnswerState {
+    /// No preferred answer is available yet.
+    Unset,
+    /// One side is preferred, but disagreement remains visible.
+    Preferred,
+    /// The contradiction is still active and should be surfaced as unresolved.
+    ActiveContradiction,
+}
+
+impl PreferredAnswerState {
+    /// Stable machine-readable name for this selection state.
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Unset => "unset",
+            Self::Preferred => "preferred",
+            Self::ActiveContradiction => "active_contradiction",
+        }
+    }
+}
+
 /// Durable contradiction record linking two memories that disagree.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ContradictionRecord {
@@ -100,6 +122,10 @@ pub struct ContradictionRecord {
     pub resolution: ResolutionState,
     /// The preferred memory after resolution (if any).
     pub preferred_memory: Option<MemoryId>,
+    /// Whether retrieval surfaces should expose a preferred answer or active contradiction.
+    pub preferred_answer_state: PreferredAnswerState,
+    /// Stable confidence signal for the current preferred-answer decision (0..1000).
+    pub confidence_signal: u16,
     /// Machine-readable reason for the current resolution.
     pub resolution_reason: Option<&'static str>,
     /// Similarity or conflict score between the two memories (0..1000).
@@ -124,6 +150,8 @@ impl ContradictionRecord {
             kind,
             resolution: ResolutionState::Unresolved,
             preferred_memory: None,
+            preferred_answer_state: PreferredAnswerState::Unset,
+            confidence_signal: 0,
             resolution_reason: None,
             conflict_score,
         }
@@ -133,7 +161,18 @@ impl ContradictionRecord {
     pub fn resolve(&mut self, state: ResolutionState, preferred: MemoryId, reason: &'static str) {
         self.resolution = state;
         self.preferred_memory = Some(preferred);
+        self.preferred_answer_state = PreferredAnswerState::Preferred;
+        self.confidence_signal = preferred_answer_confidence(self.kind, self.conflict_score, state);
         self.resolution_reason = Some(reason);
+    }
+
+    /// Marks the contradiction as still active with no preferred answer.
+    pub fn mark_active_contradiction(&mut self) {
+        self.resolution = ResolutionState::Unresolved;
+        self.preferred_memory = None;
+        self.preferred_answer_state = PreferredAnswerState::ActiveContradiction;
+        self.confidence_signal = active_contradiction_confidence(self.conflict_score);
+        self.resolution_reason = None;
     }
 
     /// Returns whether the contradiction is still unresolved.
@@ -151,6 +190,45 @@ impl ContradictionRecord {
             }
         })
     }
+
+    /// Returns whether this record should surface an active contradiction.
+    pub const fn has_active_contradiction(&self) -> bool {
+        matches!(
+            self.preferred_answer_state,
+            PreferredAnswerState::ActiveContradiction
+        )
+    }
+}
+
+const fn preferred_answer_confidence(
+    kind: ContradictionKind,
+    conflict_score: u16,
+    state: ResolutionState,
+) -> u16 {
+    let base = match kind {
+        ContradictionKind::AuthoritativeOverride => 930,
+        ContradictionKind::Supersession => 860,
+        ContradictionKind::Revision => 780,
+        ContradictionKind::Duplicate => 700,
+        ContradictionKind::Coexistence => 620,
+    };
+    let state_bonus = match state {
+        ResolutionState::AuthoritativelyResolved => 70,
+        ResolutionState::ManuallyResolved => 40,
+        ResolutionState::AutoResolved => 20,
+        ResolutionState::Unresolved => 0,
+    };
+    let conflict_bonus = conflict_score / 10;
+    let confidence = base + state_bonus + conflict_bonus;
+    if confidence > 1000 {
+        1000
+    } else {
+        confidence
+    }
+}
+
+const fn active_contradiction_confidence(conflict_score: u16) -> u16 {
+    1000 - (conflict_score / 2)
 }
 
 // ── Contradiction explain payload ────────────────────────────────────────────
@@ -164,12 +242,18 @@ pub struct ContradictionExplain {
     pub kind: ContradictionKind,
     /// Current resolution state.
     pub resolution: ResolutionState,
+    /// Selection state surfaced to retrieval consumers.
+    pub preferred_answer_state: PreferredAnswerState,
     /// Which memory is preferred (if resolved).
     pub preferred_memory: Option<MemoryId>,
+    /// Stable confidence signal for the current preferred answer state.
+    pub confidence_signal: u16,
     /// The other memory in the contradiction pair.
     pub conflicting_memory: MemoryId,
     /// Whether the current result was the preferred or superseded memory.
     pub result_is_preferred: bool,
+    /// Whether the contradiction remains active and user-visible.
+    pub active_contradiction: bool,
 }
 
 // ── Contradiction detection ──────────────────────────────────────────────────
@@ -380,9 +464,12 @@ impl ContradictionStore for ContradictionEngine {
                     contradiction_id: record.id,
                     kind: record.kind,
                     resolution: record.resolution,
+                    preferred_answer_state: record.preferred_answer_state,
                     preferred_memory: record.preferred_memory,
+                    confidence_signal: record.confidence_signal,
                     conflicting_memory,
                     result_is_preferred,
+                    active_contradiction: record.has_active_contradiction(),
                 }
             })
             .collect()
@@ -408,6 +495,22 @@ mod tests {
     use super::*;
     use crate::api::NamespaceId;
     use crate::types::MemoryId;
+
+    #[test]
+    fn active_contradiction_markers_preserve_disagreement() {
+        let mut record = make_record(ns("test"), 7, 8, ContradictionKind::Coexistence);
+
+        record.mark_active_contradiction();
+
+        assert_eq!(record.resolution, ResolutionState::Unresolved);
+        assert_eq!(record.preferred_memory, None);
+        assert_eq!(
+            record.preferred_answer_state,
+            PreferredAnswerState::ActiveContradiction
+        );
+        assert_eq!(record.confidence_signal, 750);
+        assert!(record.has_active_contradiction());
+    }
 
     fn ns(s: &str) -> NamespaceId {
         NamespaceId::new(s).unwrap()
@@ -467,6 +570,8 @@ mod tests {
         let found = engine.find_by_memory(MemoryId(10));
         assert_eq!(found[0].resolution, ResolutionState::AutoResolved);
         assert_eq!(found[0].preferred_memory, Some(MemoryId(20)));
+        assert_eq!(found[0].preferred_answer_state, PreferredAnswerState::Preferred);
+        assert_eq!(found[0].confidence_signal, 930);
         assert_eq!(found[0].superseded_memory(), Some(MemoryId(10)));
     }
 
@@ -580,12 +685,24 @@ mod tests {
         let explain_preferred = engine.explain_for_memory(MemoryId(20));
         assert_eq!(explain_preferred.len(), 1);
         assert!(explain_preferred[0].result_is_preferred);
+        assert_eq!(
+            explain_preferred[0].preferred_answer_state,
+            PreferredAnswerState::Preferred
+        );
+        assert_eq!(explain_preferred[0].confidence_signal, 1000);
+        assert!(!explain_preferred[0].active_contradiction);
         assert_eq!(explain_preferred[0].conflicting_memory, MemoryId(10));
 
         // Explain for the superseded memory
         let explain_superseded = engine.explain_for_memory(MemoryId(10));
         assert_eq!(explain_superseded.len(), 1);
         assert!(!explain_superseded[0].result_is_preferred);
+        assert_eq!(
+            explain_superseded[0].preferred_answer_state,
+            PreferredAnswerState::Preferred
+        );
+        assert_eq!(explain_superseded[0].confidence_signal, 1000);
+        assert!(!explain_superseded[0].active_contradiction);
         assert_eq!(explain_superseded[0].conflicting_memory, MemoryId(20));
     }
 
@@ -596,5 +713,15 @@ mod tests {
         assert!(ContradictionKind::AuthoritativeOverride.implies_preference());
         assert!(!ContradictionKind::Duplicate.implies_preference());
         assert!(!ContradictionKind::Coexistence.implies_preference());
+    }
+
+    #[test]
+    fn preferred_answer_state_names_are_stable() {
+        assert_eq!(PreferredAnswerState::Unset.as_str(), "unset");
+        assert_eq!(PreferredAnswerState::Preferred.as_str(), "preferred");
+        assert_eq!(
+            PreferredAnswerState::ActiveContradiction.as_str(),
+            "active_contradiction"
+        );
     }
 }

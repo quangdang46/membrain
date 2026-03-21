@@ -24,10 +24,14 @@ fn rebuild_recovers_authoritative_centroid_and_membership() {
 
     store.refresh_cluster(cluster.engram_id, 202);
     let rebuilt = store.rebuild_from_memberships();
-    let rebuilt_cluster = rebuilt.cluster(cluster.engram_id).unwrap();
+    let rebuilt_cluster = rebuilt.cluster(cluster.engram_id);
 
-    assert_eq!(rebuilt_cluster.member_count, 2);
-    assert_eq!(rebuilt_cluster.centroid, vec![0.975, 0.025]);
+    assert!(rebuilt_cluster.is_some());
+    assert_eq!(rebuilt_cluster.map(|cluster| cluster.member_count), Some(2));
+    assert_eq!(
+        rebuilt_cluster.map(|cluster| cluster.centroid.clone()),
+        Some(vec![0.975, 0.025])
+    );
     assert_eq!(rebuilt.lookup_for_memory(MemoryId(10)), Some(cluster.engram_id));
     assert_eq!(rebuilt.lookup_for_memory(MemoryId(11)), Some(cluster.engram_id));
 }
@@ -45,4 +49,23 @@ fn bounded_lookup_returns_only_top_three_similar_engrams() {
     assert_eq!(candidates.len(), 3);
     assert!(candidates[0].similarity >= candidates[1].similarity);
     assert!(candidates[1].similarity >= candidates[2].similarity);
+}
+
+#[test]
+fn rebuild_preserves_lookup_cap_and_next_cluster_identity() {
+    let mut store = EngramStore::new(0.999).with_lookup_cap(2);
+    let first = store.assign_memory(MemoryId(1), vec![1.0, 0.0], 10, "embed.v1");
+    let second = store.assign_memory(MemoryId(2), vec![0.0, 1.0], 11, "embed.v1");
+    store.assign_memory(MemoryId(3), vec![-1.0, 0.0], 12, "embed.v1");
+
+    let rebuilt = store.rebuild_from_memberships();
+    let candidates = rebuilt.similar_engrams(&[0.8, 0.2]);
+    let created_after_rebuild = rebuilt
+        .clone()
+        .assign_memory(MemoryId(4), vec![0.0, -1.0], 13, "embed.v1");
+
+    assert_eq!(candidates.len(), 2);
+    assert_eq!(created_after_rebuild.engram_id.0, second.engram_id.0 + 2);
+    assert_ne!(created_after_rebuild.engram_id, first.engram_id);
+    assert_ne!(created_after_rebuild.engram_id, second.engram_id);
 }

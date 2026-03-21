@@ -41,6 +41,7 @@ pub struct InspectParams {
 pub struct ExplainParams {
     pub query: String,
     pub namespace: String,
+    pub limit: Option<usize>,
 }
 
 /// Canonical MCP Response Envelope.
@@ -137,7 +138,7 @@ pub struct McpResource {
 
 #[cfg(test)]
 mod tests {
-    use super::{McpResponse, McpRetrievalPayload};
+    use super::{ExplainParams, McpRequest, McpResponse, McpRetrievalPayload};
     use membrain_core::api::NamespaceId;
     use membrain_core::api::RequestId;
     use membrain_core::engine::recall::RecallPlanKind;
@@ -296,5 +297,39 @@ mod tests {
         assert_eq!(payload.outcome_class, OutcomeClass::Accepted);
         assert_eq!(payload.result.outcome_class, OutcomeClass::Accepted);
         assert!(payload.partial_success);
+    }
+
+    #[test]
+    fn explain_request_round_trips_optional_limit() {
+        let request = McpRequest::Explain(ExplainParams {
+            query: "session:7".to_string(),
+            namespace: "team.alpha".to_string(),
+            limit: Some(2),
+        });
+
+        let json = serde_json::to_value(&request).unwrap();
+        assert_eq!(json["method"], "explain");
+        assert_eq!(json["params"]["query"], "session:7");
+        assert_eq!(json["params"]["namespace"], "team.alpha");
+        assert_eq!(json["params"]["limit"], 2);
+
+        let decoded: McpRequest = serde_json::from_value(json).unwrap();
+        match decoded {
+            McpRequest::Explain(params) => assert_eq!(params.limit, Some(2)),
+            other => panic!("unexpected decoded request: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn explain_request_omits_limit_when_not_provided() {
+        let request = McpRequest::Explain(ExplainParams {
+            query: "session:7".to_string(),
+            namespace: "team.alpha".to_string(),
+            limit: None,
+        });
+
+        let json = serde_json::to_value(&request).unwrap();
+        assert!(json["params"].get("limit").is_some());
+        assert!(json["params"]["limit"].is_null());
     }
 }

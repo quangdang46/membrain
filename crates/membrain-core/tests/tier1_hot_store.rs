@@ -161,3 +161,46 @@ fn recent_window_filters_out_colliding_foreign_namespace_entries() {
     assert_eq!(recent.records[0].memory_id, MemoryId(3));
     assert_eq!(recent.records[1].memory_id, MemoryId(1));
 }
+
+#[test]
+fn seed_skips_stale_recency_entries_before_evicting_a_live_record() {
+    let namespace = NamespaceId::new("tests/tier1").unwrap();
+    let mut store = Tier1HotMetadataStore::new(2);
+    store.seed(seed_record("tests/tier1", 1, 10, "first", 1_024));
+    store.seed(seed_record("tests/tier1", 2, 10, "second", 1_024));
+
+    store.exact_lookup(&namespace, MemoryId(1));
+    store.seed(seed_record("tests/tier1", 3, 10, "third", 1_024));
+    store.seed(seed_record("tests/tier1", 4, 10, "fourth", 1_024));
+
+    let first = store.exact_lookup(&namespace, MemoryId(1));
+    let third = store.exact_lookup(&namespace, MemoryId(3));
+    let fourth = store.exact_lookup(&namespace, MemoryId(4));
+
+    assert_eq!(store.len(), 2);
+    assert_eq!(first.trace.outcome, Tier1LookupOutcome::Miss);
+    assert_eq!(third.trace.outcome, Tier1LookupOutcome::Hit);
+    assert_eq!(fourth.trace.outcome, Tier1LookupOutcome::Hit);
+}
+
+#[test]
+fn zero_budget_lookups_report_bypass_without_fetching_payloads() {
+    let namespace = NamespaceId::new("tests/tier1").unwrap();
+    let mut store = Tier1HotMetadataStore::new(3);
+    store.seed(seed_record("tests/tier1", 1, 10, "alpha", 2_048));
+    store.seed(seed_record("tests/tier1", 2, 10, "beta", 2_048));
+
+    let exact = store.exact_lookup_with_budget(&namespace, MemoryId(1), 0);
+    assert_eq!(exact.trace.lane, Tier1LookupLane::ExactHandle);
+    assert_eq!(exact.trace.outcome, Tier1LookupOutcome::Bypass);
+    assert_eq!(exact.trace.recent_candidates_inspected, 0);
+    assert_eq!(exact.trace.payload_fetch_count, 0);
+    assert!(exact.record.is_none());
+
+    let recent = store.recent_for_session_with_budget(&namespace, SessionId(10), 2, 0);
+    assert_eq!(recent.trace.lane, Tier1LookupLane::RecentWindow);
+    assert_eq!(recent.trace.outcome, Tier1LookupOutcome::Bypass);
+    assert_eq!(recent.trace.recent_candidates_inspected, 0);
+    assert_eq!(recent.trace.payload_fetch_count, 0);
+    assert!(recent.records.is_empty());
+}

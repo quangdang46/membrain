@@ -12,13 +12,14 @@ use crate::engine::recall::RecallEngine;
 use crate::engine::repair::RepairEngine;
 use crate::graph::GraphModule;
 use crate::index::IndexModule;
-use crate::migrate::MigrationModule;
+use crate::migrate::{DurableSchemaObject, MigrationModule};
 use crate::observability::{ObservabilityModule, Tier2PrefilterTrace};
 use crate::policy::PolicyModule;
 use crate::store::audit::AuditLogStore;
 use crate::store::cold::ColdStore;
 use crate::store::hot::HotStore;
 use crate::store::tier2::{Tier2DurableItemLayout, Tier2Store};
+use crate::store::Tier2StoreApi;
 use crate::types::{CoreApiVersion, MemoryId, RawEncodeInput, SessionId};
 
 /// Inspectable result returned when the core facade prepares a Tier2 layout from encode output.
@@ -186,6 +187,21 @@ impl BrainStore {
         &self.tier2_store
     }
 
+    /// Returns the authoritative durable Tier2 schema objects exposed by the core-owned Tier2 store.
+    pub fn tier2_authoritative_schema_objects(&self) -> Vec<DurableSchemaObject> {
+        self.tier2_store.authoritative_schema_objects()
+    }
+
+    /// Returns whether migration manifests still include the full Tier2 durable-truth ownership set.
+    pub fn tier2_schema_matches_migration_manifest(&self) -> bool {
+        let store_objects = self.tier2_authoritative_schema_objects();
+        let manifest = self.migrate.durable_schema_manifest();
+
+        store_objects
+            .iter()
+            .all(|object| manifest.authoritative_tables.contains(object))
+    }
+
     /// Runs the encode fast path and materializes a durable Tier2 layout that preserves additive
     /// landmark and era metadata alongside metadata-first storage keys.
     pub fn prepare_tier2_layout_from_encode(
@@ -269,6 +285,7 @@ impl Default for BrainStore {
 mod tests {
     use super::{BrainStore, PreparedTier2Layout};
     use crate::api::NamespaceId;
+    use crate::migrate::DurableSchemaObject;
     use crate::types::{MemoryId, RawEncodeInput, RawIntakeKind, SessionId};
 
     #[test]
@@ -346,5 +363,23 @@ mod tests {
         assert_eq!(prepared.prefilter_trace.metadata_candidate_count, 1);
         assert_eq!(prepared.prefilter_trace.payload_fetch_count, 0);
         assert!(prepared.prefilter_stays_metadata_only());
+    }
+
+    #[test]
+    fn tier2_authoritative_schema_objects_expose_durable_memory_records() {
+        let store = BrainStore::default();
+        let schema_objects = store.tier2_authoritative_schema_objects();
+
+        assert_eq!(
+            schema_objects,
+            vec![DurableSchemaObject::DurableMemoryRecords]
+        );
+    }
+
+    #[test]
+    fn tier2_schema_matches_migration_manifest_for_durable_truth() {
+        let store = BrainStore::default();
+
+        assert!(store.tier2_schema_matches_migration_manifest());
     }
 }

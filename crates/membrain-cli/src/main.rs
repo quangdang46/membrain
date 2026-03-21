@@ -1,9 +1,11 @@
 use clap::{Parser, Subcommand};
 use membrain_core::api::NamespaceId;
+use membrain_core::index::{IndexApi, IndexModule};
 use membrain_core::observability::{AuditEventCategory, AuditEventKind};
 use membrain_core::store::audit::{AppendOnlyAuditLog, AuditLogEntry, AuditLogStore};
 use membrain_core::types::{MemoryId, SessionId};
 use membrain_daemon::daemon::{DaemonRuntime, DaemonRuntimeConfig};
+use membrain_daemon::rpc::{RuntimeMetrics, RuntimePosture, RuntimeStatus};
 use serde::Serialize;
 use std::path::PathBuf;
 
@@ -125,6 +127,26 @@ struct AuditRow {
     related_run: Option<String>,
     redacted: bool,
     note: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+struct DoctorIndexRow {
+    family: &'static str,
+    health: &'static str,
+    usable: bool,
+    entry_count: usize,
+    generation: &'static str,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+struct DoctorReport {
+    status: &'static str,
+    action: &'static str,
+    posture: &'static str,
+    degraded_reasons: Vec<String>,
+    metrics: RuntimeMetrics,
+    indexes: Vec<DoctorIndexRow>,
+    warnings: Vec<&'static str>,
 }
 
 impl From<AuditLogEntry> for AuditRow {
@@ -260,6 +282,60 @@ fn print_audit_rows(rows: &[AuditRow], json: bool) -> anyhow::Result<()> {
     Ok(())
 }
 
+fn sample_runtime_status() -> RuntimeStatus {
+    RuntimeStatus {
+        posture: RuntimePosture::Full,
+        degraded_reasons: Vec::new(),
+        metrics: RuntimeMetrics {
+            queue_depth: 0,
+            active_requests: 0,
+            background_jobs: 0,
+            cancelled_requests: 0,
+            maintenance_runs: 0,
+        },
+    }
+}
+
+fn doctor_report() -> DoctorReport {
+    let status = sample_runtime_status();
+    let indexes = IndexModule
+        .health_reports()
+        .into_iter()
+        .map(|report| DoctorIndexRow {
+            family: report.family.as_str(),
+            health: report.health.as_str(),
+            usable: report.health.is_usable(),
+            entry_count: report.entry_count,
+            generation: report.generation,
+        })
+        .collect::<Vec<_>>();
+    let warnings = indexes
+        .iter()
+        .filter_map(|row| match row.health {
+            "stale" => Some("index_stale"),
+            "needs_rebuild" => Some("index_needs_rebuild"),
+            "missing" => Some("index_missing"),
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    let overall_status = if warnings.is_empty() { "healthy" } else { "warn" };
+
+    DoctorReport {
+        status: overall_status,
+        action: "doctor",
+        posture: status.posture.as_str(),
+        degraded_reasons: status.degraded_reasons,
+        metrics: status.metrics,
+        indexes,
+        warnings,
+    }
+}
+
+fn print_doctor_report(report: &DoctorReport) -> anyhow::Result<()> {
+    println!("{}", serde_json::to_string_pretty(report)?);
+    Ok(())
+}
+
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
     let cli = Cli::parse();
@@ -318,10 +394,8 @@ async fn main() -> anyhow::Result<()> {
             );
         }
         Commands::Doctor => {
-            println!("Running system diagnostic...");
-            println!(
-                "Output: {{\"status\": \"success\", \"action\": \"doctor\", \"health\": \"healthy\"}}"
-            );
+            let report = doctor_report();
+            print_doctor_report(&report)?;
         }
         Commands::Audit {
             namespace,

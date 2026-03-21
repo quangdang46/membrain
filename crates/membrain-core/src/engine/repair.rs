@@ -8,6 +8,7 @@ use crate::engine::maintenance::{
     DurableStateToken, InterruptedMaintenance, InterruptionReason, MaintenanceOperation,
     MaintenanceProgress, MaintenanceStep,
 };
+use crate::migrate::DurableSchemaObject;
 use std::collections::HashMap;
 
 // ── Repair targets ───────────────────────────────────────────────────────────
@@ -48,6 +49,36 @@ impl RepairTarget {
             Self::GraphConsistency => "graph_consistency",
             Self::EngramIndex => "engram_index",
             Self::ContradictionConsistency => "contradiction_consistency",
+        }
+    }
+
+    /// Stable operator-facing verification artifact identifier.
+    pub const fn verification_artifact_name(self) -> &'static str {
+        match self {
+            Self::LexicalIndex => "fts5_lexical_parity",
+            Self::MetadataIndex => "tier2_metadata_parity",
+            Self::SemanticHotIndex => "usearch_hot_parity",
+            Self::SemanticColdIndex => "usearch_cold_parity",
+            Self::HotStoreConsistency => "hot_store_consistency_report",
+            Self::PayloadIntegrity => "payload_integrity_report",
+            Self::GraphConsistency => "graph_consistency_report",
+            Self::EngramIndex => "engram_membership_parity",
+            Self::ContradictionConsistency => "contradiction_consistency_report",
+        }
+    }
+
+    /// Stable machine-readable parity assertion recorded in verification output.
+    pub const fn verification_parity_check(self) -> &'static str {
+        match self {
+            Self::LexicalIndex => "fts5_projection_matches_durable_truth",
+            Self::MetadataIndex => "tier2_projection_matches_durable_truth",
+            Self::SemanticHotIndex => "usearch_hot_matches_durable_embeddings",
+            Self::SemanticColdIndex => "usearch_cold_matches_durable_embeddings",
+            Self::HotStoreConsistency => "hot_store_matches_durable_projection",
+            Self::PayloadIntegrity => "payload_handles_match_durable_records",
+            Self::GraphConsistency => "graph_projection_matches_durable_edges",
+            Self::EngramIndex => "engram_membership_matches_durable_truth",
+            Self::ContradictionConsistency => "contradiction_records_match_durable_truth",
         }
     }
 }
@@ -121,10 +152,12 @@ pub struct RepairSummary {
 /// Operator-visible parity proof for a rebuilt or verified derived index.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct VerificationArtifact {
+    pub artifact_name: &'static str,
     pub authoritative_rows: u64,
     pub derived_rows: u64,
     pub authoritative_generation: &'static str,
     pub derived_generation: &'static str,
+    pub parity_check: &'static str,
 }
 
 /// Canonical index rebuild plan derived from durable truth.
@@ -133,6 +166,7 @@ pub struct IndexRepairPlan {
     pub target: RepairTarget,
     pub entrypoint: IndexRepairEntrypoint,
     pub durable_sources: Vec<&'static str>,
+    pub authoritative_schema_objects: Vec<DurableSchemaObject>,
     pub rebuilt_outputs: Vec<&'static str>,
     pub verification_artifact: VerificationArtifact,
 }
@@ -230,10 +264,12 @@ impl RepairRun {
         };
 
         VerificationArtifact {
+            artifact_name: target.verification_artifact_name(),
             authoritative_rows: rows,
             derived_rows: rows,
             authoritative_generation: "durable.v1",
             derived_generation: "durable.v1",
+            parity_check: target.verification_parity_check(),
         }
     }
 }
@@ -296,17 +332,19 @@ impl RepairEngine {
         target: RepairTarget,
         entrypoint: IndexRepairEntrypoint,
     ) -> Option<IndexRepairPlan> {
-        let (durable_sources, rebuilt_outputs) = match target {
+        let (durable_sources, authoritative_schema_objects, rebuilt_outputs) = match target {
             RepairTarget::LexicalIndex => (
                 vec![
                     "durable_memory_records",
                     "namespace_policy_metadata",
                     "canonical_content_handles",
                 ],
+                vec![DurableSchemaObject::DurableMemoryRecords],
                 vec!["fts5_lexical_projection", "lexical_lookup_table"],
             ),
             RepairTarget::MetadataIndex => (
                 vec!["durable_memory_records", "namespace_policy_metadata"],
+                vec![DurableSchemaObject::DurableMemoryRecords],
                 vec!["tier2_metadata_projection", "namespace_lookup_table"],
             ),
             RepairTarget::SemanticHotIndex => (
@@ -315,6 +353,7 @@ impl RepairEngine {
                     "canonical_embeddings",
                     "namespace_policy_metadata",
                 ],
+                vec![DurableSchemaObject::DurableMemoryRecords],
                 vec!["usearch_hot_ann", "hot_embedding_lookup"],
             ),
             RepairTarget::SemanticColdIndex => (
@@ -323,6 +362,7 @@ impl RepairEngine {
                     "canonical_embeddings",
                     "namespace_policy_metadata",
                 ],
+                vec![DurableSchemaObject::DurableMemoryRecords],
                 vec!["usearch_cold_ann", "cold_embedding_lookup"],
             ),
             RepairTarget::EngramIndex => (
@@ -330,6 +370,11 @@ impl RepairEngine {
                     "durable_memory_records",
                     "engrams_table",
                     "engram_membership_table",
+                ],
+                vec![
+                    DurableSchemaObject::DurableMemoryRecords,
+                    DurableSchemaObject::EngramsTable,
+                    DurableSchemaObject::EngramMembershipTable,
                 ],
                 vec![
                     "engram_helper_index",
@@ -344,6 +389,7 @@ impl RepairEngine {
             target,
             entrypoint,
             durable_sources,
+            authoritative_schema_objects,
             rebuilt_outputs,
             verification_artifact: self.mock_verification_artifact(target),
         })
@@ -373,10 +419,12 @@ impl RepairEngine {
         };
 
         VerificationArtifact {
+            artifact_name: target.verification_artifact_name(),
             authoritative_rows: rows,
             derived_rows: rows,
             authoritative_generation: "durable.v1",
             derived_generation: "durable.v1",
+            parity_check: target.verification_parity_check(),
         }
     }
 }
@@ -503,6 +551,15 @@ mod tests {
             plan.rebuilt_outputs,
             vec!["fts5_lexical_projection", "lexical_lookup_table"]
         );
+        assert_eq!(
+            plan.authoritative_schema_objects,
+            vec![DurableSchemaObject::DurableMemoryRecords]
+        );
+        assert_eq!(plan.verification_artifact.artifact_name, "fts5_lexical_parity");
+        assert_eq!(
+            plan.verification_artifact.parity_check,
+            "fts5_projection_matches_durable_truth"
+        );
         assert_eq!(plan.verification_artifact.authoritative_rows, 128);
         assert_eq!(plan.verification_artifact.derived_generation, "durable.v1");
     }
@@ -535,6 +592,19 @@ mod tests {
                 "engram_adjacency_accelerator",
             ]
         );
+        assert_eq!(
+            plan.authoritative_schema_objects,
+            vec![
+                DurableSchemaObject::DurableMemoryRecords,
+                DurableSchemaObject::EngramsTable,
+                DurableSchemaObject::EngramMembershipTable,
+            ]
+        );
+        assert_eq!(plan.verification_artifact.artifact_name, "engram_membership_parity");
+        assert_eq!(
+            plan.verification_artifact.parity_check,
+            "engram_membership_matches_durable_truth"
+        );
         assert_eq!(plan.verification_artifact.authoritative_rows, 24);
         assert_eq!(plan.verification_artifact.derived_generation, "durable.v1");
     }
@@ -552,6 +622,50 @@ mod tests {
         assert!(!plan.durable_sources.contains(&"graph_edge_table"));
         assert!(plan.durable_sources.contains(&"engrams_table"));
         assert!(plan.durable_sources.contains(&"engram_membership_table"));
+    }
+
+    #[test]
+    fn verification_artifact_names_and_parity_checks_are_stable() {
+        assert_eq!(
+            RepairTarget::LexicalIndex.verification_artifact_name(),
+            "fts5_lexical_parity"
+        );
+        assert_eq!(
+            RepairTarget::LexicalIndex.verification_parity_check(),
+            "fts5_projection_matches_durable_truth"
+        );
+        assert_eq!(
+            RepairTarget::MetadataIndex.verification_artifact_name(),
+            "tier2_metadata_parity"
+        );
+        assert_eq!(
+            RepairTarget::MetadataIndex.verification_parity_check(),
+            "tier2_projection_matches_durable_truth"
+        );
+        assert_eq!(
+            RepairTarget::SemanticHotIndex.verification_artifact_name(),
+            "usearch_hot_parity"
+        );
+        assert_eq!(
+            RepairTarget::SemanticHotIndex.verification_parity_check(),
+            "usearch_hot_matches_durable_embeddings"
+        );
+        assert_eq!(
+            RepairTarget::SemanticColdIndex.verification_artifact_name(),
+            "usearch_cold_parity"
+        );
+        assert_eq!(
+            RepairTarget::SemanticColdIndex.verification_parity_check(),
+            "usearch_cold_matches_durable_embeddings"
+        );
+        assert_eq!(
+            RepairTarget::EngramIndex.verification_artifact_name(),
+            "engram_membership_parity"
+        );
+        assert_eq!(
+            RepairTarget::EngramIndex.verification_parity_check(),
+            "engram_membership_matches_durable_truth"
+        );
     }
 
     #[test]

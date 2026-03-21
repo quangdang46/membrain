@@ -189,6 +189,18 @@ pub struct Tier2PrefilterView<'a> {
     pub payload_locator: Tier2PayloadLocator,
 }
 
+impl Tier2PrefilterView<'_> {
+    /// Returns the landmark label visible to metadata-first temporal consumers.
+    pub fn landmark_label(&self) -> Option<&str> {
+        self.landmark.landmark_label.as_deref()
+    }
+
+    /// Returns the era identifier visible to metadata-first temporal consumers.
+    pub fn era_id(&self) -> Option<&str> {
+        self.landmark.era_id.as_deref()
+    }
+}
+
 /// Borrowed deterministic metadata key used by Tier2 filter/index maintenance surfaces.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Tier2MetadataIndexKey<'a> {
@@ -202,4 +214,16 @@ pub struct Tier2MetadataIndexKey<'a> {
     pub normalization_generation: &'static str,
     pub landmark: &'a LandmarkMetadata,
     pub payload_locator: Tier2PayloadLocator,
+}
+
+impl Tier2MetadataIndexKey<'_> {
+    /// Returns the landmark label preserved on the metadata-only index key.
+    pub fn landmark_label(&self) -> Option<&str> {
+        self.landmark.landmark_label.as_deref()
+    }
+
+    /// Returns the era identifier preserved on the metadata-only index key.
+    pub fn era_id(&self) -> Option<&str> {
+        self.landmark.era_id.as_deref()
+    }
 }

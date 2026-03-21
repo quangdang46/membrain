@@ -72,9 +72,12 @@ impl Tier1HotMetadataStore {
             return;
         }
 
-        if self.exact.len() >= self.capacity {
-            if let Some(evicted) = self.recent.pop_front() {
-                self.exact.remove(&evicted);
+        while self.exact.len() >= self.capacity {
+            let Some(evicted) = self.recent.pop_front() else {
+                break;
+            };
+            if self.exact.remove(&evicted).is_some() {
+                break;
             }
         }
 
@@ -189,7 +192,7 @@ impl Tier1HotMetadataStore {
         Tier1RecentLookup {
             trace: Tier1LookupTrace {
                 lane: Tier1LookupLane::RecentWindow,
-                outcome: if records.is_empty() && stale_candidates_skipped > 0 {
+                outcome: if records.is_empty() && inspected == 0 && stale_candidates_skipped > 0 {
                     Tier1LookupOutcome::StaleBypass
                 } else if records.is_empty() {
                     Tier1LookupOutcome::Miss
@@ -345,6 +348,24 @@ mod tests {
 
         assert!(recent.records.is_empty());
         assert_eq!(recent.trace.outcome, Tier1LookupOutcome::StaleBypass);
+        assert!(!recent.trace.session_window_hit);
+        assert_eq!(recent.trace.recent_candidates_inspected, 2);
+    }
+
+    #[test]
+    fn recent_lookup_reports_miss_when_stale_entries_exist_but_live_candidates_were_checked() {
+        let namespace = NamespaceId::new("team.alpha").unwrap();
+        let mut store = Tier1HotMetadataStore::new(2);
+        store.seed(seed_record("team.alpha", 1, 10, "older"));
+        store.seed(seed_record("team.alpha", 2, 20, "newer foreign session"));
+        store.seed(seed_record("team.alpha", 3, 20, "evicts older"));
+
+        store.inject_stale_recent_reference("team.alpha", 99);
+
+        let recent = store.recent_for_session(&namespace, SessionId(30), 1);
+
+        assert!(recent.records.is_empty());
+        assert_eq!(recent.trace.outcome, Tier1LookupOutcome::Miss);
         assert!(!recent.trace.session_window_hit);
         assert_eq!(recent.trace.recent_candidates_inspected, 2);
     }

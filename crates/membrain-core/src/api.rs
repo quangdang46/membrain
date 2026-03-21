@@ -205,7 +205,7 @@ impl BoundRequestContext {
 }
 
 /// Machine-readable failure family for shared core response envelopes.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
 pub enum ErrorKind {
     ValidationFailure,
     PolicyDenied,
@@ -250,7 +250,7 @@ impl ErrorKind {
 }
 
 /// Stable machine-readable next-step hint shared across interfaces.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
 pub enum RemediationStep {
     FixRequest,
     ChangeScope,
@@ -279,7 +279,7 @@ impl RemediationStep {
 }
 
 /// Shared machine-readable remediation payload for failed or degraded responses.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
 pub struct RemediationHint {
     pub summary: String,
     pub next_steps: Vec<RemediationStep>,
@@ -310,7 +310,7 @@ impl RemediationHint {
 }
 
 /// Stable availability posture shared across CLI, daemon, and MCP responses.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
 pub enum AvailabilityPosture {
     Full,
     Degraded,
@@ -331,7 +331,7 @@ impl AvailabilityPosture {
 }
 
 /// Machine-readable degraded-mode reason preserved across interfaces.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
 pub enum AvailabilityReason {
     GraphUnavailable,
     IndexBypassed,
@@ -354,7 +354,7 @@ impl AvailabilityReason {
 }
 
 /// Shared availability summary for degraded or read-only service posture.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
 pub struct AvailabilitySummary {
     pub posture: AvailabilityPosture,
     pub query_capabilities: Vec<&'static str>,
@@ -501,7 +501,7 @@ impl std::fmt::Display for ContextValidationError {
 impl std::error::Error for ContextValidationError {}
 
 /// Shared warning payload for non-fatal response annotations.
-#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
 pub struct ResponseWarning {
     pub code: &'static str,
     pub detail: String,
@@ -518,12 +518,25 @@ impl ResponseWarning {
 }
 
 /// Machine-readable top-level route summary preserved across interfaces.
-#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
 pub struct RouteSummary {
     pub route_family: &'static str,
     pub route_reason: &'static str,
     pub tier1_consulted_first: bool,
+    pub tier1_answered_directly: bool,
     pub routes_to_deeper_tiers: bool,
+    pub candidate_budget: Option<usize>,
+    pub pre_route_candidate_count: Option<usize>,
+    pub post_route_candidate_count: Option<usize>,
+    pub fallback_reason: Option<&'static str>,
+}
+
+/// Bounded score component preserved for explain and inspect surfaces.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+pub struct TraceScoreComponent {
+    pub signal_family: &'static str,
+    pub raw_value: u16,
+    pub weight: u8,
 }
 
 /// Stable trace-stage vocabulary for cross-surface explain payloads.
@@ -561,15 +574,18 @@ impl TraceStage {
 }
 
 /// Machine-readable reason describing why an item appeared or was omitted.
-#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
 pub struct ResultReason {
     pub memory_id: Option<MemoryId>,
     pub reason_code: &'static str,
+    pub reason_family: &'static str,
+    pub route_stage: TraceStage,
+    pub policy_filter_applied: bool,
     pub detail: &'static str,
 }
 
 /// Shared policy summary for explain surfaces.
-#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
 pub struct TracePolicySummary {
     pub effective_namespace: String,
     pub policy_family: &'static str,
@@ -578,10 +594,11 @@ pub struct TracePolicySummary {
     pub redaction_fields: Vec<&'static str>,
     pub retention_state: FieldPresence<&'static str>,
     pub sharing_scope: FieldPresence<&'static str>,
+    pub filters: Vec<PolicyFilterSummary>,
 }
 
 /// Shared provenance summary for explain surfaces.
-#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
 pub struct TraceProvenanceSummary {
     pub source_kind: &'static str,
     pub source_reference: &'static str,
@@ -589,7 +606,7 @@ pub struct TraceProvenanceSummary {
 }
 
 /// Shared inspect summary for passive-observation provenance and retention semantics.
-#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
 pub struct PassiveObservationInspectSummary {
     pub source_kind: &'static str,
     pub write_decision: &'static str,
@@ -626,33 +643,48 @@ impl PassiveObservationInspectSummary {
 }
 
 /// Shared freshness marker for explain surfaces.
-#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
 pub struct FreshnessMarker {
     pub code: &'static str,
     pub detail: &'static str,
 }
 
 /// Shared conflict marker for explain surfaces.
-#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
 pub struct ConflictMarker {
     pub code: &'static str,
     pub detail: &'static str,
 }
 
 /// Shared uncertainty marker for explain surfaces.
-#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
 pub struct UncertaintyMarker {
     pub code: &'static str,
     pub detail: &'static str,
 }
 
+/// Shared explain trace schema preserved across CLI, daemon, and MCP wrappers.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+pub struct ExplainTraceSchema {
+    pub route_summary: RouteSummary,
+    pub trace_stages: Vec<TraceStage>,
+    pub result_reasons: Vec<ResultReason>,
+    pub score_components: Vec<TraceScoreComponent>,
+    pub policy_summary: TracePolicySummary,
+    pub provenance_summary: TraceProvenanceSummary,
+    pub freshness_markers: Vec<FreshnessMarker>,
+    pub conflict_markers: Vec<ConflictMarker>,
+    pub uncertainty_markers: Vec<UncertaintyMarker>,
+}
+
 /// Shared response envelope reused across CLI, daemon, and MCP wrappers.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
 pub struct ResponseContext<T> {
     pub ok: bool,
     pub request_id: RequestId,
     pub namespace: NamespaceId,
     pub result: Option<T>,
+    pub explain_trace: Option<ExplainTraceSchema>,
     pub route_summary: Option<RouteSummary>,
     pub trace_stages: Vec<TraceStage>,
     pub result_reasons: Vec<ResultReason>,
@@ -681,6 +713,7 @@ impl<T> ResponseContext<T> {
             request_id,
             namespace,
             result: Some(result),
+            explain_trace: None,
             route_summary: None,
             trace_stages: Vec::new(),
             result_reasons: Vec::new(),
@@ -708,12 +741,24 @@ impl<T> ResponseContext<T> {
         route_summary: RouteSummary,
         trace_stages: Vec<TraceStage>,
         result_reasons: Vec<ResultReason>,
+        score_components: Vec<TraceScoreComponent>,
         policy_summary: TracePolicySummary,
         provenance_summary: TraceProvenanceSummary,
         freshness_markers: Vec<FreshnessMarker>,
         conflict_markers: Vec<ConflictMarker>,
         uncertainty_markers: Vec<UncertaintyMarker>,
     ) -> Self {
+        self.explain_trace = Some(ExplainTraceSchema {
+            route_summary: route_summary.clone(),
+            trace_stages: trace_stages.clone(),
+            result_reasons: result_reasons.clone(),
+            score_components,
+            policy_summary: policy_summary.clone(),
+            provenance_summary: provenance_summary.clone(),
+            freshness_markers: freshness_markers.clone(),
+            conflict_markers: conflict_markers.clone(),
+            uncertainty_markers: uncertainty_markers.clone(),
+        });
         self.route_summary = Some(route_summary);
         self.trace_stages = trace_stages;
         self.result_reasons = result_reasons;
@@ -746,6 +791,7 @@ impl<T> ResponseContext<T> {
             request_id,
             namespace,
             result: None,
+            explain_trace: None,
             route_summary: None,
             trace_stages: Vec::new(),
             result_reasons: Vec::new(),
@@ -824,10 +870,11 @@ impl ApiModule {
 mod tests {
     use super::{
         ApiModule, AvailabilityPosture, AvailabilityReason, AvailabilitySummary, ConflictMarker,
-        ContextValidationError, ErrorKind, FieldPresence, FreshnessMarker, NamespaceId,
-        PassiveObservationInspectSummary, PolicyContext, PolicyFilterSummary, RemediationHint,
-        RemediationStep, RequestContext, RequestId, ResponseContext, ResponseWarning, ResultReason,
-        RouteSummary, TracePolicySummary, TraceProvenanceSummary, TraceStage, UncertaintyMarker,
+        ContextValidationError, ErrorKind, ExplainTraceSchema, FieldPresence, FreshnessMarker,
+        NamespaceId, PassiveObservationInspectSummary, PolicyContext, PolicyFilterSummary,
+        RemediationHint, RemediationStep, RequestContext, RequestId, ResponseContext,
+        ResponseWarning, ResultReason, RouteSummary, TracePolicySummary, TraceProvenanceSummary,
+        TraceScoreComponent, TraceStage, UncertaintyMarker,
     };
     use crate::observability::OutcomeClass;
     use crate::policy::{
@@ -837,6 +884,7 @@ mod tests {
         SharingAccessDecision, SharingVisibility,
     };
     use crate::types::SessionId;
+    use serde_json::Value;
 
     #[test]
     fn namespace_binding_accepts_explicit_namespace() {
@@ -1298,7 +1346,12 @@ mod tests {
                 route_family: "tiered_recall",
                 route_reason: "bounded tier1 then tier2",
                 tier1_consulted_first: true,
+                tier1_answered_directly: false,
                 routes_to_deeper_tiers: true,
+                candidate_budget: Some(8),
+                pre_route_candidate_count: Some(3),
+                post_route_candidate_count: Some(1),
+                fallback_reason: Some("tier1_recent_insufficient"),
             },
             vec![
                 TraceStage::PolicyGate,
@@ -1309,8 +1362,23 @@ mod tests {
             vec![ResultReason {
                 memory_id: None,
                 reason_code: "tier2_exact_match",
+                reason_family: "selection",
+                route_stage: TraceStage::Tier2Exact,
+                policy_filter_applied: false,
                 detail: "candidate survived bounded ranking",
             }],
+            vec![
+                TraceScoreComponent {
+                    signal_family: "relevance",
+                    raw_value: 820,
+                    weight: 40,
+                },
+                TraceScoreComponent {
+                    signal_family: "recency",
+                    raw_value: 640,
+                    weight: 20,
+                },
+            ],
             TracePolicySummary {
                 effective_namespace: "team.gamma".into(),
                 policy_family: "namespace",
@@ -1319,6 +1387,15 @@ mod tests {
                 redaction_fields: vec!["raw_text"],
                 retention_state: FieldPresence::Absent,
                 sharing_scope: FieldPresence::Present("same_namespace"),
+                filters: vec![PolicyFilterSummary::new(
+                    "team.gamma",
+                    "namespace",
+                    OutcomeClass::Accepted,
+                    "not_blocked",
+                    FieldPresence::Present("same_namespace".to_string()),
+                    FieldPresence::Absent,
+                    vec!["raw_text".to_string()],
+                )],
             },
             TraceProvenanceSummary {
                 source_kind: "memory",
@@ -1357,6 +1434,56 @@ mod tests {
         assert_eq!(response.trace_stages[2].as_str(), "tier2_exact");
         assert_eq!(response.trace_stages[3].as_str(), "packaging");
         assert_eq!(response.result_reasons[0].reason_code, "tier2_exact_match");
+        assert_eq!(response.result_reasons[0].reason_family, "selection");
+        assert_eq!(
+            response.result_reasons[0].route_stage.as_str(),
+            "tier2_exact"
+        );
+        assert!(!response.result_reasons[0].policy_filter_applied);
+        assert_eq!(
+            response.route_summary.as_ref().unwrap().candidate_budget,
+            Some(8)
+        );
+        assert_eq!(
+            response
+                .route_summary
+                .as_ref()
+                .unwrap()
+                .pre_route_candidate_count,
+            Some(3)
+        );
+        assert_eq!(
+            response
+                .route_summary
+                .as_ref()
+                .unwrap()
+                .post_route_candidate_count,
+            Some(1)
+        );
+        assert_eq!(
+            response.route_summary.as_ref().unwrap().fallback_reason,
+            Some("tier1_recent_insufficient")
+        );
+        assert!(
+            !response
+                .route_summary
+                .as_ref()
+                .unwrap()
+                .tier1_answered_directly
+        );
+        assert_eq!(
+            response
+                .explain_trace
+                .as_ref()
+                .unwrap()
+                .score_components
+                .len(),
+            2
+        );
+        assert_eq!(
+            response.explain_trace.as_ref().unwrap().score_components[0].signal_family,
+            "relevance"
+        );
         assert_eq!(
             response
                 .policy_summary
@@ -1373,6 +1500,17 @@ mod tests {
                 .sharing_scope
                 .state_name(),
             "present"
+        );
+        assert_eq!(response.policy_summary.as_ref().unwrap().filters.len(), 1);
+        assert_eq!(
+            response
+                .explain_trace
+                .as_ref()
+                .unwrap()
+                .policy_summary
+                .filters[0]
+                .policy_family,
+            "namespace"
         );
         assert_eq!(
             response
@@ -1422,6 +1560,44 @@ mod tests {
             "present"
         );
         assert_eq!(
+            response.explain_trace.as_ref().unwrap().trace_stages[0].as_str(),
+            "policy_gate"
+        );
+        assert_eq!(
+            response
+                .explain_trace
+                .as_ref()
+                .unwrap()
+                .route_summary
+                .fallback_reason,
+            Some("tier1_recent_insufficient")
+        );
+        assert_eq!(
+            response.explain_trace,
+            Some(ExplainTraceSchema {
+                route_summary: response.route_summary.clone().unwrap(),
+                trace_stages: response.trace_stages.clone(),
+                result_reasons: response.result_reasons.clone(),
+                score_components: vec![
+                    TraceScoreComponent {
+                        signal_family: "relevance",
+                        raw_value: 820,
+                        weight: 40,
+                    },
+                    TraceScoreComponent {
+                        signal_family: "recency",
+                        raw_value: 640,
+                        weight: 20,
+                    },
+                ],
+                policy_summary: response.policy_summary.clone().unwrap(),
+                provenance_summary: response.provenance_summary.clone().unwrap(),
+                freshness_markers: response.freshness_markers.clone(),
+                conflict_markers: response.conflict_markers.clone(),
+                uncertainty_markers: response.uncertainty_markers.clone(),
+            })
+        );
+        assert_eq!(
             response
                 .passive_observation
                 .as_ref()
@@ -1429,6 +1605,139 @@ mod tests {
                 .write_decision,
             "capture"
         );
+    }
+
+    #[test]
+    fn response_context_and_explain_trace_serializes_with_expected_shape() {
+        let response = ResponseContext::success(
+            NamespaceId::new("team.gamma").unwrap(),
+            RequestId::new("req-serde").unwrap(),
+            11u8,
+        )
+        .with_trace_schema(
+            RouteSummary {
+                route_family: "tiered_recall",
+                route_reason: "bounded tier1 then tier2",
+                tier1_consulted_first: true,
+                tier1_answered_directly: false,
+                routes_to_deeper_tiers: true,
+                candidate_budget: Some(8),
+                pre_route_candidate_count: Some(3),
+                post_route_candidate_count: Some(1),
+                fallback_reason: Some("tier1_recent_insufficient"),
+            },
+            vec![TraceStage::PolicyGate, TraceStage::Tier2Exact],
+            vec![ResultReason {
+                memory_id: None,
+                reason_code: "tier2_exact_match",
+                reason_family: "selection",
+                route_stage: TraceStage::Tier2Exact,
+                policy_filter_applied: false,
+                detail: "candidate survived bounded ranking",
+            }],
+            vec![TraceScoreComponent {
+                signal_family: "relevance",
+                raw_value: 820,
+                weight: 40,
+            }],
+            TracePolicySummary {
+                effective_namespace: "team.gamma".into(),
+                policy_family: "namespace",
+                outcome_class: OutcomeClass::Accepted,
+                blocked_stage: "not_blocked",
+                redaction_fields: vec!["raw_text"],
+                retention_state: FieldPresence::Absent,
+                sharing_scope: FieldPresence::Present("same_namespace"),
+                filters: vec![PolicyFilterSummary::new(
+                    "team.gamma",
+                    "namespace",
+                    OutcomeClass::Accepted,
+                    "not_blocked",
+                    FieldPresence::Present("same_namespace".to_string()),
+                    FieldPresence::Absent,
+                    vec!["raw_text".to_string()],
+                )],
+            },
+            TraceProvenanceSummary {
+                source_kind: "memory",
+                source_reference: "memory_id",
+                lineage_ancestors: Vec::new(),
+            },
+            vec![FreshnessMarker {
+                code: "fresh",
+                detail: "item is recent enough for default packaging",
+            }],
+            vec![ConflictMarker {
+                code: "no_open_conflict",
+                detail: "no contradiction siblings were surfaced",
+            }],
+            vec![UncertaintyMarker {
+                code: "low_uncertainty",
+                detail: "bounded evidence had low uncertainty",
+            }],
+        )
+        .with_safeguard(PolicySafeguardOutcome {
+            outcome_class: OutcomeClass::Blocked,
+            preflight_state: PreflightState::Blocked,
+            operation_class: OperationClass::AuthoritativeRewrite,
+            affected_scope: "effective_namespace",
+            impact_summary: "authoritative_rewrite_requires_window",
+            blocked_reasons: vec![SafeguardReasonCode::MaintenanceWindowRequired],
+            preflight_checks: vec![],
+            check_results: vec![],
+            warnings: vec!["stale_generation"],
+            confidence_constraints: Some(ConfidenceConstraint {
+                minimum_level: "medium",
+                change_my_mind_conditions: vec!["fresh_snapshot"],
+            }),
+            reversibility: ReversibilityKind::RollbackViaSnapshot,
+            confirmation: ConfirmationState {
+                required: true,
+                force_allowed: false,
+                confirmed: false,
+                generation_bound: Some(7),
+            },
+            audit: SafeguardAudit {
+                event_kind: "safeguard_evaluation",
+                actor_source: "core_policy",
+                request_id: "policy-eval",
+                preview_id: Some("preview-7"),
+                related_run: None,
+                scope_handle: "effective_namespace",
+            },
+            policy_summary: crate::policy::PolicySummary::deny(true),
+        })
+        .with_passive_observation(PassiveObservationInspectSummary {
+            source_kind: "observation",
+            write_decision: "capture",
+            captured_as_observation: true,
+            observation_source: FieldPresence::Present("passive_observation".into()),
+            observation_chunk_id: FieldPresence::Present("obs-0000000000000042".into()),
+            retention_marker: FieldPresence::Present("volatile_observation"),
+        });
+
+        let value = serde_json::to_value(&response).unwrap();
+        assert_eq!(
+            value
+                .get("explain_trace")
+                .and_then(Value::as_object)
+                .unwrap()["route_summary"]["route_family"],
+            "tiered_recall"
+        );
+        assert_eq!(
+            value
+                .get("explain_trace")
+                .and_then(Value::as_object)
+                .unwrap()["policy_summary"]["filters"][0]["policy_family"],
+            "namespace"
+        );
+        assert_eq!(
+            value.get("safeguard").and_then(Value::as_object).unwrap()["blocked_reasons"][0],
+            "MaintenanceWindowRequired"
+        );
+
+        assert_eq!(value["ok"], true);
+        assert_eq!(value["result"], 11);
     }
 
     #[test]

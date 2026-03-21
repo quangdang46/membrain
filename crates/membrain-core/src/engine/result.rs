@@ -4,6 +4,9 @@
 //! produces before any wrapper formats it for CLI, daemon, or MCP output.
 
 use crate::api::{FieldPresence, NamespaceId, PolicyFilterSummary};
+use crate::observability::{
+    ExplainResultReason, ObservabilityModule, TracePolicySummary, TraceProvenanceSummary,
+};
 use crate::brain_store::PreparedTier2Layout;
 use crate::engine::contradiction::{ContradictionExplain, ResolutionState};
 use crate::engine::ranking::{RankingExplain, RankingResult};
@@ -418,6 +421,34 @@ pub struct RetrievalExplain {
     pub contradictions_found: usize,
     /// Why concrete results appeared or alternatives were omitted.
     pub result_reasons: Vec<ResultReason>,
+}
+
+impl RetrievalResultSet {
+    /// Builds the shared route summary and trace stages from the canonical envelope.
+    pub fn explain_route(&self) -> (crate::observability::RouteSummary, Vec<crate::observability::TraceStage>) {
+        ObservabilityModule.explain_route(self)
+    }
+
+    /// Builds the shared result-reason family from the canonical envelope.
+    pub fn explain_result_reasons(&self) -> Vec<ExplainResultReason> {
+        ObservabilityModule.explain_result_reasons(self)
+    }
+
+    /// Builds the shared policy and provenance summaries from the canonical envelope.
+    pub fn explain_policy_and_provenance(&self) -> (TracePolicySummary, TraceProvenanceSummary) {
+        ObservabilityModule.explain_policy_and_provenance(self)
+    }
+
+    /// Builds the shared freshness, conflict, and uncertainty marker families.
+    pub fn explain_markers(
+        &self,
+    ) -> (
+        Vec<crate::observability::FreshnessMarker>,
+        Vec<crate::observability::ConflictMarker>,
+        Vec<crate::observability::UncertaintyMarker>,
+    ) {
+        ObservabilityModule.explain_markers(self)
+    }
 }
 
 impl RetrievalExplain {

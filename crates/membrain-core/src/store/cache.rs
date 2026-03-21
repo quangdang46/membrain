@@ -1318,21 +1318,19 @@ impl CacheManager {
         &Self::HOT_PATH_LOOKUP_ORDER
     }
 
-    /// Returns the store for a given cache family.
-    pub fn store_for(&mut self, family: CacheFamily) -> &mut BoundedCacheStore {
+    /// Returns the store for a given cache family when that family is backed by a cache store.
+    pub fn store_for(&mut self, family: CacheFamily) -> Option<&mut BoundedCacheStore> {
         match family {
-            CacheFamily::Tier1Item => &mut self.tier1_item,
-            CacheFamily::NegativeCache => &mut self.negative,
-            CacheFamily::ResultCache => &mut self.result,
-            CacheFamily::EntityNeighborhood => &mut self.entity_neighborhood,
-            CacheFamily::SummaryCache => &mut self.summary,
-            CacheFamily::AnnProbeCache => &mut self.ann_probe,
-            CacheFamily::PrefetchHints => {
-                panic!("prefetch hints are managed by the PrefetchController, not a cache store")
-            }
-            CacheFamily::SessionWarmup => &mut self.session_warmup,
-            CacheFamily::GoalConditioned => &mut self.goal_conditioned,
-            CacheFamily::ColdStartMitigation => &mut self.cold_start,
+            CacheFamily::Tier1Item => Some(&mut self.tier1_item),
+            CacheFamily::NegativeCache => Some(&mut self.negative),
+            CacheFamily::ResultCache => Some(&mut self.result),
+            CacheFamily::EntityNeighborhood => Some(&mut self.entity_neighborhood),
+            CacheFamily::SummaryCache => Some(&mut self.summary),
+            CacheFamily::AnnProbeCache => Some(&mut self.ann_probe),
+            CacheFamily::PrefetchHints => None,
+            CacheFamily::SessionWarmup => Some(&mut self.session_warmup),
+            CacheFamily::GoalConditioned => Some(&mut self.goal_conditioned),
+            CacheFamily::ColdStartMitigation => Some(&mut self.cold_start),
         }
     }
 
@@ -1845,6 +1843,14 @@ mod tests {
             .contains(&CacheFamily::PrefetchHints));
         // team.beta should survive
         assert_eq!(mgr.result.len(), 1);
+    }
+
+    #[test]
+    fn store_for_returns_none_for_prefetch_family() {
+        let mut mgr = CacheManager::new(4, 4);
+
+        assert!(mgr.store_for(CacheFamily::PrefetchHints).is_none());
+        assert!(mgr.store_for(CacheFamily::Tier1Item).is_some());
     }
 
     // ── § 9.9  Version-mismatch bypass ───────────────────────────────────

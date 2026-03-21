@@ -71,7 +71,7 @@ impl RawIntakeKind {
 }
 
 /// Route families selected by bounded shallow classification on the encode fast path.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
 pub enum FastPathRouteFamily {
     Event,
     Observation,
@@ -105,7 +105,7 @@ impl FastPathRouteFamily {
 }
 
 /// Bounded temporal-landmark signals evaluated during encode.
-#[derive(Debug, Clone, Copy, PartialEq)]
+#[derive(Debug, Clone, Copy, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct LandmarkSignals {
     /// Emotional arousal signal normalized to 0.0..=1.0.
     pub arousal: f32,
@@ -135,7 +135,7 @@ impl LandmarkSignals {
 }
 
 /// Additive landmark and era metadata derived during encode.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct LandmarkMetadata {
     /// Whether the memory qualifies as a temporal landmark.
     pub is_landmark: bool,

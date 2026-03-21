@@ -388,6 +388,20 @@ impl DaemonRuntime {
                 Ok(response) => JsonRpcResponse::success(request_id, json!(response)),
                 Err(message) => JsonRpcResponse::error(request_id, -32602, message, None),
             },
+            RuntimeRequest::Inspect { id, namespace } => {
+                match Self::handle_inspect(id, &namespace, request_correlation_id) {
+                    Ok(response) => JsonRpcResponse::success(request_id, json!(response)),
+                    Err(message) => JsonRpcResponse::error(request_id, -32602, message, None),
+                }
+            }
+            RuntimeRequest::Explain {
+                query,
+                namespace,
+                limit,
+            } => match Self::handle_explain(&query, &namespace, limit, request_correlation_id) {
+                Ok(response) => JsonRpcResponse::success(request_id, json!(response)),
+                Err(message) => JsonRpcResponse::error(request_id, -32602, message, None),
+            },
             RuntimeRequest::Sleep { millis } => {
                 tokio::select! {
                     _ = state.shutdown_notify.notified() => {
@@ -467,10 +481,60 @@ impl DaemonRuntime {
         limit: Option<usize>,
         request_correlation_id: u64,
     ) -> Result<McpResponse, String> {
-        let namespace = NamespaceId::new(namespace).map_err(|err| err.to_string())?;
-        let request_id = RequestId::new(format!("daemon-recall-{request_correlation_id}"))
-            .map_err(|err| err.to_string())?;
         let request = Self::recall_request_from_query(query)?;
+        Self::handle_retrieval_method(
+            request,
+            namespace,
+            limit,
+            request_correlation_id,
+            "recall",
+            "planner-only recall envelope; evidence hydration not implemented",
+        )
+    }
+
+    fn handle_inspect(
+        id: u64,
+        namespace: &str,
+        request_correlation_id: u64,
+    ) -> Result<McpResponse, String> {
+        Self::handle_retrieval_method(
+            RecallRequest::exact(MemoryId(id)),
+            namespace,
+            Some(1),
+            request_correlation_id,
+            "inspect",
+            "planner-only inspect envelope; item hydration not implemented",
+        )
+    }
+
+    fn handle_explain(
+        query: &str,
+        namespace: &str,
+        limit: Option<usize>,
+        request_correlation_id: u64,
+    ) -> Result<McpResponse, String> {
+        let request = Self::recall_request_from_query(query)?;
+        Self::handle_retrieval_method(
+            request,
+            namespace,
+            limit,
+            request_correlation_id,
+            "explain",
+            "planner-only explain envelope; evidence hydration not implemented",
+        )
+    }
+
+    fn handle_retrieval_method(
+        request: RecallRequest,
+        namespace: &str,
+        limit: Option<usize>,
+        request_correlation_id: u64,
+        method_name: &str,
+        degraded_summary: &str,
+    ) -> Result<McpResponse, String> {
+        let namespace = NamespaceId::new(namespace).map_err(|err| err.to_string())?;
+        let request_id = RequestId::new(format!("daemon-{method_name}-{request_correlation_id}"))
+            .map_err(|err| err.to_string())?;
         let plan = RecallEngine.plan_recall(request, RuntimeConfig::default());
         let result_budget = Self::canonical_result_budget(request, limit);
         let mut result = RetrievalResultSet::empty(
@@ -480,9 +544,7 @@ impl DaemonRuntime {
         result.outcome_class = membrain_core::observability::OutcomeClass::Degraded;
         result.policy_summary.outcome_class = membrain_core::observability::OutcomeClass::Degraded;
         result.packaging_metadata.result_budget = result_budget;
-        result.packaging_metadata.degraded_summary = Some(
-            "planner-only recall envelope; evidence hydration not implemented".to_string(),
-        );
+        result.packaging_metadata.degraded_summary = Some(degraded_summary.to_string());
         result.truncated = false;
         let payload = McpRetrievalPayload::from_result(request_id, namespace, false, result);
         Ok(McpResponse::retrieval_success(payload))
@@ -1151,6 +1213,229 @@ mod tests {
             recall_response["result"]["retrieval"]["result"]["packaging_metadata"]["degraded_summary"],
             json!("planner-only recall envelope; evidence hydration not implemented")
         );
+
+        let shutdown_response = send_request(
+            &socket_path,
+            json!({"jsonrpc":"2.0","method":"shutdown","params":{},"id":"done"}),
+        )
+        .await;
+        assert_eq!(shutdown_response["result"]["shutting_down"], json!(true));
+        timeout(Duration::from_secs(2), handle)
+            .await
+            .unwrap()
+            .unwrap()
+            .unwrap();
+    }
+
+    #[tokio::test]
+    async fn runtime_inspect_returns_typed_mcp_retrieval_payload() {
+        let socket_path = unique_path("inspect");
+        let mut config = DaemonRuntimeConfig::new(&socket_path);
+        config.maintenance_interval = Duration::from_secs(3600);
+        let handle = spawn_runtime(config).await;
+
+        timeout(Duration::from_secs(2), async {
+            while tokio::fs::metadata(&socket_path).await.is_err() {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .unwrap();
+
+        let inspect_response = send_request(
+            &socket_path,
+            json!({
+                "jsonrpc":"2.0",
+                "method":"inspect",
+                "params":{"id":42,"namespace":"team.alpha"},
+                "id":"inspect"
+            }),
+        )
+        .await;
+
+        assert_eq!(inspect_response["result"]["status"], json!("ok"));
+        assert_eq!(inspect_response["result"]["retrieval"]["namespace"], json!("team.alpha"));
+        assert_eq!(
+            inspect_response["result"]["retrieval"]["result"]["explain"]["recall_plan"],
+            json!("ExactIdTier1")
+        );
+        assert_eq!(
+            inspect_response["result"]["retrieval"]["result"]["packaging_metadata"]["result_budget"],
+            json!(1)
+        );
+        assert_eq!(
+            inspect_response["result"]["retrieval"]["result"]["packaging_metadata"]["degraded_summary"],
+            json!("planner-only inspect envelope; item hydration not implemented")
+        );
+
+        let shutdown_response = send_request(
+            &socket_path,
+            json!({"jsonrpc":"2.0","method":"shutdown","params":{},"id":"done"}),
+        )
+        .await;
+        assert_eq!(shutdown_response["result"]["shutting_down"], json!(true));
+        timeout(Duration::from_secs(2), handle)
+            .await
+            .unwrap()
+            .unwrap()
+            .unwrap();
+    }
+
+    #[tokio::test]
+    async fn runtime_explain_returns_typed_mcp_retrieval_payload() {
+        let socket_path = unique_path("explain");
+        let mut config = DaemonRuntimeConfig::new(&socket_path);
+        config.maintenance_interval = Duration::from_secs(3600);
+        let handle = spawn_runtime(config).await;
+
+        timeout(Duration::from_secs(2), async {
+            while tokio::fs::metadata(&socket_path).await.is_err() {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .unwrap();
+
+        let explain_response = send_request(
+            &socket_path,
+            json!({
+                "jsonrpc":"2.0",
+                "method":"explain",
+                "params":{"query":"session:7","namespace":"team.alpha","limit":2},
+                "id":"explain"
+            }),
+        )
+        .await;
+
+        assert_eq!(explain_response["result"]["status"], json!("ok"));
+        assert_eq!(explain_response["result"]["retrieval"]["namespace"], json!("team.alpha"));
+        assert_eq!(
+            explain_response["result"]["retrieval"]["result"]["explain"]["recall_plan"],
+            json!("RecentTier1ThenTier2Exact")
+        );
+        assert_eq!(
+            explain_response["result"]["retrieval"]["result"]["packaging_metadata"]["result_budget"],
+            json!(2)
+        );
+        assert_eq!(
+            explain_response["result"]["retrieval"]["result"]["packaging_metadata"]["degraded_summary"],
+            json!("planner-only explain envelope; evidence hydration not implemented")
+        );
+
+        let shutdown_response = send_request(
+            &socket_path,
+            json!({"jsonrpc":"2.0","method":"shutdown","params":{},"id":"done"}),
+        )
+        .await;
+        assert_eq!(shutdown_response["result"]["shutting_down"], json!(true));
+        timeout(Duration::from_secs(2), handle)
+            .await
+            .unwrap()
+            .unwrap()
+            .unwrap();
+    }
+
+    #[tokio::test]
+    async fn runtime_inspect_missing_id_returns_invalid_params_error() {
+        let socket_path = unique_path("inspect-missing-id");
+        let mut config = DaemonRuntimeConfig::new(&socket_path);
+        config.maintenance_interval = Duration::from_secs(3600);
+        let handle = spawn_runtime(config).await;
+
+        timeout(Duration::from_secs(2), async {
+            while tokio::fs::metadata(&socket_path).await.is_err() {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .unwrap();
+
+        let response = send_request(
+            &socket_path,
+            json!({
+                "jsonrpc":"2.0",
+                "method":"inspect",
+                "params":{"namespace":"team.alpha"},
+                "id":"inspect-missing-id"
+            }),
+        )
+        .await;
+
+        assert_eq!(response["error"]["code"], json!(-32602));
+        assert_eq!(response["error"]["message"], json!("missing id"));
+
+        let zero_id_response = send_request(
+            &socket_path,
+            json!({
+                "jsonrpc":"2.0",
+                "method":"inspect",
+                "params":{"id":0,"namespace":"team.alpha"},
+                "id":"inspect-zero-id"
+            }),
+        )
+        .await;
+
+        assert_eq!(zero_id_response["error"]["code"], json!(-32602));
+        assert_eq!(zero_id_response["error"]["message"], json!("id must be at least 1"));
+
+        let fractional_id_response = send_request(
+            &socket_path,
+            json!({
+                "jsonrpc":"2.0",
+                "method":"inspect",
+                "params":{"id":1.5,"namespace":"team.alpha"},
+                "id":"inspect-fractional-id"
+            }),
+        )
+        .await;
+
+        assert_eq!(fractional_id_response["error"]["code"], json!(-32602));
+        assert_eq!(
+            fractional_id_response["error"]["message"],
+            json!("id must be a positive integer")
+        );
+
+        let shutdown_response = send_request(
+            &socket_path,
+            json!({"jsonrpc":"2.0","method":"shutdown","params":{},"id":"done"}),
+        )
+        .await;
+        assert_eq!(shutdown_response["result"]["shutting_down"], json!(true));
+        timeout(Duration::from_secs(2), handle)
+            .await
+            .unwrap()
+            .unwrap()
+            .unwrap();
+    }
+
+    #[tokio::test]
+    async fn runtime_explain_invalid_limit_returns_invalid_params_error() {
+        let socket_path = unique_path("explain-invalid-limit");
+        let mut config = DaemonRuntimeConfig::new(&socket_path);
+        config.maintenance_interval = Duration::from_secs(3600);
+        let handle = spawn_runtime(config).await;
+
+        timeout(Duration::from_secs(2), async {
+            while tokio::fs::metadata(&socket_path).await.is_err() {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .unwrap();
+
+        let response = send_request(
+            &socket_path,
+            json!({
+                "jsonrpc":"2.0",
+                "method":"explain",
+                "params":{"query":"session:7","namespace":"team.alpha","limit":0},
+                "id":"explain-invalid-limit"
+            }),
+        )
+        .await;
+
+        assert_eq!(response["error"]["code"], json!(-32602));
+        assert_eq!(response["error"]["message"], json!("limit must be at least 1"));
 
         let shutdown_response = send_request(
             &socket_path,

@@ -118,6 +118,61 @@ pub struct RuntimeMethodRequest {
     pub id: Option<Value>,
 }
 
+fn parse_optional_limit(params: &Value) -> Result<Option<usize>, JsonRpcError> {
+    match params.get("limit") {
+        None | Some(Value::Null) => Ok(None),
+        Some(Value::Number(value)) => {
+            let parsed = value.as_u64().and_then(|value| usize::try_from(value).ok());
+            match parsed {
+                Some(0) => Err(JsonRpcError {
+                    code: -32602,
+                    message: "limit must be at least 1".to_string(),
+                    data: None,
+                }),
+                Some(limit) => Ok(Some(limit)),
+                None => Err(JsonRpcError {
+                    code: -32602,
+                    message: "limit must be a positive integer".to_string(),
+                    data: None,
+                }),
+            }
+        }
+        Some(_) => Err(JsonRpcError {
+            code: -32602,
+            message: "limit must be a positive integer".to_string(),
+            data: None,
+        }),
+    }
+}
+
+fn parse_required_u64(params: &Value, field: &'static str) -> Result<u64, JsonRpcError> {
+    match params.get(field) {
+        None | Some(Value::Null) => Err(JsonRpcError {
+            code: -32602,
+            message: format!("missing {field}"),
+            data: None,
+        }),
+        Some(Value::Number(value)) => match value.as_u64() {
+            Some(0) => Err(JsonRpcError {
+                code: -32602,
+                message: format!("{field} must be at least 1"),
+                data: None,
+            }),
+            Some(value) => Ok(value),
+            None => Err(JsonRpcError {
+                code: -32602,
+                message: format!("{field} must be a positive integer"),
+                data: None,
+            }),
+        },
+        Some(_) => Err(JsonRpcError {
+            code: -32602,
+            message: format!("{field} must be a positive integer"),
+            data: None,
+        }),
+    }
+}
+
 impl RuntimeMethodRequest {
     pub fn parse_method(&self) -> Result<RuntimeRequest, JsonRpcError> {
         if self.jsonrpc != "2.0" {
@@ -158,37 +213,50 @@ impl RuntimeMethodRequest {
                         message: "missing namespace".to_string(),
                         data: None,
                     })?;
-                let limit = match self.params.get("limit") {
-                    None | Some(Value::Null) => None,
-                    Some(Value::Number(value)) => {
-                        let parsed = value.as_u64().and_then(|value| usize::try_from(value).ok());
-                        match parsed {
-                            Some(0) => {
-                                return Err(JsonRpcError {
-                                    code: -32602,
-                                    message: "limit must be at least 1".to_string(),
-                                    data: None,
-                                });
-                            }
-                            Some(limit) => Some(limit),
-                            None => {
-                                return Err(JsonRpcError {
-                                    code: -32602,
-                                    message: "limit must be a positive integer".to_string(),
-                                    data: None,
-                                });
-                            }
-                        }
-                    }
-                    Some(_) => {
-                        return Err(JsonRpcError {
-                            code: -32602,
-                            message: "limit must be a positive integer".to_string(),
-                            data: None,
-                        });
-                    }
-                };
+                let limit = parse_optional_limit(&self.params)?;
                 Ok(RuntimeRequest::Recall {
+                    query: query.to_string(),
+                    namespace: namespace.to_string(),
+                    limit,
+                })
+            }
+            "inspect" => {
+                let id = parse_required_u64(&self.params, "id")?;
+                let namespace = self
+                    .params
+                    .get("namespace")
+                    .and_then(Value::as_str)
+                    .ok_or_else(|| JsonRpcError {
+                        code: -32602,
+                        message: "missing namespace".to_string(),
+                        data: None,
+                    })?;
+                Ok(RuntimeRequest::Inspect {
+                    id,
+                    namespace: namespace.to_string(),
+                })
+            }
+            "explain" => {
+                let query = self
+                    .params
+                    .get("query")
+                    .and_then(Value::as_str)
+                    .ok_or_else(|| JsonRpcError {
+                        code: -32602,
+                        message: "missing query".to_string(),
+                        data: None,
+                    })?;
+                let namespace = self
+                    .params
+                    .get("namespace")
+                    .and_then(Value::as_str)
+                    .ok_or_else(|| JsonRpcError {
+                        code: -32602,
+                        message: "missing namespace".to_string(),
+                        data: None,
+                    })?;
+                let limit = parse_optional_limit(&self.params)?;
+                Ok(RuntimeRequest::Explain {
                     query: query.to_string(),
                     namespace: namespace.to_string(),
                     limit,
@@ -264,6 +332,15 @@ pub enum RuntimeRequest {
     Ping,
     Status,
     Recall {
+        query: String,
+        namespace: String,
+        limit: Option<usize>,
+    },
+    Inspect {
+        id: u64,
+        namespace: String,
+    },
+    Explain {
         query: String,
         namespace: String,
         limit: Option<usize>,
@@ -414,5 +491,98 @@ mod tests {
         let error = fractional_limit.parse_method().unwrap_err();
         assert_eq!(error.code, -32602);
         assert_eq!(error.message, "limit must be a positive integer");
+    }
+
+    #[test]
+    fn parse_method_accepts_named_inspect_params() {
+        let request = RuntimeMethodRequest {
+            jsonrpc: "2.0".to_string(),
+            method: "inspect".to_string(),
+            params: json!({ "id": 42, "namespace": "team.alpha" }),
+            id: Some(json!(5)),
+        };
+
+        assert_eq!(
+            request.parse_method().unwrap(),
+            RuntimeRequest::Inspect {
+                id: 42,
+                namespace: "team.alpha".to_string(),
+            }
+        );
+    }
+
+    #[test]
+    fn parse_method_inspect_requires_id_and_namespace() {
+        let missing_id = RuntimeMethodRequest {
+            jsonrpc: "2.0".to_string(),
+            method: "inspect".to_string(),
+            params: json!({ "namespace": "team.alpha" }),
+            id: Some(json!(6)),
+        };
+        let error = missing_id.parse_method().unwrap_err();
+        assert_eq!(error.code, -32602);
+        assert_eq!(error.message, "missing id");
+
+        let zero_id = RuntimeMethodRequest {
+            jsonrpc: "2.0".to_string(),
+            method: "inspect".to_string(),
+            params: json!({ "id": 0, "namespace": "team.alpha" }),
+            id: Some(json!(61)),
+        };
+        let error = zero_id.parse_method().unwrap_err();
+        assert_eq!(error.code, -32602);
+        assert_eq!(error.message, "id must be at least 1");
+
+        let fractional_id = RuntimeMethodRequest {
+            jsonrpc: "2.0".to_string(),
+            method: "inspect".to_string(),
+            params: json!({ "id": 1.5, "namespace": "team.alpha" }),
+            id: Some(json!(62)),
+        };
+        let error = fractional_id.parse_method().unwrap_err();
+        assert_eq!(error.code, -32602);
+        assert_eq!(error.message, "id must be a positive integer");
+
+        let missing_namespace = RuntimeMethodRequest {
+            jsonrpc: "2.0".to_string(),
+            method: "inspect".to_string(),
+            params: json!({ "id": 42 }),
+            id: Some(json!(7)),
+        };
+        let error = missing_namespace.parse_method().unwrap_err();
+        assert_eq!(error.code, -32602);
+        assert_eq!(error.message, "missing namespace");
+    }
+
+    #[test]
+    fn parse_method_accepts_named_explain_params() {
+        let request = RuntimeMethodRequest {
+            jsonrpc: "2.0".to_string(),
+            method: "explain".to_string(),
+            params: json!({ "query": "memory:42", "namespace": "team.alpha", "limit": 2 }),
+            id: Some(json!(8)),
+        };
+
+        assert_eq!(
+            request.parse_method().unwrap(),
+            RuntimeRequest::Explain {
+                query: "memory:42".to_string(),
+                namespace: "team.alpha".to_string(),
+                limit: Some(2),
+            }
+        );
+    }
+
+    #[test]
+    fn parse_method_explain_reuses_limit_validation() {
+        let zero_limit = RuntimeMethodRequest {
+            jsonrpc: "2.0".to_string(),
+            method: "explain".to_string(),
+            params: json!({ "query": "memory:42", "namespace": "team.alpha", "limit": 0 }),
+            id: Some(json!(9)),
+        };
+        let error = zero_limit.parse_method().unwrap_err();
+        assert_eq!(error.code, -32602);
+        assert_eq!(error.message, "limit must be at least 1");
     }
 }

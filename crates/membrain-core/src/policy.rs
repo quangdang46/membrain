@@ -1,7 +1,7 @@
 use crate::observability::OutcomeClass;
 
 /// Effective policy decision shared across core APIs and wrappers.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
 pub enum PolicyDecision {
     /// The request may proceed to bounded planning or retrieval.
     Allow,
@@ -36,7 +36,7 @@ impl PassiveObservationDecision {
 }
 
 /// Canonical visibility for namespace-aware sharing.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, serde::Serialize)]
 pub enum SharingVisibility {
     #[default]
     Private,
@@ -55,7 +55,7 @@ impl SharingVisibility {
 }
 
 /// Machine-readable access scope granted after sharing mediation.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
 pub enum SharingScope {
     NamespaceOnly,
     ApprovedShared,
@@ -73,7 +73,7 @@ impl SharingScope {
 }
 
 /// Stable denial reasons for namespace-aware sharing access.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
 pub enum SharingDenialReason {
     NamespaceIsolation,
     ApprovedScopeRequired,
@@ -99,7 +99,7 @@ impl SharingDenialReason {
 }
 
 /// Final mediation outcome for namespace-aware sharing access.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
 pub enum SharingAccessDecision {
     Allow,
     Redact,
@@ -107,7 +107,7 @@ pub enum SharingAccessDecision {
 }
 
 /// Machine-readable summary of the policy gate that fired before expensive work.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
 pub struct PolicySummary {
     /// Final allow/deny decision for the preflight gate.
     pub decision: PolicyDecision,
@@ -138,7 +138,7 @@ impl PolicySummary {
 }
 
 /// Shared safeguard classes for risky or high-blast-radius operations.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
 pub enum OperationClass {
     ReadOnlyAssessment,
     DerivedSurfaceMutation,
@@ -147,7 +147,7 @@ pub enum OperationClass {
 }
 
 /// Shared preflight readiness states preserved across interfaces.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
 pub enum PreflightState {
     Ready,
     Blocked,
@@ -156,7 +156,7 @@ pub enum PreflightState {
 }
 
 /// Machine-readable per-check status preserved in safeguard outputs.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
 pub enum PreflightCheckStatus {
     Passed,
     Blocked,
@@ -165,7 +165,7 @@ pub enum PreflightCheckStatus {
 }
 
 /// Stable blocked or rejected reason codes for preflight and safeguard flows.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
 pub enum SafeguardReasonCode {
     ConfirmationRequired,
     StalePreflight,
@@ -181,7 +181,7 @@ pub enum SafeguardReasonCode {
 }
 
 /// Recovery posture for risky operations.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
 pub enum ReversibilityKind {
     RepairableFromDurableTruth,
     RollbackViaSnapshot,
@@ -190,7 +190,7 @@ pub enum ReversibilityKind {
 }
 
 /// Shared readiness check result preserved in the safeguard object.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
 pub struct PreflightCheck {
     pub check_name: &'static str,
     pub status: PreflightCheckStatus,
@@ -228,7 +228,7 @@ pub struct SharingAccessRequest {
 }
 
 /// Machine-readable outcome for namespace-aware sharing mediation.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
 pub struct SharingAccessOutcome {
     pub decision: SharingAccessDecision,
     pub policy_summary: PolicySummary,
@@ -238,7 +238,7 @@ pub struct SharingAccessOutcome {
 }
 
 /// Shared confirmation state for previewed risky operations.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
 pub struct ConfirmationState {
     pub required: bool,
     pub force_allowed: bool,
@@ -247,14 +247,14 @@ pub struct ConfirmationState {
 }
 
 /// Shared confidence threshold metadata for high-stakes or action-oriented guidance.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
 pub struct ConfidenceConstraint {
     pub minimum_level: &'static str,
     pub change_my_mind_conditions: Vec<&'static str>,
 }
 
 /// Stable audit correlation payload for safeguard preview, apply, and rollback review.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
 pub struct SafeguardAudit {
     pub event_kind: &'static str,
     pub actor_source: &'static str,
@@ -265,7 +265,7 @@ pub struct SafeguardAudit {
 }
 
 /// Shared safeguard payload reused by preview, blocked, degraded, rejected, and accepted flows.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
 pub struct SafeguardOutcome {
     pub outcome_class: OutcomeClass,
     pub preflight_state: PreflightState,
@@ -533,7 +533,16 @@ impl PolicyGateway for PolicyModule {
             };
         }
 
-        let sharing_scope = sharing_scope.expect("allow path requires sharing scope");
+        let Some(sharing_scope) = sharing_scope else {
+            return SharingAccessOutcome {
+                decision: SharingAccessDecision::Deny,
+                policy_summary: PolicySummary::deny(true),
+                sharing_scope: None,
+                denial_reasons: vec![SharingDenialReason::NamespaceIsolation],
+                redaction_fields: vec!["memory_id", "sharing_scope", "workspace_id", "session_id"],
+            };
+        };
+
         let redaction_fields = if request.same_namespace {
             Vec::new()
         } else {
@@ -849,7 +858,7 @@ mod tests {
         IngestMode, ObservationWriteRequest, OperationClass, PassiveObservationDecision,
         PolicyDecision, PolicyGateway, PolicyModule, PreflightCheckStatus, PreflightState,
         ReversibilityKind, SafeguardReasonCode, SafeguardRequest, SharingAccessDecision,
-        SharingAccessRequest, SharingVisibility,
+        SharingAccessRequest, SharingDenialReason, SharingVisibility,
     };
     use crate::observability::OutcomeClass;
 
@@ -870,6 +879,35 @@ mod tests {
         assert_eq!(outcome.sharing_scope.unwrap().as_str(), "namespace_only");
         assert!(outcome.denial_reasons.is_empty());
         assert!(outcome.redaction_fields.is_empty());
+    }
+
+    #[test]
+    fn sharing_access_denies_instead_of_panicking_when_allow_path_lacks_scope() {
+        let gateway = PolicyModule;
+        let outcome = gateway.evaluate_sharing_access(SharingAccessRequest {
+            same_namespace: false,
+            include_public: false,
+            visibility: SharingVisibility::Public,
+            workspace_acl_allowed: true,
+            agent_acl_allowed: true,
+            session_visibility_allowed: true,
+            legal_hold: false,
+        });
+
+        assert_eq!(outcome.decision, SharingAccessDecision::Deny);
+        assert_eq!(outcome.policy_summary.decision, PolicyDecision::Deny);
+        assert_eq!(outcome.sharing_scope, None);
+        assert_eq!(
+            outcome.denial_reasons,
+            vec![
+                SharingDenialReason::NamespaceIsolation,
+                SharingDenialReason::ApprovedScopeRequired,
+            ]
+        );
+        assert_eq!(
+            outcome.redaction_fields,
+            vec!["memory_id", "sharing_scope", "workspace_id", "session_id"]
+        );
     }
 
     #[test]

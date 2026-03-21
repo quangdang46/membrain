@@ -7,7 +7,8 @@ use membrain_core::engine::maintenance::{
     MaintenanceJobHandle, MaintenanceJobState, MaintenanceOperation, MaintenanceProgress,
     MaintenanceStep,
 };
-use membrain_core::engine::repair::{RepairEngine, RepairTarget};
+use membrain_core::engine::repair::{IndexRepairEntrypoint, RepairEngine, RepairTarget};
+use membrain_core::migrate::DurableSchemaObject;
 
 #[derive(Debug, Clone)]
 struct ScriptedMaintenance {
@@ -380,10 +381,15 @@ fn repair_runs_expose_verification_artifacts_through_maintenance_handle() {
                     .verification_artifacts
                     .get(&RepairTarget::LexicalIndex)
                     .unwrap();
+                assert_eq!(lexical.artifact_name, "fts5_lexical_parity");
                 assert_eq!(lexical.authoritative_rows, 128);
                 assert_eq!(lexical.derived_rows, 128);
                 assert_eq!(lexical.authoritative_generation, "durable.v1");
                 assert_eq!(lexical.derived_generation, "durable.v1");
+                assert_eq!(
+                    lexical.parity_check,
+                    "fts5_projection_matches_durable_truth"
+                );
 
                 let semantic_hot = summary
                     .verification_artifacts
@@ -402,4 +408,126 @@ fn repair_runs_expose_verification_artifacts_through_maintenance_handle() {
             _ => panic!("unexpected state"),
         }
     }
+}
+
+#[test]
+fn repair_runs_preserve_index_rebuild_entrypoint_contracts_in_verification_artifacts() {
+    let namespace = NamespaceId::new("test").unwrap();
+    let engine = RepairEngine;
+    let semantic_cold_plan = engine
+        .plan_index_rebuild(
+            RepairTarget::SemanticColdIndex,
+            IndexRepairEntrypoint::ForceRebuild,
+        )
+        .expect("semantic cold index should expose rebuild plan");
+    let metadata_plan = engine
+        .plan_index_rebuild(
+            RepairTarget::MetadataIndex,
+            IndexRepairEntrypoint::RebuildIfNeeded,
+        )
+        .expect("metadata index should expose rebuild plan");
+
+    let run = engine.create_targeted(
+        namespace,
+        vec![RepairTarget::SemanticColdIndex, RepairTarget::MetadataIndex],
+    );
+    let mut handle = MaintenanceJobHandle::new(run, 10);
+
+    let started = handle.start();
+    assert_eq!(
+        started.state,
+        MaintenanceJobState::Running { progress: None }
+    );
+
+    let first_poll = handle.poll();
+    assert_eq!(
+        first_poll.state,
+        MaintenanceJobState::Running {
+            progress: Some(MaintenanceProgress::new(1, 2)),
+        }
+    );
+    assert_eq!(first_poll.polls_used, 1);
+
+    let completed = handle.poll();
+    let MaintenanceJobState::Completed(summary) = completed.state else {
+        panic!("expected completed repair summary after second poll");
+    };
+    assert_eq!(completed.polls_used, 2);
+    assert_eq!(summary.targets_checked, 2);
+    assert_eq!(summary.results.len(), 2);
+    assert!(summary
+        .results
+        .iter()
+        .all(|result| result.detail == "verified_against_durable_truth"));
+
+    let semantic_cold = summary
+        .verification_artifacts
+        .get(&RepairTarget::SemanticColdIndex)
+        .expect("semantic cold artifact should be present");
+    assert_eq!(
+        semantic_cold.artifact_name,
+        semantic_cold_plan.verification_artifact.artifact_name
+    );
+    assert_eq!(
+        semantic_cold.parity_check,
+        semantic_cold_plan.verification_artifact.parity_check
+    );
+    assert_eq!(
+        semantic_cold.authoritative_rows,
+        semantic_cold_plan.verification_artifact.authoritative_rows
+    );
+    assert_eq!(
+        semantic_cold.derived_generation,
+        semantic_cold_plan.verification_artifact.derived_generation
+    );
+    assert_eq!(
+        semantic_cold_plan.entrypoint,
+        IndexRepairEntrypoint::ForceRebuild
+    );
+    assert!(semantic_cold_plan
+        .rebuilt_outputs
+        .contains(&"usearch_cold_ann"));
+    assert!(semantic_cold_plan
+        .durable_sources
+        .contains(&"canonical_embeddings"));
+    assert_eq!(
+        semantic_cold_plan.authoritative_schema_objects,
+        vec![DurableSchemaObject::DurableMemoryRecords]
+    );
+
+    let metadata = summary
+        .verification_artifacts
+        .get(&RepairTarget::MetadataIndex)
+        .expect("metadata artifact should be present");
+    assert_eq!(
+        metadata.artifact_name,
+        metadata_plan.verification_artifact.artifact_name
+    );
+    assert_eq!(
+        metadata.parity_check,
+        metadata_plan.verification_artifact.parity_check
+    );
+    assert_eq!(
+        metadata.authoritative_rows,
+        metadata_plan.verification_artifact.authoritative_rows
+    );
+    assert_eq!(
+        metadata_plan.entrypoint,
+        IndexRepairEntrypoint::RebuildIfNeeded
+    );
+    assert!(metadata_plan
+        .rebuilt_outputs
+        .contains(&"tier2_metadata_projection"));
+    assert!(metadata_plan
+        .durable_sources
+        .contains(&"namespace_policy_metadata"));
+    assert_eq!(
+        metadata_plan.authoritative_schema_objects,
+        vec![DurableSchemaObject::DurableMemoryRecords]
+    );
+
+    assert_eq!(handle.snapshot().polls_used, 2);
+    assert_eq!(handle.start(), handle.snapshot());
+    assert_eq!(handle.poll(), handle.snapshot());
+    assert_eq!(handle.cancel(), handle.snapshot());
 }

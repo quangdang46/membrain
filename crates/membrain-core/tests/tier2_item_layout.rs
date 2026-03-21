@@ -295,6 +295,44 @@ fn tier2_metadata_preserves_passive_observation_provenance_without_payload_fetch
 }
 
 #[test]
+fn tier2_observation_layout_keeps_provenance_in_metadata_and_raw_body_detached() {
+    let store = Tier2Store;
+    let raw_text = "file watcher noticed a new artifact";
+    let compact_text = "new artifact observed";
+    let envelope = normalized_observation(
+        raw_text,
+        compact_text,
+        "passive_observation",
+        "obs-0000000000000042",
+    );
+
+    let layout = store.layout_item(
+        NamespaceId::new("team.alpha").unwrap(),
+        MemoryId(81),
+        SessionId(9),
+        127,
+        &envelope,
+    );
+    let payload = layout.payload_record();
+
+    assert_eq!(layout.metadata.payload_size_bytes, raw_text.len());
+    assert_eq!(layout.metadata.payload_size_bytes, payload.raw_size_bytes);
+    assert_eq!(layout.metadata.payload_locator, payload.payload_locator);
+    assert_eq!(
+        layout.metadata.observation_source.as_deref(),
+        Some("passive_observation")
+    );
+    assert_eq!(
+        layout.metadata.observation_chunk_id.as_deref(),
+        Some("obs-0000000000000042")
+    );
+    assert_eq!(payload.raw_text, raw_text);
+    assert_ne!(payload.raw_text, compact_text);
+    assert!(layout.prefilter_stays_metadata_only());
+    assert_eq!(layout.prefilter_trace().payload_fetch_count, 0);
+}
+
+#[test]
 fn tier2_landmark_prefilter_trace_stays_metadata_first_for_temporal_recall_consumers() {
     let store = Tier2Store;
     let envelope = normalized_event_with_landmark(
@@ -325,14 +363,12 @@ fn tier2_landmark_prefilter_trace_stays_metadata_first_for_temporal_recall_consu
     assert_eq!(trace.payload_fetch_count, 0);
     assert!(layout.prefilter_stays_metadata_only());
     assert!(prefilter.landmark.is_landmark);
-    assert_eq!(
-        prefilter.landmark.landmark_label.as_deref(),
-        Some("launch milestone")
-    );
-    assert_eq!(
-        prefilter.landmark.era_id.as_deref(),
-        Some("era-launch-milestone-0001")
-    );
+    assert_eq!(prefilter.landmark_label(), Some("launch milestone"));
+    assert_eq!(prefilter.era_id(), Some("era-launch-milestone-0001"));
     assert_eq!(prefilter.payload_locator, layout.metadata.payload_locator);
-    assert_eq!(layout.metadata_index_key().landmark, &envelope.landmark);
+
+    let key = layout.metadata_index_key();
+    assert_eq!(key.landmark, &envelope.landmark);
+    assert_eq!(key.landmark_label(), Some("launch milestone"));
+    assert_eq!(key.era_id(), Some("era-launch-milestone-0001"));
 }
