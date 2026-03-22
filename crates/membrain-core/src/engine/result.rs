@@ -121,6 +121,9 @@ pub struct UncertaintyMarkers {
     pub freshness_uncertainty: Option<u16>,
     pub contradiction_uncertainty: Option<u16>,
     pub missing_evidence_uncertainty: Option<u16>,
+    pub corroboration_uncertainty: Option<u16>,
+    /// Confidence interval bounds (lower, point, upper) when computed.
+    pub confidence_interval: Option<(u16, u16, u16)>,
 }
 
 /// Machine-readable conflict summary preserved for every returned item.
@@ -204,6 +207,8 @@ pub struct OmissionSummary {
     pub duplicate_collapsed: usize,
     pub low_confidence_suppressed: usize,
     pub stale_bypassed: usize,
+    /// Results filtered out because confidence was below the configured threshold.
+    pub confidence_filtered: usize,
 }
 
 /// Policy evaluation summary.
@@ -363,6 +368,7 @@ impl RetrievalResultSet {
                 duplicate_collapsed: 0,
                 low_confidence_suppressed: 0,
                 stale_bypassed: 0,
+                confidence_filtered: 0,
             },
             freshness_markers: FreshnessMarkers {
                 oldest_item_days: 0,
@@ -677,6 +683,130 @@ impl ResultBuilder {
                     .map(|explain| 1000u16.saturating_sub(explain.confidence_signal))
                     .max(),
                 missing_evidence_uncertainty: None,
+                corroboration_uncertainty: None,
+                confidence_interval: None,
+            },
+            answered_from,
+            rerank_metadata: ranking_result.rerank_metadata.clone(),
+        };
+
+        let provenance_summary = ProvenanceSummary {
+            source_kind: "memory".to_string(),
+            source_reference: "memory_id".to_string(),
+            source_agent: "core_engine".to_string(),
+            original_namespace: namespace,
+            derived_from: None,
+            lineage_ancestors: Vec::new(),
+            relation_to_seed: None,
+            graph_seed: None,
+        };
+
+        self.evidence_pack.push(EvidenceItem {
+            result,
+            provenance_summary,
+            freshness_markers: FreshnessMarkers {
+                oldest_item_days: 0,
+                newest_item_days: 0,
+                volatile_items_included: false,
+                stale_warning: false,
+                as_of_tick: None,
+            },
+            omitted_fields: Vec::new(),
+        });
+    }
+
+    /// Adds a candidate with full confidence computation from evidence inputs.
+    ///
+    /// This uses the `ConfidenceEngine` to compute proper confidence scores,
+    /// uncertainty breakdowns, and optional confidence intervals, rather than
+    /// relying on the final ranking score as a confidence proxy.
+    pub fn add_with_confidence(
+        &mut self,
+        memory_id: MemoryId,
+        namespace: NamespaceId,
+        session_id: SessionId,
+        memory_type: CanonicalMemoryType,
+        compact_text: String,
+        ranking_result: &RankingResult,
+        answered_from: AnsweredFrom,
+        confidence_inputs: &crate::engine::confidence::ConfidenceInputs,
+        confidence_policy: &crate::engine::confidence::ConfidencePolicy,
+    ) {
+        use crate::engine::confidence::ConfidenceEngine;
+
+        self.total_candidates += 1;
+
+        let confidence_engine = ConfidenceEngine;
+        let confidence_output = confidence_engine.compute(confidence_inputs, confidence_policy);
+
+        let ranking_explain = RankingExplain::from_result(ranking_result);
+        let result = RetrievalResult {
+            memory_id,
+            namespace: namespace.clone(),
+            session_id,
+            memory_type,
+            compact_text,
+            role: EvidenceRole::Primary,
+            entry_lane: match answered_from {
+                AnsweredFrom::Tier1Hot => EntryLane::Exact,
+                AnsweredFrom::Tier2Indexed => EntryLane::Semantic,
+                AnsweredFrom::Tier3Cold => EntryLane::ColdFallback,
+            },
+            payload_state: PayloadState::Inline,
+            score: ranking_result.final_score,
+            score_summary: ScoreSummary::from_ranking_explain(&ranking_explain),
+            ranking_explain,
+            contradiction_explains: ranking_result.contradiction_explains.clone(),
+            conflict_markers: ConflictMarkers {
+                conflict_state: ranking_result
+                    .contradiction_explains
+                    .iter()
+                    .map(|explain| explain.resolution)
+                    .find(|state| *state != ResolutionState::None)
+                    .unwrap_or(ResolutionState::None),
+                conflict_record_ids: ranking_result
+                    .contradiction_explains
+                    .iter()
+                    .map(|explain| explain.contradiction_id.0)
+                    .collect(),
+                belief_chain_id: None,
+                superseded_by: ranking_result
+                    .contradiction_explains
+                    .iter()
+                    .find_map(|explain| {
+                        (explain.superseded_memory == Some(memory_id)).then_some(
+                            explain
+                                .preferred_memory
+                                .unwrap_or(explain.conflicting_memory),
+                        )
+                    }),
+                contradiction_lineage_pairs: ranking_result
+                    .contradiction_explains
+                    .iter()
+                    .map(|explain| explain.lineage_pair)
+                    .collect(),
+                resolution_reasons: ranking_result
+                    .contradiction_explains
+                    .iter()
+                    .filter_map(|explain| explain.resolution_reason.clone())
+                    .collect(),
+                audit_visible_count: ranking_result
+                    .contradiction_explains
+                    .iter()
+                    .filter(|explain| explain.audit_visible)
+                    .count(),
+                omitted_conflict_siblings: 0,
+            },
+            uncertainty_markers: UncertaintyMarkers {
+                confidence: confidence_output.confidence,
+                uncertainty_score: confidence_output.uncertainty_score,
+                freshness_uncertainty: Some(confidence_output.freshness_uncertainty),
+                contradiction_uncertainty: Some(confidence_output.contradiction_uncertainty),
+                missing_evidence_uncertainty: Some(confidence_output.missing_evidence_uncertainty),
+                corroboration_uncertainty: Some(confidence_output.corroboration_uncertainty),
+                confidence_interval: confidence_output
+                    .confidence_interval
+                    .map(|ci| (ci.lower, ci.point, ci.upper)),
             },
             answered_from,
             rerank_metadata: ranking_result.rerank_metadata.clone(),
@@ -778,6 +908,114 @@ impl ResultBuilder {
                 duplicate_collapsed: 0,
                 low_confidence_suppressed: 0,
                 stale_bypassed: 0,
+                confidence_filtered: 0,
+            },
+            freshness_markers: FreshnessMarkers {
+                oldest_item_days: 0,
+                newest_item_days: 0,
+                volatile_items_included: false,
+                stale_warning: false,
+                as_of_tick: None,
+            },
+            packaging_metadata: PackagingMetadata {
+                result_budget: self.max_results,
+                token_budget: None,
+                graph_assistance: "none".to_string(),
+                degraded_summary: None,
+                packaging_mode: packaging_mode.to_string(),
+                rerank_metadata,
+            },
+            output_mode: DualOutputMode::Balanced,
+            truncated,
+            total_candidates: self.total_candidates,
+        }
+    }
+
+    /// Builds the result set with confidence-based filtering applied.
+    ///
+    /// Results whose confidence score falls below the threshold are removed
+    /// from the evidence pack before sorting and truncation. The number of
+    /// filtered results is recorded in `omitted_summary.confidence_filtered`.
+    pub fn build_with_confidence_filter(
+        mut self,
+        explain: RetrievalExplain,
+        min_confidence: u16,
+    ) -> RetrievalResultSet {
+        let pre_filter_count = self.evidence_pack.len();
+        self.evidence_pack
+            .retain(|item| item.result.uncertainty_markers.confidence >= min_confidence);
+        let filtered_count = pre_filter_count - self.evidence_pack.len();
+
+        self.evidence_pack
+            .sort_by(|a, b| b.result.score.cmp(&a.result.score));
+        let truncated = self.evidence_pack.len() > self.max_results;
+        let outcome_class = if truncated {
+            OutcomeClass::Partial
+        } else {
+            OutcomeClass::Accepted
+        };
+        let packaging_mode = if self.action_pack.is_some() {
+            "evidence_plus_action"
+        } else {
+            "evidence_only"
+        };
+        self.evidence_pack.truncate(self.max_results);
+        let rerank_metadata = self.evidence_pack.first().and_then(|first| {
+            self.evidence_pack
+                .iter()
+                .all(|item| item.result.rerank_metadata == first.result.rerank_metadata)
+                .then(|| first.result.rerank_metadata.clone())
+        });
+
+        let contradictions_found = self
+            .evidence_pack
+            .iter()
+            .map(|item| item.result.contradiction_explains.len())
+            .sum();
+
+        RetrievalResultSet {
+            outcome_class,
+            evidence_pack: self.evidence_pack,
+            action_pack: self.action_pack,
+            deferred_payloads: self.deferred_payloads,
+            explain: RetrievalExplain {
+                contradictions_found,
+                ..explain
+            },
+            policy_summary: PolicySummary {
+                namespace_applied: self.namespace_applied.clone(),
+                outcome_class,
+                redactions_applied: false,
+                restrictions_active: Vec::new(),
+                filters: vec![PolicyFilterSummary::new(
+                    self.namespace_applied.as_str(),
+                    "namespace",
+                    OutcomeClass::Accepted,
+                    "none",
+                    FieldPresence::Present("namespace_bound".to_string()),
+                    FieldPresence::Absent,
+                    Vec::new(),
+                )],
+            },
+            provenance_summary: ProvenanceSummary {
+                source_kind: "retrieval_pipeline".to_string(),
+                source_reference: "result_builder".to_string(),
+                source_agent: "core_engine".to_string(),
+                original_namespace: self.namespace_applied.clone(),
+                derived_from: None,
+                lineage_ancestors: Vec::new(),
+                relation_to_seed: None,
+                graph_seed: None,
+            },
+            omitted_summary: OmissionSummary {
+                policy_redacted: 0,
+                threshold_dropped: 0,
+                dedup_dropped: 0,
+                budget_capped: usize::from(truncated),
+                duplicate_collapsed: 0,
+                low_confidence_suppressed: 0,
+                stale_bypassed: 0,
+                confidence_filtered: filtered_count,
             },
             freshness_markers: FreshnessMarkers {
                 oldest_item_days: 0,

@@ -1,5 +1,11 @@
+/// Belief-history storage and version timeline surfaces.
+pub mod belief_history;
+/// Confidence-interval storage and scoring input surfaces.
+pub mod confidence;
 /// Consolidation maintenance surfaces.
 pub mod consolidation;
+/// Context-budget request contract and greedy packing semantics.
+pub mod context_budget;
 /// Contradiction records and conflict-aware storage surfaces.
 pub mod contradiction;
 /// Encode-path orchestration surfaces.
@@ -10,6 +16,8 @@ pub mod episode;
 pub mod forgetting;
 /// Query-intent classification and routing-input taxonomy surfaces.
 pub mod intent;
+/// Proactive and retroactive interference detection and penalty surfaces.
+pub mod interference;
 /// Shared cancellable maintenance control surfaces.
 pub mod maintenance;
 /// Ranking and score-fusion surfaces.

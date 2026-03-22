@@ -1,7 +1,8 @@
 use crate::api::NamespaceId;
 use crate::config::RuntimeConfig;
 use crate::engine::contradiction::{
-    ContradictionError, ContradictionId, ContradictionKind, ContradictionRecord, ContradictionStore,
+    ContradictionCandidate, ContradictionError, ContradictionId, ContradictionKind,
+    ContradictionRecord, ContradictionStore, DetectionResult,
 };
 use crate::observability::{
     AdmissionOutcomeKind, EncodeFastPathStage, EncodeFastPathTrace, WorkingMemoryTrace,
@@ -87,6 +88,112 @@ pub enum EncodeWriteBranch {
     Accepted,
     /// The candidate branched into explicit contradiction recording.
     ContradictionRecorded,
+}
+
+/// Outcome of the integrated detect-and-branch write path.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum WriteBranchOutcome {
+    /// No contradiction detected; write may proceed normally.
+    Accepted {
+        /// Trace proving the branch decision and detection inputs.
+        trace: ContradictionWriteBranchTrace,
+    },
+    /// A contradiction was detected and recorded; write branches into conflict storage.
+    ContradictionRecorded {
+        /// The contradiction write outcome with record details.
+        outcome: ContradictionWriteOutcome,
+        /// Trace proving the branch decision and detection inputs.
+        trace: ContradictionWriteBranchTrace,
+    },
+}
+
+impl WriteBranchOutcome {
+    /// Returns whether the write was accepted without contradiction.
+    pub const fn is_accepted(&self) -> bool {
+        matches!(self, Self::Accepted { .. })
+    }
+
+    /// Returns whether a contradiction was detected and recorded.
+    pub const fn is_contradiction(&self) -> bool {
+        matches!(self, Self::ContradictionRecorded { .. })
+    }
+
+    /// Returns the inner contradiction outcome if one was recorded.
+    pub fn contradiction_outcome(&self) -> Option<&ContradictionWriteOutcome> {
+        match self {
+            Self::ContradictionRecorded { outcome, .. } => Some(outcome),
+            Self::Accepted { .. } => None,
+        }
+    }
+
+    /// Returns the trace artifact proving which branch was taken.
+    pub const fn trace(&self) -> &ContradictionWriteBranchTrace {
+        match self {
+            Self::Accepted { trace } | Self::ContradictionRecorded { trace, .. } => trace,
+        }
+    }
+}
+
+/// Machine-readable trace proving which branch the write path took and why.
+///
+/// This artifact satisfies the acceptance requirement that "logs show the branch
+/// taken when a contradiction is detected." It is produced by every call to
+/// `detect_and_branch` or `detect_all_and_branch` so callers can record or
+/// inspect the decision without re-deriving it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ContradictionWriteBranchTrace {
+    /// Which branch the write path selected.
+    pub branch: EncodeWriteBranch,
+    /// Number of candidate memories consulted during detection.
+    pub candidates_examined: usize,
+    /// The contradiction kind if a conflict was detected, `None` when accepted.
+    pub detected_kind: Option<ContradictionKind>,
+    /// Conflict score in 0..1000 if a conflict was detected.
+    pub conflict_score: Option<u16>,
+    /// The existing memory that conflicted (if any).
+    pub existing_memory: Option<MemoryId>,
+    /// The incoming memory being written.
+    pub incoming_memory: MemoryId,
+}
+
+impl ContradictionWriteBranchTrace {
+    /// Builds a trace for an accepted (no-conflict) write.
+    pub fn accepted(candidates_examined: usize, incoming_memory: MemoryId) -> Self {
+        Self {
+            branch: EncodeWriteBranch::Accepted,
+            candidates_examined,
+            detected_kind: None,
+            conflict_score: None,
+            existing_memory: None,
+            incoming_memory,
+        }
+    }
+
+    /// Builds a trace for a contradiction-recorded write.
+    pub fn contradiction(
+        candidates_examined: usize,
+        existing_memory: MemoryId,
+        incoming_memory: MemoryId,
+        kind: ContradictionKind,
+        conflict_score: u16,
+    ) -> Self {
+        Self {
+            branch: EncodeWriteBranch::ContradictionRecorded,
+            candidates_examined,
+            detected_kind: Some(kind),
+            conflict_score: Some(conflict_score),
+            existing_memory: Some(existing_memory),
+            incoming_memory,
+        }
+    }
+
+    /// Returns a stable machine-readable label for the branch taken.
+    pub const fn branch_label(&self) -> &'static str {
+        match self.branch {
+            EncodeWriteBranch::Accepted => "accepted",
+            EncodeWriteBranch::ContradictionRecorded => "contradiction_recorded",
+        }
+    }
 }
 
 /// Result of routing an encode candidate through contradiction-aware write branching.
@@ -278,6 +385,99 @@ impl EncodeEngine {
             incoming_memory,
             kind,
         })
+    }
+
+    /// Detects contradictions for an incoming candidate and branches into recording if found.
+    ///
+    /// This is the integrated write-path entry point: it runs contradiction detection
+    /// against all indexed memories in the namespace, and if a conflict is found,
+    /// records an explicit contradiction artifact instead of silently overwriting.
+    ///
+    /// Returns `WriteBranchOutcome::Accepted` when no contradiction is detected,
+    /// or `WriteBranchOutcome::ContradictionRecorded` when the write branches into
+    /// contradiction recording. Both variants carry a `ContradictionWriteBranchTrace`
+    /// so callers can log or inspect the decision.
+    pub fn detect_and_branch(
+        &self,
+        contradictions: &mut crate::engine::contradiction::ContradictionEngine,
+        namespace: NamespaceId,
+        incoming_memory: MemoryId,
+        candidate: &ContradictionCandidate,
+    ) -> Result<WriteBranchOutcome, ContradictionError> {
+        let candidates_examined = contradictions.indexed_memory_count(&candidate.namespace);
+        let detection = contradictions.detect(candidate);
+
+        match detection {
+            DetectionResult::NoConflict => {
+                let trace =
+                    ContradictionWriteBranchTrace::accepted(candidates_examined, incoming_memory);
+                Ok(WriteBranchOutcome::Accepted { trace })
+            }
+            DetectionResult::ConflictDetected {
+                existing_memory,
+                kind,
+                conflict_score,
+            } => {
+                let trace = ContradictionWriteBranchTrace::contradiction(
+                    candidates_examined,
+                    existing_memory,
+                    incoming_memory,
+                    kind,
+                    conflict_score,
+                );
+                let outcome = self.record_contradiction_branch(
+                    contradictions,
+                    namespace,
+                    existing_memory,
+                    incoming_memory,
+                    kind,
+                    conflict_score,
+                )?;
+                Ok(WriteBranchOutcome::ContradictionRecorded { outcome, trace })
+            }
+        }
+    }
+
+    /// Detects all contradictions for an incoming candidate and records each as a separate artifact.
+    ///
+    /// Unlike `detect_and_branch` which stops at the best match, this method records
+    /// contradictions against all conflicting memories. Use this when the write path
+    /// must preserve a complete conflict picture rather than just the strongest signal.
+    pub fn detect_all_and_branch(
+        &self,
+        contradictions: &mut crate::engine::contradiction::ContradictionEngine,
+        namespace: NamespaceId,
+        incoming_memory: MemoryId,
+        candidate: &ContradictionCandidate,
+    ) -> Result<Vec<ContradictionWriteOutcome>, ContradictionError> {
+        let detections = contradictions.detect_all(candidate);
+        let mut outcomes = Vec::with_capacity(detections.len());
+
+        for detection in detections {
+            if let DetectionResult::ConflictDetected {
+                existing_memory,
+                kind,
+                conflict_score,
+            } = detection
+            {
+                match self.record_contradiction_branch(
+                    contradictions,
+                    namespace.clone(),
+                    existing_memory,
+                    incoming_memory,
+                    kind,
+                    conflict_score,
+                ) {
+                    Ok(outcome) => outcomes.push(outcome),
+                    Err(ContradictionError::DuplicateRecord) => {
+                        // Skip duplicate pairs — the contradiction is already recorded
+                    }
+                    Err(e) => return Err(e),
+                }
+            }
+        }
+
+        Ok(outcomes)
     }
 
     fn write_gate(
@@ -505,10 +705,11 @@ impl EncodeRuntime for EncodeEngine {
 
 #[cfg(test)]
 mod tests {
-    use super::{EncodeEngine, EncodeWriteBranch};
+    use super::{EncodeEngine, EncodeWriteBranch, WriteBranchOutcome};
     use crate::api::NamespaceId;
     use crate::engine::contradiction::{
-        ContradictionEngine, ContradictionError, ContradictionKind, ContradictionStore,
+        ContradictionCandidate, ContradictionEngine, ContradictionError, ContradictionKind,
+        ContradictionStore,
     };
     use crate::policy::IngestMode;
     use crate::policy::PassiveObservationDecision;
@@ -727,5 +928,430 @@ mod tests {
         );
 
         assert_eq!(duplicate.unwrap_err(), ContradictionError::DuplicateRecord);
+    }
+
+    // ── Integrated detect-and-branch tests ────────────────────────────────────
+
+    #[test]
+    fn detect_and_branch_accepts_when_no_conflict() {
+        let engine = test_engine();
+        let mut contradictions = ContradictionEngine::new();
+
+        let candidate = ContradictionCandidate {
+            memory_id: MemoryId(100),
+            fingerprint: 42,
+            compact_text: "unique memory content with no matches".into(),
+            namespace: test_namespace(),
+        };
+
+        let outcome = engine
+            .detect_and_branch(
+                &mut contradictions,
+                test_namespace(),
+                MemoryId(100),
+                &candidate,
+            )
+            .unwrap();
+
+        assert!(outcome.is_accepted());
+        assert!(!outcome.is_contradiction());
+        assert_eq!(outcome.contradiction_outcome(), None);
+        assert_eq!(contradictions.count_in_namespace(&test_namespace()), 0);
+    }
+
+    #[test]
+    fn detect_and_branch_records_contradiction_on_duplicate_fingerprint() {
+        let engine = test_engine();
+        let mut contradictions = ContradictionEngine::new();
+
+        // Register an existing memory in the detection index
+        contradictions.register_memory(
+            test_namespace(),
+            MemoryId(1),
+            42,
+            "the server is running on port 8080".into(),
+        );
+
+        // Incoming memory has the same fingerprint — exact duplicate
+        let candidate = ContradictionCandidate {
+            memory_id: MemoryId(2),
+            fingerprint: 42,
+            compact_text: "the server is running on port 8080".into(),
+            namespace: test_namespace(),
+        };
+
+        let outcome = engine
+            .detect_and_branch(
+                &mut contradictions,
+                test_namespace(),
+                MemoryId(2),
+                &candidate,
+            )
+            .unwrap();
+
+        assert!(outcome.is_contradiction());
+        let co = outcome.contradiction_outcome().unwrap();
+        assert_eq!(co.branch, EncodeWriteBranch::ContradictionRecorded);
+        assert_eq!(co.existing_memory, MemoryId(1));
+        assert_eq!(co.incoming_memory, MemoryId(2));
+        assert_eq!(co.kind, ContradictionKind::Duplicate);
+        assert_eq!(contradictions.count_in_namespace(&test_namespace()), 1);
+    }
+
+    #[test]
+    fn detect_and_branch_records_revision_on_high_text_similarity() {
+        let engine = test_engine();
+        let mut contradictions = ContradictionEngine::new();
+
+        // Register with 14 distinct words so one-word swap gives Jaccard = 13/15 ≈ 0.867
+        contradictions.register_memory(
+            test_namespace(),
+            MemoryId(10),
+            100,
+            "alpha beta gamma delta epsilon zeta eta theta iota kappa lambda mu nu".into(),
+        );
+
+        let candidate = ContradictionCandidate {
+            memory_id: MemoryId(20),
+            fingerprint: 200,
+            compact_text: "alpha beta gamma delta epsilon zeta eta theta iota kappa lambda mu xi"
+                .into(),
+            namespace: test_namespace(),
+        };
+
+        let outcome = engine
+            .detect_and_branch(
+                &mut contradictions,
+                test_namespace(),
+                MemoryId(20),
+                &candidate,
+            )
+            .unwrap();
+
+        assert!(outcome.is_contradiction());
+        let co = outcome.contradiction_outcome().unwrap();
+        assert_eq!(co.kind, ContradictionKind::Revision);
+        assert_eq!(co.existing_memory, MemoryId(10));
+        assert_eq!(co.incoming_memory, MemoryId(20));
+    }
+
+    #[test]
+    fn detect_and_branch_accepts_when_similarity_below_threshold() {
+        let engine = test_engine();
+        let mut contradictions = ContradictionEngine::new();
+
+        contradictions.register_memory(
+            test_namespace(),
+            MemoryId(1),
+            100,
+            "database connection pool configured".into(),
+        );
+
+        let candidate = ContradictionCandidate {
+            memory_id: MemoryId(2),
+            fingerprint: 200,
+            compact_text: "quantum physics measurements observed".into(),
+            namespace: test_namespace(),
+        };
+
+        let outcome = engine
+            .detect_and_branch(
+                &mut contradictions,
+                test_namespace(),
+                MemoryId(2),
+                &candidate,
+            )
+            .unwrap();
+
+        assert!(outcome.is_accepted());
+    }
+
+    #[test]
+    fn detect_and_branch_isolates_across_namespaces() {
+        let engine = test_engine();
+        let mut contradictions = ContradictionEngine::new();
+
+        contradictions.register_memory(
+            NamespaceId::new("alpha").unwrap(),
+            MemoryId(1),
+            42,
+            "hello world".into(),
+        );
+
+        let candidate = ContradictionCandidate {
+            memory_id: MemoryId(2),
+            fingerprint: 42,
+            compact_text: "hello world".into(),
+            namespace: NamespaceId::new("beta").unwrap(),
+        };
+
+        let outcome = engine
+            .detect_and_branch(
+                &mut contradictions,
+                NamespaceId::new("beta").unwrap(),
+                MemoryId(2),
+                &candidate,
+            )
+            .unwrap();
+
+        assert!(outcome.is_accepted());
+        assert_eq!(
+            contradictions.count_in_namespace(&NamespaceId::new("alpha").unwrap()),
+            0
+        );
+        assert_eq!(
+            contradictions.count_in_namespace(&NamespaceId::new("beta").unwrap()),
+            0
+        );
+    }
+
+    #[test]
+    fn detect_all_and_branch_records_multiple_conflicts() {
+        let engine = test_engine();
+        let mut contradictions = ContradictionEngine::new();
+
+        // Register two memories that will both conflict with the candidate
+        contradictions.register_memory(
+            test_namespace(),
+            MemoryId(1),
+            100,
+            "the server is running on port 8080".into(),
+        );
+        contradictions.register_memory(
+            test_namespace(),
+            MemoryId(3),
+            300,
+            "the server is running on port 8080 in production environment".into(),
+        );
+
+        let candidate = ContradictionCandidate {
+            memory_id: MemoryId(2),
+            fingerprint: 200,
+            compact_text: "the server is running on port 9090 in production".into(),
+            namespace: test_namespace(),
+        };
+
+        let outcomes = engine
+            .detect_all_and_branch(
+                &mut contradictions,
+                test_namespace(),
+                MemoryId(2),
+                &candidate,
+            )
+            .unwrap();
+
+        assert!(!outcomes.is_empty());
+        // Both memories should have produced contradiction records
+        assert!(contradictions.count_in_namespace(&test_namespace()) >= 1);
+    }
+
+    #[test]
+    fn detect_all_and_branch_returns_empty_on_no_conflict() {
+        let engine = test_engine();
+        let mut contradictions = ContradictionEngine::new();
+
+        let candidate = ContradictionCandidate {
+            memory_id: MemoryId(1),
+            fingerprint: 42,
+            compact_text: "unique content".into(),
+            namespace: test_namespace(),
+        };
+
+        let outcomes = engine
+            .detect_all_and_branch(
+                &mut contradictions,
+                test_namespace(),
+                MemoryId(1),
+                &candidate,
+            )
+            .unwrap();
+
+        assert!(outcomes.is_empty());
+        assert_eq!(contradictions.count_in_namespace(&test_namespace()), 0);
+    }
+
+    #[test]
+    fn detect_all_and_branch_skips_duplicate_pairs() {
+        let engine = test_engine();
+        let mut contradictions = ContradictionEngine::new();
+
+        // Register the same memory twice (shouldn't happen in practice, but tests idempotency)
+        contradictions.register_memory(test_namespace(), MemoryId(1), 42, "hello world".into());
+
+        let candidate = ContradictionCandidate {
+            memory_id: MemoryId(2),
+            fingerprint: 42,
+            compact_text: "hello world".into(),
+            namespace: test_namespace(),
+        };
+
+        // First call records the contradiction
+        let outcomes1 = engine
+            .detect_all_and_branch(
+                &mut contradictions,
+                test_namespace(),
+                MemoryId(2),
+                &candidate,
+            )
+            .unwrap();
+        assert_eq!(outcomes1.len(), 1);
+
+        // Second call should skip the duplicate pair without erroring
+        let outcomes2 = engine
+            .detect_all_and_branch(
+                &mut contradictions,
+                test_namespace(),
+                MemoryId(2),
+                &candidate,
+            )
+            .unwrap();
+        assert!(outcomes2.is_empty());
+        // Still only one contradiction record
+        assert_eq!(contradictions.count_in_namespace(&test_namespace()), 1);
+    }
+
+    // ── WriteBranchOutcome tests ──────────────────────────────────────────────
+
+    #[test]
+    fn write_branch_outcome_accessor_methods() {
+        let trace = super::ContradictionWriteBranchTrace::accepted(0, MemoryId(1));
+        let accepted = WriteBranchOutcome::Accepted { trace };
+        assert!(accepted.is_accepted());
+        assert!(!accepted.is_contradiction());
+        assert_eq!(accepted.contradiction_outcome(), None);
+
+        let trace = super::ContradictionWriteBranchTrace::contradiction(
+            1,
+            MemoryId(1),
+            MemoryId(2),
+            ContradictionKind::Supersession,
+            800,
+        );
+        let branch = WriteBranchOutcome::ContradictionRecorded {
+            outcome: super::ContradictionWriteOutcome {
+                contradiction_id: crate::engine::contradiction::ContradictionId(1),
+                branch: EncodeWriteBranch::ContradictionRecorded,
+                existing_memory: MemoryId(1),
+                incoming_memory: MemoryId(2),
+                kind: ContradictionKind::Supersession,
+            },
+            trace,
+        };
+        assert!(!branch.is_accepted());
+        assert!(branch.is_contradiction());
+        assert!(branch.contradiction_outcome().is_some());
+        assert_eq!(
+            branch.contradiction_outcome().unwrap().kind,
+            ContradictionKind::Supersession
+        );
+    }
+
+    // ── ContradictionWriteBranchTrace tests ───────────────────────────────────
+
+    #[test]
+    fn trace_shows_branch_on_accepted_write() {
+        let engine = test_engine();
+        let mut contradictions = ContradictionEngine::new();
+
+        contradictions.register_memory(
+            test_namespace(),
+            MemoryId(1),
+            100,
+            "database connection pool configured".into(),
+        );
+
+        let candidate = ContradictionCandidate {
+            memory_id: MemoryId(2),
+            fingerprint: 200,
+            compact_text: "quantum physics measurements observed".into(),
+            namespace: test_namespace(),
+        };
+
+        let outcome = engine
+            .detect_and_branch(
+                &mut contradictions,
+                test_namespace(),
+                MemoryId(2),
+                &candidate,
+            )
+            .unwrap();
+
+        let trace = outcome.trace();
+        assert_eq!(trace.branch, EncodeWriteBranch::Accepted);
+        assert_eq!(trace.branch_label(), "accepted");
+        assert_eq!(trace.candidates_examined, 1);
+        assert_eq!(trace.detected_kind, None);
+        assert_eq!(trace.conflict_score, None);
+        assert_eq!(trace.existing_memory, None);
+        assert_eq!(trace.incoming_memory, MemoryId(2));
+    }
+
+    #[test]
+    fn trace_shows_branch_on_contradiction_detected() {
+        let engine = test_engine();
+        let mut contradictions = ContradictionEngine::new();
+
+        contradictions.register_memory(
+            test_namespace(),
+            MemoryId(1),
+            42,
+            "the server is running on port 8080".into(),
+        );
+
+        let candidate = ContradictionCandidate {
+            memory_id: MemoryId(2),
+            fingerprint: 42,
+            compact_text: "the server is running on port 8080".into(),
+            namespace: test_namespace(),
+        };
+
+        let outcome = engine
+            .detect_and_branch(
+                &mut contradictions,
+                test_namespace(),
+                MemoryId(2),
+                &candidate,
+            )
+            .unwrap();
+
+        let trace = outcome.trace();
+        assert_eq!(trace.branch, EncodeWriteBranch::ContradictionRecorded);
+        assert_eq!(trace.branch_label(), "contradiction_recorded");
+        assert_eq!(trace.candidates_examined, 1);
+        assert_eq!(trace.detected_kind, Some(ContradictionKind::Duplicate));
+        assert_eq!(trace.conflict_score, Some(1000));
+        assert_eq!(trace.existing_memory, Some(MemoryId(1)));
+        assert_eq!(trace.incoming_memory, MemoryId(2));
+    }
+
+    #[test]
+    fn trace_shows_correct_candidates_examined_count() {
+        let engine = test_engine();
+        let mut contradictions = ContradictionEngine::new();
+
+        // Register 3 memories in the namespace
+        contradictions.register_memory(test_namespace(), MemoryId(1), 100, "first memory".into());
+        contradictions.register_memory(test_namespace(), MemoryId(2), 200, "second memory".into());
+        contradictions.register_memory(test_namespace(), MemoryId(3), 300, "third memory".into());
+
+        let candidate = ContradictionCandidate {
+            memory_id: MemoryId(10),
+            fingerprint: 999,
+            compact_text: "completely unrelated content".into(),
+            namespace: test_namespace(),
+        };
+
+        let outcome = engine
+            .detect_and_branch(
+                &mut contradictions,
+                test_namespace(),
+                MemoryId(10),
+                &candidate,
+            )
+            .unwrap();
+
+        let trace = outcome.trace();
+        assert_eq!(trace.candidates_examined, 3);
+        assert_eq!(trace.branch, EncodeWriteBranch::Accepted);
     }
 }

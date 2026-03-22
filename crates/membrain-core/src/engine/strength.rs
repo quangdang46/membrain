@@ -145,42 +145,58 @@ impl StrengthEngine {
         }
     }
 
-    pub fn effective_strength(&self, state: &StrengthState, _current_tick: u64) -> f32 {
+    /// Returns effective strength using lazy Ebbinghaus decay.
+    ///
+    /// R(t) = e^(-elapsed/stability) * base_strength
+    /// where elapsed = current_tick - last_accessed_tick.
+    /// O(1) computation; no wall-clock iteration.
+    pub fn effective_strength(&self, state: &StrengthState, current_tick: u64) -> f32 {
         if state.bypass_decay {
             return state.base_strength;
         }
-        let retention = Self::ebbinghaus_retention(state.stability, state.access_count as u64);
+        let elapsed = current_tick.saturating_sub(state.last_accessed_tick);
+        let retention = Self::ebbinghaus_retention(state.stability, elapsed);
         state.base_strength * retention
     }
 
+    /// Applies LTD decay by computing the new base_strength from tick-based elapsed time.
+    ///
+    /// Returns None if bypass_decay is set (emotional memories resist LTD).
+    /// On return, state.base_strength is updated to the decayed value and
+    /// last_accessed_tick is set to current_tick.
     pub fn apply_ltd(
         &self,
         state: &mut StrengthState,
-        _current_tick: u64,
+        current_tick: u64,
         policy: &StrengthPolicy,
     ) -> Option<LtdResult> {
         if state.bypass_decay {
             return None;
         }
-        let interactions_elapsed = state.access_count as u64;
-        let retention = Self::ebbinghaus_retention(state.stability, interactions_elapsed);
+        let elapsed = current_tick.saturating_sub(state.last_accessed_tick);
+        let retention = Self::ebbinghaus_retention(state.stability, elapsed);
         let prev_strength = state.base_strength;
-        state.base_strength *= retention;
-        let exceeded_min = state.base_strength < policy.min_strength;
+        let new_strength = (prev_strength * retention).max(0.0);
+        state.base_strength = new_strength;
+        state.last_accessed_tick = current_tick;
+        let exceeded_min = new_strength < policy.min_strength;
         Some(LtdResult {
             previous_strength: prev_strength,
-            new_strength: state.base_strength,
+            new_strength,
             retention,
-            interactions_elapsed,
+            interactions_elapsed: elapsed,
             exceeded_min,
             archive_eligible: exceeded_min && !state.bypass_decay,
         })
     }
 
+    /// Evaluates decay decision using tick-based elapsed time.
+    ///
+    /// Returns the appropriate action without mutating state.
     pub fn evaluate_decay(
         &self,
         state: &StrengthState,
-        _current_tick: u64,
+        current_tick: u64,
         policy: &StrengthPolicy,
     ) -> DecayDecision {
         if state.bypass_decay {
@@ -189,7 +205,8 @@ impl StrengthEngine {
                 effective_strength: state.base_strength,
             };
         }
-        let retention = Self::ebbinghaus_retention(state.stability, state.access_count as u64);
+        let elapsed = current_tick.saturating_sub(state.last_accessed_tick);
+        let retention = Self::ebbinghaus_retention(state.stability, elapsed);
         let effective = state.base_strength * retention;
         if effective < policy.min_strength {
             return DecayDecision::Archive {
@@ -199,7 +216,7 @@ impl StrengthEngine {
         }
         DecayDecision::ApplyLTD {
             previous_strength: state.base_strength,
-            new_strength: state.base_strength * retention,
+            new_strength: effective,
             retention,
         }
     }
@@ -223,6 +240,37 @@ impl StrengthEngine {
             access_count: prev.access_count + 1,
             tick,
             bypass_decay: prev.bypass_decay,
+        }
+    }
+
+    /// Builds an EligibilityFactors from strength state for ForgettingEngine integration.
+    ///
+    /// Maps strength, emotional, and bypass signals into the multi-factor
+    /// eligibility model without duplicating decay logic.
+    pub fn to_eligibility_factors(
+        &self,
+        state: &StrengthState,
+        current_tick: u64,
+    ) -> crate::engine::forgetting::EligibilityFactors {
+        let effective = self.effective_strength(state, current_tick);
+        let recency = if current_tick <= state.last_accessed_tick {
+            1.0
+        } else {
+            let elapsed = current_tick - state.last_accessed_tick;
+            (1.0 / (1.0 + elapsed as f32 * 0.01)).clamp(0.0, 1.0)
+        };
+        let access_frequency = if state.access_count == 0 {
+            0.0
+        } else {
+            (state.access_count as f32 / 100.0).clamp(0.0, 1.0)
+        };
+        crate::engine::forgetting::EligibilityFactors {
+            effective_strength: effective,
+            recency,
+            access_frequency,
+            in_contradiction: false,
+            emotional_arousal: state.emotional_arousal,
+            bypass_decay: state.bypass_decay,
         }
     }
 
@@ -321,7 +369,7 @@ mod tests {
         let engine = StrengthEngine::new();
         let mut s = state(0.5);
         s.stability = 1.0;
-        s.access_count = 10;
+        s.last_accessed_tick = 0;
         let effective = engine.effective_strength(&s, 10);
         let retention = (-(10_f32) / 1.0).exp();
         let expected = 0.5 * retention;
@@ -334,10 +382,10 @@ mod tests {
         let engine = StrengthEngine::new();
         let mut weak = state(0.5);
         weak.stability = 1.0;
-        weak.access_count = 10;
+        weak.last_accessed_tick = 0;
         let mut strong = state(0.5);
         strong.stability = 10.0;
-        strong.access_count = 10;
+        strong.last_accessed_tick = 0;
         let weak_eff = engine.effective_strength(&weak, 10);
         let strong_eff = engine.effective_strength(&strong, 10);
         assert!(strong_eff > weak_eff);
@@ -348,7 +396,7 @@ mod tests {
         let engine = StrengthEngine::new();
         let mut s = state(0.5);
         s.stability = 1.0;
-        s.access_count = 10;
+        s.last_accessed_tick = 0;
         let result = engine.apply_ltd(&mut s, 10, &policy());
         assert!(result.is_some());
         let r = result.unwrap();
@@ -370,7 +418,7 @@ mod tests {
         let engine = StrengthEngine::new();
         let mut s = state(0.12);
         s.stability = 1.0;
-        s.access_count = 100;
+        s.last_accessed_tick = 0;
         let result = engine.apply_ltd(&mut s, 100, &policy());
         assert!(result.is_some());
         let r = result.unwrap();
@@ -393,7 +441,7 @@ mod tests {
         let engine = StrengthEngine::new();
         let mut s = state(0.5);
         s.stability = 2.0;
-        s.access_count = 3;
+        s.last_accessed_tick = 0;
         let decision = engine.evaluate_decay(&s, 3, &policy());
         match decision {
             DecayDecision::ApplyLTD { new_strength, .. } => {
@@ -408,7 +456,7 @@ mod tests {
         let engine = StrengthEngine::new();
         let mut s = state(0.12);
         s.stability = 1.0;
-        s.access_count = 100;
+        s.last_accessed_tick = 0;
         let decision = engine.evaluate_decay(&s, 100, &policy());
         match decision {
             DecayDecision::Archive {
@@ -462,7 +510,7 @@ mod tests {
         let engine = StrengthEngine::new();
         let mut s = state(0.5);
         s.stability = 5.0;
-        s.access_count = 20;
+        s.last_accessed_tick = 0;
         let result = engine.apply_ltd(&mut s, 20, &policy());
         assert!(result.is_some());
         let r = result.unwrap();
@@ -471,14 +519,205 @@ mod tests {
     }
 
     #[test]
+    fn effective_strength_is_deterministic_for_same_state_and_tick() {
+        let engine = StrengthEngine::new();
+        let mut s = state(0.5);
+        s.stability = 10.0;
+        s.last_accessed_tick = 5;
+        let eff1 = engine.effective_strength(&s, 100);
+        let eff2 = engine.effective_strength(&s, 100);
+        assert_eq!(eff1, eff2);
+    }
+
+    #[test]
     fn no_wall_clock_dependency() {
         let engine = StrengthEngine::new();
         let mut s = state(0.5);
         s.stability = 10.0;
         s.last_accessed_tick = 5;
-        s.access_count = 3;
-        let eff_now = engine.effective_strength(&s, 100);
-        let eff_later = engine.effective_strength(&s, 1_000_000);
-        assert_eq!(eff_now, eff_later);
+        // Same input ticks always produce same output — no wall clock
+        let eff_a = engine.effective_strength(&s, 100);
+        let eff_b = engine.effective_strength(&s, 100);
+        assert_eq!(eff_a, eff_b);
+        // Different elapsed ticks produce different but deterministic results
+        let eff_c = engine.effective_strength(&s, 200);
+        let eff_d = engine.effective_strength(&s, 200);
+        assert_eq!(eff_c, eff_d);
+        assert!(eff_c < eff_a, "more elapsed = less effective strength");
+    }
+
+    // ── Deterministic fixtures ──────────────────────────────────────────
+
+    #[test]
+    fn fixture_ltp_monotonic_over_sequence() {
+        let engine = StrengthEngine::new();
+        let mut s = state(0.1);
+        s.stability = 1.0;
+        let p = policy();
+        let mut prev_strength = s.base_strength;
+        let mut prev_stability = s.stability;
+        for tick in 1..=20 {
+            let result = engine.apply_ltp(&mut s, tick, &p);
+            assert!(
+                result.new_strength >= prev_strength,
+                "LTP must be monotonic at tick {tick}"
+            );
+            assert!(
+                result.new_stability >= prev_stability,
+                "stability must increase at tick {tick}"
+            );
+            prev_strength = result.new_strength;
+            prev_stability = result.new_stability;
+        }
+        assert_eq!(s.base_strength, 1.0); // capped at max after 20 LTPs from 0.1
+        assert_eq!(s.access_count, 20);
+    }
+
+    #[test]
+    fn fixture_ltd_bounded_decay() {
+        let engine = StrengthEngine::new();
+        let mut s = state(0.5);
+        s.stability = 10.0;
+        s.last_accessed_tick = 0;
+        let p = policy();
+
+        let mut strengths = Vec::new();
+        for tick in [10, 50, 100, 200] {
+            let result = engine.apply_ltd(&mut s, tick, &p);
+            assert!(result.is_some());
+            strengths.push(result.unwrap().new_strength);
+        }
+
+        // Each successive LTD at higher tick should produce lower or equal strength
+        for w in strengths.windows(2) {
+            assert!(w[1] <= w[0], "LTD must be bounded");
+        }
+    }
+
+    #[test]
+    fn fixture_bypass_decay_blocks_ltd() {
+        let engine = StrengthEngine::new();
+        let mut s = emotional_state(0.8, 0.9, 0.6);
+        let p = policy();
+
+        let result = engine.apply_ltd(&mut s, 1000, &p);
+        assert!(result.is_none(), "bypass must block LTD");
+
+        let decision = engine.evaluate_decay(&s, 1000, &p);
+        assert!(
+            matches!(decision, DecayDecision::Bypass { reason, .. } if reason == "emotional_bypass"),
+            "bypass must be preserved in decay decision"
+        );
+    }
+
+    #[test]
+    fn fixture_archive_threshold_proven() {
+        let engine = StrengthEngine::new();
+        let mut s = state(0.15);
+        s.stability = 1.0;
+        s.last_accessed_tick = 0;
+        let p = policy();
+
+        // At tick 1, retention = e^(-1) ~ 0.368, effective ~ 0.055 < 0.1
+        let decision = engine.evaluate_decay(&s, 1, &p);
+        match decision {
+            DecayDecision::Archive {
+                reason,
+                final_strength,
+            } => {
+                assert_eq!(reason, "below_min_strength");
+                assert!(final_strength < p.min_strength);
+            }
+            other => panic!("expected Archive at tick 1, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn fixture_no_wall_clock_in_strength_engine() {
+        let engine = StrengthEngine::new();
+        let mut s = state(0.5);
+        s.stability = 5.0;
+        s.last_accessed_tick = 100;
+
+        // effective_strength at tick 200 and tick 2000000 should differ (more elapsed = less strength)
+        let eff_200 = engine.effective_strength(&s, 200);
+        let eff_2m = engine.effective_strength(&s, 2_000_000);
+        assert!(
+            eff_2m < eff_200,
+            "more elapsed tick must mean less effective strength"
+        );
+
+        // But for the same tick, result is always the same (deterministic)
+        assert_eq!(eff_200, engine.effective_strength(&s, 200));
+        assert_eq!(eff_2m, engine.effective_strength(&s, 2_000_000));
+    }
+
+    #[test]
+    fn fixture_ltp_to_ltd_roundtrip() {
+        let engine = StrengthEngine::new();
+        let mut s = state(0.3);
+        s.stability = 2.0;
+        s.last_accessed_tick = 0;
+        let p = policy();
+
+        // Apply LTP to strengthen
+        let ltp = engine.apply_ltp(&mut s, 5, &p);
+        assert!(ltp.new_strength > 0.3);
+
+        // Apply LTD to decay
+        let ltd = engine.apply_ltd(&mut s, 20, &p);
+        assert!(ltd.is_some());
+        let ltd = ltd.unwrap();
+        assert!(ltd.new_strength < ltp.new_strength);
+        assert!(ltd.new_strength >= 0.0);
+    }
+
+    #[test]
+    fn fixture_stability_increases_ltd_resistance() {
+        let engine = StrengthEngine::new();
+        let p = policy();
+
+        let mut low_stab = state(0.5);
+        low_stab.stability = 1.0;
+        low_stab.last_accessed_tick = 0;
+
+        let mut high_stab = state(0.5);
+        high_stab.stability = 20.0;
+        high_stab.last_accessed_tick = 0;
+
+        let low_ltd = engine.apply_ltd(&mut low_stab, 10, &p).unwrap();
+        let high_ltd = engine.apply_ltd(&mut high_stab, 10, &p).unwrap();
+
+        // Higher stability = more retention after same elapsed time
+        assert!(
+            high_ltd.new_strength > low_ltd.new_strength,
+            "higher stability must resist LTD better"
+        );
+    }
+
+    #[test]
+    fn fixture_to_eligibility_factors_maps_correctly() {
+        let engine = StrengthEngine::new();
+        let mut s = state(0.5);
+        s.stability = 1.0;
+        s.last_accessed_tick = 100;
+        s.access_count = 50;
+        s.emotional_arousal = 0.8;
+
+        let factors = engine.to_eligibility_factors(&s, 200);
+        assert!(factors.effective_strength > 0.0);
+        assert!(factors.effective_strength <= 0.5);
+        assert!(factors.recency > 0.0 && factors.recency <= 1.0);
+        assert_eq!(factors.emotional_arousal, 0.8);
+        assert!(!factors.bypass_decay);
+    }
+
+    #[test]
+    fn fixture_to_eligibility_factors_preserves_bypass() {
+        let engine = StrengthEngine::new();
+        let s = emotional_state(0.8, 0.9, 0.6);
+        let factors = engine.to_eligibility_factors(&s, 1000);
+        assert!(factors.bypass_decay);
+        assert_eq!(factors.effective_strength, 0.8);
     }
 }

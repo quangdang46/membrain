@@ -46,6 +46,8 @@ pub enum ScoreFamily {
     Provenance,
     /// Contradiction-aware penalty or boost.
     ConflictAdjustment,
+    /// Confidence-derived reliability signal from evidence inputs.
+    Confidence,
 }
 
 impl ScoreFamily {
@@ -57,17 +59,19 @@ impl ScoreFamily {
             Self::Strength => "strength",
             Self::Provenance => "provenance",
             Self::ConflictAdjustment => "conflict_adjustment",
+            Self::Confidence => "confidence",
         }
     }
 
     /// Default weight for this signal family (0..100).
     pub const fn default_weight(self) -> u8 {
         match self {
-            Self::Recency => 30,
-            Self::Salience => 30,
-            Self::Strength => 25,
-            Self::Provenance => 10,
-            Self::ConflictAdjustment => 5,
+            Self::Recency => 28,
+            Self::Salience => 28,
+            Self::Strength => 22,
+            Self::Provenance => 8,
+            Self::ConflictAdjustment => 4,
+            Self::Confidence => 10,
         }
     }
 }
@@ -82,6 +86,7 @@ pub struct RankingProfile {
     pub strength_weight: u8,
     pub provenance_weight: u8,
     pub conflict_weight: u8,
+    pub confidence_weight: u8,
 }
 
 impl RankingProfile {
@@ -93,28 +98,43 @@ impl RankingProfile {
             strength_weight: ScoreFamily::Strength.default_weight(),
             provenance_weight: ScoreFamily::Provenance.default_weight(),
             conflict_weight: ScoreFamily::ConflictAdjustment.default_weight(),
+            confidence_weight: ScoreFamily::Confidence.default_weight(),
         }
     }
 
     /// Recency-biased profile for "what happened recently" queries.
     pub const fn recency_biased() -> Self {
         Self {
-            recency_weight: 45,
-            salience_weight: 25,
+            recency_weight: 40,
+            salience_weight: 23,
             strength_weight: 15,
-            provenance_weight: 10,
-            conflict_weight: 5,
+            provenance_weight: 8,
+            conflict_weight: 4,
+            confidence_weight: 10,
         }
     }
 
     /// Strength-biased profile for reinforced-memory queries.
     pub const fn strength_biased() -> Self {
         Self {
+            recency_weight: 12,
+            salience_weight: 18,
+            strength_weight: 45,
+            provenance_weight: 8,
+            conflict_weight: 4,
+            confidence_weight: 13,
+        }
+    }
+
+    /// Confidence-biased profile for high-stakes queries where reliability matters most.
+    pub const fn confidence_biased() -> Self {
+        Self {
             recency_weight: 15,
-            salience_weight: 20,
-            strength_weight: 50,
+            salience_weight: 15,
+            strength_weight: 15,
             provenance_weight: 10,
             conflict_weight: 5,
+            confidence_weight: 40,
         }
     }
 }
@@ -141,6 +161,9 @@ pub struct RankingInput {
     /// Conflict adjustment: positive boosts preferred, negative penalizes superseded.
     /// Stored as 500 = neutral, 0 = max penalty, 1000 = max boost.
     pub conflict: u16,
+    /// Confidence-derived reliability score (0..1000, higher = more certain).
+    /// Computed from evidence inputs (corroboration, freshness, contradiction, provenance).
+    pub confidence: u16,
 }
 
 /// Declared local reranker mode for the final bounded candidate slice.
@@ -217,6 +240,7 @@ pub fn fuse_scores(input: RankingInput, profile: RankingProfile) -> RankingResul
             input.conflict,
             profile.conflict_weight,
         ),
+        ScoreSignal::new("confidence", input.confidence, profile.confidence_weight),
     ];
 
     let total_weighted: u32 = signals.iter().map(|s| s.weighted_value).sum();
@@ -229,6 +253,8 @@ pub fn fuse_scores(input: RankingInput, profile: RankingProfile) -> RankingResul
         "recency_biased"
     } else if profile == RankingProfile::strength_biased() {
         "strength_biased"
+    } else if profile == RankingProfile::confidence_biased() {
+        "confidence_biased"
     } else {
         "custom"
     };
@@ -286,6 +312,7 @@ impl RankingExplain {
             signal_for(ScoreFamily::Strength),
             signal_for(ScoreFamily::Provenance),
             signal_for(ScoreFamily::ConflictAdjustment),
+            signal_for(ScoreFamily::Confidence),
         ];
 
         Self {
@@ -299,6 +326,73 @@ impl RankingExplain {
             profile: result.profile_name.to_string(),
             has_conflict: !result.contradiction_explains.is_empty(),
             contradiction_details: result.contradiction_explains.clone(),
+        }
+    }
+}
+
+// ── Confidence-aware display and filtering ────────────────────────────────────
+
+/// Confidence interval data attached to retrieval explain outputs.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct ConfidenceIntervalDisplay {
+    /// Point estimate of confidence (0..1000).
+    pub point: u16,
+    /// Lower bound of the confidence interval.
+    pub lower: u16,
+    /// Upper bound of the confidence interval.
+    pub upper: u16,
+    /// Width of the interval (upper - lower).
+    pub width: u16,
+}
+
+/// Configuration for confidence-aware retrieval filtering and display.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct ConfidenceDisplayConfig {
+    /// Minimum confidence score (0..1000) for a result to be included.
+    /// Results below this threshold are suppressed from the output.
+    pub min_confidence_threshold: u16,
+    /// Whether to compute and display confidence intervals.
+    pub show_confidence_intervals: bool,
+    /// Whether to include uncertainty breakdown (corroboration, freshness, etc.) in explain.
+    pub show_uncertainty_breakdown: bool,
+    /// Whether to tag low-confidence results with a warning marker.
+    pub tag_low_confidence: bool,
+    /// Threshold below which results are tagged as "low_confidence" (0..1000).
+    pub low_confidence_tag_threshold: u16,
+}
+
+impl Default for ConfidenceDisplayConfig {
+    fn default() -> Self {
+        Self {
+            min_confidence_threshold: 100,
+            show_confidence_intervals: true,
+            show_uncertainty_breakdown: true,
+            tag_low_confidence: true,
+            low_confidence_tag_threshold: 400,
+        }
+    }
+}
+
+impl ConfidenceDisplayConfig {
+    /// Permissive config that never filters and always shows everything.
+    pub const fn permissive() -> Self {
+        Self {
+            min_confidence_threshold: 0,
+            show_confidence_intervals: true,
+            show_uncertainty_breakdown: true,
+            tag_low_confidence: false,
+            low_confidence_tag_threshold: 0,
+        }
+    }
+
+    /// Strict config for high-stakes queries.
+    pub const fn strict() -> Self {
+        Self {
+            min_confidence_threshold: 500,
+            show_confidence_intervals: true,
+            show_uncertainty_breakdown: true,
+            tag_low_confidence: true,
+            low_confidence_tag_threshold: 600,
         }
     }
 }

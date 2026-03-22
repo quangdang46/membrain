@@ -448,6 +448,20 @@ impl DaemonRuntime {
                 let report = state.doctor_report().await;
                 JsonRpcResponse::success(request_id, json!(report))
             }
+            RuntimeRequest::Encode {
+                content,
+                namespace,
+                memory_type: _,
+            } => {
+                let _ = (content, namespace);
+                JsonRpcResponse::success(
+                    request_id,
+                    json!({
+                        "status": "accepted",
+                        "message": "encode envelope accepted; storage pipeline not yet wired"
+                    }),
+                )
+            }
             RuntimeRequest::Recall {
                 query,
                 namespace,
@@ -565,6 +579,88 @@ impl DaemonRuntime {
                     json!(RuntimeMaintenanceAccepted {
                         maintenance_id,
                         polls_budget,
+                    }),
+                )
+            }
+            RuntimeRequest::Forget {
+                id,
+                namespace,
+                mode,
+                reason,
+            } => {
+                let _ = (&namespace, &mode, &reason);
+                JsonRpcResponse::success(
+                    request_id,
+                    json!({
+                        "status": "accepted",
+                        "id": id,
+                        "mode": mode.unwrap_or_else(|| "archive".to_string()),
+                        "message": "forget envelope accepted; forgetting pipeline not yet wired"
+                    }),
+                )
+            }
+            RuntimeRequest::Pin {
+                id,
+                namespace,
+                reason,
+            } => {
+                let _ = (&namespace, &reason);
+                JsonRpcResponse::success(
+                    request_id,
+                    json!({
+                        "status": "accepted",
+                        "id": id,
+                        "message": "pin envelope accepted; retention pipeline not yet wired"
+                    }),
+                )
+            }
+            RuntimeRequest::Consolidate { namespace, scope } => {
+                let _ = (&namespace, &scope);
+                JsonRpcResponse::success(
+                    request_id,
+                    json!({
+                        "status": "accepted",
+                        "scope": scope.unwrap_or_else(|| "session".to_string()),
+                        "message": "consolidate envelope accepted; consolidation pipeline not yet wired"
+                    }),
+                )
+            }
+            RuntimeRequest::Share { id, namespace_id } => {
+                let _ = namespace_id;
+                JsonRpcResponse::success(
+                    request_id,
+                    json!({
+                        "status": "accepted",
+                        "id": id,
+                        "message": "share envelope accepted; sharing pipeline not yet wired"
+                    }),
+                )
+            }
+            RuntimeRequest::Unshare { id, namespace } => {
+                let _ = namespace;
+                JsonRpcResponse::success(
+                    request_id,
+                    json!({
+                        "status": "accepted",
+                        "id": id,
+                        "message": "unshare envelope accepted; sharing pipeline not yet wired"
+                    }),
+                )
+            }
+            RuntimeRequest::Link {
+                source_id,
+                target_id,
+                namespace,
+                link_type,
+            } => {
+                let _ = (&namespace, &link_type);
+                JsonRpcResponse::success(
+                    request_id,
+                    json!({
+                        "status": "accepted",
+                        "source_id": source_id,
+                        "target_id": target_id,
+                        "message": "link envelope accepted; graph pipeline not yet wired"
                     }),
                 )
             }

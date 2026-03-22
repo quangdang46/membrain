@@ -295,6 +295,21 @@ impl RuntimeMethodRequest {
             "ping" => Ok(RuntimeRequest::Ping),
             "status" => Ok(RuntimeRequest::Status),
             "doctor" => Ok(RuntimeRequest::Doctor),
+            "encode" => {
+                reject_unknown_fields(&self.params, &["content", "namespace", "memory_type"])?;
+                let content = parse_required_string(&self.params, "content")?;
+                let namespace = parse_required_string(&self.params, "namespace")?;
+                let memory_type = self
+                    .params
+                    .get("memory_type")
+                    .and_then(Value::as_str)
+                    .map(ToOwned::to_owned);
+                Ok(RuntimeRequest::Encode {
+                    content,
+                    namespace,
+                    memory_type,
+                })
+            }
             "recall" => {
                 reject_unknown_fields(&self.params, &["query", "namespace", "limit"])?;
                 let query = self
@@ -457,6 +472,84 @@ impl RuntimeMethodRequest {
                 })
             }
             "shutdown" => Ok(RuntimeRequest::Shutdown),
+            "forget" => {
+                reject_unknown_fields(&self.params, &["id", "namespace", "mode", "reason"])?;
+                let id = parse_required_u64(&self.params, "id")?;
+                let namespace = parse_required_string(&self.params, "namespace")?;
+                let mode = self
+                    .params
+                    .get("mode")
+                    .and_then(Value::as_str)
+                    .map(ToOwned::to_owned);
+                let reason = self
+                    .params
+                    .get("reason")
+                    .and_then(Value::as_str)
+                    .map(ToOwned::to_owned);
+                Ok(RuntimeRequest::Forget {
+                    id,
+                    namespace,
+                    mode,
+                    reason,
+                })
+            }
+            "pin" => {
+                reject_unknown_fields(&self.params, &["id", "namespace", "reason"])?;
+                let id = parse_required_u64(&self.params, "id")?;
+                let namespace = parse_required_string(&self.params, "namespace")?;
+                let reason = self
+                    .params
+                    .get("reason")
+                    .and_then(Value::as_str)
+                    .map(ToOwned::to_owned);
+                Ok(RuntimeRequest::Pin {
+                    id,
+                    namespace,
+                    reason,
+                })
+            }
+            "consolidate" => {
+                reject_unknown_fields(&self.params, &["namespace", "scope"])?;
+                let namespace = parse_required_string(&self.params, "namespace")?;
+                let scope = self
+                    .params
+                    .get("scope")
+                    .and_then(Value::as_str)
+                    .map(ToOwned::to_owned);
+                Ok(RuntimeRequest::Consolidate { namespace, scope })
+            }
+            "share" => {
+                reject_unknown_fields(&self.params, &["id", "namespace_id"])?;
+                let id = parse_required_u64(&self.params, "id")?;
+                let namespace_id = parse_required_string(&self.params, "namespace_id")?;
+                Ok(RuntimeRequest::Share { id, namespace_id })
+            }
+            "unshare" => {
+                reject_unknown_fields(&self.params, &["id", "namespace"])?;
+                let id = parse_required_u64(&self.params, "id")?;
+                let namespace = parse_required_string(&self.params, "namespace")?;
+                Ok(RuntimeRequest::Unshare { id, namespace })
+            }
+            "link" => {
+                reject_unknown_fields(
+                    &self.params,
+                    &["source_id", "target_id", "namespace", "link_type"],
+                )?;
+                let source_id = parse_required_u64(&self.params, "source_id")?;
+                let target_id = parse_required_u64(&self.params, "target_id")?;
+                let namespace = parse_required_string(&self.params, "namespace")?;
+                let link_type = self
+                    .params
+                    .get("link_type")
+                    .and_then(Value::as_str)
+                    .map(ToOwned::to_owned);
+                Ok(RuntimeRequest::Link {
+                    source_id,
+                    target_id,
+                    namespace,
+                    link_type,
+                })
+            }
             _ => Err(JsonRpcError {
                 code: -32601,
                 message: format!("unknown method '{}'", self.method),
@@ -471,6 +564,11 @@ pub enum RuntimeRequest {
     Ping,
     Status,
     Doctor,
+    Encode {
+        content: String,
+        namespace: String,
+        memory_type: Option<String>,
+    },
     Recall {
         query: String,
         namespace: String,
@@ -484,6 +582,35 @@ pub enum RuntimeRequest {
         query: String,
         namespace: String,
         limit: Option<usize>,
+    },
+    Forget {
+        id: u64,
+        namespace: String,
+        mode: Option<String>,
+        reason: Option<String>,
+    },
+    Pin {
+        id: u64,
+        namespace: String,
+        reason: Option<String>,
+    },
+    Consolidate {
+        namespace: String,
+        scope: Option<String>,
+    },
+    Share {
+        id: u64,
+        namespace_id: String,
+    },
+    Unshare {
+        id: u64,
+        namespace: String,
+    },
+    Link {
+        source_id: u64,
+        target_id: u64,
+        namespace: String,
+        link_type: Option<String>,
     },
     PreflightRun {
         namespace: String,
@@ -1005,5 +1132,275 @@ mod tests {
         let error = explain.parse_method().unwrap_err();
         assert_eq!(error.code, -32602);
         assert_eq!(error.message, "unknown field unexpected");
+    }
+
+    #[test]
+    fn parse_method_encode_accepts_required_and_optional_fields() {
+        let request = RuntimeMethodRequest {
+            jsonrpc: "2.0".to_string(),
+            method: "encode".to_string(),
+            params: json!({
+                "content": "user prefers dark mode",
+                "namespace": "team.alpha",
+                "memory_type": "user_preference"
+            }),
+            id: Some(json!(30)),
+        };
+
+        match request.parse_method().unwrap() {
+            RuntimeRequest::Encode {
+                content,
+                namespace,
+                memory_type,
+            } => {
+                assert_eq!(content, "user prefers dark mode");
+                assert_eq!(namespace, "team.alpha");
+                assert_eq!(memory_type, Some("user_preference".to_string()));
+            }
+            other => panic!("unexpected: {other:?}"),
+        }
+
+        // Without optional memory_type
+        let minimal = RuntimeMethodRequest {
+            jsonrpc: "2.0".to_string(),
+            method: "encode".to_string(),
+            params: json!({
+                "content": "hello world",
+                "namespace": "team.alpha"
+            }),
+            id: Some(json!(31)),
+        };
+
+        match minimal.parse_method().unwrap() {
+            RuntimeRequest::Encode { memory_type, .. } => assert!(memory_type.is_none()),
+            other => panic!("unexpected: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn parse_method_encode_rejects_missing_required_fields() {
+        let missing_content = RuntimeMethodRequest {
+            jsonrpc: "2.0".to_string(),
+            method: "encode".to_string(),
+            params: json!({"namespace": "team.alpha"}),
+            id: Some(json!(32)),
+        };
+        let error = missing_content.parse_method().unwrap_err();
+        assert_eq!(error.code, -32602);
+        assert_eq!(error.message, "missing content");
+
+        let missing_ns = RuntimeMethodRequest {
+            jsonrpc: "2.0".to_string(),
+            method: "encode".to_string(),
+            params: json!({"content": "hello"}),
+            id: Some(json!(33)),
+        };
+        let error = missing_ns.parse_method().unwrap_err();
+        assert_eq!(error.code, -32602);
+        assert_eq!(error.message, "missing namespace");
+    }
+
+    #[test]
+    fn parse_method_forget_accepts_canonical_fields() {
+        let request = RuntimeMethodRequest {
+            jsonrpc: "2.0".to_string(),
+            method: "forget".to_string(),
+            params: json!({
+                "id": 42,
+                "namespace": "team.alpha",
+                "mode": "archive",
+                "reason": "stale data"
+            }),
+            id: Some(json!(34)),
+        };
+
+        match request.parse_method().unwrap() {
+            RuntimeRequest::Forget {
+                id,
+                namespace,
+                mode,
+                reason,
+            } => {
+                assert_eq!(id, 42);
+                assert_eq!(namespace, "team.alpha");
+                assert_eq!(mode, Some("archive".to_string()));
+                assert_eq!(reason, Some("stale data".to_string()));
+            }
+            other => panic!("unexpected: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn parse_method_pin_accepts_canonical_fields() {
+        let request = RuntimeMethodRequest {
+            jsonrpc: "2.0".to_string(),
+            method: "pin".to_string(),
+            params: json!({
+                "id": 42,
+                "namespace": "team.alpha",
+                "reason": "critical reference"
+            }),
+            id: Some(json!(35)),
+        };
+
+        match request.parse_method().unwrap() {
+            RuntimeRequest::Pin {
+                id,
+                namespace,
+                reason,
+            } => {
+                assert_eq!(id, 42);
+                assert_eq!(namespace, "team.alpha");
+                assert_eq!(reason, Some("critical reference".to_string()));
+            }
+            other => panic!("unexpected: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn parse_method_consolidate_accepts_canonical_fields() {
+        let request = RuntimeMethodRequest {
+            jsonrpc: "2.0".to_string(),
+            method: "consolidate".to_string(),
+            params: json!({
+                "namespace": "team.alpha",
+                "scope": "session"
+            }),
+            id: Some(json!(36)),
+        };
+
+        match request.parse_method().unwrap() {
+            RuntimeRequest::Consolidate { namespace, scope } => {
+                assert_eq!(namespace, "team.alpha");
+                assert_eq!(scope, Some("session".to_string()));
+            }
+            other => panic!("unexpected: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn parse_method_share_and_unshare_accept_canonical_fields() {
+        let share = RuntimeMethodRequest {
+            jsonrpc: "2.0".to_string(),
+            method: "share".to_string(),
+            params: json!({
+                "id": 42,
+                "namespace_id": "team.beta"
+            }),
+            id: Some(json!(37)),
+        };
+
+        match share.parse_method().unwrap() {
+            RuntimeRequest::Share { id, namespace_id } => {
+                assert_eq!(id, 42);
+                assert_eq!(namespace_id, "team.beta");
+            }
+            other => panic!("unexpected: {other:?}"),
+        }
+
+        let unshare = RuntimeMethodRequest {
+            jsonrpc: "2.0".to_string(),
+            method: "unshare".to_string(),
+            params: json!({
+                "id": 42,
+                "namespace": "team.alpha"
+            }),
+            id: Some(json!(38)),
+        };
+
+        match unshare.parse_method().unwrap() {
+            RuntimeRequest::Unshare { id, namespace } => {
+                assert_eq!(id, 42);
+                assert_eq!(namespace, "team.alpha");
+            }
+            other => panic!("unexpected: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn parse_method_link_accepts_canonical_fields() {
+        let request = RuntimeMethodRequest {
+            jsonrpc: "2.0".to_string(),
+            method: "link".to_string(),
+            params: json!({
+                "source_id": 42,
+                "target_id": 99,
+                "namespace": "team.alpha",
+                "link_type": "supports"
+            }),
+            id: Some(json!(39)),
+        };
+
+        match request.parse_method().unwrap() {
+            RuntimeRequest::Link {
+                source_id,
+                target_id,
+                namespace,
+                link_type,
+            } => {
+                assert_eq!(source_id, 42);
+                assert_eq!(target_id, 99);
+                assert_eq!(namespace, "team.alpha");
+                assert_eq!(link_type, Some("supports".to_string()));
+            }
+            other => panic!("unexpected: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn mutation_methods_reject_unknown_fields() {
+        let forget = RuntimeMethodRequest {
+            jsonrpc: "2.0".to_string(),
+            method: "forget".to_string(),
+            params: json!({
+                "id": 42,
+                "namespace": "team.alpha",
+                "unexpected": true
+            }),
+            id: Some(json!(40)),
+        };
+        let error = forget.parse_method().unwrap_err();
+        assert_eq!(error.code, -32602);
+        assert_eq!(error.message, "unknown field unexpected");
+
+        let pin = RuntimeMethodRequest {
+            jsonrpc: "2.0".to_string(),
+            method: "pin".to_string(),
+            params: json!({
+                "id": 42,
+                "namespace": "team.alpha",
+                "unexpected": true
+            }),
+            id: Some(json!(41)),
+        };
+        let error = pin.parse_method().unwrap_err();
+        assert_eq!(error.code, -32602);
+
+        let encode = RuntimeMethodRequest {
+            jsonrpc: "2.0".to_string(),
+            method: "encode".to_string(),
+            params: json!({
+                "content": "hello",
+                "namespace": "team.alpha",
+                "unexpected": true
+            }),
+            id: Some(json!(42)),
+        };
+        let error = encode.parse_method().unwrap_err();
+        assert_eq!(error.code, -32602);
+
+        let link = RuntimeMethodRequest {
+            jsonrpc: "2.0".to_string(),
+            method: "link".to_string(),
+            params: json!({
+                "source_id": 1,
+                "target_id": 2,
+                "namespace": "team.alpha",
+                "unexpected": true
+            }),
+            id: Some(json!(43)),
+        };
+        let error = link.parse_method().unwrap_err();
+        assert_eq!(error.code, -32602);
     }
 }

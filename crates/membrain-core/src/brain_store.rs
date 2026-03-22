@@ -3,8 +3,10 @@ use crate::api::NamespaceId;
 use crate::config::RuntimeConfig;
 use crate::embed::EmbedModule;
 use crate::engine::consolidation::ConsolidationEngine;
-use crate::engine::contradiction::{ContradictionEngine, ContradictionError, ContradictionKind};
-use crate::engine::encode::{ContradictionWriteOutcome, EncodeEngine};
+use crate::engine::contradiction::{
+    ContradictionCandidate, ContradictionEngine, ContradictionError, ContradictionKind,
+};
+use crate::engine::encode::{ContradictionWriteOutcome, EncodeEngine, WriteBranchOutcome};
 use crate::engine::forgetting::ForgettingEngine;
 use crate::engine::intent::IntentEngine;
 use crate::engine::ranking::RankingEngine;
@@ -165,6 +167,43 @@ impl BrainStore {
         )
     }
 
+    /// Detects contradictions for an incoming candidate and branches into recording if found.
+    ///
+    /// This is the primary write-path entry point for contradiction-aware encoding.
+    /// It runs detection against indexed memories and, if a conflict is found,
+    /// records an explicit contradiction artifact instead of silently overwriting.
+    pub fn detect_and_branch_encode(
+        &mut self,
+        namespace: NamespaceId,
+        incoming_memory: MemoryId,
+        candidate: &ContradictionCandidate,
+    ) -> Result<WriteBranchOutcome, ContradictionError> {
+        self.encode.detect_and_branch(
+            &mut self.contradiction,
+            namespace,
+            incoming_memory,
+            candidate,
+        )
+    }
+
+    /// Detects all contradictions for an incoming candidate and records each.
+    ///
+    /// Use this when the write path must preserve the complete conflict picture
+    /// rather than just the strongest signal.
+    pub fn detect_all_and_branch_encode(
+        &mut self,
+        namespace: NamespaceId,
+        incoming_memory: MemoryId,
+        candidate: &ContradictionCandidate,
+    ) -> Result<Vec<ContradictionWriteOutcome>, ContradictionError> {
+        self.encode.detect_all_and_branch(
+            &mut self.contradiction,
+            namespace,
+            incoming_memory,
+            candidate,
+        )
+    }
+
     /// Returns the shared consolidation surface owned by the core crate.
     pub fn consolidation_engine(&self) -> &ConsolidationEngine {
         &self.consolidation
@@ -308,6 +347,7 @@ impl Default for BrainStore {
 mod tests {
     use super::{BrainStore, PreparedTier2Layout};
     use crate::api::NamespaceId;
+    use crate::engine::contradiction::ContradictionStore;
     use crate::migrate::DurableSchemaObject;
     use crate::observability::Tier1LookupOutcome;
     use crate::store::{
@@ -517,5 +557,97 @@ mod tests {
         ));
         assert!(trace.summary().contains("PROMOTE to hot"));
         assert!(trace.summary().contains("salience=850"));
+    }
+
+    // ── Contradiction write-path branching through BrainStore facade ─────────
+
+    #[test]
+    fn detect_and_branch_encode_records_contradiction_through_facade() {
+        let mut store = BrainStore::default();
+        let namespace = NamespaceId::new("tests/branch").unwrap();
+
+        // Register an existing memory in the contradiction engine
+        store.contradiction_engine_mut().register_memory(
+            namespace.clone(),
+            MemoryId(1),
+            42,
+            "server deployed to production".into(),
+        );
+
+        let candidate = crate::engine::contradiction::ContradictionCandidate {
+            memory_id: MemoryId(2),
+            fingerprint: 42,
+            compact_text: "server deployed to production".into(),
+            namespace: namespace.clone(),
+        };
+
+        let outcome = store
+            .detect_and_branch_encode(namespace.clone(), MemoryId(2), &candidate)
+            .unwrap();
+
+        assert!(outcome.is_contradiction());
+        let co = outcome.contradiction_outcome().unwrap();
+        assert_eq!(co.existing_memory, MemoryId(1));
+        assert_eq!(co.incoming_memory, MemoryId(2));
+        assert_eq!(
+            store.contradiction_engine().count_in_namespace(&namespace),
+            1
+        );
+    }
+
+    #[test]
+    fn detect_and_branch_encode_accepts_on_no_conflict_through_facade() {
+        let mut store = BrainStore::default();
+        let namespace = NamespaceId::new("tests/branch").unwrap();
+
+        let candidate = crate::engine::contradiction::ContradictionCandidate {
+            memory_id: MemoryId(1),
+            fingerprint: 42,
+            compact_text: "unique content".into(),
+            namespace: namespace.clone(),
+        };
+
+        let outcome = store
+            .detect_and_branch_encode(namespace.clone(), MemoryId(1), &candidate)
+            .unwrap();
+
+        assert!(outcome.is_accepted());
+        assert_eq!(
+            store.contradiction_engine().count_in_namespace(&namespace),
+            0
+        );
+    }
+
+    #[test]
+    fn detect_all_and_branch_encode_records_multiple_through_facade() {
+        let mut store = BrainStore::default();
+        let namespace = NamespaceId::new("tests/branch").unwrap();
+
+        store.contradiction_engine_mut().register_memory(
+            namespace.clone(),
+            MemoryId(1),
+            100,
+            "the server is running on port 8080".into(),
+        );
+        store.contradiction_engine_mut().register_memory(
+            namespace.clone(),
+            MemoryId(3),
+            300,
+            "the server is running on port 8080 in production environment".into(),
+        );
+
+        let candidate = crate::engine::contradiction::ContradictionCandidate {
+            memory_id: MemoryId(2),
+            fingerprint: 200,
+            compact_text: "the server is running on port 9090 in production".into(),
+            namespace: namespace.clone(),
+        };
+
+        let outcomes = store
+            .detect_all_and_branch_encode(namespace.clone(), MemoryId(2), &candidate)
+            .unwrap();
+
+        assert!(!outcomes.is_empty());
+        assert!(store.contradiction_engine().count_in_namespace(&namespace) >= 1);
     }
 }
