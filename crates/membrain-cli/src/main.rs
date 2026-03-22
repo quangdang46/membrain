@@ -984,8 +984,7 @@ async fn main() -> anyhow::Result<()> {
             json,
         } => {
             let ns = NamespaceId::new(namespace)?;
-            let output =
-                recall_memories(&store, &hot, &local_records, query, &ns, *top, explain);
+            let output = recall_memories(&store, &hot, &local_records, query, &ns, *top, explain);
             if *json {
                 println!("{}", serde_json::to_string_pretty(&output)?);
             } else {
