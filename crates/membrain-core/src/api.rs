@@ -584,11 +584,11 @@ impl TraceStage {
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
 pub struct ResultReason {
     pub memory_id: Option<MemoryId>,
-    pub reason_code: &'static str,
-    pub reason_family: &'static str,
+    pub reason_code: String,
+    pub reason_family: String,
     pub route_stage: TraceStage,
     pub policy_filter_applied: bool,
-    pub detail: &'static str,
+    pub detail: String,
 }
 
 /// Shared policy summary for explain surfaces.
@@ -607,8 +607,8 @@ pub struct TracePolicySummary {
 /// Shared provenance summary for explain surfaces.
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
 pub struct TraceProvenanceSummary {
-    pub source_kind: &'static str,
-    pub source_reference: &'static str,
+    pub source_kind: String,
+    pub source_reference: String,
     pub lineage_ancestors: Vec<MemoryId>,
 }
 
@@ -762,11 +762,11 @@ impl ResultReason {
 
         Self {
             memory_id: reason.memory_id,
-            reason_code,
-            reason_family,
+            reason_code: reason_code.to_string(),
+            reason_family: reason_family.to_string(),
             route_stage,
             policy_filter_applied: false,
-            detail: Box::leak(reason.detail.clone().into_boxed_str()),
+            detail: reason.detail.clone(),
         }
     }
 }
@@ -814,20 +814,8 @@ impl TraceProvenanceSummary {
     /// Builds the shared provenance summary from one retrieval result set.
     pub fn from_result_set(result_set: &RetrievalResultSet) -> Self {
         Self {
-            source_kind: Box::leak(
-                result_set
-                    .provenance_summary
-                    .source_kind
-                    .clone()
-                    .into_boxed_str(),
-            ),
-            source_reference: Box::leak(
-                result_set
-                    .provenance_summary
-                    .source_reference
-                    .clone()
-                    .into_boxed_str(),
-            ),
+            source_kind: result_set.provenance_summary.source_kind.clone(),
+            source_reference: result_set.provenance_summary.source_reference.clone(),
             lineage_ancestors: result_set.provenance_summary.lineage_ancestors.clone(),
         }
     }
@@ -1700,11 +1688,11 @@ mod tests {
             ],
             vec![ResultReason {
                 memory_id: None,
-                reason_code: "tier2_exact_match",
-                reason_family: "selection",
+                reason_code: "tier2_exact_match".to_string(),
+                reason_family: "selection".to_string(),
                 route_stage: TraceStage::Tier2Exact,
                 policy_filter_applied: false,
-                detail: "candidate survived bounded ranking",
+                detail: "candidate survived bounded ranking".to_string(),
             }],
             TraceOmissionSummary {
                 policy_redacted: 0,
@@ -1746,8 +1734,8 @@ mod tests {
                 )],
             },
             TraceProvenanceSummary {
-                source_kind: "memory",
-                source_reference: "memory_id",
+                source_kind: "memory".to_string(),
+                source_reference: "memory_id".to_string(),
                 lineage_ancestors: Vec::new(),
             },
             vec![FreshnessMarker {
@@ -2004,11 +1992,11 @@ mod tests {
             vec![TraceStage::PolicyGate, TraceStage::Tier2Exact],
             vec![ResultReason {
                 memory_id: None,
-                reason_code: "tier2_exact_match",
-                reason_family: "selection",
+                reason_code: "tier2_exact_match".to_string(),
+                reason_family: "selection".to_string(),
                 route_stage: TraceStage::Tier2Exact,
                 policy_filter_applied: false,
-                detail: "candidate survived bounded ranking",
+                detail: "candidate survived bounded ranking".to_string(),
             }],
             TraceOmissionSummary {
                 policy_redacted: 0,
@@ -2043,8 +2031,8 @@ mod tests {
                 )],
             },
             TraceProvenanceSummary {
-                source_kind: "memory",
-                source_reference: "memory_id",
+                source_kind: "memory".to_string(),
+                source_reference: "memory_id".to_string(),
                 lineage_ancestors: Vec::new(),
             },
             vec![FreshnessMarker {

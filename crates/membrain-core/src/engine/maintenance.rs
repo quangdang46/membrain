@@ -129,6 +129,11 @@ where
         }
     }
 
+    /// Returns a shared reference to the underlying operation.
+    pub fn operation(&self) -> &O {
+        &self.operation
+    }
+
     fn snapshot_with_state(
         &self,
         state: MaintenanceJobState<O::Summary>,

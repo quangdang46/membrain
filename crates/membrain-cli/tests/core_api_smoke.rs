@@ -1,5 +1,7 @@
 use membrain_core::api::{
-    NamespaceId, PassiveObservationInspectSummary, RequestId, ResponseContext,
+    AvailabilityPosture, AvailabilityReason, AvailabilitySummary, ErrorKind, NamespaceId,
+    PassiveObservationInspectSummary, PolicyContext, RemediationStep, RequestContext, RequestId,
+    ResponseContext,
 };
 use membrain_core::engine::encode::EncodeRuntime;
 use membrain_core::engine::intent::{IntentEngine, QueryIntent};
@@ -11,7 +13,9 @@ use membrain_core::engine::recall::{RecallRuntime, RecallTraceStage};
 use membrain_core::engine::repair::{IndexRepairEntrypoint, RepairTarget};
 use membrain_core::engine::retrieval_planner::{PrimaryCue, RetrievalRequest};
 use membrain_core::observability::OutcomeClass;
-use membrain_core::policy::{PolicyDecision, PolicyGateway};
+use membrain_core::policy::{
+    PolicyDecision, PolicyGateway, PolicyModule, SharingAccessDecision, SharingVisibility,
+};
 use membrain_core::store::hot::Tier1HotMetadataStore;
 use membrain_core::store::{ColdStoreApi, HotStoreApi, Tier2StoreApi};
 use membrain_core::types::{
@@ -412,4 +416,238 @@ fn cli_can_surface_repair_reports_through_shared_core_repair_engine() {
         summary.results[1].rebuilt_outputs,
         vec!["tier2_metadata_projection", "namespace_lookup_table"]
     );
+}
+
+// ── CLI parity and denial end-to-end scripts ─────────────────────────────────
+//
+// These tests verify that CLI-facing encode, recall, inspect, explain, and
+// admin surfaces produce deterministic outputs that match the canonical
+// retrieval, policy, and error contracts without relying on ambient time
+// or flaky wall-clock assumptions.
+
+#[test]
+fn cli_parity_encode_recall_inspect_pipeline() {
+    let store = BrainStore::new(RuntimeConfig::default());
+    let namespace = NamespaceId::new("parity.test").expect("valid namespace");
+    let request_id = RequestId::new("req-pipeline-1").expect("valid request id");
+
+    // Step 1: Encode — run the fast path and verify deterministic output
+    let prepared = store.encode_engine().prepare_fast_path(RawEncodeInput::new(
+        RawIntakeKind::Event,
+        "  parity test  encode  recall  inspect  ",
+    ));
+    assert_eq!(prepared.normalized.memory_type, CanonicalMemoryType::Event);
+    assert_eq!(
+        prepared.normalized.compact_text,
+        "parity test encode recall inspect"
+    );
+    assert_eq!(
+        prepared.classification.route_family,
+        FastPathRouteFamily::Event
+    );
+    assert!(prepared.trace.stayed_within_latency_budget);
+
+    // Step 2: Build a successful response envelope and verify parity fields
+    let response = ResponseContext::success(namespace.clone(), request_id.clone(), 1u8);
+    assert!(response.ok);
+    assert_eq!(response.request_id.as_str(), "req-pipeline-1");
+    assert_eq!(response.namespace.as_str(), "parity.test");
+    assert_eq!(response.outcome_class, OutcomeClass::Accepted);
+    assert!(response.error_kind.is_none());
+    assert!(!response.retryable);
+    assert!(!response.partial_success);
+    assert!(response.remediation.is_none());
+    assert!(response.availability.is_none());
+    assert!(response.warnings.is_empty());
+
+    // Step 3: Recall route planning — verify the plan is deterministic
+    let plan = store.recall_engine().plan_recall(
+        membrain_core::engine::recall::RecallRequest::exact(MemoryId(1)),
+        store.config(),
+    );
+    assert!(plan.terminates_in_tier1());
+    assert_eq!(
+        plan.route_summary.trace_stages,
+        &[RecallTraceStage::Tier1ExactHandle]
+    );
+
+    // Step 4: Inspect parity — the passive observation fields must be explicitly
+    // absent for non-observation intake, not silently missing
+    let active = store.encode_engine().prepare_fast_path(RawEncodeInput::new(
+        RawIntakeKind::Event,
+        "active intake for parity",
+    ));
+    let inspect_response = ResponseContext::success(
+        namespace.clone(),
+        RequestId::new("req-inspect-parity").unwrap(),
+        1u8,
+    )
+    .with_passive_observation(PassiveObservationInspectSummary::from_encode(
+        &active.passive_observation_inspect,
+    ));
+    let passive = inspect_response.passive_observation.as_ref().unwrap();
+    assert!(!passive.captured_as_observation);
+    assert_eq!(passive.observation_source.state_name(), "absent");
+    assert_eq!(passive.observation_chunk_id.state_name(), "absent");
+}
+
+#[test]
+fn cli_parity_denial_scenarios() {
+    let namespace = NamespaceId::new("parity.denial").unwrap();
+
+    // Denial 1: Missing namespace fails at binding time
+    let request_no_ns = RequestContext {
+        namespace: None,
+        workspace_id: None,
+        agent_id: None,
+        session_id: None,
+        task_id: None,
+        request_id: RequestId::new("req-denial-1").unwrap(),
+        policy_context: PolicyContext {
+            include_public: false,
+            sharing_visibility: SharingVisibility::Private,
+            caller_identity_bound: true,
+            workspace_acl_allowed: true,
+            agent_acl_allowed: true,
+            session_visibility_allowed: true,
+            legal_hold: false,
+        },
+        time_budget_ms: None,
+    };
+    let bind_result = request_no_ns.bind_namespace(None);
+    assert!(bind_result.is_err());
+    let err = bind_result.unwrap_err();
+    assert_eq!(err.error_kind(), ErrorKind::ValidationFailure);
+
+    // Denial 2: Unbound caller identity is denied by policy
+    let request_unbound = RequestContext {
+        namespace: Some(namespace.clone()),
+        workspace_id: None,
+        agent_id: None,
+        session_id: None,
+        task_id: None,
+        request_id: RequestId::new("req-denial-2").unwrap(),
+        policy_context: PolicyContext {
+            include_public: false,
+            sharing_visibility: SharingVisibility::Private,
+            caller_identity_bound: false,
+            workspace_acl_allowed: true,
+            agent_acl_allowed: true,
+            session_visibility_allowed: true,
+            legal_hold: false,
+        },
+        time_budget_ms: None,
+    };
+    let bound = request_unbound.bind_namespace(None).unwrap();
+    let policy = bound.evaluate_policy(&PolicyModule);
+    assert_eq!(policy.decision, PolicyDecision::Deny);
+    assert_eq!(policy.outcome_class, OutcomeClass::Rejected);
+
+    // Denial 3: Failed response envelope preserves error taxonomy
+    let failure = ResponseContext::<()>::failure(
+        namespace.clone(),
+        RequestId::new("req-denial-3").unwrap(),
+        ErrorKind::PolicyDenied,
+        vec![],
+    );
+    assert!(!failure.ok);
+    assert_eq!(failure.outcome_class, OutcomeClass::Rejected);
+    assert_eq!(failure.error_kind, Some(ErrorKind::PolicyDenied));
+    assert!(!failure.retryable);
+    let remediation = failure.remediation.as_ref().unwrap();
+    assert!(remediation.step_names().contains(&"change_scope"));
+}
+
+#[test]
+fn cli_parity_cross_namespace_sharing_denial_and_redaction() {
+    let request = RequestContext {
+        namespace: Some(NamespaceId::new("parity.ns1").unwrap()),
+        workspace_id: None,
+        agent_id: None,
+        session_id: None,
+        task_id: None,
+        request_id: RequestId::new("req-cross-ns").unwrap(),
+        policy_context: PolicyContext {
+            include_public: false,
+            sharing_visibility: SharingVisibility::Private,
+            caller_identity_bound: true,
+            workspace_acl_allowed: true,
+            agent_acl_allowed: true,
+            session_visibility_allowed: true,
+            legal_hold: false,
+        },
+        time_budget_ms: None,
+    };
+    let bound = request.bind_namespace(None).unwrap();
+    let outcome = bound.evaluate_cross_namespace_sharing_access(
+        &PolicyModule,
+        &NamespaceId::new("parity.ns2").unwrap(),
+    );
+    assert_eq!(outcome.decision, SharingAccessDecision::Deny);
+    assert!(outcome
+        .denial_reasons
+        .iter()
+        .any(|r| r.as_str() == "namespace_isolation"));
+    assert!(outcome.redaction_fields.contains(&"memory_id"));
+    assert!(outcome.redaction_fields.contains(&"session_id"));
+}
+
+#[test]
+fn cli_parity_partial_success_and_degraded_outcomes() {
+    let namespace = NamespaceId::new("parity.partial").unwrap();
+    let request_id = RequestId::new("req-partial").unwrap();
+
+    // Partial success outcome
+    let partial = ResponseContext::success(namespace.clone(), request_id.clone(), 42u8)
+        .with_partial_success();
+    assert!(partial.ok);
+    assert!(partial.partial_success);
+    assert_eq!(partial.outcome_class, OutcomeClass::Partial);
+
+    // Degraded availability outcome
+    let degraded = ResponseContext::success(namespace.clone(), request_id.clone(), 42u8)
+        .with_availability(AvailabilitySummary::degraded(
+            vec!["recall"],
+            vec!["encode"],
+            vec![AvailabilityReason::RepairInFlight],
+            vec![RemediationStep::CheckHealth],
+        ));
+    assert!(degraded.ok);
+    assert_eq!(degraded.outcome_class, OutcomeClass::Degraded);
+    let avail = degraded.availability.as_ref().unwrap();
+    assert_eq!(avail.posture, AvailabilityPosture::Degraded);
+    assert!(avail
+        .degraded_reasons
+        .contains(&AvailabilityReason::RepairInFlight));
+}
+
+#[test]
+fn cli_parity_repair_engine_produces_deterministic_results() {
+    let store = BrainStore::new(RuntimeConfig::default());
+    let namespace = NamespaceId::new("parity.repair").unwrap();
+
+    // Run repair twice and verify identical results
+    for _ in 0..2 {
+        let run = store.repair_engine().create_targeted(
+            namespace.clone(),
+            vec![RepairTarget::LexicalIndex, RepairTarget::MetadataIndex],
+            IndexRepairEntrypoint::RebuildIfNeeded,
+        );
+        let mut handle = MaintenanceJobHandle::new(run, 8);
+        handle.start();
+        let mut completed = false;
+        for _ in 0..8 {
+            let snapshot = handle.poll();
+            if let MaintenanceJobState::Completed(summary) = snapshot.state {
+                assert_eq!(summary.targets_checked, 2);
+                assert_eq!(summary.rebuilt, 2);
+                assert!(summary.results.iter().all(|r| r.verification_passed));
+                assert_eq!(summary.results[0].target, RepairTarget::LexicalIndex);
+                assert_eq!(summary.results[1].target, RepairTarget::MetadataIndex);
+                completed = true;
+                break;
+            }
+        }
+        assert!(completed, "repair should complete within bounded polls");
+    }
 }

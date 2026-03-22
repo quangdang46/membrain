@@ -131,7 +131,8 @@ impl StrengthEngine {
         let prev_strength = state.base_strength;
         let prev_stability = state.stability;
         state.base_strength = (state.base_strength + policy.ltp_delta).min(policy.max_strength);
-        state.stability += policy.stability_increment;
+        let max_stability = policy.max_strength * 10.0;
+        state.stability = (state.stability + policy.stability_increment).min(max_stability);
         state.last_accessed_tick = current_tick;
         state.access_count += 1;
         LtpResult {
@@ -230,7 +231,7 @@ impl StrengthEngine {
             return 0.0;
         }
         let exponent = -(interactions_elapsed as f32) / stability;
-        exponent.exp().max(0.0).min(1.0)
+        exponent.exp().clamp(0.0, 1.0)
     }
 
     pub fn should_bypass_decay(&self, arousal: f32, valence: f32, policy: &StrengthPolicy) -> bool {

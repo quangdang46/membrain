@@ -285,6 +285,17 @@ pub enum DualOutputMode {
     Fast,
 }
 
+impl DualOutputMode {
+    /// Stable machine-readable name.
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Strict => "strict",
+            Self::Balanced => "balanced",
+            Self::Fast => "fast",
+        }
+    }
+}
+
 // ── Result set ───────────────────────────────────────────────────────────────
 
 /// Packaged result set returned by the retrieval pipeline.
@@ -1481,5 +1492,606 @@ mod tests {
         assert_eq!(AnsweredFrom::Tier1Hot.as_str(), "tier1_hot");
         assert_eq!(AnsweredFrom::Tier2Indexed.as_str(), "tier2_indexed");
         assert_eq!(AnsweredFrom::Tier3Cold.as_str(), "tier3_cold");
+    }
+
+    #[test]
+    fn full_outcome_returns_all_candidates_within_limit() {
+        let mut builder = ResultBuilder::new(5, ns("full"));
+        let scores = [
+            fuse_scores(
+                RankingInput {
+                    recency: 900,
+                    salience: 850,
+                    strength: 800,
+                    provenance: 750,
+                    conflict: 500,
+                },
+                RankingProfile::balanced(),
+            ),
+            fuse_scores(
+                RankingInput {
+                    recency: 700,
+                    salience: 650,
+                    strength: 600,
+                    provenance: 550,
+                    conflict: 500,
+                },
+                RankingProfile::balanced(),
+            ),
+            fuse_scores(
+                RankingInput {
+                    recency: 500,
+                    salience: 450,
+                    strength: 400,
+                    provenance: 350,
+                    conflict: 500,
+                },
+                RankingProfile::balanced(),
+            ),
+        ];
+        for (i, score) in scores.iter().enumerate() {
+            builder.add(
+                MemoryId(i as u64 + 1),
+                ns("full"),
+                SessionId(1),
+                CanonicalMemoryType::Event,
+                format!("item {i}"),
+                score,
+                AnsweredFrom::Tier1Hot,
+            );
+        }
+        let result_set = builder.build(RetrievalExplain {
+            recall_plan: RecallPlanKind::ExactIdTier1,
+            route_reason: "full batch".to_string(),
+            tiers_consulted: vec!["tier1_exact".to_string()],
+            trace_stages: vec![RecallTraceStage::Tier1ExactHandle],
+            tier1_answered_directly: true,
+            candidate_budget: 5,
+            time_consumed_ms: Some(3),
+            ranking_profile: "balanced".to_string(),
+            contradictions_found: 0,
+            result_reasons: vec![],
+        });
+
+        assert_eq!(result_set.count(), 3);
+        assert!(!result_set.truncated);
+        assert_eq!(result_set.outcome_class, OutcomeClass::Accepted);
+        assert_eq!(result_set.total_candidates, 3);
+        assert_eq!(result_set.omitted_summary.budget_capped, 0);
+        assert!(result_set.top().is_some());
+    }
+
+    #[test]
+    fn degraded_outcome_carries_degraded_summary() {
+        let mut builder = ResultBuilder::new(3, ns("degraded"));
+        let ranked = fuse_scores(
+            RankingInput {
+                recency: 600,
+                salience: 550,
+                strength: 500,
+                provenance: 450,
+                conflict: 500,
+            },
+            RankingProfile::balanced(),
+        );
+        builder.add(
+            MemoryId(1),
+            ns("degraded"),
+            SessionId(1),
+            CanonicalMemoryType::Event,
+            "partial result".into(),
+            &ranked,
+            AnsweredFrom::Tier2Indexed,
+        );
+        let explain = RetrievalExplain {
+            recall_plan: RecallPlanKind::Tier2ExactThenTier3Fallback,
+            route_reason: "degraded tier2 only".to_string(),
+            tiers_consulted: vec!["tier2_exact".to_string()],
+            trace_stages: vec![RecallTraceStage::Tier2Exact],
+            tier1_answered_directly: false,
+            candidate_budget: 3,
+            time_consumed_ms: Some(250),
+            ranking_profile: "balanced".to_string(),
+            contradictions_found: 0,
+            result_reasons: vec![ResultReason {
+                memory_id: None,
+                reason_code: "degraded_tier2_only".to_string(),
+                detail: "tier1 hot set unavailable, tier2 served partial results".to_string(),
+            }],
+        };
+        let mut result_set = builder.build(explain);
+        result_set.packaging_metadata.degraded_summary =
+            Some("tier1 unavailable, tier2 partial fallback".to_string());
+
+        assert_eq!(
+            result_set.packaging_metadata.degraded_summary.as_deref(),
+            Some("tier1 unavailable, tier2 partial fallback")
+        );
+        assert_eq!(result_set.explain.result_reasons.len(), 1);
+        assert_eq!(
+            result_set.explain.result_reasons[0].reason_code,
+            "degraded_tier2_only"
+        );
+    }
+
+    #[test]
+    fn policy_filtered_outcome_tracks_redactions() {
+        let mut builder = ResultBuilder::new(5, ns("policy"));
+        let scored = fuse_scores(
+            RankingInput {
+                recency: 800,
+                salience: 750,
+                strength: 700,
+                provenance: 650,
+                conflict: 500,
+            },
+            RankingProfile::balanced(),
+        );
+        builder.add(
+            MemoryId(1),
+            ns("policy"),
+            SessionId(1),
+            CanonicalMemoryType::Event,
+            "visible item".into(),
+            &scored,
+            AnsweredFrom::Tier1Hot,
+        );
+        let result_set = builder.build(RetrievalExplain {
+            recall_plan: RecallPlanKind::ExactIdTier1,
+            route_reason: "policy filtered".to_string(),
+            tiers_consulted: vec!["tier1_exact".to_string()],
+            trace_stages: vec![RecallTraceStage::Tier1ExactHandle],
+            tier1_answered_directly: true,
+            candidate_budget: 5,
+            time_consumed_ms: Some(2),
+            ranking_profile: "balanced".to_string(),
+            contradictions_found: 0,
+            result_reasons: vec![ResultReason {
+                memory_id: None,
+                reason_code: "policy_redacted".to_string(),
+                detail: "2 items redacted by namespace policy".to_string(),
+            }],
+        });
+
+        assert_eq!(
+            result_set.policy_summary.namespace_applied.as_str(),
+            "policy"
+        );
+        assert_eq!(result_set.explain.result_reasons.len(), 1);
+        assert_eq!(
+            result_set.explain.result_reasons[0].reason_code,
+            "policy_redacted"
+        );
+        assert!(result_set.explain.result_reasons[0]
+            .detail
+            .contains("2 items redacted"));
+    }
+
+    #[test]
+    fn action_pack_present_when_builder_attaches_actions() {
+        let mut builder = ResultBuilder::new(5, ns("actions"));
+        let scored = fuse_scores(
+            RankingInput {
+                recency: 700,
+                salience: 650,
+                strength: 600,
+                provenance: 550,
+                conflict: 500,
+            },
+            RankingProfile::balanced(),
+        );
+        builder.add(
+            MemoryId(10),
+            ns("actions"),
+            SessionId(1),
+            CanonicalMemoryType::ToolOutcome,
+            "deploy succeeded".into(),
+            &scored,
+            AnsweredFrom::Tier2Indexed,
+        );
+        builder.action_pack = Some(vec![ActionArtifact {
+            action_type: "redeploy".to_string(),
+            suggestion: "Consider re-running last successful deploy".to_string(),
+            supporting_evidence: vec![MemoryId(10)],
+            confidence_score: 750,
+        }]);
+        let result_set = builder.build(RetrievalExplain {
+            recall_plan: RecallPlanKind::Tier2ExactThenTier3Fallback,
+            route_reason: "action-aware".to_string(),
+            tiers_consulted: vec!["tier2_exact".to_string()],
+            trace_stages: vec![RecallTraceStage::Tier2Exact],
+            tier1_answered_directly: false,
+            candidate_budget: 5,
+            time_consumed_ms: Some(10),
+            ranking_profile: "balanced".to_string(),
+            contradictions_found: 0,
+            result_reasons: vec![],
+        });
+
+        assert!(result_set.action_pack.is_some());
+        assert_eq!(result_set.action_pack.as_ref().unwrap().len(), 1);
+        assert_eq!(
+            result_set.action_pack.as_ref().unwrap()[0].action_type,
+            "redeploy"
+        );
+        assert_eq!(
+            result_set.action_pack.as_ref().unwrap()[0].supporting_evidence,
+            vec![MemoryId(10)]
+        );
+        assert_eq!(
+            result_set.action_pack.as_ref().unwrap()[0].confidence_score,
+            750
+        );
+        assert_eq!(
+            result_set.packaging_metadata.packaging_mode,
+            "evidence_plus_action"
+        );
+    }
+
+    #[test]
+    fn action_pack_absent_by_default() {
+        let mut builder = ResultBuilder::new(3, ns("no_actions"));
+        let scored = fuse_scores(
+            RankingInput {
+                recency: 600,
+                salience: 550,
+                strength: 500,
+                provenance: 450,
+                conflict: 500,
+            },
+            RankingProfile::balanced(),
+        );
+        builder.add(
+            MemoryId(1),
+            ns("no_actions"),
+            SessionId(1),
+            CanonicalMemoryType::Event,
+            "just evidence".into(),
+            &scored,
+            AnsweredFrom::Tier1Hot,
+        );
+        let result_set = builder.build(RetrievalExplain {
+            recall_plan: RecallPlanKind::ExactIdTier1,
+            route_reason: "evidence only".to_string(),
+            tiers_consulted: vec!["tier1_exact".to_string()],
+            trace_stages: vec![RecallTraceStage::Tier1ExactHandle],
+            tier1_answered_directly: true,
+            candidate_budget: 3,
+            time_consumed_ms: Some(2),
+            ranking_profile: "balanced".to_string(),
+            contradictions_found: 0,
+            result_reasons: vec![],
+        });
+
+        assert!(result_set.action_pack.is_none());
+        assert_eq!(
+            result_set.packaging_metadata.packaging_mode,
+            "evidence_only"
+        );
+    }
+
+    #[test]
+    fn omitted_summary_tracks_all_variant_types() {
+        let omitted = OmissionSummary {
+            policy_redacted: 3,
+            threshold_dropped: 2,
+            dedup_dropped: 1,
+            budget_capped: 4,
+            duplicate_collapsed: 5,
+            low_confidence_suppressed: 2,
+            stale_bypassed: 1,
+        };
+        assert_eq!(omitted.policy_redacted, 3);
+        assert_eq!(omitted.threshold_dropped, 2);
+        assert_eq!(omitted.dedup_dropped, 1);
+        assert_eq!(omitted.budget_capped, 4);
+        assert_eq!(omitted.duplicate_collapsed, 5);
+        assert_eq!(omitted.low_confidence_suppressed, 2);
+        assert_eq!(omitted.stale_bypassed, 1);
+
+        let json = serde_json::to_string(&omitted).unwrap();
+        let decoded: OmissionSummary = serde_json::from_str(&json).unwrap();
+        assert_eq!(decoded, omitted);
+    }
+
+    #[test]
+    fn retrieval_explain_round_trips_through_json() {
+        let explain = RetrievalExplain {
+            recall_plan: RecallPlanKind::Tier2ExactThenTier3Fallback,
+            route_reason: "hybrid fallback".to_string(),
+            tiers_consulted: vec![
+                "tier1_recent".to_string(),
+                "tier2_exact".to_string(),
+                "tier3_fallback".to_string(),
+            ],
+            trace_stages: vec![
+                RecallTraceStage::Tier1RecentWindow,
+                RecallTraceStage::Tier2Exact,
+                RecallTraceStage::Tier3Fallback,
+            ],
+            tier1_answered_directly: false,
+            candidate_budget: 100,
+            time_consumed_ms: Some(42),
+            ranking_profile: "recency_biased".to_string(),
+            contradictions_found: 2,
+            result_reasons: vec![
+                ResultReason {
+                    memory_id: Some(MemoryId(7)),
+                    reason_code: "top_result".to_string(),
+                    detail: "highest score".to_string(),
+                },
+                ResultReason {
+                    memory_id: None,
+                    reason_code: "budget_capped".to_string(),
+                    detail: "3 candidates dropped".to_string(),
+                },
+            ],
+        };
+        let json = serde_json::to_string(&explain).unwrap();
+        let decoded: RetrievalExplain = serde_json::from_str(&json).unwrap();
+        assert_eq!(
+            decoded.recall_plan,
+            RecallPlanKind::Tier2ExactThenTier3Fallback
+        );
+        assert_eq!(decoded.tiers_consulted.len(), 3);
+        assert_eq!(decoded.contradictions_found, 2);
+        assert_eq!(decoded.result_reasons.len(), 2);
+        assert_eq!(decoded.result_reasons[0].reason_code, "top_result");
+        assert_eq!(decoded.time_consumed_ms, Some(42));
+    }
+
+    #[test]
+    fn dual_output_mode_variants_are_stable() {
+        assert_eq!(DualOutputMode::Strict.as_str(), "strict");
+        assert_eq!(DualOutputMode::Balanced.as_str(), "balanced");
+        assert_eq!(DualOutputMode::Fast.as_str(), "fast");
+
+        for mode in [
+            DualOutputMode::Strict,
+            DualOutputMode::Balanced,
+            DualOutputMode::Fast,
+        ] {
+            let json = serde_json::to_string(&mode).unwrap();
+            let decoded: DualOutputMode = serde_json::from_str(&json).unwrap();
+            assert_eq!(decoded, mode);
+        }
+    }
+
+    #[test]
+    fn evidence_item_fields_preserved_through_serialization() {
+        let mut builder = ResultBuilder::new(1, ns("serialize"));
+        let ranked = fuse_scores(
+            RankingInput {
+                recency: 800,
+                salience: 750,
+                strength: 700,
+                provenance: 650,
+                conflict: 300,
+            },
+            RankingProfile::balanced(),
+        );
+        builder.add(
+            MemoryId(42),
+            ns("serialize"),
+            SessionId(5),
+            CanonicalMemoryType::Observation,
+            "round-trip test".into(),
+            &ranked,
+            AnsweredFrom::Tier3Cold,
+        );
+        let result_set = builder.build(RetrievalExplain {
+            recall_plan: RecallPlanKind::Tier2ExactThenTier3Fallback,
+            route_reason: "serialize test".to_string(),
+            tiers_consulted: vec!["tier3_fallback".to_string()],
+            trace_stages: vec![RecallTraceStage::Tier3Fallback],
+            tier1_answered_directly: false,
+            candidate_budget: 1,
+            time_consumed_ms: Some(50),
+            ranking_profile: "balanced".to_string(),
+            contradictions_found: 0,
+            result_reasons: vec![],
+        });
+
+        let json = serde_json::to_string(&result_set).unwrap();
+        let decoded: RetrievalResultSet = serde_json::from_str(&json).unwrap();
+
+        assert_eq!(decoded.count(), 1);
+        let item = &decoded.evidence_pack[0];
+        assert_eq!(item.result.memory_id, MemoryId(42));
+        assert_eq!(item.result.entry_lane.as_str(), "cold_fallback");
+        assert_eq!(item.result.answered_from.as_str(), "tier3_cold");
+        assert_eq!(item.result.memory_type, CanonicalMemoryType::Observation);
+        assert_eq!(item.result.compact_text, "round-trip test");
+        assert_eq!(item.result.role, EvidenceRole::Primary);
+        assert_eq!(item.result.payload_state, PayloadState::Inline);
+        assert!(!item.freshness_markers.volatile_items_included);
+        assert_eq!(
+            item.provenance_summary.original_namespace.as_str(),
+            "serialize"
+        );
+    }
+
+    #[test]
+    fn explain_route_produces_stable_route_summary_and_trace_stages() {
+        let mut builder = ResultBuilder::new(3, ns("route"));
+        let ranked = fuse_scores(
+            RankingInput {
+                recency: 700,
+                salience: 650,
+                strength: 600,
+                provenance: 550,
+                conflict: 500,
+            },
+            RankingProfile::balanced(),
+        );
+        builder.add(
+            MemoryId(5),
+            ns("route"),
+            SessionId(2),
+            CanonicalMemoryType::Event,
+            "route test".into(),
+            &ranked,
+            AnsweredFrom::Tier2Indexed,
+        );
+        let explain = RetrievalExplain::from_plan(
+            &RecallEngine.plan_recall(
+                RecallRequest::small_session_lookup(SessionId(2)),
+                RuntimeConfig::default(),
+            ),
+            "balanced",
+        );
+        let result_set = builder.build(explain);
+
+        let (route_summary, trace_stages) = result_set.explain_route();
+
+        assert!(!route_summary.route_family.is_empty());
+        assert!(!route_summary.route_reason.is_empty());
+        assert!(!trace_stages.is_empty());
+        assert!(trace_stages
+            .iter()
+            .any(|s| matches!(s, crate::observability::TraceStage::PolicyGate)));
+        assert!(trace_stages
+            .iter()
+            .any(|s| matches!(s, crate::observability::TraceStage::Packaging)));
+    }
+
+    #[test]
+    fn explain_result_reasons_maps_all_result_reasons() {
+        let mut builder = ResultBuilder::new(1, ns("reasons"));
+        let ranked = fuse_scores(
+            RankingInput {
+                recency: 600,
+                salience: 550,
+                strength: 500,
+                provenance: 450,
+                conflict: 500,
+            },
+            RankingProfile::balanced(),
+        );
+        builder.add(
+            MemoryId(3),
+            ns("reasons"),
+            SessionId(1),
+            CanonicalMemoryType::Event,
+            "reasons test".into(),
+            &ranked,
+            AnsweredFrom::Tier1Hot,
+        );
+        let explain = RetrievalExplain {
+            recall_plan: RecallPlanKind::ExactIdTier1,
+            route_reason: "reasons test".to_string(),
+            tiers_consulted: vec!["tier1_exact".to_string()],
+            trace_stages: vec![RecallTraceStage::Tier1ExactHandle],
+            tier1_answered_directly: true,
+            candidate_budget: 1,
+            time_consumed_ms: Some(2),
+            ranking_profile: "balanced".to_string(),
+            contradictions_found: 0,
+            result_reasons: vec![
+                ResultReason {
+                    memory_id: Some(MemoryId(3)),
+                    reason_code: "score_kept".to_string(),
+                    detail: "highest score".to_string(),
+                },
+                ResultReason {
+                    memory_id: None,
+                    reason_code: "no_match".to_string(),
+                    detail: "2 candidates dropped".to_string(),
+                },
+            ],
+        };
+        let result_set = builder.build(explain);
+
+        let reasons = result_set.explain_result_reasons();
+
+        assert_eq!(reasons.len(), 2);
+        assert_eq!(reasons[0].reason_code, "score_kept");
+        assert_eq!(reasons[1].reason_code, "no_match");
+    }
+
+    #[test]
+    fn explain_policy_and_provenance_returns_structured_summaries() {
+        let mut builder = ResultBuilder::new(1, ns("policy_prov"));
+        let ranked = fuse_scores(
+            RankingInput {
+                recency: 800,
+                salience: 750,
+                strength: 700,
+                provenance: 650,
+                conflict: 500,
+            },
+            RankingProfile::balanced(),
+        );
+        builder.add(
+            MemoryId(8),
+            ns("policy_prov"),
+            SessionId(4),
+            CanonicalMemoryType::Observation,
+            "policy provenance".into(),
+            &ranked,
+            AnsweredFrom::Tier1Hot,
+        );
+        let explain = RetrievalExplain {
+            recall_plan: RecallPlanKind::ExactIdTier1,
+            route_reason: "policy test".to_string(),
+            tiers_consulted: vec!["tier1_exact".to_string()],
+            trace_stages: vec![RecallTraceStage::Tier1ExactHandle],
+            tier1_answered_directly: true,
+            candidate_budget: 1,
+            time_consumed_ms: Some(1),
+            ranking_profile: "balanced".to_string(),
+            contradictions_found: 0,
+            result_reasons: vec![],
+        };
+        let result_set = builder.build(explain);
+
+        let (policy_summary, provenance_summary) = result_set.explain_policy_and_provenance();
+
+        assert_eq!(policy_summary.effective_namespace.as_str(), "policy_prov");
+        assert!(!provenance_summary.source_kind.is_empty());
+    }
+
+    #[test]
+    fn explain_markers_returns_freshness_conflict_and_uncertainty_markers() {
+        let mut builder = ResultBuilder::new(1, ns("markers"));
+        let ranked = fuse_scores(
+            RankingInput {
+                recency: 600,
+                salience: 550,
+                strength: 500,
+                provenance: 450,
+                conflict: 500,
+            },
+            RankingProfile::balanced(),
+        );
+        builder.add(
+            MemoryId(9),
+            ns("markers"),
+            SessionId(1),
+            CanonicalMemoryType::Event,
+            "markers test".into(),
+            &ranked,
+            AnsweredFrom::Tier2Indexed,
+        );
+        let explain = RetrievalExplain {
+            recall_plan: RecallPlanKind::Tier2ExactThenTier3Fallback,
+            route_reason: "markers test".to_string(),
+            tiers_consulted: vec!["tier2_exact".to_string()],
+            trace_stages: vec![RecallTraceStage::Tier2Exact],
+            tier1_answered_directly: false,
+            candidate_budget: 1,
+            time_consumed_ms: Some(5),
+            ranking_profile: "balanced".to_string(),
+            contradictions_found: 0,
+            result_reasons: vec![],
+        };
+        let result_set = builder.build(explain);
+
+        let (freshness_markers, conflict_markers, uncertainty_markers) =
+            result_set.explain_markers();
+
+        assert!(!freshness_markers.is_empty());
+        assert!(conflict_markers.is_empty());
+        assert_eq!(uncertainty_markers.len(), 1);
     }
 }

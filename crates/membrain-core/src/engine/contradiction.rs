@@ -6,6 +6,7 @@
 
 use crate::api::NamespaceId;
 use crate::types::MemoryId;
+use std::collections::HashMap;
 
 // ── Contradiction kinds ──────────────────────────────────────────────────────
 
@@ -416,11 +417,33 @@ pub enum ContradictionError {
 
 // ── In-memory contradiction engine ───────────────────────────────────────────
 
+/// Entry in the memory index used for contradiction detection.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct MemoryIndexEntry {
+    memory_id: MemoryId,
+    fingerprint: u64,
+    compact_text: String,
+}
+
 /// In-memory contradiction engine for the core crate.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ContradictionEngine {
     records: Vec<ContradictionRecord>,
     next_id: u64,
+    /// Per-namespace index of known memories for contradiction detection.
+    memory_index: HashMap<NamespaceId, Vec<MemoryIndexEntry>>,
+}
+
+/// Bounded similarity thresholds used during contradiction detection.
+pub struct SimilarityThresholds;
+
+impl SimilarityThresholds {
+    /// Exact-duplicate fingerprint match — no text comparison needed.
+    pub const EXACT_DUPLICATE: u16 = 1000;
+    /// High text similarity suggests a revision of an existing memory.
+    pub const REVISION_SIMILARITY: f64 = 0.85;
+    /// Moderate text similarity suggests coexistence or conflicting perspectives.
+    pub const COEXISTENCE_SIMILARITY: f64 = 0.40;
 }
 
 impl ContradictionEngine {
@@ -429,6 +452,7 @@ impl ContradictionEngine {
         Self {
             records: Vec::new(),
             next_id: 1,
+            memory_index: HashMap::new(),
         }
     }
 
@@ -437,20 +461,135 @@ impl ContradictionEngine {
         "engine.contradiction"
     }
 
+    /// Registers an existing memory in the detection index.
+    pub fn register_memory(
+        &mut self,
+        namespace: NamespaceId,
+        memory_id: MemoryId,
+        fingerprint: u64,
+        compact_text: String,
+    ) {
+        let entry = MemoryIndexEntry {
+            memory_id,
+            fingerprint,
+            compact_text,
+        };
+        self.memory_index.entry(namespace).or_default().push(entry);
+    }
+
+    /// Removes a memory from the detection index.
+    pub fn unregister_memory(&mut self, namespace: &NamespaceId, memory_id: MemoryId) {
+        if let Some(entries) = self.memory_index.get_mut(namespace) {
+            entries.retain(|e| e.memory_id != memory_id);
+        }
+    }
+
+    /// Returns the count of indexed memories in a namespace.
+    pub fn indexed_memory_count(&self, namespace: &NamespaceId) -> usize {
+        self.memory_index
+            .get(namespace)
+            .map_or(0, |entries| entries.len())
+    }
+
     /// Detects potential contradictions for an incoming memory candidate.
     pub fn detect(&self, candidate: &ContradictionCandidate) -> DetectionResult {
-        // Check for duplicate fingerprints first
-        for record in &self.records {
-            if record.namespace == candidate.namespace {
-                // This is a simplified detection; real implementation would
-                // cross-reference with stored memory metadata
-                if record.memory_a == candidate.memory_id || record.memory_b == candidate.memory_id
-                {
-                    continue; // Skip self-references
+        let Some(entries) = self.memory_index.get(&candidate.namespace) else {
+            return DetectionResult::NoConflict;
+        };
+
+        let mut best_match: Option<(MemoryId, ContradictionKind, u16)> = None;
+
+        for entry in entries {
+            if entry.memory_id == candidate.memory_id {
+                continue;
+            }
+
+            // Exact duplicate: same fingerprint
+            if entry.fingerprint == candidate.fingerprint {
+                let score = SimilarityThresholds::EXACT_DUPLICATE;
+                match &best_match {
+                    Some((_, _, best_score)) if *best_score >= score => {}
+                    _ => {
+                        best_match = Some((entry.memory_id, ContradictionKind::Duplicate, score));
+                    }
+                }
+                continue;
+            }
+
+            // Text similarity analysis for non-exact matches
+            let similarity = text_similarity(&entry.compact_text, &candidate.compact_text);
+
+            if similarity >= SimilarityThresholds::REVISION_SIMILARITY {
+                // High similarity: likely a revision of the existing memory
+                let score = similarity_to_score(similarity);
+                match &best_match {
+                    Some((_, _, best_score)) if *best_score >= score => {}
+                    _ => {
+                        best_match = Some((entry.memory_id, ContradictionKind::Revision, score));
+                    }
+                }
+            } else if similarity >= SimilarityThresholds::COEXISTENCE_SIMILARITY {
+                // Moderate similarity: could be conflicting perspectives
+                let score = similarity_to_score(similarity);
+                match &best_match {
+                    Some((_, _, best_score)) if *best_score >= score => {}
+                    _ => {
+                        best_match = Some((entry.memory_id, ContradictionKind::Coexistence, score));
+                    }
                 }
             }
+            // Below COEXISTENCE_SIMILARITY: no contradiction detected
         }
-        DetectionResult::NoConflict
+
+        match best_match {
+            Some((existing_memory, kind, conflict_score)) => DetectionResult::ConflictDetected {
+                existing_memory,
+                kind,
+                conflict_score,
+            },
+            None => DetectionResult::NoConflict,
+        }
+    }
+
+    /// Detects contradictions against all known memories and returns all matches.
+    pub fn detect_all(&self, candidate: &ContradictionCandidate) -> Vec<DetectionResult> {
+        let Some(entries) = self.memory_index.get(&candidate.namespace) else {
+            return Vec::new();
+        };
+
+        let mut results = Vec::new();
+
+        for entry in entries {
+            if entry.memory_id == candidate.memory_id {
+                continue;
+            }
+
+            if entry.fingerprint == candidate.fingerprint {
+                results.push(DetectionResult::ConflictDetected {
+                    existing_memory: entry.memory_id,
+                    kind: ContradictionKind::Duplicate,
+                    conflict_score: SimilarityThresholds::EXACT_DUPLICATE,
+                });
+                continue;
+            }
+
+            let similarity = text_similarity(&entry.compact_text, &candidate.compact_text);
+
+            if similarity >= SimilarityThresholds::COEXISTENCE_SIMILARITY {
+                let kind = if similarity >= SimilarityThresholds::REVISION_SIMILARITY {
+                    ContradictionKind::Revision
+                } else {
+                    ContradictionKind::Coexistence
+                };
+                results.push(DetectionResult::ConflictDetected {
+                    existing_memory: entry.memory_id,
+                    kind,
+                    conflict_score: similarity_to_score(similarity),
+                });
+            }
+        }
+
+        results
     }
 
     /// Allocates the next contradiction ID.
@@ -459,6 +598,38 @@ impl ContradictionEngine {
         self.next_id += 1;
         id
     }
+}
+
+/// Computes a bounded similarity score between two text strings.
+///
+/// Uses a simple word-overlap Jaccard coefficient to avoid hidden full-corpus scans.
+/// This is intentionally lightweight — heavier similarity (embedding-based) belongs
+/// in the retrieval layer, not in the contradiction detection hot path.
+pub fn text_similarity(a: &str, b: &str) -> f64 {
+    // Check empty first - empty strings should return 0.0, not 1.0
+    if a.is_empty() || b.is_empty() {
+        return 0.0;
+    }
+    if a == b {
+        return 1.0;
+    }
+
+    let words_a: std::collections::HashSet<&str> = a.split_whitespace().collect();
+    let words_b: std::collections::HashSet<&str> = b.split_whitespace().collect();
+
+    let intersection = words_a.intersection(&words_b).count();
+    let union = words_a.union(&words_b).count();
+
+    if union == 0 {
+        0.0
+    } else {
+        intersection as f64 / union as f64
+    }
+}
+
+/// Converts a 0.0..=1.0 similarity to a 0..1000 conflict score.
+fn similarity_to_score(similarity: f64) -> u16 {
+    (similarity * 1000.0).round().min(1000.0) as u16
 }
 
 impl Default for ContradictionEngine {
@@ -916,5 +1087,300 @@ mod tests {
             Some("legal hold keeps archived contradiction".to_string())
         );
         assert!(explain[0].audit_visible);
+    }
+
+    // ── Detection tests ────────────────────────────────────────────────────────
+
+    #[test]
+    fn detect_no_conflict_on_empty_engine() {
+        let engine = ContradictionEngine::new();
+        let candidate = ContradictionCandidate {
+            memory_id: MemoryId(1),
+            fingerprint: 42,
+            compact_text: "hello world".into(),
+            namespace: ns("test"),
+        };
+        assert_eq!(engine.detect(&candidate), DetectionResult::NoConflict);
+    }
+
+    #[test]
+    fn detect_no_conflict_across_namespaces() {
+        let mut engine = ContradictionEngine::new();
+        engine.register_memory(ns("alpha"), MemoryId(1), 42, "hello world".into());
+
+        let candidate = ContradictionCandidate {
+            memory_id: MemoryId(2),
+            fingerprint: 42,
+            compact_text: "hello world".into(),
+            namespace: ns("beta"),
+        };
+        assert_eq!(engine.detect(&candidate), DetectionResult::NoConflict);
+    }
+
+    #[test]
+    fn detect_duplicate_on_same_fingerprint() {
+        let mut engine = ContradictionEngine::new();
+        engine.register_memory(ns("test"), MemoryId(1), 42, "hello world".into());
+
+        let candidate = ContradictionCandidate {
+            memory_id: MemoryId(2),
+            fingerprint: 42,
+            compact_text: "hello world".into(),
+            namespace: ns("test"),
+        };
+
+        match engine.detect(&candidate) {
+            DetectionResult::ConflictDetected {
+                existing_memory,
+                kind,
+                conflict_score,
+            } => {
+                assert_eq!(existing_memory, MemoryId(1));
+                assert_eq!(kind, ContradictionKind::Duplicate);
+                assert_eq!(conflict_score, 1000);
+            }
+            _ => panic!("expected duplicate conflict"),
+        }
+    }
+
+    #[test]
+    fn detect_skips_self_references() {
+        let mut engine = ContradictionEngine::new();
+        engine.register_memory(ns("test"), MemoryId(1), 42, "hello world".into());
+
+        let candidate = ContradictionCandidate {
+            memory_id: MemoryId(1),
+            fingerprint: 42,
+            compact_text: "hello world".into(),
+            namespace: ns("test"),
+        };
+        assert_eq!(engine.detect(&candidate), DetectionResult::NoConflict);
+    }
+
+    #[test]
+    fn detect_revision_on_high_similarity() {
+        let mut engine = ContradictionEngine::new();
+        engine.register_memory(
+            ns("test"),
+            MemoryId(1),
+            100,
+            "the server is running on port eight zero eight zero".into(),
+        );
+
+        // One word swapped: eight → five; intersection=8, union=9, Jaccard ≈ 0.889 ≥ 0.85
+        let candidate = ContradictionCandidate {
+            memory_id: MemoryId(2),
+            fingerprint: 200,
+            compact_text: "the server is running on port five zero eight zero".into(),
+            namespace: ns("test"),
+        };
+
+        match engine.detect(&candidate) {
+            DetectionResult::ConflictDetected { kind, .. } => {
+                // 8/9 ≈ 0.889 ≥ 0.85 revision threshold
+                assert_eq!(kind, ContradictionKind::Revision);
+            }
+            _ => panic!("expected revision conflict"),
+        }
+    }
+
+    #[test]
+    fn detect_revision_on_very_high_similarity() {
+        let mut engine = ContradictionEngine::new();
+        // 14 distinct words so one-word swap gives Jaccard = 13/15 ≈ 0.867 ≥ 0.85
+        engine.register_memory(
+            ns("test2"),
+            MemoryId(10),
+            100,
+            "alpha beta gamma delta epsilon zeta eta theta iota kappa lambda mu nu".into(),
+        );
+
+        // One word swapped: nu → xi; intersection=13, union=15, Jaccard ≈ 0.867
+        let candidate = ContradictionCandidate {
+            memory_id: MemoryId(2),
+            fingerprint: 200,
+            compact_text: "alpha beta gamma delta epsilon zeta eta theta iota kappa lambda mu xi"
+                .into(),
+            namespace: ns("test2"),
+        };
+
+        match engine.detect(&candidate) {
+            DetectionResult::ConflictDetected { kind, .. } => {
+                // 13/15 ≈ 0.867 ≥ 0.85 revision threshold
+                assert_eq!(kind, ContradictionKind::Revision);
+            }
+            _ => panic!("expected revision conflict"),
+        }
+    }
+
+    #[test]
+    fn detect_coexistence_on_moderate_similarity() {
+        let mut engine = ContradictionEngine::new();
+        engine.register_memory(
+            ns("test"),
+            MemoryId(1),
+            100,
+            "database connection pool configured with max 50 connections".into(),
+        );
+
+        let candidate = ContradictionCandidate {
+            memory_id: MemoryId(2),
+            fingerprint: 200,
+            compact_text: "cache layer uses bounded eviction with LRU strategy".into(),
+            namespace: ns("test"),
+        };
+
+        // This text pair has moderate overlap (some common words) but is not highly similar
+        let result = engine.detect(&candidate);
+        // Should be NoConflict since there's very little word overlap
+        assert_eq!(result, DetectionResult::NoConflict);
+    }
+
+    #[test]
+    fn detect_no_conflict_on_dissimilar_text() {
+        let mut engine = ContradictionEngine::new();
+        engine.register_memory(
+            ns("test"),
+            MemoryId(1),
+            100,
+            "database connection pool configured".into(),
+        );
+
+        let candidate = ContradictionCandidate {
+            memory_id: MemoryId(2),
+            fingerprint: 200,
+            compact_text: "quantum physics measurements observed".into(),
+            namespace: ns("test"),
+        };
+
+        assert_eq!(engine.detect(&candidate), DetectionResult::NoConflict);
+    }
+
+    #[test]
+    fn detect_all_returns_multiple_matches() {
+        let mut engine = ContradictionEngine::new();
+        engine.register_memory(
+            ns("test"),
+            MemoryId(1),
+            100,
+            "the server is running on port 8080".into(),
+        );
+        engine.register_memory(
+            ns("test"),
+            MemoryId(3),
+            300,
+            "the server is running on port 8080 in production environment".into(),
+        );
+
+        let candidate = ContradictionCandidate {
+            memory_id: MemoryId(2),
+            fingerprint: 200,
+            compact_text: "the server is running on port 9090 in production".into(),
+            namespace: ns("test"),
+        };
+
+        let results = engine.detect_all(&candidate);
+        assert!(!results.is_empty());
+        // Both memories should be detected as potential conflicts
+    }
+
+    #[test]
+    fn register_and_unregister_memory() {
+        let mut engine = ContradictionEngine::new();
+        let ns_test = ns("test");
+
+        assert_eq!(engine.indexed_memory_count(&ns_test), 0);
+
+        engine.register_memory(ns_test.clone(), MemoryId(1), 42, "hello".into());
+        assert_eq!(engine.indexed_memory_count(&ns_test), 1);
+
+        engine.register_memory(ns_test.clone(), MemoryId(2), 43, "world".into());
+        assert_eq!(engine.indexed_memory_count(&ns_test), 2);
+
+        engine.unregister_memory(&ns_test, MemoryId(1));
+        assert_eq!(engine.indexed_memory_count(&ns_test), 1);
+    }
+
+    #[test]
+    fn text_similarity_identical() {
+        assert_eq!(text_similarity("hello world", "hello world"), 1.0);
+    }
+
+    #[test]
+    fn text_similarity_empty() {
+        assert_eq!(text_similarity("", "hello"), 0.0);
+        assert_eq!(text_similarity("hello", ""), 0.0);
+        assert_eq!(text_similarity("", ""), 0.0);
+    }
+
+    #[test]
+    fn text_similarity_no_overlap() {
+        assert_eq!(text_similarity("alpha beta", "gamma delta"), 0.0);
+    }
+
+    #[test]
+    fn text_similarity_partial_overlap() {
+        let sim = text_similarity("the quick brown fox", "the lazy brown dog");
+        // Words in common: "the", "brown" = 2
+        // Union: "the", "quick", "brown", "fox", "lazy", "dog" = 6
+        // Jaccard = 2/6 ≈ 0.333
+        assert!((sim - 0.333).abs() < 0.01);
+    }
+
+    #[test]
+    fn text_similarity_high_overlap() {
+        let sim = text_similarity(
+            "server running port 8080 production",
+            "server running port 9090 production",
+        );
+        // Words in common: server, running, port, production = 4
+        // Union: server, running, port, 8080, 9090, production = 6
+        // Jaccard = 4/6 ≈ 0.667
+        assert!((sim - 4.0 / 6.0).abs() < 0.01);
+    }
+
+    #[test]
+    fn similarity_to_score_conversion() {
+        assert_eq!(similarity_to_score(1.0), 1000);
+        assert_eq!(similarity_to_score(0.5), 500);
+        assert_eq!(similarity_to_score(0.0), 0);
+        assert_eq!(similarity_to_score(0.85), 850);
+    }
+
+    #[test]
+    fn detect_finds_best_match_not_first_match() {
+        let mut engine = ContradictionEngine::new();
+        // Register a low-similarity memory first (below coexistence threshold)
+        engine.register_memory(ns("test"), MemoryId(1), 100, "alpha beta gamma".into());
+        // Register a high-similarity memory second (revision level)
+        engine.register_memory(
+            ns("test"),
+            MemoryId(3),
+            300,
+            "alpha beta gamma delta".into(),
+        );
+
+        // Candidate is very similar to MemoryId(3): 4/5 = 0.8 (close to revision)
+        // And similar to MemoryId(1): 3/5 = 0.6 (coexistence level)
+        let candidate = ContradictionCandidate {
+            memory_id: MemoryId(2),
+            fingerprint: 200,
+            compact_text: "alpha beta gamma delta epsilon".into(),
+            namespace: ns("test"),
+        };
+
+        match engine.detect(&candidate) {
+            DetectionResult::ConflictDetected {
+                existing_memory,
+                kind,
+                ..
+            } => {
+                // Should prefer the higher-similarity match (MemoryId(3) at 0.8)
+                assert_eq!(existing_memory, MemoryId(3));
+                // 4/5 = 0.8 which is below 0.85 revision threshold, so it's coexistence
+                assert_eq!(kind, ContradictionKind::Coexistence);
+            }
+            _ => panic!("expected conflict detected"),
+        }
     }
 }

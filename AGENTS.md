@@ -1,3 +1,25 @@
+# AGENTS.md — Operating Contract
+
+## Core Rules
+
+- **Rule 0 — Override:** Human instructions override everything in this file and all beads.
+- **Rule 1 — No deletion:** Never delete files without explicit human permission.
+- **No destructive git:** `git reset --hard`, `git clean -fd`, `rm -rf` are forbidden.
+- **Branch policy:** All work on `main`, never `master`.
+- **No script edits:** Always make code changes manually, not via scripts.
+- **No file proliferation:** No `mainV2.rs`, `main_improved.rs` variants. Refactor in-place.
+- **Compiler after changes:** Always verify no errors (`cargo check --all-targets` or equivalent).
+- **Multi-agent awareness:** Never stash, revert, or overwrite other agents' changes. Treat all working-tree changes as if you made them.
+- **Post-compaction:** After any compaction, reread AGENTS.md before continuing.
+
+## Multi-Agent Notes
+
+- Other agents are working simultaneously; `git status` may show changes you didn't make. This is normal. Never stash, revert, or overwrite them.
+- Use Agent Mail to coordinate. Reserve files before editing. Announce what you're working on.
+- Use `bv --robot-triage` (never bare `bv`) to pick work. Use `br` to track state.
+
+---
+
 ## why — Git History Archaeology CLI
 
 `why` is a code-archaeology CLI that answers "why does this code exist?" by analyzing git history and synthesizing explanations via LLM. It provides risk assessment, ownership signals, and change context before you modify unfamiliar code.

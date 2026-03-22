@@ -518,4 +518,402 @@ mod tests {
         assert!(!metadata.local_reranker_applied);
         assert_eq!(metadata.rerank_score_delta, 0);
     }
+
+    // ── Calibration fixtures and score-breakdown artifacts ────────────────
+
+    /// A single calibration input with a stable label for regression detection.
+    #[derive(Debug, Clone, PartialEq)]
+    pub struct CalibrationFixture {
+        /// Stable human-readable label for this fixture.
+        pub label: &'static str,
+        /// Ranking input signals.
+        pub input: RankingInput,
+    }
+
+    /// Expected ordering invariant for a set of calibration fixtures.
+    #[derive(Debug, Clone, PartialEq, Eq)]
+    pub struct OrderingInvariant {
+        /// Label of the item expected to rank higher.
+        pub higher: &'static str,
+        /// Label of the item expected to rank lower.
+        pub lower: &'static str,
+    }
+
+    /// Score breakdown for one candidate captured in a calibration artifact.
+    #[derive(Debug, Clone, PartialEq, Eq)]
+    pub struct ScoreBreakdownArtifact {
+        /// Label of the candidate.
+        pub label: &'static str,
+        /// Final fused score.
+        pub final_score: u16,
+        /// Per-signal weighted contributions in order.
+        pub signal_contributions: Vec<(&'static str, u16, u8, u32)>,
+    }
+
+    /// Calibration artifact produced by running fixtures through a profile.
+    #[derive(Debug, Clone, PartialEq)]
+    pub struct CalibrationArtifact {
+        /// Profile name used for this calibration run.
+        pub profile_name: &'static str,
+        /// Score breakdowns ordered by descending final score.
+        pub ranked_candidates: Vec<ScoreBreakdownArtifact>,
+        /// Whether all ordering invariants held.
+        pub ordering_invariants_satisfied: bool,
+        /// Total weighted score sum before capping.
+        pub total_weighted_sum: u32,
+    }
+
+    /// Representative calibration fixtures covering distinct signal patterns.
+    pub fn calibration_fixtures() -> Vec<CalibrationFixture> {
+        vec![
+            CalibrationFixture {
+                label: "recent_low_strength",
+                input: RankingInput {
+                    recency: 900,
+                    salience: 300,
+                    strength: 200,
+                    provenance: 500,
+                    conflict: 500,
+                },
+            },
+            CalibrationFixture {
+                label: "strong_old",
+                input: RankingInput {
+                    recency: 100,
+                    salience: 400,
+                    strength: 950,
+                    provenance: 600,
+                    conflict: 500,
+                },
+            },
+            CalibrationFixture {
+                label: "high_salience_med",
+                input: RankingInput {
+                    recency: 500,
+                    salience: 950,
+                    strength: 500,
+                    provenance: 400,
+                    conflict: 500,
+                },
+            },
+            CalibrationFixture {
+                label: "provenance_heavy",
+                input: RankingInput {
+                    recency: 300,
+                    salience: 300,
+                    strength: 300,
+                    provenance: 950,
+                    conflict: 500,
+                },
+            },
+            CalibrationFixture {
+                label: "conflict_penalized",
+                input: RankingInput {
+                    recency: 100,
+                    salience: 100,
+                    strength: 100,
+                    provenance: 100,
+                    conflict: 0,
+                },
+            },
+            CalibrationFixture {
+                label: "all_mid",
+                input: RankingInput {
+                    recency: 500,
+                    salience: 500,
+                    strength: 500,
+                    provenance: 500,
+                    conflict: 500,
+                },
+            },
+            CalibrationFixture {
+                label: "zero_signals",
+                input: RankingInput {
+                    recency: 0,
+                    salience: 0,
+                    strength: 0,
+                    provenance: 0,
+                    conflict: 0,
+                },
+            },
+            CalibrationFixture {
+                label: "max_signals",
+                input: RankingInput {
+                    recency: 1000,
+                    salience: 1000,
+                    strength: 1000,
+                    provenance: 1000,
+                    conflict: 1000,
+                },
+            },
+        ]
+    }
+
+    /// Ordering invariants that must hold for the balanced profile.
+    pub fn balanced_ordering_invariants() -> Vec<OrderingInvariant> {
+        vec![
+            OrderingInvariant {
+                higher: "max_signals",
+                lower: "all_mid",
+            },
+            OrderingInvariant {
+                higher: "all_mid",
+                lower: "zero_signals",
+            },
+            OrderingInvariant {
+                higher: "recent_low_strength",
+                lower: "conflict_penalized",
+            },
+        ]
+    }
+
+    /// Runs calibration fixtures through a profile and produces an artifact.
+    pub fn run_calibration(
+        fixtures: &[CalibrationFixture],
+        profile: RankingProfile,
+        profile_name: &'static str,
+        invariants: &[OrderingInvariant],
+    ) -> CalibrationArtifact {
+        let mut scored: Vec<(CalibrationFixture, RankingResult)> = fixtures
+            .iter()
+            .map(|f| (f.clone(), fuse_scores(f.input, profile)))
+            .collect();
+
+        scored.sort_by(|a, b| b.1.final_score.cmp(&a.1.final_score));
+
+        let ranked_candidates = scored
+            .iter()
+            .map(|(fixture, result)| ScoreBreakdownArtifact {
+                label: fixture.label,
+                final_score: result.final_score,
+                signal_contributions: result
+                    .signals
+                    .iter()
+                    .map(|s| (s.name, s.raw_value, s.weight, s.weighted_value))
+                    .collect(),
+            })
+            .collect();
+
+        let label_to_score: std::collections::HashMap<&str, u16> = scored
+            .iter()
+            .map(|(f, r)| (f.label, r.final_score))
+            .collect();
+
+        let ordering_invariants_satisfied = invariants.iter().all(|inv| {
+            let higher_score = label_to_score.get(inv.higher).copied().unwrap_or(0);
+            let lower_score = label_to_score.get(inv.lower).copied().unwrap_or(0);
+            higher_score >= lower_score
+        });
+
+        let total_weighted_sum = scored
+            .iter()
+            .map(|(_, r)| r.signals.iter().map(|s| s.weighted_value).sum::<u32>())
+            .sum();
+
+        CalibrationArtifact {
+            profile_name,
+            ranked_candidates,
+            ordering_invariants_satisfied,
+            total_weighted_sum,
+        }
+    }
+
+    #[test]
+    fn calibration_fixtures_cover_eight_signal_patterns() {
+        let fixtures = calibration_fixtures();
+        assert_eq!(fixtures.len(), 8);
+        let labels: Vec<&str> = fixtures.iter().map(|f| f.label).collect();
+        assert!(labels.contains(&"recent_low_strength"));
+        assert!(labels.contains(&"strong_old"));
+        assert!(labels.contains(&"max_signals"));
+        assert!(labels.contains(&"zero_signals"));
+    }
+
+    #[test]
+    fn calibration_artifact_ranked_descending() {
+        let fixtures = calibration_fixtures();
+        let invariants = balanced_ordering_invariants();
+        let artifact = run_calibration(
+            &fixtures,
+            RankingProfile::balanced(),
+            "balanced",
+            &invariants,
+        );
+
+        assert_eq!(artifact.profile_name, "balanced");
+        assert_eq!(artifact.ranked_candidates.len(), 8);
+        // Verify descending order.
+        for window in artifact.ranked_candidates.windows(2) {
+            assert!(
+                window[0].final_score >= window[1].final_score,
+                "{} ({}) should >= {} ({})",
+                window[0].label,
+                window[0].final_score,
+                window[1].label,
+                window[1].final_score,
+            );
+        }
+    }
+
+    #[test]
+    fn calibration_ordering_invariants_hold_for_balanced() {
+        let fixtures = calibration_fixtures();
+        let invariants = balanced_ordering_invariants();
+        let artifact = run_calibration(
+            &fixtures,
+            RankingProfile::balanced(),
+            "balanced",
+            &invariants,
+        );
+        assert!(artifact.ordering_invariants_satisfied);
+    }
+
+    #[test]
+    fn calibration_max_beats_mid_beats_zero() {
+        let fixtures = calibration_fixtures();
+        let invariants = balanced_ordering_invariants();
+        let artifact = run_calibration(
+            &fixtures,
+            RankingProfile::balanced(),
+            "balanced",
+            &invariants,
+        );
+
+        let max = artifact
+            .ranked_candidates
+            .iter()
+            .find(|c| c.label == "max_signals")
+            .unwrap();
+        let mid = artifact
+            .ranked_candidates
+            .iter()
+            .find(|c| c.label == "all_mid")
+            .unwrap();
+        let zero = artifact
+            .ranked_candidates
+            .iter()
+            .find(|c| c.label == "zero_signals")
+            .unwrap();
+
+        assert_eq!(max.final_score, 1000);
+        assert_eq!(mid.final_score, 500);
+        assert_eq!(zero.final_score, 0);
+    }
+
+    #[test]
+    fn calibration_score_breakdown_shows_signal_contributions() {
+        let fixtures = calibration_fixtures();
+        let invariants = balanced_ordering_invariants();
+        let artifact = run_calibration(
+            &fixtures,
+            RankingProfile::balanced(),
+            "balanced",
+            &invariants,
+        );
+
+        let all_mid = artifact
+            .ranked_candidates
+            .iter()
+            .find(|c| c.label == "all_mid")
+            .unwrap();
+
+        assert_eq!(all_mid.signal_contributions.len(), 5);
+        // Each signal: raw=500, weight varies, weighted = raw * weight / 100
+        let recency_contrib = all_mid.signal_contributions[0];
+        assert_eq!(recency_contrib.0, "recency");
+        assert_eq!(recency_contrib.1, 500);
+        assert_eq!(recency_contrib.2, 30); // default weight
+        assert_eq!(recency_contrib.3, 150); // 500 * 30 / 100
+    }
+
+    #[test]
+    fn calibration_recency_biased_ranks_recent_higher_than_balanced() {
+        let fixtures = calibration_fixtures();
+        let invariants = vec![];
+
+        let balanced_artifact = run_calibration(
+            &fixtures,
+            RankingProfile::balanced(),
+            "balanced",
+            &invariants,
+        );
+        let recency_artifact = run_calibration(
+            &fixtures,
+            RankingProfile::recency_biased(),
+            "recency_biased",
+            &invariants,
+        );
+
+        let balanced_recent = balanced_artifact
+            .ranked_candidates
+            .iter()
+            .find(|c| c.label == "recent_low_strength")
+            .unwrap();
+        let recency_recent = recency_artifact
+            .ranked_candidates
+            .iter()
+            .find(|c| c.label == "recent_low_strength")
+            .unwrap();
+
+        // With recency bias, "recent_low_strength" should score higher.
+        assert!(recency_recent.final_score > balanced_recent.final_score);
+    }
+
+    #[test]
+    fn calibration_strength_biased_ranks_strong_higher_than_balanced() {
+        let fixtures = calibration_fixtures();
+        let invariants = vec![];
+
+        let balanced_artifact = run_calibration(
+            &fixtures,
+            RankingProfile::balanced(),
+            "balanced",
+            &invariants,
+        );
+        let strength_artifact = run_calibration(
+            &fixtures,
+            RankingProfile::strength_biased(),
+            "strength_biased",
+            &invariants,
+        );
+
+        let balanced_strong = balanced_artifact
+            .ranked_candidates
+            .iter()
+            .find(|c| c.label == "strong_old")
+            .unwrap();
+        let strength_strong = strength_artifact
+            .ranked_candidates
+            .iter()
+            .find(|c| c.label == "strong_old")
+            .unwrap();
+
+        assert!(strength_strong.final_score > balanced_strong.final_score);
+    }
+
+    #[test]
+    fn calibration_conflict_penalized_scores_below_all_mid() {
+        let fixtures = calibration_fixtures();
+        let invariants = balanced_ordering_invariants();
+        let artifact = run_calibration(
+            &fixtures,
+            RankingProfile::balanced(),
+            "balanced",
+            &invariants,
+        );
+
+        let conflict = artifact
+            .ranked_candidates
+            .iter()
+            .find(|c| c.label == "conflict_penalized")
+            .unwrap();
+        let mid = artifact
+            .ranked_candidates
+            .iter()
+            .find(|c| c.label == "all_mid")
+            .unwrap();
+
+        // conflict_penalized has high signals but conflict=100, should score below all_mid
+        assert!(conflict.final_score < mid.final_score);
+    }
 }
