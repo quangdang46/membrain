@@ -5,7 +5,6 @@
 //! score. It produces explain payloads that downstream surfaces can inspect.
 
 use crate::engine::contradiction::ContradictionExplain;
-use crate::types::MemoryId;
 
 // ── Score components ─────────────────────────────────────────────────────────
 
@@ -291,7 +290,11 @@ impl RankingExplain {
 
         Self {
             final_score: result.final_score,
-            total_weighted_score: result.signals.iter().map(|signal| signal.weighted_value).sum(),
+            total_weighted_score: result
+                .signals
+                .iter()
+                .map(|signal| signal.weighted_value)
+                .sum(),
             signal_breakdown,
             profile: result.profile_name.to_string(),
             has_conflict: !result.contradiction_explains.is_empty(),
@@ -428,10 +431,20 @@ mod tests {
         assert_eq!(explain.final_score, result.final_score);
         assert_eq!(explain.profile, "balanced");
         assert!(!explain.has_conflict);
-        assert_eq!(explain.total_weighted_score, result.signals.iter().map(|signal| signal.weighted_value).sum::<u32>());
+        assert_eq!(
+            explain.total_weighted_score,
+            result
+                .signals
+                .iter()
+                .map(|signal| signal.weighted_value)
+                .sum::<u32>()
+        );
         assert_eq!(explain.signal_breakdown.len(), 5);
         assert_eq!(explain.signal_breakdown[0].0, ScoreFamily::Recency);
-        assert_eq!(explain.signal_breakdown[0].3, result.signals[0].weighted_value);
+        assert_eq!(
+            explain.signal_breakdown[0].3,
+            result.signals[0].weighted_value
+        );
     }
 
     #[test]
@@ -452,8 +465,14 @@ mod tests {
 
         assert_eq!(explain.signal_breakdown.len(), 5);
         assert_eq!(explain.total_weighted_score, 600);
-        assert_eq!(explain.signal_breakdown[0], (ScoreFamily::Recency, 800, 15, 120));
-        assert_eq!(explain.signal_breakdown[1], (ScoreFamily::Salience, 0, 30, 0));
+        assert_eq!(
+            explain.signal_breakdown[0],
+            (ScoreFamily::Recency, 800, 15, 120)
+        );
+        assert_eq!(
+            explain.signal_breakdown[1],
+            (ScoreFamily::Salience, 0, 30, 0)
+        );
         assert_eq!(
             explain.signal_breakdown[2],
             (ScoreFamily::Strength, 900, 50, 450)
@@ -482,7 +501,10 @@ mod tests {
         };
         let result = engine.rank_candidate(input, RankingProfile::balanced());
         assert_eq!(result.final_score, 500);
-        assert_eq!(result.rerank_metadata.local_reranker_mode.as_str(), "disabled");
+        assert_eq!(
+            result.rerank_metadata.local_reranker_mode.as_str(),
+            "disabled"
+        );
         assert!(!result.rerank_metadata.local_reranker_applied);
     }
 

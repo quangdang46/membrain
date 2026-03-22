@@ -170,12 +170,21 @@ impl MaintenanceOperation for ConsolidationRun {
             .grouping_report(&Default::default(), &candidates);
         self.episode_source_sets += grouping.groups.len() as u32;
         self.skipped += grouping.groups.len() as u32;
-        self.named_fixtures
-            .extend(grouping.groups.iter().map(|group| group.fixture_name.clone()));
+        self.named_fixtures.extend(
+            grouping
+                .groups
+                .iter()
+                .map(|group| group.fixture_name.clone()),
+        );
         self.heuristics_summary = Some(grouping.heuristics_summary.clone());
-        self.grouping_logs.extend(grouping.sample_logs.iter().map(|log| {
-            format!("namespace={} stage=nrem_migration {}", self.namespace.as_str(), log)
-        }));
+        self.grouping_logs
+            .extend(grouping.sample_logs.iter().map(|log| {
+                format!(
+                    "namespace={} stage=nrem_migration {}",
+                    self.namespace.as_str(),
+                    log
+                )
+            }));
         self.processed = batch_end;
         self.durable_token = DurableStateToken(self.processed as u64);
 

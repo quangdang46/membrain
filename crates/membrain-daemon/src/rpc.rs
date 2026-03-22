@@ -196,19 +196,21 @@ fn parse_required_u64(params: &Value, field: &'static str) -> Result<u64, JsonRp
 fn parse_optional_u32(params: &Value, field: &'static str) -> Result<Option<u32>, JsonRpcError> {
     match params.get(field) {
         None | Some(Value::Null) => Ok(None),
-        Some(Value::Number(value)) => match value.as_u64().and_then(|value| u32::try_from(value).ok()) {
-            Some(0) => Err(JsonRpcError {
-                code: -32602,
-                message: format!("{field} must be at least 1"),
-                data: None,
-            }),
-            Some(value) => Ok(Some(value)),
-            None => Err(JsonRpcError {
-                code: -32602,
-                message: format!("{field} must be a positive integer"),
-                data: None,
-            }),
-        },
+        Some(Value::Number(value)) => {
+            match value.as_u64().and_then(|value| u32::try_from(value).ok()) {
+                Some(0) => Err(JsonRpcError {
+                    code: -32602,
+                    message: format!("{field} must be at least 1"),
+                    data: None,
+                }),
+                Some(value) => Ok(Some(value)),
+                None => Err(JsonRpcError {
+                    code: -32602,
+                    message: format!("{field} must be a positive integer"),
+                    data: None,
+                }),
+            }
+        }
         Some(_) => Err(JsonRpcError {
             code: -32602,
             message: format!("{field} must be a positive integer"),
@@ -257,7 +259,10 @@ fn reject_unknown_fields(params: &Value, allowed: &[&str]) -> Result<(), JsonRpc
         return Ok(());
     };
 
-    if let Some(field) = object.keys().find(|field| !allowed.contains(&field.as_str())) {
+    if let Some(field) = object
+        .keys()
+        .find(|field| !allowed.contains(&field.as_str()))
+    {
         return Err(JsonRpcError {
             code: -32602,
             message: format!("unknown field {field}"),
@@ -390,7 +395,10 @@ impl RuntimeMethodRequest {
                 )?;
                 Ok(RuntimeRequest::PreflightAllow {
                     namespace: parse_required_string(&self.params, "namespace")?,
-                    authorization_token: parse_required_string(&self.params, "authorization_token")?,
+                    authorization_token: parse_required_string(
+                        &self.params,
+                        "authorization_token",
+                    )?,
                     bypass_flags: parse_string_array(&self.params, "bypass_flags")?,
                 })
             }
@@ -441,8 +449,8 @@ impl RuntimeMethodRequest {
             }
             "run_maintenance" => {
                 let polls_budget = parse_optional_u32(&self.params, "polls_budget")?;
-                let step_delay_ms = parse_optional_u32(&self.params, "step_delay_ms")?
-                    .map(u64::from);
+                let step_delay_ms =
+                    parse_optional_u32(&self.params, "step_delay_ms")?.map(u64::from);
                 Ok(RuntimeRequest::RunMaintenance {
                     polls_budget,
                     step_delay_ms,

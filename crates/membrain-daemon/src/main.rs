@@ -135,7 +135,8 @@ mod tests {
             ["membrain-daemon", "--maintenance-poll-budget", "abc"],
             ["membrain-daemon", "--maintenance-step-delay-ms", "abc"],
         ] {
-            let error = Cli::try_parse_from(args).expect_err("non-numeric value should be rejected");
+            let error =
+                Cli::try_parse_from(args).expect_err("non-numeric value should be rejected");
             let rendered = error.to_string();
             assert!(
                 rendered.contains("invalid integer value: abc"),

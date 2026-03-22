@@ -670,19 +670,28 @@ impl RouteSummary {
             }
             _ => "custom_route_reason",
         };
-        let fallback_reason = result_set
-            .explain
-            .trace_stages
-            .last()
-            .and_then(|stage| match stage {
-                crate::engine::recall::RecallTraceStage::Tier3Fallback => Some("tier3_fallback"),
-                crate::engine::recall::RecallTraceStage::Tier2Exact
-                    if !result_set.explain.tier1_answered_directly
-                        && result_set.explain.trace_stages.iter().any(|stage| {
-                            matches!(stage, crate::engine::recall::RecallTraceStage::Tier1RecentWindow)
-                        }) => Some("tier1_recent_insufficient"),
-                _ => None,
-            });
+        let fallback_reason =
+            result_set
+                .explain
+                .trace_stages
+                .last()
+                .and_then(|stage| match stage {
+                    crate::engine::recall::RecallTraceStage::Tier3Fallback => {
+                        Some("tier3_fallback")
+                    }
+                    crate::engine::recall::RecallTraceStage::Tier2Exact
+                        if !result_set.explain.tier1_answered_directly
+                            && result_set.explain.trace_stages.iter().any(|stage| {
+                                matches!(
+                                    stage,
+                                    crate::engine::recall::RecallTraceStage::Tier1RecentWindow
+                                )
+                            }) =>
+                    {
+                        Some("tier1_recent_insufficient")
+                    }
+                    _ => None,
+                });
 
         Self {
             route_family,
@@ -738,7 +747,9 @@ impl ResultReason {
             _ => "custom",
         };
         let route_stage = match reason_code {
-            "score_kept" | "no_match" | "tier2_exact_match"
+            "score_kept"
+            | "no_match"
+            | "tier2_exact_match"
             | "temporal_prefilter_metadata_only"
             | "temporal_payload_deferred"
             | "temporal_landmark_selected"
@@ -764,7 +775,11 @@ impl TracePolicySummary {
     /// Builds the shared policy summary from one retrieval result set.
     pub fn from_result_set(result_set: &RetrievalResultSet) -> Self {
         Self {
-            effective_namespace: result_set.policy_summary.namespace_applied.as_str().to_string(),
+            effective_namespace: result_set
+                .policy_summary
+                .namespace_applied
+                .as_str()
+                .to_string(),
             policy_family: "namespace",
             outcome_class: result_set.policy_summary.outcome_class,
             blocked_stage: "not_blocked",
@@ -779,15 +794,17 @@ impl TracePolicySummary {
                 .policy_summary
                 .filters
                 .iter()
-                .map(|filter| PolicyFilterSummary::new(
-                    filter.effective_namespace.clone(),
-                    filter.policy_family.clone(),
-                    filter.outcome_class,
-                    filter.blocked_stage.clone(),
-                    filter.sharing_scope.clone(),
-                    filter.retention_marker.clone(),
-                    filter.redaction_fields.clone(),
-                ))
+                .map(|filter| {
+                    PolicyFilterSummary::new(
+                        filter.effective_namespace.clone(),
+                        filter.policy_family.clone(),
+                        filter.outcome_class,
+                        filter.blocked_stage.clone(),
+                        filter.sharing_scope.clone(),
+                        filter.retention_marker.clone(),
+                        filter.redaction_fields.clone(),
+                    )
+                })
                 .collect(),
         }
     }
@@ -797,7 +814,13 @@ impl TraceProvenanceSummary {
     /// Builds the shared provenance summary from one retrieval result set.
     pub fn from_result_set(result_set: &RetrievalResultSet) -> Self {
         Self {
-            source_kind: Box::leak(result_set.provenance_summary.source_kind.clone().into_boxed_str()),
+            source_kind: Box::leak(
+                result_set
+                    .provenance_summary
+                    .source_kind
+                    .clone()
+                    .into_boxed_str(),
+            ),
             source_reference: Box::leak(
                 result_set
                     .provenance_summary
@@ -1557,10 +1580,14 @@ mod tests {
             deferred_payloads: Vec::new(),
             explain: RetrievalExplain {
                 recall_plan: RecallPlanKind::RecentTier1ThenTier2Exact,
-                route_reason: "small session lookup scans the Tier1 recent window before Tier2 exact"
-                    .to_string(),
+                route_reason:
+                    "small session lookup scans the Tier1 recent window before Tier2 exact"
+                        .to_string(),
                 tiers_consulted: vec!["tier1_recent".to_string(), "tier2_exact".to_string()],
-                trace_stages: vec![RecallTraceStage::Tier1RecentWindow, RecallTraceStage::Tier2Exact],
+                trace_stages: vec![
+                    RecallTraceStage::Tier1RecentWindow,
+                    RecallTraceStage::Tier2Exact,
+                ],
                 tier1_answered_directly: false,
                 candidate_budget: 8,
                 time_consumed_ms: Some(7),
@@ -2152,10 +2179,7 @@ mod tests {
         );
         assert_eq!(
             repair_rollback.reason_names(),
-            vec![
-                "repair_rollback_required",
-                "repair_rollback_in_progress",
-            ],
+            vec!["repair_rollback_required", "repair_rollback_in_progress",],
         );
         assert_eq!(
             repair_rollback.recovery_condition_names(),

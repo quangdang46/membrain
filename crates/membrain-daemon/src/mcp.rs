@@ -282,7 +282,10 @@ mod tests {
         assert!(json["result"].get("freshness_markers").is_some());
         assert!(json["result"].get("packaging_metadata").is_some());
         assert!(json["result"].get("explain").is_some());
-        assert_eq!(json["explain_trace"]["route_summary"]["route_family"], "exact_id_tier1");
+        assert_eq!(
+            json["explain_trace"]["route_summary"]["route_family"],
+            "exact_id_tier1"
+        );
         assert!(json["explain_trace"].get("omitted_summary").is_some());
         assert!(json["explain_trace"].get("policy_summary").is_some());
         assert!(json["explain_trace"].get("provenance_summary").is_some());
@@ -304,8 +307,14 @@ mod tests {
         assert_eq!(payload.outcome_class, OutcomeClass::Accepted);
         assert_eq!(payload.result.outcome_class, OutcomeClass::Accepted);
         assert_eq!(payload.explain_trace.omitted_summary["budget_capped"], 0);
-        assert_eq!(payload.explain_trace.policy_summary["effective_namespace"], "mcp.team");
-        assert_eq!(payload.explain_trace.provenance_summary["source_reference"], "result_set");
+        assert_eq!(
+            payload.explain_trace.policy_summary["effective_namespace"],
+            "mcp.team"
+        );
+        assert_eq!(
+            payload.explain_trace.provenance_summary["source_reference"],
+            "result_set"
+        );
         assert!(payload.partial_success);
     }
 
@@ -406,7 +415,9 @@ mod tests {
             "unexpected": true
         }))
         .unwrap_err();
-        assert!(encode_error.to_string().contains("unknown field `unexpected`"));
+        assert!(encode_error
+            .to_string()
+            .contains("unknown field `unexpected`"));
 
         let recall_error = serde_json::from_value::<RecallParams>(serde_json::json!({
             "query": "session:7",
@@ -415,7 +426,9 @@ mod tests {
             "unexpected": true
         }))
         .unwrap_err();
-        assert!(recall_error.to_string().contains("unknown field `unexpected`"));
+        assert!(recall_error
+            .to_string()
+            .contains("unknown field `unexpected`"));
 
         let inspect_error = serde_json::from_value::<InspectParams>(serde_json::json!({
             "id": 7,
@@ -423,7 +436,9 @@ mod tests {
             "unexpected": true
         }))
         .unwrap_err();
-        assert!(inspect_error.to_string().contains("unknown field `unexpected`"));
+        assert!(inspect_error
+            .to_string()
+            .contains("unknown field `unexpected`"));
 
         let explain_error = serde_json::from_value::<ExplainParams>(serde_json::json!({
             "query": "session:7",
@@ -432,7 +447,9 @@ mod tests {
             "unexpected": true
         }))
         .unwrap_err();
-        assert!(explain_error.to_string().contains("unknown field `unexpected`"));
+        assert!(explain_error
+            .to_string()
+            .contains("unknown field `unexpected`"));
     }
 
     #[test]

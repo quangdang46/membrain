@@ -508,7 +508,10 @@ mod tests {
             "temporal_proximity_ms=600000 max_episode_span_ms=3600000 honor_session_bounds=true honor_task_bounds=true require_entity_overlap=false"
         );
         assert_eq!(report.groups[0].fixture_name, "episode_1_task_cluster_1_2");
-        assert_eq!(report.groups[0].lineage.source_memory_ids, vec![MemoryId(1), MemoryId(2)]);
+        assert_eq!(
+            report.groups[0].lineage.source_memory_ids,
+            vec![MemoryId(1), MemoryId(2)]
+        );
         assert_eq!(
             report.groups[0].lineage.continuity_keys,
             vec!["task_cluster", "task_id", "entity_overlap"]

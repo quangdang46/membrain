@@ -162,6 +162,7 @@ impl Tier1HotMetadataStore {
         let mut inspected = 0usize;
         let mut records = Vec::new();
         let mut stale_candidates_skipped = 0usize;
+        let mut valid_entries_checked = false;
 
         if bounded_limit == 0 {
             return Tier1RecentLookup {
@@ -181,11 +182,12 @@ impl Tier1HotMetadataStore {
                 break;
             }
 
-            inspected += 1;
             let Some(record) = self.exact.get(key) else {
                 stale_candidates_skipped += 1;
                 continue;
             };
+            inspected += 1;
+            valid_entries_checked = true;
             if &record.namespace == namespace && record.session_id == session_id {
                 records.push(record.clone());
                 if records.len() >= bounded_limit {
@@ -197,7 +199,10 @@ impl Tier1HotMetadataStore {
         Tier1RecentLookup {
             trace: Tier1LookupTrace {
                 lane: Tier1LookupLane::RecentWindow,
-                outcome: if records.is_empty() && inspected == 0 && stale_candidates_skipped > 0 {
+                outcome: if records.is_empty()
+                    && stale_candidates_skipped > 0
+                    && !valid_entries_checked
+                {
                     Tier1LookupOutcome::StaleBypass
                 } else if records.is_empty() {
                     Tier1LookupOutcome::Miss

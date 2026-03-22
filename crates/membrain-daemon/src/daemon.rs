@@ -1340,11 +1340,9 @@ mod tests {
             recall_response["result"]["retrieval"]["result"]["packaging_metadata"]["result_budget"],
             json!(1)
         );
-        assert!(
-            recall_response["result"]["retrieval"]
-                .get("explain_trace")
-                .is_some()
-        );
+        assert!(recall_response["result"]["retrieval"]
+            .get("explain_trace")
+            .is_some());
 
         let shutdown_response = send_request(
             &socket_path,
@@ -1407,10 +1405,16 @@ mod tests {
         assert!(retrieval["explain_trace"].get("route_summary").is_some());
         assert!(retrieval["explain_trace"].get("omitted_summary").is_some());
         assert!(retrieval["explain_trace"].get("policy_summary").is_some());
-        assert!(retrieval["explain_trace"].get("provenance_summary").is_some());
-        assert!(retrieval["explain_trace"].get("freshness_markers").is_some());
+        assert!(retrieval["explain_trace"]
+            .get("provenance_summary")
+            .is_some());
+        assert!(retrieval["explain_trace"]
+            .get("freshness_markers")
+            .is_some());
         assert!(retrieval["explain_trace"].get("conflict_markers").is_some());
-        assert!(retrieval["explain_trace"].get("uncertainty_markers").is_some());
+        assert!(retrieval["explain_trace"]
+            .get("uncertainty_markers")
+            .is_some());
         assert_eq!(
             retrieval["result"]["packaging_metadata"]["degraded_summary"],
             json!("planner-only recall envelope; evidence hydration not implemented")
@@ -1661,7 +1665,10 @@ mod tests {
         )
         .await;
         assert_eq!(explain_response["result"]["allowed"], json!(false));
-        assert_eq!(explain_response["result"]["preflight_state"], json!("blocked"));
+        assert_eq!(
+            explain_response["result"]["preflight_state"],
+            json!("blocked")
+        );
         assert_eq!(
             explain_response["result"]["blocked_reasons"],
             json!(["confirmation_required"])
@@ -1840,11 +1847,9 @@ mod tests {
                 ["degraded_summary"],
             json!("planner-only inspect envelope; item hydration not implemented")
         );
-        assert!(
-            inspect_response["result"]["retrieval"]
-                .get("explain_trace")
-                .is_some()
-        );
+        assert!(inspect_response["result"]["retrieval"]
+            .get("explain_trace")
+            .is_some());
 
         let shutdown_response = send_request(
             &socket_path,
@@ -1904,11 +1909,9 @@ mod tests {
                 ["degraded_summary"],
             json!("planner-only explain envelope; evidence hydration not implemented")
         );
-        assert!(
-            explain_response["result"]["retrieval"]
-                .get("explain_trace")
-                .is_some()
-        );
+        assert!(explain_response["result"]["retrieval"]
+            .get("explain_trace")
+            .is_some());
 
         let shutdown_response = send_request(
             &socket_path,
@@ -1951,7 +1954,7 @@ mod tests {
 
         let result = &inspect_response["result"];
         assert_eq!(result["status"], json!("ok"));
-        assert!(result.get("payload" ).is_none());
+        assert!(result.get("payload").is_none());
         assert!(result.get("error").is_none());
 
         let retrieval = &result["retrieval"];
@@ -2327,7 +2330,8 @@ mod tests {
 
     #[tokio::test]
     async fn shutdown_skips_manual_run_maintenance_accounting_when_cancelled_before_first_step() {
-        let config = DaemonRuntimeConfig::new(unique_path("maintenance-budget-cancelled").as_path());
+        let config =
+            DaemonRuntimeConfig::new(unique_path("maintenance-budget-cancelled").as_path());
         let state = Arc::new(super::RuntimeState::new(&config));
 
         let maintenance_finished = super::DaemonRuntime::run_maintenance_budget(

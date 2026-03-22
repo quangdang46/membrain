@@ -712,15 +712,12 @@ impl ResultBuilder {
             "evidence_only"
         };
         self.evidence_pack.truncate(self.max_results);
-        let rerank_metadata = self
-            .evidence_pack
-            .first()
-            .and_then(|first| {
-                self.evidence_pack
-                    .iter()
-                    .all(|item| item.result.rerank_metadata == first.result.rerank_metadata)
-                    .then(|| first.result.rerank_metadata.clone())
-            });
+        let rerank_metadata = self.evidence_pack.first().and_then(|first| {
+            self.evidence_pack
+                .iter()
+                .all(|item| item.result.rerank_metadata == first.result.rerank_metadata)
+                .then(|| first.result.rerank_metadata.clone())
+        });
 
         let contradictions_found = self
             .evidence_pack
@@ -801,8 +798,8 @@ mod tests {
     use crate::engine::contradiction::{
         ContradictionExplain, ContradictionId, ContradictionKind, PreferredAnswerState,
     };
-    use crate::engine::recall::{RecallEngine, RecallRequest, RecallRuntime};
     use crate::engine::ranking::{fuse_scores, RankingInput, RankingProfile};
+    use crate::engine::recall::{RecallEngine, RecallRequest, RecallRuntime};
     use crate::types::{LandmarkSignals, RawEncodeInput, RawIntakeKind};
 
     fn ns(s: &str) -> NamespaceId {
@@ -928,7 +925,10 @@ mod tests {
             result_set.evidence_pack[0].result.score
         );
         assert_eq!(
-            result_set.evidence_pack[0].result.score_summary.total_weighted_score,
+            result_set.evidence_pack[0]
+                .result
+                .score_summary
+                .total_weighted_score,
             result_set.evidence_pack[0]
                 .result
                 .ranking_explain
@@ -1075,9 +1075,18 @@ mod tests {
 
         assert_eq!(result_set.count(), 2);
         assert!(result_set.packaging_metadata.rerank_metadata.is_none());
-        assert!(result_set.evidence_pack[0].result.rerank_metadata.local_reranker_applied);
+        assert!(
+            result_set.evidence_pack[0]
+                .result
+                .rerank_metadata
+                .local_reranker_applied
+        );
         assert_eq!(
-            result_set.evidence_pack[1].result.rerank_metadata.local_reranker_mode.as_str(),
+            result_set.evidence_pack[1]
+                .result
+                .rerank_metadata
+                .local_reranker_mode
+                .as_str(),
             "disabled"
         );
     }

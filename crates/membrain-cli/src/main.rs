@@ -1,7 +1,5 @@
 use clap::{Parser, Subcommand};
-use membrain_core::api::{
-    AvailabilityReason, AvailabilitySummary, NamespaceId, RemediationStep,
-};
+use membrain_core::api::{AvailabilityReason, AvailabilitySummary, NamespaceId, RemediationStep};
 use membrain_core::engine::maintenance::{
     MaintenanceController, MaintenanceJobHandle, MaintenanceJobState,
 };
@@ -400,7 +398,8 @@ fn doctor_report() -> DoctorReport {
 
     let mut cache = CacheManager::new(4, 4);
     cache.result.disable();
-    cache.prefetch.submit_hint(namespace.clone(),
+    cache.prefetch.submit_hint(
+        namespace.clone(),
         membrain_core::store::cache::PrefetchTrigger::SessionRecency,
         vec![],
     );

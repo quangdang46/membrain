@@ -580,7 +580,7 @@ mod tests {
         let prepared = engine.prepare_ingest_candidate(
             RawEncodeInput::new(
                 RawIntakeKind::Observation,
-                "camera summary noted a recurring hallway blockage",
+                "camera  summary  noted   a recurring   hallway  blockage",
             ),
             IngestMode::PassiveObservation,
             true,
@@ -627,12 +627,9 @@ mod tests {
             .is_some_and(|chunk_id| chunk_id.starts_with("obs-")));
         assert_eq!(
             prepared.normalized.payload_size_bytes,
-            "camera summary noted a recurring hallway blockage".len()
+            "camera  summary  noted   a recurring   hallway  blockage".len()
         );
-        assert!(
-            prepared.normalized.payload_size_bytes
-                > prepared.normalized.compact_text.len()
-        );
+        assert!(prepared.normalized.payload_size_bytes > prepared.normalized.compact_text.len());
     }
 
     #[test]
