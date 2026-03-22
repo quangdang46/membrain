@@ -2,6 +2,8 @@
 
 /// Stable top-level core facade and module composition.
 pub mod api;
+/// Benchmark harness entrypoints and artifact contracts.
+pub mod benchmarks;
 pub mod brain_store;
 /// Shared runtime configuration and bounded-work budgets.
 pub mod config;
