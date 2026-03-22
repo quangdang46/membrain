@@ -16,9 +16,13 @@ pub mod maintenance;
 pub mod ranking;
 /// Recall-path orchestration surfaces.
 pub mod recall;
+/// Reconsolidation, labile-window, and pending-update surfaces.
+pub mod reconsolidation;
 /// Repair and rebuild maintenance surfaces.
 pub mod repair;
 /// Retrieval result envelope and packaging surfaces.
 pub mod result;
 /// Bounded Tier2/Tier3 retrieval planners with escalation logic.
 pub mod retrieval_planner;
+/// LTP/LTD strength update and lazy Ebbinghaus decay surfaces.
+pub mod strength;
