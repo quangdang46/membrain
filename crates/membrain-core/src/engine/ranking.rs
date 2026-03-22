@@ -433,7 +433,8 @@ mod tests {
             + p.salience_weight as u16
             + p.strength_weight as u16
             + p.provenance_weight as u16
-            + p.conflict_weight as u16;
+            + p.conflict_weight as u16
+            + p.confidence_weight as u16;
         assert_eq!(total, 100);
     }
 
@@ -444,7 +445,8 @@ mod tests {
             + p.salience_weight as u16
             + p.strength_weight as u16
             + p.provenance_weight as u16
-            + p.conflict_weight as u16;
+            + p.conflict_weight as u16
+            + p.confidence_weight as u16;
         assert_eq!(total, 100);
     }
 
@@ -455,7 +457,8 @@ mod tests {
             + p.salience_weight as u16
             + p.strength_weight as u16
             + p.provenance_weight as u16
-            + p.conflict_weight as u16;
+            + p.conflict_weight as u16
+            + p.confidence_weight as u16;
         assert_eq!(total, 100);
     }
 
@@ -467,6 +470,7 @@ mod tests {
             strength: 1000,
             provenance: 1000,
             conflict: 1000,
+            confidence: 1000,
         };
         let result = fuse_scores(input, RankingProfile::balanced());
         assert_eq!(result.final_score, 1000);
@@ -481,6 +485,7 @@ mod tests {
             strength: 0,
             provenance: 0,
             conflict: 0,
+            confidence: 0,
         };
         let result = fuse_scores(input, RankingProfile::balanced());
         assert_eq!(result.final_score, 0);
@@ -494,6 +499,7 @@ mod tests {
             strength: 1000,
             provenance: 300,
             conflict: 500,
+            confidence: 500,
         };
         let high_recency = RankingInput {
             recency: 1000,
@@ -501,6 +507,7 @@ mod tests {
             strength: 200,
             provenance: 300,
             conflict: 500,
+            confidence: 500,
         };
 
         let profile = RankingProfile::strength_biased();
@@ -518,6 +525,7 @@ mod tests {
             strength: 900,
             provenance: 700,
             conflict: 500,
+            confidence: 500,
         };
         let result = fuse_scores(input, RankingProfile::balanced());
         let explain = RankingExplain::from_result(&result);
@@ -533,7 +541,7 @@ mod tests {
                 .map(|signal| signal.weighted_value)
                 .sum::<u32>()
         );
-        assert_eq!(explain.signal_breakdown.len(), 5);
+        assert_eq!(explain.signal_breakdown.len(), 6);
         assert_eq!(explain.signal_breakdown[0].0, ScoreFamily::Recency);
         assert_eq!(
             explain.signal_breakdown[0].3,
@@ -557,15 +565,19 @@ mod tests {
 
         let explain = RankingExplain::from_result(&result);
 
-        assert_eq!(explain.signal_breakdown.len(), 5);
+        assert_eq!(explain.signal_breakdown.len(), 6);
         assert_eq!(explain.total_weighted_score, 600);
+        assert_eq!(
+            explain.signal_breakdown[5],
+            (ScoreFamily::Confidence, 0, 10, 0)
+        );
         assert_eq!(
             explain.signal_breakdown[0],
             (ScoreFamily::Recency, 800, 15, 120)
         );
         assert_eq!(
             explain.signal_breakdown[1],
-            (ScoreFamily::Salience, 0, 30, 0)
+            (ScoreFamily::Salience, 0, 28, 0)
         );
         assert_eq!(
             explain.signal_breakdown[2],
@@ -577,7 +589,11 @@ mod tests {
         );
         assert_eq!(
             explain.signal_breakdown[4],
-            (ScoreFamily::ConflictAdjustment, 0, 5, 0)
+            (ScoreFamily::ConflictAdjustment, 0, 4, 0)
+        );
+        assert_eq!(
+            explain.signal_breakdown[5],
+            (ScoreFamily::Confidence, 0, 10, 0)
         );
     }
 
@@ -592,6 +608,7 @@ mod tests {
             strength: 500,
             provenance: 500,
             conflict: 500,
+            confidence: 500,
         };
         let result = engine.rank_candidate(input, RankingProfile::balanced());
         assert_eq!(result.final_score, 500);
@@ -668,6 +685,7 @@ mod tests {
                     strength: 200,
                     provenance: 500,
                     conflict: 500,
+                    confidence: 500,
                 },
             },
             CalibrationFixture {
@@ -678,6 +696,7 @@ mod tests {
                     strength: 950,
                     provenance: 600,
                     conflict: 500,
+                    confidence: 500,
                 },
             },
             CalibrationFixture {
@@ -688,6 +707,7 @@ mod tests {
                     strength: 500,
                     provenance: 400,
                     conflict: 500,
+                    confidence: 500,
                 },
             },
             CalibrationFixture {
@@ -698,6 +718,7 @@ mod tests {
                     strength: 300,
                     provenance: 950,
                     conflict: 500,
+                    confidence: 500,
                 },
             },
             CalibrationFixture {
@@ -708,6 +729,7 @@ mod tests {
                     strength: 100,
                     provenance: 100,
                     conflict: 0,
+                    confidence: 0,
                 },
             },
             CalibrationFixture {
@@ -718,6 +740,7 @@ mod tests {
                     strength: 500,
                     provenance: 500,
                     conflict: 500,
+                    confidence: 500,
                 },
             },
             CalibrationFixture {
@@ -728,6 +751,7 @@ mod tests {
                     strength: 0,
                     provenance: 0,
                     conflict: 0,
+                    confidence: 0,
                 },
             },
             CalibrationFixture {
@@ -738,6 +762,7 @@ mod tests {
                     strength: 1000,
                     provenance: 1000,
                     conflict: 1000,
+                    confidence: 1000,
                 },
             },
         ]
@@ -911,13 +936,13 @@ mod tests {
             .find(|c| c.label == "all_mid")
             .unwrap();
 
-        assert_eq!(all_mid.signal_contributions.len(), 5);
+        assert_eq!(all_mid.signal_contributions.len(), 6);
         // Each signal: raw=500, weight varies, weighted = raw * weight / 100
         let recency_contrib = all_mid.signal_contributions[0];
         assert_eq!(recency_contrib.0, "recency");
         assert_eq!(recency_contrib.1, 500);
-        assert_eq!(recency_contrib.2, 30); // default weight
-        assert_eq!(recency_contrib.3, 150); // 500 * 30 / 100
+        assert_eq!(recency_contrib.2, 28); // default weight
+        assert_eq!(recency_contrib.3, 140); // 500 * 28 / 100
     }
 
     #[test]

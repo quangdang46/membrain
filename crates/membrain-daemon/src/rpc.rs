@@ -219,6 +219,137 @@ fn parse_optional_u32(params: &Value, field: &'static str) -> Result<Option<u32>
     }
 }
 
+fn parse_optional_u64(params: &Value, field: &'static str) -> Result<Option<u64>, JsonRpcError> {
+    match params.get(field) {
+        None | Some(Value::Null) => Ok(None),
+        Some(Value::Number(value)) => value.as_u64().map(Some).ok_or_else(|| JsonRpcError {
+            code: -32602,
+            message: format!("{field} must be a non-negative integer"),
+            data: None,
+        }),
+        Some(_) => Err(JsonRpcError {
+            code: -32602,
+            message: format!("{field} must be a non-negative integer"),
+            data: None,
+        }),
+    }
+}
+
+fn parse_optional_positive_u64(
+    params: &Value,
+    field: &'static str,
+) -> Result<Option<u64>, JsonRpcError> {
+    match params.get(field) {
+        None | Some(Value::Null) => Ok(None),
+        Some(Value::Number(value)) => match value.as_u64() {
+            Some(0) => Err(JsonRpcError {
+                code: -32602,
+                message: format!("{field} must be at least 1"),
+                data: None,
+            }),
+            Some(value) => Ok(Some(value)),
+            None => Err(JsonRpcError {
+                code: -32602,
+                message: format!("{field} must be a positive integer"),
+                data: None,
+            }),
+        },
+        Some(_) => Err(JsonRpcError {
+            code: -32602,
+            message: format!("{field} must be a positive integer"),
+            data: None,
+        }),
+    }
+}
+
+fn parse_optional_string(
+    params: &Value,
+    field: &'static str,
+) -> Result<Option<String>, JsonRpcError> {
+    match params.get(field) {
+        None | Some(Value::Null) => Ok(None),
+        Some(Value::String(value)) => Ok(Some(value.clone())),
+        Some(_) => Err(JsonRpcError {
+            code: -32602,
+            message: format!("{field} must be a string"),
+            data: None,
+        }),
+    }
+}
+
+fn parse_optional_bool(params: &Value, field: &'static str) -> Result<Option<bool>, JsonRpcError> {
+    match params.get(field) {
+        None | Some(Value::Null) => Ok(None),
+        Some(Value::Bool(value)) => Ok(Some(*value)),
+        Some(_) => Err(JsonRpcError {
+            code: -32602,
+            message: format!("{field} must be a boolean"),
+            data: None,
+        }),
+    }
+}
+
+fn parse_optional_f64(params: &Value, field: &'static str) -> Result<Option<f64>, JsonRpcError> {
+    match params.get(field) {
+        None | Some(Value::Null) => Ok(None),
+        Some(Value::Number(value)) => value.as_f64().map(Some).ok_or_else(|| JsonRpcError {
+            code: -32602,
+            message: format!("{field} must be a number"),
+            data: None,
+        }),
+        Some(_) => Err(JsonRpcError {
+            code: -32602,
+            message: format!("{field} must be a number"),
+            data: None,
+        }),
+    }
+}
+
+fn parse_optional_budget(params: &Value) -> Result<Option<usize>, JsonRpcError> {
+    let limit = parse_optional_limit(params)?;
+    let result_budget = match params.get("result_budget") {
+        None | Some(Value::Null) => None,
+        Some(Value::Number(value)) => {
+            let parsed = value.as_u64().and_then(|value| usize::try_from(value).ok());
+            match parsed {
+                Some(0) => {
+                    return Err(JsonRpcError {
+                        code: -32602,
+                        message: "result_budget must be at least 1".to_string(),
+                        data: None,
+                    })
+                }
+                Some(value) => Some(value),
+                None => {
+                    return Err(JsonRpcError {
+                        code: -32602,
+                        message: "result_budget must be a positive integer".to_string(),
+                        data: None,
+                    })
+                }
+            }
+        }
+        Some(_) => {
+            return Err(JsonRpcError {
+                code: -32602,
+                message: "result_budget must be a positive integer".to_string(),
+                data: None,
+            })
+        }
+    };
+
+    match (limit, result_budget) {
+        (Some(limit), Some(result_budget)) if limit != result_budget => Err(JsonRpcError {
+            code: -32602,
+            message: "limit and result_budget must match when both are provided".to_string(),
+            data: None,
+        }),
+        (Some(limit), _) => Ok(Some(limit)),
+        (_, Some(result_budget)) => Ok(Some(result_budget)),
+        (None, None) => Ok(None),
+    }
+}
+
 fn parse_required_string(params: &Value, field: &'static str) -> Result<String, JsonRpcError> {
     params
         .get(field)
@@ -311,16 +442,26 @@ impl RuntimeMethodRequest {
                 })
             }
             "recall" => {
-                reject_unknown_fields(&self.params, &["query", "namespace", "limit"])?;
-                let query = self
-                    .params
-                    .get("query")
-                    .and_then(Value::as_str)
-                    .ok_or_else(|| JsonRpcError {
-                        code: -32602,
-                        message: "missing query".to_string(),
-                        data: None,
-                    })?;
+                reject_unknown_fields(
+                    &self.params,
+                    &[
+                        "query",
+                        "query_text",
+                        "namespace",
+                        "limit",
+                        "result_budget",
+                        "context_text",
+                        "effort",
+                        "include_public",
+                        "like_id",
+                        "unlike_id",
+                        "as_of_tick",
+                        "at_snapshot",
+                        "min_confidence",
+                    ],
+                )?;
+                let query = parse_optional_string(&self.params, "query")?;
+                let query_text = parse_optional_string(&self.params, "query_text")?;
                 let namespace = self
                     .params
                     .get("namespace")
@@ -330,11 +471,45 @@ impl RuntimeMethodRequest {
                         message: "missing namespace".to_string(),
                         data: None,
                     })?;
-                let limit = parse_optional_limit(&self.params)?;
+                let result_budget = parse_optional_budget(&self.params)?;
+                let context_text = parse_optional_string(&self.params, "context_text")?;
+                let effort = parse_optional_string(&self.params, "effort")?;
+                let include_public = parse_optional_bool(&self.params, "include_public")?;
+                let like_id = parse_optional_positive_u64(&self.params, "like_id")?;
+                let unlike_id = parse_optional_positive_u64(&self.params, "unlike_id")?;
+                let as_of_tick = parse_optional_u64(&self.params, "as_of_tick")?;
+                let at_snapshot = parse_optional_string(&self.params, "at_snapshot")?;
+                let min_confidence = parse_optional_f64(&self.params, "min_confidence")?;
+
+                if as_of_tick.is_some() && at_snapshot.is_some() {
+                    return Err(JsonRpcError {
+                        code: -32602,
+                        message: "as_of_tick and at_snapshot cannot be combined".to_string(),
+                        data: None,
+                    });
+                }
+
+                let primary_query = query_text.or(query);
+                if primary_query.is_none() && like_id.is_none() && unlike_id.is_none() {
+                    return Err(JsonRpcError {
+                        code: -32602,
+                        message: "missing query or query-by-example cue".to_string(),
+                        data: None,
+                    });
+                }
+
                 Ok(RuntimeRequest::Recall {
-                    query: query.to_string(),
+                    query_text: primary_query,
                     namespace: namespace.to_string(),
-                    limit,
+                    result_budget,
+                    context_text,
+                    effort,
+                    include_public,
+                    like_id,
+                    unlike_id,
+                    as_of_tick,
+                    at_snapshot,
+                    min_confidence,
                 })
             }
             "inspect" => {
@@ -559,7 +734,7 @@ impl RuntimeMethodRequest {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq)]
 pub enum RuntimeRequest {
     Ping,
     Status,
@@ -570,9 +745,17 @@ pub enum RuntimeRequest {
         memory_type: Option<String>,
     },
     Recall {
-        query: String,
+        query_text: Option<String>,
         namespace: String,
-        limit: Option<usize>,
+        result_budget: Option<usize>,
+        context_text: Option<String>,
+        effort: Option<String>,
+        include_public: Option<bool>,
+        like_id: Option<u64>,
+        unlike_id: Option<u64>,
+        as_of_tick: Option<u64>,
+        at_snapshot: Option<String>,
+        min_confidence: Option<f64>,
     },
     Inspect {
         id: u64,
@@ -803,15 +986,23 @@ mod tests {
         assert_eq!(
             request.parse_method().unwrap(),
             RuntimeRequest::Recall {
-                query: "memory:42".to_string(),
+                query_text: Some("memory:42".to_string()),
                 namespace: "team.alpha".to_string(),
-                limit: Some(3),
+                result_budget: Some(3),
+                context_text: None,
+                effort: None,
+                include_public: None,
+                like_id: None,
+                unlike_id: None,
+                as_of_tick: None,
+                at_snapshot: None,
+                min_confidence: None,
             }
         );
     }
 
     #[test]
-    fn parse_method_recall_requires_query_and_namespace() {
+    fn parse_method_recall_requires_query_or_example_cue_and_namespace() {
         let missing_query = RuntimeMethodRequest {
             jsonrpc: "2.0".to_string(),
             method: "recall".to_string(),
@@ -820,7 +1011,7 @@ mod tests {
         };
         let error = missing_query.parse_method().unwrap_err();
         assert_eq!(error.code, -32602);
-        assert_eq!(error.message, "missing query");
+        assert_eq!(error.message, "missing query or query-by-example cue");
 
         let missing_namespace = RuntimeMethodRequest {
             jsonrpc: "2.0".to_string(),
@@ -834,7 +1025,7 @@ mod tests {
     }
 
     #[test]
-    fn parse_method_recall_rejects_non_positive_or_non_integer_limits() {
+    fn parse_method_recall_rejects_invalid_budgets_and_conflicting_history_fields() {
         let zero_limit = RuntimeMethodRequest {
             jsonrpc: "2.0".to_string(),
             method: "recall".to_string(),
@@ -854,6 +1045,42 @@ mod tests {
         let error = fractional_limit.parse_method().unwrap_err();
         assert_eq!(error.code, -32602);
         assert_eq!(error.message, "limit must be a positive integer");
+
+        let mismatched_budget = RuntimeMethodRequest {
+            jsonrpc: "2.0".to_string(),
+            method: "recall".to_string(),
+            params: json!({
+                "query": "memory:42",
+                "namespace": "team.alpha",
+                "limit": 2,
+                "result_budget": 3
+            }),
+            id: Some(json!(5)),
+        };
+        let error = mismatched_budget.parse_method().unwrap_err();
+        assert_eq!(error.code, -32602);
+        assert_eq!(
+            error.message,
+            "limit and result_budget must match when both are provided"
+        );
+
+        let conflicting_history = RuntimeMethodRequest {
+            jsonrpc: "2.0".to_string(),
+            method: "recall".to_string(),
+            params: json!({
+                "query": "memory:42",
+                "namespace": "team.alpha",
+                "as_of_tick": 42,
+                "at_snapshot": "before-refactor"
+            }),
+            id: Some(json!(6)),
+        };
+        let error = conflicting_history.parse_method().unwrap_err();
+        assert_eq!(error.code, -32602);
+        assert_eq!(
+            error.message,
+            "as_of_tick and at_snapshot cannot be combined"
+        );
     }
 
     #[test]
@@ -1088,14 +1315,80 @@ mod tests {
     }
 
     #[test]
+    fn parse_method_recall_accepts_query_by_example_and_richer_contract_fields() {
+        let request = RuntimeMethodRequest {
+            jsonrpc: "2.0".to_string(),
+            method: "recall".to_string(),
+            params: json!({
+                "query_text": "session:7",
+                "namespace": "team.alpha",
+                "result_budget": 4,
+                "context_text": "triaging recall drift",
+                "effort": "high",
+                "include_public": true,
+                "like_id": 11,
+                "unlike_id": 17,
+                "as_of_tick": 42,
+                "min_confidence": 0.8
+            }),
+            id: Some(json!(18)),
+        };
+
+        assert_eq!(
+            request.parse_method().unwrap(),
+            RuntimeRequest::Recall {
+                query_text: Some("session:7".to_string()),
+                namespace: "team.alpha".to_string(),
+                result_budget: Some(4),
+                context_text: Some("triaging recall drift".to_string()),
+                effort: Some("high".to_string()),
+                include_public: Some(true),
+                like_id: Some(11),
+                unlike_id: Some(17),
+                as_of_tick: Some(42),
+                at_snapshot: None,
+                min_confidence: Some(0.8),
+            }
+        );
+
+        let example_only = RuntimeMethodRequest {
+            jsonrpc: "2.0".to_string(),
+            method: "recall".to_string(),
+            params: json!({
+                "namespace": "team.alpha",
+                "like_id": 99,
+                "result_budget": 2
+            }),
+            id: Some(json!(19)),
+        };
+
+        assert_eq!(
+            example_only.parse_method().unwrap(),
+            RuntimeRequest::Recall {
+                query_text: None,
+                namespace: "team.alpha".to_string(),
+                result_budget: Some(2),
+                context_text: None,
+                effort: None,
+                include_public: None,
+                like_id: Some(99),
+                unlike_id: None,
+                as_of_tick: None,
+                at_snapshot: None,
+                min_confidence: None,
+            }
+        );
+    }
+
+    #[test]
     fn parse_method_retrieval_methods_reject_unknown_fields() {
         let recall = RuntimeMethodRequest {
             jsonrpc: "2.0".to_string(),
             method: "recall".to_string(),
             params: json!({
-                "query": "memory:42",
+                "query_text": "memory:42",
                 "namespace": "team.alpha",
-                "limit": 3,
+                "result_budget": 3,
                 "unexpected": true
             }),
             id: Some(json!(18)),
@@ -1157,7 +1450,7 @@ mod tests {
                 assert_eq!(namespace, "team.alpha");
                 assert_eq!(memory_type, Some("user_preference".to_string()));
             }
-            other => panic!("unexpected: {other:?}"),
+            _ => std::process::abort(),
         }
 
         // Without optional memory_type
@@ -1173,7 +1466,7 @@ mod tests {
 
         match minimal.parse_method().unwrap() {
             RuntimeRequest::Encode { memory_type, .. } => assert!(memory_type.is_none()),
-            other => panic!("unexpected: {other:?}"),
+            _ => std::process::abort(),
         }
     }
 
@@ -1226,7 +1519,7 @@ mod tests {
                 assert_eq!(mode, Some("archive".to_string()));
                 assert_eq!(reason, Some("stale data".to_string()));
             }
-            other => panic!("unexpected: {other:?}"),
+            _ => std::process::abort(),
         }
     }
 
@@ -1253,7 +1546,7 @@ mod tests {
                 assert_eq!(namespace, "team.alpha");
                 assert_eq!(reason, Some("critical reference".to_string()));
             }
-            other => panic!("unexpected: {other:?}"),
+            _ => std::process::abort(),
         }
     }
 
@@ -1274,7 +1567,7 @@ mod tests {
                 assert_eq!(namespace, "team.alpha");
                 assert_eq!(scope, Some("session".to_string()));
             }
-            other => panic!("unexpected: {other:?}"),
+            _ => std::process::abort(),
         }
     }
 
@@ -1295,7 +1588,7 @@ mod tests {
                 assert_eq!(id, 42);
                 assert_eq!(namespace_id, "team.beta");
             }
-            other => panic!("unexpected: {other:?}"),
+            _ => std::process::abort(),
         }
 
         let unshare = RuntimeMethodRequest {
@@ -1313,7 +1606,7 @@ mod tests {
                 assert_eq!(id, 42);
                 assert_eq!(namespace, "team.alpha");
             }
-            other => panic!("unexpected: {other:?}"),
+            _ => std::process::abort(),
         }
     }
 
@@ -1343,7 +1636,7 @@ mod tests {
                 assert_eq!(namespace, "team.alpha");
                 assert_eq!(link_type, Some("supports".to_string()));
             }
-            other => panic!("unexpected: {other:?}"),
+            _ => std::process::abort(),
         }
     }
 

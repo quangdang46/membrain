@@ -974,6 +974,7 @@ mod tests {
                 duplicate_collapsed: 0,
                 low_confidence_suppressed: 0,
                 stale_bypassed: 0,
+                confidence_filtered: 0,
             },
             freshness_markers: membrain_core::engine::result::FreshnessMarkers {
                 oldest_item_days: 0,
@@ -1129,7 +1130,7 @@ mod tests {
         let decoded: McpRequest = serde_json::from_value(json).unwrap();
         match decoded {
             McpRequest::Explain(params) => assert_eq!(params.limit, Some(2)),
-            other => panic!("unexpected decoded request: {other:?}"),
+            _ => std::process::abort(),
         }
     }
 
@@ -1319,7 +1320,7 @@ mod tests {
                 assert_eq!(params.salience, Some(500));
                 assert!(params.source_metadata.is_none());
             }
-            other => panic!("unexpected decoded request: {other:?}"),
+            _ => std::process::abort(),
         }
     }
 
@@ -1366,14 +1367,14 @@ mod tests {
                 assert_eq!(params.like_id, Some(42));
                 assert_eq!(params.mood_congruent, Some(true));
             }
-            other => panic!("unexpected decoded request: {other:?}"),
+            _ => std::process::abort(),
         }
     }
 
     #[test]
     fn mutation_method_envelopes_round_trip_via_serde() {
         // Link
-        let link_json = serde_json::to_value(&McpRequest::Link(
+        let link_json = serde_json::to_value(McpRequest::Link(
             serde_json::from_value(serde_json::json!({
                 "source_id": 42,
                 "target_id": 99,
@@ -1388,7 +1389,7 @@ mod tests {
         assert_eq!(link_json["params"]["link_type"], "supports");
 
         // Pin
-        let pin_json = serde_json::to_value(&McpRequest::Pin(
+        let pin_json = serde_json::to_value(McpRequest::Pin(
             serde_json::from_value(serde_json::json!({
                 "id": 42,
                 "namespace": "team.alpha",
@@ -1401,7 +1402,7 @@ mod tests {
         assert_eq!(pin_json["params"]["id"], 42);
 
         // Forget
-        let forget_json = serde_json::to_value(&McpRequest::Forget(
+        let forget_json = serde_json::to_value(McpRequest::Forget(
             serde_json::from_value(serde_json::json!({
                 "id": 42,
                 "namespace": "team.alpha",
@@ -1415,7 +1416,7 @@ mod tests {
         assert_eq!(forget_json["params"]["mode"], "archive");
 
         // Share
-        let share_json = serde_json::to_value(&McpRequest::Share(
+        let share_json = serde_json::to_value(McpRequest::Share(
             serde_json::from_value(serde_json::json!({
                 "id": 42,
                 "namespace_id": "team.beta"
@@ -1427,7 +1428,7 @@ mod tests {
         assert_eq!(share_json["params"]["namespace_id"], "team.beta");
 
         // Unshare
-        let unshare_json = serde_json::to_value(&McpRequest::Unshare(
+        let unshare_json = serde_json::to_value(McpRequest::Unshare(
             serde_json::from_value(serde_json::json!({
                 "id": 42,
                 "namespace": "team.alpha"
@@ -1438,7 +1439,7 @@ mod tests {
         assert_eq!(unshare_json["method"], "unshare");
 
         // Consolidate
-        let consolidate_json = serde_json::to_value(&McpRequest::Consolidate(
+        let consolidate_json = serde_json::to_value(McpRequest::Consolidate(
             serde_json::from_value(serde_json::json!({
                 "namespace": "team.alpha",
                 "scope": "session"
@@ -1450,7 +1451,7 @@ mod tests {
         assert_eq!(consolidate_json["params"]["scope"], "session");
 
         // Repair
-        let repair_json = serde_json::to_value(&McpRequest::Repair(
+        let repair_json = serde_json::to_value(McpRequest::Repair(
             serde_json::from_value(serde_json::json!({
                 "namespace": "team.alpha",
                 "surfaces": ["index", "graph"],
@@ -1466,35 +1467,35 @@ mod tests {
     #[test]
     fn operator_and_feature_methods_round_trip() {
         // Stats
-        let stats = serde_json::to_value(&McpRequest::Stats(
+        let stats = serde_json::to_value(McpRequest::Stats(
             serde_json::from_value(serde_json::json!({"namespace": "team.alpha"})).unwrap(),
         ))
         .unwrap();
         assert_eq!(stats["method"], "stats");
 
         // Health
-        let health = serde_json::to_value(&McpRequest::Health(
+        let health = serde_json::to_value(McpRequest::Health(
             serde_json::from_value(serde_json::json!({"namespace": "team.alpha"})).unwrap(),
         ))
         .unwrap();
         assert_eq!(health["method"], "health");
 
         // Doctor
-        let doctor = serde_json::to_value(&McpRequest::Doctor(
+        let doctor = serde_json::to_value(McpRequest::Doctor(
             serde_json::from_value(serde_json::json!({"namespace": "team.alpha"})).unwrap(),
         ))
         .unwrap();
         assert_eq!(doctor["method"], "doctor");
 
         // Dream
-        let dream = serde_json::to_value(&McpRequest::Dream(
+        let dream = serde_json::to_value(McpRequest::Dream(
             serde_json::from_value(serde_json::json!({"namespace": "team.alpha"})).unwrap(),
         ))
         .unwrap();
         assert_eq!(dream["method"], "dream");
 
         // Snapshot
-        let snapshot = serde_json::to_value(&McpRequest::Snapshot(
+        let snapshot = serde_json::to_value(McpRequest::Snapshot(
             serde_json::from_value(serde_json::json!({
                 "name": "pre-migration",
                 "namespace": "team.alpha",
@@ -1536,14 +1537,14 @@ mod tests {
     #[test]
     fn goal_methods_round_trip() {
         // goal_state
-        let state = serde_json::to_value(&McpRequest::GoalState(
+        let state = serde_json::to_value(McpRequest::GoalState(
             serde_json::from_value(serde_json::json!({})).unwrap(),
         ))
         .unwrap();
         assert_eq!(state["method"], "goal_state");
 
         // goal_state with task_id
-        let state_with_task = serde_json::to_value(&McpRequest::GoalState(
+        let state_with_task = serde_json::to_value(McpRequest::GoalState(
             serde_json::from_value(serde_json::json!({"task_id": "task-42"})).unwrap(),
         ))
         .unwrap();
@@ -1551,7 +1552,7 @@ mod tests {
         assert_eq!(state_with_task["params"]["task_id"], "task-42");
 
         // goal_pause
-        let pause = serde_json::to_value(&McpRequest::GoalPause(
+        let pause = serde_json::to_value(McpRequest::GoalPause(
             serde_json::from_value(serde_json::json!({
                 "task_id": "task-42",
                 "note": "waiting for review"
@@ -1563,14 +1564,14 @@ mod tests {
         assert_eq!(pause["params"]["note"], "waiting for review");
 
         // goal_resume
-        let resume = serde_json::to_value(&McpRequest::GoalResume(
+        let resume = serde_json::to_value(McpRequest::GoalResume(
             serde_json::from_value(serde_json::json!({"task_id": "task-42"})).unwrap(),
         ))
         .unwrap();
         assert_eq!(resume["method"], "goal_resume");
 
         // goal_abandon
-        let abandon = serde_json::to_value(&McpRequest::GoalAbandon(
+        let abandon = serde_json::to_value(McpRequest::GoalAbandon(
             serde_json::from_value(serde_json::json!({
                 "task_id": "task-42",
                 "reason": "requirements changed"

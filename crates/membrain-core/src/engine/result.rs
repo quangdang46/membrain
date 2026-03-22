@@ -720,6 +720,7 @@ impl ResultBuilder {
     /// This uses the `ConfidenceEngine` to compute proper confidence scores,
     /// uncertainty breakdowns, and optional confidence intervals, rather than
     /// relying on the final ranking score as a confidence proxy.
+    #[allow(clippy::too_many_arguments)]
     pub fn add_with_confidence(
         &mut self,
         memory_id: MemoryId,
@@ -1066,6 +1067,7 @@ mod tests {
                 strength: 100,
                 provenance: 100,
                 conflict: 500,
+                confidence: 500,
             },
             RankingProfile::balanced(),
         );
@@ -1076,6 +1078,7 @@ mod tests {
                 strength: 500,
                 provenance: 500,
                 conflict: 500,
+                confidence: 500,
             },
             RankingProfile::balanced(),
         );
@@ -1086,6 +1089,7 @@ mod tests {
                 strength: 900,
                 provenance: 900,
                 conflict: 500,
+                confidence: 500,
             },
             RankingProfile::balanced(),
         );
@@ -1274,6 +1278,7 @@ mod tests {
                 strength: 800,
                 provenance: 750,
                 conflict: 0,
+                confidence: 0,
             },
             RankingProfile::balanced(),
         );
@@ -1292,6 +1297,7 @@ mod tests {
                 strength: 790,
                 provenance: 780,
                 conflict: 0,
+                confidence: 0,
             },
             RankingProfile::balanced(),
         );
@@ -1350,6 +1356,7 @@ mod tests {
                 strength: 760,
                 provenance: 900,
                 conflict: 280,
+                confidence: 280,
             },
             RankingProfile::balanced(),
         );
@@ -1433,6 +1440,7 @@ mod tests {
                 strength: 760,
                 provenance: 900,
                 conflict: 280,
+                confidence: 280,
             },
             RankingProfile::balanced(),
         );
@@ -1501,6 +1509,7 @@ mod tests {
                 strength: 800,
                 provenance: 600,
                 conflict: 500,
+                confidence: 500,
             },
             RankingProfile::balanced(),
         );
@@ -1574,6 +1583,7 @@ mod tests {
                 strength: 710,
                 provenance: 900,
                 conflict: 260,
+                confidence: 260,
             },
             RankingProfile::balanced(),
         );
@@ -1743,6 +1753,7 @@ mod tests {
                     strength: 800,
                     provenance: 750,
                     conflict: 500,
+                    confidence: 500,
                 },
                 RankingProfile::balanced(),
             ),
@@ -1753,6 +1764,7 @@ mod tests {
                     strength: 600,
                     provenance: 550,
                     conflict: 500,
+                    confidence: 500,
                 },
                 RankingProfile::balanced(),
             ),
@@ -1763,6 +1775,7 @@ mod tests {
                     strength: 400,
                     provenance: 350,
                     conflict: 500,
+                    confidence: 500,
                 },
                 RankingProfile::balanced(),
             ),
@@ -1809,6 +1822,7 @@ mod tests {
                 strength: 500,
                 provenance: 450,
                 conflict: 500,
+                confidence: 500,
             },
             RankingProfile::balanced(),
         );
@@ -1862,6 +1876,7 @@ mod tests {
                 strength: 700,
                 provenance: 650,
                 conflict: 500,
+                confidence: 500,
             },
             RankingProfile::balanced(),
         );
@@ -1915,6 +1930,7 @@ mod tests {
                 strength: 600,
                 provenance: 550,
                 conflict: 500,
+                confidence: 500,
             },
             RankingProfile::balanced(),
         );
@@ -1976,6 +1992,7 @@ mod tests {
                 strength: 500,
                 provenance: 450,
                 conflict: 500,
+                confidence: 500,
             },
             RankingProfile::balanced(),
         );
@@ -2018,6 +2035,7 @@ mod tests {
             duplicate_collapsed: 5,
             low_confidence_suppressed: 2,
             stale_bypassed: 1,
+            confidence_filtered: 6,
         };
         assert_eq!(omitted.policy_redacted, 3);
         assert_eq!(omitted.threshold_dropped, 2);
@@ -2105,6 +2123,7 @@ mod tests {
                 strength: 700,
                 provenance: 650,
                 conflict: 300,
+                confidence: 300,
             },
             RankingProfile::balanced(),
         );
@@ -2159,6 +2178,7 @@ mod tests {
                 strength: 600,
                 provenance: 550,
                 conflict: 500,
+                confidence: 500,
             },
             RankingProfile::balanced(),
         );
@@ -2203,6 +2223,7 @@ mod tests {
                 strength: 500,
                 provenance: 450,
                 conflict: 500,
+                confidence: 500,
             },
             RankingProfile::balanced(),
         );
@@ -2257,6 +2278,7 @@ mod tests {
                 strength: 700,
                 provenance: 650,
                 conflict: 500,
+                confidence: 500,
             },
             RankingProfile::balanced(),
         );
@@ -2299,6 +2321,7 @@ mod tests {
                 strength: 500,
                 provenance: 450,
                 conflict: 500,
+                confidence: 500,
             },
             RankingProfile::balanced(),
         );

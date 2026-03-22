@@ -26,9 +26,10 @@ pub const fn estimate_tokens(content_len: usize) -> usize {
 // ── Request / response types ──────────────────────────────────────────────────
 
 /// Format for injection output.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
 pub enum InjectionFormat {
     /// Plain text, one memory per line.
+    #[default]
     Plain,
     /// Markdown-formatted memories.
     Markdown,
@@ -43,12 +44,6 @@ impl InjectionFormat {
             Self::Markdown => "markdown",
             Self::Json => "json",
         }
-    }
-}
-
-impl Default for InjectionFormat {
-    fn default() -> Self {
-        Self::Plain
     }
 }
 

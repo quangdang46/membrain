@@ -71,6 +71,7 @@ fn ranking_fusion_produces_scores_for_recall_results() {
         strength: 900,
         provenance: 700,
         conflict: 500,
+        confidence: 500,
     };
 
     let result = fuse_scores(input, RankingProfile::balanced());
@@ -91,6 +92,7 @@ fn result_builder_adds_and_ranks_candidates() {
             strength: 800,
             provenance: 750,
             conflict: 500,
+            confidence: 500,
         },
         RankingProfile::balanced(),
     );
@@ -102,6 +104,7 @@ fn result_builder_adds_and_ranks_candidates() {
             strength: 500,
             provenance: 500,
             conflict: 500,
+            confidence: 500,
         },
         RankingProfile::balanced(),
     );
@@ -113,6 +116,7 @@ fn result_builder_adds_and_ranks_candidates() {
             strength: 100,
             provenance: 100,
             conflict: 500,
+            confidence: 500,
         },
         RankingProfile::balanced(),
     );
@@ -188,6 +192,7 @@ fn result_builder_truncates_to_budget() {
                 strength: score,
                 provenance: score,
                 conflict: 500,
+                confidence: 500,
             },
             RankingProfile::balanced(),
         );

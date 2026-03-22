@@ -368,6 +368,7 @@ pub fn bench_ranking(
                 strength: 200,
                 provenance: 500,
                 conflict: 500,
+                confidence: 500,
             },
         ),
         (
@@ -378,6 +379,7 @@ pub fn bench_ranking(
                 strength: 950,
                 provenance: 600,
                 conflict: 500,
+                confidence: 500,
             },
         ),
         (
@@ -388,6 +390,7 @@ pub fn bench_ranking(
                 strength: 500,
                 provenance: 500,
                 conflict: 500,
+                confidence: 500,
             },
         ),
         (
@@ -398,6 +401,7 @@ pub fn bench_ranking(
                 strength: 1000,
                 provenance: 1000,
                 conflict: 1000,
+                confidence: 1000,
             },
         ),
     ];

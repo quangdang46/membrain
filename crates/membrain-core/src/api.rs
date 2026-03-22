@@ -622,6 +622,7 @@ pub struct TraceOmissionSummary {
     pub duplicate_collapsed: usize,
     pub low_confidence_suppressed: usize,
     pub stale_bypassed: usize,
+    pub confidence_filtered: usize,
 }
 
 impl TraceOmissionSummary {
@@ -635,6 +636,7 @@ impl TraceOmissionSummary {
             duplicate_collapsed: omission.duplicate_collapsed,
             low_confidence_suppressed: omission.low_confidence_suppressed,
             stale_bypassed: omission.stale_bypassed,
+            confidence_filtered: omission.confidence_filtered,
         }
     }
 
@@ -1608,6 +1610,7 @@ mod tests {
                 duplicate_collapsed: 0,
                 low_confidence_suppressed: 0,
                 stale_bypassed: 0,
+                confidence_filtered: 0,
             },
             freshness_markers: FreshnessMarkers {
                 oldest_item_days: 0,
@@ -1702,6 +1705,7 @@ mod tests {
                 duplicate_collapsed: 1,
                 low_confidence_suppressed: 0,
                 stale_bypassed: 0,
+                confidence_filtered: 0,
             },
             vec![
                 TraceScoreComponent {
@@ -1940,6 +1944,7 @@ mod tests {
                     duplicate_collapsed: 1,
                     low_confidence_suppressed: 0,
                     stale_bypassed: 0,
+                    confidence_filtered: 0,
                 },
                 score_components: vec![
                     TraceScoreComponent {
@@ -2006,6 +2011,7 @@ mod tests {
                 duplicate_collapsed: 0,
                 low_confidence_suppressed: 0,
                 stale_bypassed: 0,
+                confidence_filtered: 0,
             },
             vec![TraceScoreComponent {
                 signal_family: "relevance",

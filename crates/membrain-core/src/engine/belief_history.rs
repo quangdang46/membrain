@@ -318,6 +318,7 @@ impl BeliefHistoryEngine {
     }
 
     /// Records a contradiction-triggered version in an existing chain.
+    #[allow(clippy::too_many_arguments)]
     pub fn record_contradiction(
         &mut self,
         chain_id: BeliefChainId,

@@ -852,6 +852,7 @@ mod tests {
                 duplicate_collapsed: 0,
                 low_confidence_suppressed: 0,
                 stale_bypassed: 0,
+                confidence_filtered: 0,
             },
             freshness_markers: FreshnessMarkers {
                 oldest_item_days: 1,
@@ -992,6 +993,7 @@ mod tests {
                     duplicate_collapsed: 0,
                     low_confidence_suppressed: 0,
                     stale_bypassed: 0,
+                    confidence_filtered: 0,
                 },
                 freshness_markers: FreshnessMarkers {
                     oldest_item_days: 0,
@@ -1068,6 +1070,7 @@ mod tests {
                 duplicate_collapsed: 0,
                 low_confidence_suppressed: 0,
                 stale_bypassed: 0,
+                confidence_filtered: 0,
             },
             freshness_markers: FreshnessMarkers {
                 oldest_item_days: 0,
@@ -1150,6 +1153,7 @@ mod tests {
                 duplicate_collapsed: 0,
                 low_confidence_suppressed: 0,
                 stale_bypassed: 0,
+                confidence_filtered: 0,
             },
             freshness_markers: FreshnessMarkers {
                 oldest_item_days: 0,
@@ -1264,6 +1268,7 @@ mod tests {
                 duplicate_collapsed: 0,
                 low_confidence_suppressed: 0,
                 stale_bypassed: 0,
+                confidence_filtered: 0,
             },
             freshness_markers: FreshnessMarkers {
                 oldest_item_days: 0,
@@ -1352,6 +1357,7 @@ mod tests {
                 duplicate_collapsed: 0,
                 low_confidence_suppressed: 0,
                 stale_bypassed: 0,
+                confidence_filtered: 0,
             },
             freshness_markers: FreshnessMarkers {
                 oldest_item_days: 0,
