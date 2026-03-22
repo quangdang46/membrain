@@ -462,7 +462,7 @@ fn encode_memory(
 
 fn recall_memories(
     store: &BrainStore,
-    _hot: &mut Tier1HotMetadataStore,
+    _hot: &Tier1HotMetadataStore,
     local_records: &[LocalMemoryRecord],
     query: &str,
     namespace: &NamespaceId,
@@ -985,7 +985,7 @@ async fn main() -> anyhow::Result<()> {
         } => {
             let ns = NamespaceId::new(namespace)?;
             let output =
-                recall_memories(&store, &mut hot, &local_records, query, &ns, *top, explain);
+                recall_memories(&store, &hot, &local_records, query, &ns, *top, explain);
             if *json {
                 println!("{}", serde_json::to_string_pretty(&output)?);
             } else {

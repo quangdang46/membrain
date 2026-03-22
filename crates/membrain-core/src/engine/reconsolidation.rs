@@ -404,7 +404,8 @@ impl ReconsolidationEngine {
                 {
                     triggers.push(RefreshTrigger::CacheInvalidate);
                 }
-                // Content updates always require cache invalidation.
+                // Every applied update must invalidate the cache so
+                // downstream consumers re-fetch from durable truth.
                 if !triggers.contains(&RefreshTrigger::CacheInvalidate) {
                     triggers.push(RefreshTrigger::CacheInvalidate);
                 }

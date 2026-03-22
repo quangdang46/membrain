@@ -86,6 +86,8 @@ pub struct ForgettingSummary {
     pub demoted: u32,
     /// Memories archived.
     pub archived: u32,
+    /// Memories restored from a previous forgotten state.
+    pub restored: u32,
     /// Memories skipped (still healthy).
     pub skipped: u32,
 }
@@ -241,6 +243,7 @@ pub struct ForgettingRun {
     forgotten: u32,
     demoted: u32,
     archived: u32,
+    restored: u32,
     skipped: u32,
     completed: bool,
     durable_token: DurableStateToken,
@@ -266,6 +269,7 @@ impl ForgettingRun {
             forgotten: 0,
             demoted: 0,
             archived: 0,
+            restored: 0,
             skipped: 0,
             completed: false,
             durable_token: DurableStateToken(0),
@@ -423,6 +427,7 @@ impl MaintenanceOperation for ForgettingRun {
                 forgotten: self.forgotten,
                 demoted: self.demoted,
                 archived: self.archived,
+                restored: self.restored,
                 skipped: self.skipped,
             });
         }
@@ -458,7 +463,8 @@ impl MaintenanceOperation for ForgettingRun {
                 ForgettingAction::SoftForget => self.forgotten += 1,
                 ForgettingAction::Demote { .. } => self.demoted += 1,
                 ForgettingAction::Archive => self.archived += 1,
-                ForgettingAction::Skip | ForgettingAction::Restore => self.skipped += 1,
+                ForgettingAction::Restore => self.restored += 1,
+                ForgettingAction::Skip => self.skipped += 1,
             }
             self.decisions.push(ForgettingDecision {
                 memory_id: candidate.memory_id,
@@ -489,6 +495,7 @@ impl MaintenanceOperation for ForgettingRun {
                 forgotten: self.forgotten,
                 demoted: self.demoted,
                 archived: self.archived,
+                restored: self.restored,
                 skipped: self.skipped,
             })
         } else {
@@ -518,8 +525,6 @@ pub struct EligibilityFactors {
     pub recency: f32,
     /// Access frequency normalized (1.0 = very frequent, 0.0 = never accessed).
     pub access_frequency: f32,
-    /// Number of ticks since last access (higher = more eligible for forgetting).
-    pub ticks_since_access: u64,
     /// Whether this memory is in a contradiction neighborhood.
     pub in_contradiction: bool,
     /// Emotional arousal (higher = more resistant to forgetting).
@@ -535,7 +540,6 @@ impl EligibilityFactors {
             effective_strength: strength,
             recency: 0.5,
             access_frequency: 0.5,
-            ticks_since_access: 0,
             in_contradiction: false,
             emotional_arousal: 0.0,
             bypass_decay: false,
@@ -1340,7 +1344,6 @@ mod tests {
             in_contradiction: false,
             emotional_arousal: 0.0,
             bypass_decay: false,
-            ticks_since_access: 0,
         };
 
         let score = engine.compute_eligibility_score(&factors);
