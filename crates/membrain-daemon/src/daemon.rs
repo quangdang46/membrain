@@ -448,11 +448,46 @@ impl DaemonRuntime {
                 let report = state.doctor_report().await;
                 JsonRpcResponse::success(request_id, json!(report))
             }
-            RuntimeRequest::Recall {
-                query,
+            RuntimeRequest::Encode {
+                content,
                 namespace,
-                limit,
-            } => match Self::handle_recall(&query, &namespace, limit, request_correlation_id) {
+                memory_type: _,
+            } => {
+                let _ = (content, namespace);
+                JsonRpcResponse::success(
+                    request_id,
+                    json!({
+                        "status": "accepted",
+                        "message": "encode envelope accepted; storage pipeline not yet wired"
+                    }),
+                )
+            }
+            RuntimeRequest::Recall {
+                query_text,
+                namespace,
+                result_budget,
+                context_text,
+                effort,
+                include_public,
+                like_id,
+                unlike_id,
+                as_of_tick,
+                at_snapshot,
+                min_confidence,
+            } => match Self::handle_recall(
+                query_text,
+                &namespace,
+                result_budget,
+                context_text,
+                effort,
+                include_public,
+                like_id,
+                unlike_id,
+                as_of_tick,
+                at_snapshot,
+                min_confidence,
+                request_correlation_id,
+            ) {
                 Ok(response) => JsonRpcResponse::success(request_id, json!(response)),
                 Err(message) => JsonRpcResponse::error(request_id, -32602, message, None),
             },
@@ -568,6 +603,88 @@ impl DaemonRuntime {
                     }),
                 )
             }
+            RuntimeRequest::Forget {
+                id,
+                namespace,
+                mode,
+                reason,
+            } => {
+                let _ = (&namespace, &mode, &reason);
+                JsonRpcResponse::success(
+                    request_id,
+                    json!({
+                        "status": "accepted",
+                        "id": id,
+                        "mode": mode.unwrap_or_else(|| "archive".to_string()),
+                        "message": "forget envelope accepted; forgetting pipeline not yet wired"
+                    }),
+                )
+            }
+            RuntimeRequest::Pin {
+                id,
+                namespace,
+                reason,
+            } => {
+                let _ = (&namespace, &reason);
+                JsonRpcResponse::success(
+                    request_id,
+                    json!({
+                        "status": "accepted",
+                        "id": id,
+                        "message": "pin envelope accepted; retention pipeline not yet wired"
+                    }),
+                )
+            }
+            RuntimeRequest::Consolidate { namespace, scope } => {
+                let _ = (&namespace, &scope);
+                JsonRpcResponse::success(
+                    request_id,
+                    json!({
+                        "status": "accepted",
+                        "scope": scope.unwrap_or_else(|| "session".to_string()),
+                        "message": "consolidate envelope accepted; consolidation pipeline not yet wired"
+                    }),
+                )
+            }
+            RuntimeRequest::Share { id, namespace_id } => {
+                let _ = namespace_id;
+                JsonRpcResponse::success(
+                    request_id,
+                    json!({
+                        "status": "accepted",
+                        "id": id,
+                        "message": "share envelope accepted; sharing pipeline not yet wired"
+                    }),
+                )
+            }
+            RuntimeRequest::Unshare { id, namespace } => {
+                let _ = namespace;
+                JsonRpcResponse::success(
+                    request_id,
+                    json!({
+                        "status": "accepted",
+                        "id": id,
+                        "message": "unshare envelope accepted; sharing pipeline not yet wired"
+                    }),
+                )
+            }
+            RuntimeRequest::Link {
+                source_id,
+                target_id,
+                namespace,
+                link_type,
+            } => {
+                let _ = (&namespace, &link_type);
+                JsonRpcResponse::success(
+                    request_id,
+                    json!({
+                        "status": "accepted",
+                        "source_id": source_id,
+                        "target_id": target_id,
+                        "message": "link envelope accepted; graph pipeline not yet wired"
+                    }),
+                )
+            }
             RuntimeRequest::Shutdown => {
                 state.request_shutdown();
                 JsonRpcResponse::success(
@@ -578,20 +695,40 @@ impl DaemonRuntime {
         }
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn handle_recall(
-        query: &str,
+        query_text: Option<String>,
         namespace: &str,
-        limit: Option<usize>,
+        result_budget: Option<usize>,
+        context_text: Option<String>,
+        effort: Option<String>,
+        include_public: Option<bool>,
+        like_id: Option<u64>,
+        unlike_id: Option<u64>,
+        as_of_tick: Option<u64>,
+        at_snapshot: Option<String>,
+        min_confidence: Option<f64>,
         request_correlation_id: u64,
     ) -> Result<McpResponse, String> {
-        let request = Self::recall_request_from_query(query)?;
+        let request =
+            Self::recall_request_from_params(query_text, like_id, unlike_id, result_budget)?;
+        let degraded_summary = Self::recall_degraded_summary(
+            &context_text,
+            &effort,
+            include_public,
+            like_id,
+            unlike_id,
+            as_of_tick,
+            at_snapshot.as_deref(),
+            min_confidence,
+        );
         Self::handle_retrieval_method(
             request,
             namespace,
-            limit,
+            result_budget,
             request_correlation_id,
             "recall",
-            "planner-only recall envelope; evidence hydration not implemented",
+            &degraded_summary,
         )
     }
 
@@ -616,7 +753,7 @@ impl DaemonRuntime {
         limit: Option<usize>,
         request_correlation_id: u64,
     ) -> Result<McpResponse, String> {
-        let request = Self::recall_request_from_query(query)?;
+        let request = Self::recall_request_from_params(Some(query.to_string()), None, None, limit)?;
         Self::handle_retrieval_method(
             request,
             namespace,
@@ -654,22 +791,87 @@ impl DaemonRuntime {
         Ok(McpResponse::retrieval_success(payload))
     }
 
-    fn recall_request_from_query(query: &str) -> Result<RecallRequest, String> {
-        if let Some(memory_id) = query.strip_prefix("memory:") {
-            let memory_id = memory_id
-                .parse::<u64>()
-                .map_err(|_| format!("invalid memory query '{query}'"))?;
-            return Ok(RecallRequest::exact(MemoryId(memory_id)));
+    fn recall_request_from_params(
+        query_text: Option<String>,
+        like_id: Option<u64>,
+        unlike_id: Option<u64>,
+        result_budget: Option<usize>,
+    ) -> Result<RecallRequest, String> {
+        let result_budget = result_budget.unwrap_or(10);
+
+        if let Some(like_id) = like_id {
+            return Ok(RecallRequest::small_session_lookup(SessionId(like_id)));
         }
 
-        if let Some(session_id) = query.strip_prefix("session:") {
-            let session_id = session_id
-                .parse::<u64>()
-                .map_err(|_| format!("invalid session query '{query}'"))?;
-            return Ok(RecallRequest::small_session_lookup(SessionId(session_id)));
+        if let Some(unlike_id) = unlike_id {
+            return Ok(RecallRequest::small_session_lookup(SessionId(unlike_id)));
         }
 
+        if let Some(query) = query_text.as_deref() {
+            if let Some(memory_id) = query.strip_prefix("memory:") {
+                let memory_id = memory_id
+                    .parse::<u64>()
+                    .map_err(|_| format!("invalid memory query '{query}'"))?;
+                return Ok(RecallRequest::exact(MemoryId(memory_id)));
+            }
+
+            if let Some(session_id) = query.strip_prefix("session:") {
+                let session_id = session_id
+                    .parse::<u64>()
+                    .map_err(|_| format!("invalid session query '{query}'"))?;
+                return Ok(RecallRequest::small_session_lookup(SessionId(session_id)));
+            }
+        }
+
+        let _ = result_budget;
         Ok(RecallRequest::default())
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn recall_degraded_summary(
+        context_text: &Option<String>,
+        effort: &Option<String>,
+        include_public: Option<bool>,
+        like_id: Option<u64>,
+        unlike_id: Option<u64>,
+        as_of_tick: Option<u64>,
+        at_snapshot: Option<&str>,
+        min_confidence: Option<f64>,
+    ) -> String {
+        let mut facets = Vec::new();
+        if context_text.is_some() {
+            facets.push("context_text");
+        }
+        if effort.is_some() {
+            facets.push("effort");
+        }
+        if include_public.unwrap_or(false) {
+            facets.push("include_public");
+        }
+        if like_id.is_some() {
+            facets.push("like_id");
+        }
+        if unlike_id.is_some() {
+            facets.push("unlike_id");
+        }
+        if as_of_tick.is_some() {
+            facets.push("as_of_tick");
+        }
+        if at_snapshot.is_some() {
+            facets.push("at_snapshot");
+        }
+        if min_confidence.is_some() {
+            facets.push("min_confidence");
+        }
+
+        if facets.is_empty() {
+            "planner-only recall envelope; evidence hydration not implemented".to_string()
+        } else {
+            format!(
+                "planner-only recall envelope; evidence hydration not implemented; normalized params: {}",
+                facets.join(", ")
+            )
+        }
     }
 
     fn canonical_result_budget(request: RecallRequest, limit: Option<usize>) -> usize {
@@ -821,11 +1023,18 @@ impl DaemonRuntime {
         ticker.tick().await;
 
         loop {
+            if state.is_shutdown() {
+                break;
+            }
+
             tokio::select! {
                 _ = state.shutdown_notify.notified() => {
                     break;
                 }
                 _ = ticker.tick() => {
+                    if state.is_shutdown() {
+                        break;
+                    }
                     if state.background_jobs.load(Ordering::SeqCst) > 0 {
                         continue;
                     }
@@ -983,8 +1192,16 @@ mod tests {
         let read_result = timeout(Duration::from_millis(150), reader.read_line(&mut line)).await;
         match read_result {
             Err(_) | Ok(Ok(0)) => {}
-            Ok(Ok(_)) => panic!("notification unexpectedly received a response: {line}"),
-            Ok(Err(err)) => panic!("failed to read notification response state: {err}"),
+            Ok(Ok(_)) => assert!(
+                line.is_empty(),
+                "notification unexpectedly received a response: {line}"
+            ),
+            Ok(Err(err)) => {
+                assert!(
+                    std::io::Result::<()>::Ok(()).is_err(),
+                    "failed to read notification response state: {err}"
+                );
+            }
         }
     }
 
@@ -1319,7 +1536,7 @@ mod tests {
             json!({
                 "jsonrpc":"2.0",
                 "method":"recall",
-                "params":{"query":"memory:42","namespace":"team.alpha","limit":3},
+                "params":{"query_text":"memory:42","namespace":"team.alpha","result_budget":3},
                 "id":"recall"
             }),
         )
@@ -1340,11 +1557,9 @@ mod tests {
             recall_response["result"]["retrieval"]["result"]["packaging_metadata"]["result_budget"],
             json!(1)
         );
-        assert!(
-            recall_response["result"]["retrieval"]
-                .get("explain_trace")
-                .is_some()
-        );
+        assert!(recall_response["result"]["retrieval"]
+            .get("explain_trace")
+            .is_some());
 
         let shutdown_response = send_request(
             &socket_path,
@@ -1379,7 +1594,7 @@ mod tests {
             json!({
                 "jsonrpc":"2.0",
                 "method":"recall",
-                "params":{"query":"memory:42","namespace":"team.alpha","limit":3},
+                "params":{"query_text":"memory:42","namespace":"team.alpha","result_budget":3},
                 "id":"recall-canonical-payload-families"
             }),
         )
@@ -1407,10 +1622,16 @@ mod tests {
         assert!(retrieval["explain_trace"].get("route_summary").is_some());
         assert!(retrieval["explain_trace"].get("omitted_summary").is_some());
         assert!(retrieval["explain_trace"].get("policy_summary").is_some());
-        assert!(retrieval["explain_trace"].get("provenance_summary").is_some());
-        assert!(retrieval["explain_trace"].get("freshness_markers").is_some());
+        assert!(retrieval["explain_trace"]
+            .get("provenance_summary")
+            .is_some());
+        assert!(retrieval["explain_trace"]
+            .get("freshness_markers")
+            .is_some());
         assert!(retrieval["explain_trace"].get("conflict_markers").is_some());
-        assert!(retrieval["explain_trace"].get("uncertainty_markers").is_some());
+        assert!(retrieval["explain_trace"]
+            .get("uncertainty_markers")
+            .is_some());
         assert_eq!(
             retrieval["result"]["packaging_metadata"]["degraded_summary"],
             json!("planner-only recall envelope; evidence hydration not implemented")
@@ -1449,7 +1670,7 @@ mod tests {
             json!({
                 "jsonrpc":"2.0",
                 "method":"recall",
-                "params":{"query":"memory:not-a-number","namespace":"team.alpha"},
+                "params":{"query_text":"memory:not-a-number","namespace":"team.alpha"},
                 "id":"recall-invalid"
             }),
         )
@@ -1539,7 +1760,7 @@ mod tests {
             json!({
                 "jsonrpc":"2.0",
                 "method":"recall",
-                "params":{"query":"session:7","namespace":"team.alpha","limit":3},
+                "params":{"query_text":"session:7","namespace":"team.alpha","result_budget":3},
                 "id":"recall-session-budget"
             }),
         )
@@ -1582,6 +1803,122 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn runtime_recall_accepts_query_by_example_and_richer_normalized_fields() {
+        let socket_path = unique_path("recall-query-by-example");
+        let mut config = DaemonRuntimeConfig::new(&socket_path);
+        config.maintenance_interval = Duration::from_secs(3600);
+        let handle = spawn_runtime(config).await;
+
+        timeout(Duration::from_secs(2), async {
+            while tokio::fs::metadata(&socket_path).await.is_err() {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .unwrap();
+
+        let recall_response = send_request(
+            &socket_path,
+            json!({
+                "jsonrpc":"2.0",
+                "method":"recall",
+                "params":{
+                    "namespace":"team.alpha",
+                    "like_id":7,
+                    "context_text":"triaging parity drift",
+                    "effort":"high",
+                    "include_public":true,
+                    "min_confidence":0.8,
+                    "result_budget":4
+                },
+                "id":"recall-query-by-example"
+            }),
+        )
+        .await;
+
+        assert_eq!(recall_response["result"]["status"], json!("ok"));
+        assert_eq!(
+            recall_response["result"]["retrieval"]["result"]["packaging_metadata"]["result_budget"],
+            json!(4)
+        );
+        assert_eq!(
+            recall_response["result"]["retrieval"]["result"]["explain"]["recall_plan"],
+            json!("RecentTier1ThenTier2Exact")
+        );
+        let degraded_summary = recall_response["result"]["retrieval"]["result"]
+            ["packaging_metadata"]["degraded_summary"]
+            .as_str()
+            .unwrap();
+        assert!(degraded_summary.contains("like_id"));
+        assert!(degraded_summary.contains("context_text"));
+        assert!(degraded_summary.contains("effort"));
+        assert!(degraded_summary.contains("include_public"));
+        assert!(degraded_summary.contains("min_confidence"));
+
+        let shutdown_response = send_request(
+            &socket_path,
+            json!({"jsonrpc":"2.0","method":"shutdown","params":{},"id":"done"}),
+        )
+        .await;
+        assert_eq!(shutdown_response["result"]["shutting_down"], json!(true));
+        timeout(Duration::from_secs(2), handle)
+            .await
+            .unwrap()
+            .unwrap()
+            .unwrap();
+    }
+
+    #[tokio::test]
+    async fn runtime_recall_rejects_conflicting_history_params() {
+        let socket_path = unique_path("recall-conflicting-history");
+        let mut config = DaemonRuntimeConfig::new(&socket_path);
+        config.maintenance_interval = Duration::from_secs(3600);
+        let handle = spawn_runtime(config).await;
+
+        timeout(Duration::from_secs(2), async {
+            while tokio::fs::metadata(&socket_path).await.is_err() {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .unwrap();
+
+        let recall_response = send_request(
+            &socket_path,
+            json!({
+                "jsonrpc":"2.0",
+                "method":"recall",
+                "params":{
+                    "query_text":"session:7",
+                    "namespace":"team.alpha",
+                    "as_of_tick":42,
+                    "at_snapshot":"before-refactor"
+                },
+                "id":"recall-conflicting-history"
+            }),
+        )
+        .await;
+
+        assert_eq!(recall_response["error"]["code"], json!(-32602));
+        assert_eq!(
+            recall_response["error"]["message"],
+            json!("as_of_tick and at_snapshot cannot be combined")
+        );
+
+        let shutdown_response = send_request(
+            &socket_path,
+            json!({"jsonrpc":"2.0","method":"shutdown","params":{},"id":"done"}),
+        )
+        .await;
+        assert_eq!(shutdown_response["result"]["shutting_down"], json!(true));
+        timeout(Duration::from_secs(2), handle)
+            .await
+            .unwrap()
+            .unwrap()
+            .unwrap();
+    }
+
+    #[tokio::test]
     async fn runtime_recall_uses_default_budget_when_limit_is_omitted() {
         let socket_path = unique_path("recall-default-budget");
         let mut config = DaemonRuntimeConfig::new(&socket_path);
@@ -1601,7 +1938,7 @@ mod tests {
             json!({
                 "jsonrpc":"2.0",
                 "method":"recall",
-                "params":{"query":"session:7","namespace":"team.alpha"},
+                "params":{"query_text":"session:7","namespace":"team.alpha"},
                 "id":"recall-default-budget"
             }),
         )
@@ -1661,7 +1998,10 @@ mod tests {
         )
         .await;
         assert_eq!(explain_response["result"]["allowed"], json!(false));
-        assert_eq!(explain_response["result"]["preflight_state"], json!("blocked"));
+        assert_eq!(
+            explain_response["result"]["preflight_state"],
+            json!("blocked")
+        );
         assert_eq!(
             explain_response["result"]["blocked_reasons"],
             json!(["confirmation_required"])
@@ -1840,11 +2180,9 @@ mod tests {
                 ["degraded_summary"],
             json!("planner-only inspect envelope; item hydration not implemented")
         );
-        assert!(
-            inspect_response["result"]["retrieval"]
-                .get("explain_trace")
-                .is_some()
-        );
+        assert!(inspect_response["result"]["retrieval"]
+            .get("explain_trace")
+            .is_some());
 
         let shutdown_response = send_request(
             &socket_path,
@@ -1904,11 +2242,9 @@ mod tests {
                 ["degraded_summary"],
             json!("planner-only explain envelope; evidence hydration not implemented")
         );
-        assert!(
-            explain_response["result"]["retrieval"]
-                .get("explain_trace")
-                .is_some()
-        );
+        assert!(explain_response["result"]["retrieval"]
+            .get("explain_trace")
+            .is_some());
 
         let shutdown_response = send_request(
             &socket_path,
@@ -1951,7 +2287,7 @@ mod tests {
 
         let result = &inspect_response["result"];
         assert_eq!(result["status"], json!("ok"));
-        assert!(result.get("payload" ).is_none());
+        assert!(result.get("payload").is_none());
         assert!(result.get("error").is_none());
 
         let retrieval = &result["retrieval"];
@@ -2327,7 +2663,8 @@ mod tests {
 
     #[tokio::test]
     async fn shutdown_skips_manual_run_maintenance_accounting_when_cancelled_before_first_step() {
-        let config = DaemonRuntimeConfig::new(unique_path("maintenance-budget-cancelled").as_path());
+        let config =
+            DaemonRuntimeConfig::new(unique_path("maintenance-budget-cancelled").as_path());
         let state = Arc::new(super::RuntimeState::new(&config));
 
         let maintenance_finished = super::DaemonRuntime::run_maintenance_budget(

@@ -271,7 +271,9 @@ mod tests {
             "unexpected": true
         }))
         .unwrap_err();
-        assert!(allow_error.to_string().contains("unknown field `unexpected`"));
+        assert!(allow_error
+            .to_string()
+            .contains("unknown field `unexpected`"));
 
         let outcome_error = serde_json::from_value::<PreflightOutcome>(json!({
             "success": true,

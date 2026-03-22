@@ -342,16 +342,36 @@ impl CacheHealthReport {
     /// Aggregates cache and prefetch health from the canonical cache manager.
     pub fn from_cache_manager(cache: &CacheManager) -> Self {
         let family_status = vec![
-            cache_family_health(CacheFamily::Tier1Item, &cache.tier1_item.metrics, cache.tier1_item.is_disabled()),
-            cache_family_health(CacheFamily::NegativeCache, &cache.negative.metrics, cache.negative.is_disabled()),
-            cache_family_health(CacheFamily::ResultCache, &cache.result.metrics, cache.result.is_disabled()),
+            cache_family_health(
+                CacheFamily::Tier1Item,
+                &cache.tier1_item.metrics,
+                cache.tier1_item.is_disabled(),
+            ),
+            cache_family_health(
+                CacheFamily::NegativeCache,
+                &cache.negative.metrics,
+                cache.negative.is_disabled(),
+            ),
+            cache_family_health(
+                CacheFamily::ResultCache,
+                &cache.result.metrics,
+                cache.result.is_disabled(),
+            ),
             cache_family_health(
                 CacheFamily::EntityNeighborhood,
                 &cache.entity_neighborhood.metrics,
                 cache.entity_neighborhood.is_disabled(),
             ),
-            cache_family_health(CacheFamily::SummaryCache, &cache.summary.metrics, cache.summary.is_disabled()),
-            cache_family_health(CacheFamily::AnnProbeCache, &cache.ann_probe.metrics, cache.ann_probe.is_disabled()),
+            cache_family_health(
+                CacheFamily::SummaryCache,
+                &cache.summary.metrics,
+                cache.summary.is_disabled(),
+            ),
+            cache_family_health(
+                CacheFamily::AnnProbeCache,
+                &cache.ann_probe.metrics,
+                cache.ann_probe.is_disabled(),
+            ),
             cache_family_health(
                 CacheFamily::SessionWarmup,
                 &cache.session_warmup.metrics,
@@ -362,13 +382,23 @@ impl CacheHealthReport {
                 &cache.goal_conditioned.metrics,
                 cache.goal_conditioned.is_disabled(),
             ),
-            cache_family_health(CacheFamily::ColdStartMitigation, &cache.cold_start.metrics, cache.cold_start.is_disabled()),
+            cache_family_health(
+                CacheFamily::ColdStartMitigation,
+                &cache.cold_start.metrics,
+                cache.cold_start.is_disabled(),
+            ),
         ];
         let total_hit_count = family_status.iter().map(|item| item.hit_count).sum();
         let total_miss_count = family_status.iter().map(|item| item.miss_count).sum();
         let total_bypass_count = family_status.iter().map(|item| item.bypass_count).sum();
-        let total_invalidation_count = family_status.iter().map(|item| item.invalidation_count).sum();
-        let total_stale_warning_count = family_status.iter().map(|item| item.stale_warning_count).sum();
+        let total_invalidation_count = family_status
+            .iter()
+            .map(|item| item.invalidation_count)
+            .sum();
+        let total_stale_warning_count = family_status
+            .iter()
+            .map(|item| item.stale_warning_count)
+            .sum();
         let state = if family_status
             .iter()
             .any(|item| item.state == SubsystemHealthState::Unavailable)
@@ -691,24 +721,33 @@ mod tests {
         );
 
         assert_eq!(report.hot_utilization_pct, 76.0);
-        assert_eq!(report.availability_posture, Some(AvailabilityPosture::Degraded));
+        assert_eq!(
+            report.availability_posture,
+            Some(AvailabilityPosture::Degraded)
+        );
         assert_eq!(report.backpressure_state, Some("high"));
         assert_eq!(report.repair_queue_depth, Some(2));
         assert_eq!(report.cache.state, SubsystemHealthState::Unavailable);
         assert_eq!(report.indexes.state, SubsystemHealthState::Degraded);
-        assert_eq!(report.repair.as_ref().map(|r| r.state), Some(SubsystemHealthState::Blocked));
+        assert_eq!(
+            report.repair.as_ref().map(|r| r.state),
+            Some(SubsystemHealthState::Blocked)
+        );
         assert!(report
             .subsystem_status
             .iter()
-            .any(|row| row.subsystem == "availability" && row.state == SubsystemHealthState::Degraded));
+            .any(|row| row.subsystem == "availability"
+                && row.state == SubsystemHealthState::Degraded));
         assert!(report
             .trends
             .iter()
-            .any(|trend| trend.metric == "total_recalls" && trend.direction == TrendDirection::Improving));
+            .any(|trend| trend.metric == "total_recalls"
+                && trend.direction == TrendDirection::Improving));
         assert!(report
             .trends
             .iter()
-            .any(|trend| trend.metric == "repair_queue_depth" && trend.direction == TrendDirection::Worsening));
+            .any(|trend| trend.metric == "repair_queue_depth"
+                && trend.direction == TrendDirection::Worsening));
         assert!(report
             .cache
             .family_status

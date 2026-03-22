@@ -865,25 +865,42 @@ fn completed_repair_snapshots_keep_verification_artifacts_and_operator_reports_s
         .expect("metadata report should be present")
         .clone();
 
-    for terminal_snapshot in [handle.snapshot(), handle.start(), handle.poll(), handle.cancel()] {
+    for terminal_snapshot in [
+        handle.snapshot(),
+        handle.start(),
+        handle.poll(),
+        handle.cancel(),
+    ] {
         let MaintenanceJobState::Completed(terminal_summary) = terminal_snapshot.state else {
             panic!("expected completed repair summary to stay stable");
         };
         assert_eq!(terminal_summary.targets_checked, 2);
         assert_eq!(terminal_summary.rebuilt, 2);
         assert_eq!(
-            terminal_summary.verification_artifacts.get(&RepairTarget::LexicalIndex),
+            terminal_summary
+                .verification_artifacts
+                .get(&RepairTarget::LexicalIndex),
             Some(&lexical_artifact)
         );
         assert_eq!(
-            terminal_summary.verification_artifacts.get(&RepairTarget::MetadataIndex),
+            terminal_summary
+                .verification_artifacts
+                .get(&RepairTarget::MetadataIndex),
             Some(&metadata_artifact)
         );
         assert!(terminal_summary.operator_reports.contains(&lexical_report));
         assert!(terminal_summary.operator_reports.contains(&metadata_report));
-        assert!(lexical_report.operator_log.contains(lexical_artifact.artifact_name));
-        assert!(lexical_report.operator_log.contains(lexical_artifact.parity_check));
-        assert!(metadata_report.operator_log.contains(metadata_artifact.artifact_name));
-        assert!(metadata_report.operator_log.contains(metadata_artifact.parity_check));
+        assert!(lexical_report
+            .operator_log
+            .contains(lexical_artifact.artifact_name));
+        assert!(lexical_report
+            .operator_log
+            .contains(lexical_artifact.parity_check));
+        assert!(metadata_report
+            .operator_log
+            .contains(metadata_artifact.artifact_name));
+        assert!(metadata_report
+            .operator_log
+            .contains(metadata_artifact.parity_check));
     }
 }

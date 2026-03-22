@@ -1477,7 +1477,10 @@ mod tests {
 
         let plan = RetrievalPlan::new(request);
 
-        assert_eq!(plan.budget_for_stage(PlannerStage::HotSemanticSearch), Some(80));
+        assert_eq!(
+            plan.budget_for_stage(PlannerStage::HotSemanticSearch),
+            Some(80)
+        );
         assert_eq!(plan.budget_for_stage(PlannerStage::Float32Rescore), Some(7));
     }
 }

@@ -233,7 +233,10 @@ mod tests {
 
     #[test]
     fn durable_schema_object_names_stay_machine_readable() {
-        assert_eq!(DurableSchemaObject::MemoryItemsTable.as_str(), "memory_items");
+        assert_eq!(
+            DurableSchemaObject::MemoryItemsTable.as_str(),
+            "memory_items"
+        );
         assert_eq!(
             DurableSchemaObject::MemoryPayloadsTable.as_str(),
             "memory_payloads"

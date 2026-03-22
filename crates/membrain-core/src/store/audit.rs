@@ -413,8 +413,7 @@ mod tests {
 
         let namespace_entries = log.entries_for_namespace(&namespace);
         let rollback_entries = log.entries_for_related_run("repair-run-17");
-        let degraded_entries =
-            log.entries_for_kind(AuditEventKind::MaintenanceRepairDegraded);
+        let degraded_entries = log.entries_for_kind(AuditEventKind::MaintenanceRepairDegraded);
         let rollback_trigger_entries =
             log.entries_for_kind(AuditEventKind::MaintenanceRepairRollbackTriggered);
         let rollback_completed_entries =
@@ -641,6 +640,9 @@ mod tests {
             Some("contradiction-archive-run")
         );
         assert!(!entry.redacted);
-        assert_eq!(log.entries_for_request_id("req-contradiction-10"), vec![entry]);
+        assert_eq!(
+            log.entries_for_request_id("req-contradiction-10"),
+            vec![entry]
+        );
     }
 }

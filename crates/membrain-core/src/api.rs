@@ -584,11 +584,11 @@ impl TraceStage {
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
 pub struct ResultReason {
     pub memory_id: Option<MemoryId>,
-    pub reason_code: &'static str,
-    pub reason_family: &'static str,
+    pub reason_code: String,
+    pub reason_family: String,
     pub route_stage: TraceStage,
     pub policy_filter_applied: bool,
-    pub detail: &'static str,
+    pub detail: String,
 }
 
 /// Shared policy summary for explain surfaces.
@@ -607,8 +607,8 @@ pub struct TracePolicySummary {
 /// Shared provenance summary for explain surfaces.
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
 pub struct TraceProvenanceSummary {
-    pub source_kind: &'static str,
-    pub source_reference: &'static str,
+    pub source_kind: String,
+    pub source_reference: String,
     pub lineage_ancestors: Vec<MemoryId>,
 }
 
@@ -622,6 +622,7 @@ pub struct TraceOmissionSummary {
     pub duplicate_collapsed: usize,
     pub low_confidence_suppressed: usize,
     pub stale_bypassed: usize,
+    pub confidence_filtered: usize,
 }
 
 impl TraceOmissionSummary {
@@ -635,6 +636,7 @@ impl TraceOmissionSummary {
             duplicate_collapsed: omission.duplicate_collapsed,
             low_confidence_suppressed: omission.low_confidence_suppressed,
             stale_bypassed: omission.stale_bypassed,
+            confidence_filtered: omission.confidence_filtered,
         }
     }
 
@@ -670,19 +672,28 @@ impl RouteSummary {
             }
             _ => "custom_route_reason",
         };
-        let fallback_reason = result_set
-            .explain
-            .trace_stages
-            .last()
-            .and_then(|stage| match stage {
-                crate::engine::recall::RecallTraceStage::Tier3Fallback => Some("tier3_fallback"),
-                crate::engine::recall::RecallTraceStage::Tier2Exact
-                    if !result_set.explain.tier1_answered_directly
-                        && result_set.explain.trace_stages.iter().any(|stage| {
-                            matches!(stage, crate::engine::recall::RecallTraceStage::Tier1RecentWindow)
-                        }) => Some("tier1_recent_insufficient"),
-                _ => None,
-            });
+        let fallback_reason =
+            result_set
+                .explain
+                .trace_stages
+                .last()
+                .and_then(|stage| match stage {
+                    crate::engine::recall::RecallTraceStage::Tier3Fallback => {
+                        Some("tier3_fallback")
+                    }
+                    crate::engine::recall::RecallTraceStage::Tier2Exact
+                        if !result_set.explain.tier1_answered_directly
+                            && result_set.explain.trace_stages.iter().any(|stage| {
+                                matches!(
+                                    stage,
+                                    crate::engine::recall::RecallTraceStage::Tier1RecentWindow
+                                )
+                            }) =>
+                    {
+                        Some("tier1_recent_insufficient")
+                    }
+                    _ => None,
+                });
 
         Self {
             route_family,
@@ -738,7 +749,9 @@ impl ResultReason {
             _ => "custom",
         };
         let route_stage = match reason_code {
-            "score_kept" | "no_match" | "tier2_exact_match"
+            "score_kept"
+            | "no_match"
+            | "tier2_exact_match"
             | "temporal_prefilter_metadata_only"
             | "temporal_payload_deferred"
             | "temporal_landmark_selected"
@@ -751,11 +764,11 @@ impl ResultReason {
 
         Self {
             memory_id: reason.memory_id,
-            reason_code,
-            reason_family,
+            reason_code: reason_code.to_string(),
+            reason_family: reason_family.to_string(),
             route_stage,
             policy_filter_applied: false,
-            detail: Box::leak(reason.detail.clone().into_boxed_str()),
+            detail: reason.detail.clone(),
         }
     }
 }
@@ -764,7 +777,11 @@ impl TracePolicySummary {
     /// Builds the shared policy summary from one retrieval result set.
     pub fn from_result_set(result_set: &RetrievalResultSet) -> Self {
         Self {
-            effective_namespace: result_set.policy_summary.namespace_applied.as_str().to_string(),
+            effective_namespace: result_set
+                .policy_summary
+                .namespace_applied
+                .as_str()
+                .to_string(),
             policy_family: "namespace",
             outcome_class: result_set.policy_summary.outcome_class,
             blocked_stage: "not_blocked",
@@ -779,15 +796,17 @@ impl TracePolicySummary {
                 .policy_summary
                 .filters
                 .iter()
-                .map(|filter| PolicyFilterSummary::new(
-                    filter.effective_namespace.clone(),
-                    filter.policy_family.clone(),
-                    filter.outcome_class,
-                    filter.blocked_stage.clone(),
-                    filter.sharing_scope.clone(),
-                    filter.retention_marker.clone(),
-                    filter.redaction_fields.clone(),
-                ))
+                .map(|filter| {
+                    PolicyFilterSummary::new(
+                        filter.effective_namespace.clone(),
+                        filter.policy_family.clone(),
+                        filter.outcome_class,
+                        filter.blocked_stage.clone(),
+                        filter.sharing_scope.clone(),
+                        filter.retention_marker.clone(),
+                        filter.redaction_fields.clone(),
+                    )
+                })
                 .collect(),
         }
     }
@@ -797,14 +816,8 @@ impl TraceProvenanceSummary {
     /// Builds the shared provenance summary from one retrieval result set.
     pub fn from_result_set(result_set: &RetrievalResultSet) -> Self {
         Self {
-            source_kind: Box::leak(result_set.provenance_summary.source_kind.clone().into_boxed_str()),
-            source_reference: Box::leak(
-                result_set
-                    .provenance_summary
-                    .source_reference
-                    .clone()
-                    .into_boxed_str(),
-            ),
+            source_kind: result_set.provenance_summary.source_kind.clone(),
+            source_reference: result_set.provenance_summary.source_reference.clone(),
             lineage_ancestors: result_set.provenance_summary.lineage_ancestors.clone(),
         }
     }
@@ -1557,10 +1570,14 @@ mod tests {
             deferred_payloads: Vec::new(),
             explain: RetrievalExplain {
                 recall_plan: RecallPlanKind::RecentTier1ThenTier2Exact,
-                route_reason: "small session lookup scans the Tier1 recent window before Tier2 exact"
-                    .to_string(),
+                route_reason:
+                    "small session lookup scans the Tier1 recent window before Tier2 exact"
+                        .to_string(),
                 tiers_consulted: vec!["tier1_recent".to_string(), "tier2_exact".to_string()],
-                trace_stages: vec![RecallTraceStage::Tier1RecentWindow, RecallTraceStage::Tier2Exact],
+                trace_stages: vec![
+                    RecallTraceStage::Tier1RecentWindow,
+                    RecallTraceStage::Tier2Exact,
+                ],
                 tier1_answered_directly: false,
                 candidate_budget: 8,
                 time_consumed_ms: Some(7),
@@ -1593,6 +1610,7 @@ mod tests {
                 duplicate_collapsed: 0,
                 low_confidence_suppressed: 0,
                 stale_bypassed: 0,
+                confidence_filtered: 0,
             },
             freshness_markers: FreshnessMarkers {
                 oldest_item_days: 0,
@@ -1673,11 +1691,11 @@ mod tests {
             ],
             vec![ResultReason {
                 memory_id: None,
-                reason_code: "tier2_exact_match",
-                reason_family: "selection",
+                reason_code: "tier2_exact_match".to_string(),
+                reason_family: "selection".to_string(),
                 route_stage: TraceStage::Tier2Exact,
                 policy_filter_applied: false,
-                detail: "candidate survived bounded ranking",
+                detail: "candidate survived bounded ranking".to_string(),
             }],
             TraceOmissionSummary {
                 policy_redacted: 0,
@@ -1687,6 +1705,7 @@ mod tests {
                 duplicate_collapsed: 1,
                 low_confidence_suppressed: 0,
                 stale_bypassed: 0,
+                confidence_filtered: 0,
             },
             vec![
                 TraceScoreComponent {
@@ -1719,8 +1738,8 @@ mod tests {
                 )],
             },
             TraceProvenanceSummary {
-                source_kind: "memory",
-                source_reference: "memory_id",
+                source_kind: "memory".to_string(),
+                source_reference: "memory_id".to_string(),
                 lineage_ancestors: Vec::new(),
             },
             vec![FreshnessMarker {
@@ -1925,6 +1944,7 @@ mod tests {
                     duplicate_collapsed: 1,
                     low_confidence_suppressed: 0,
                     stale_bypassed: 0,
+                    confidence_filtered: 0,
                 },
                 score_components: vec![
                     TraceScoreComponent {
@@ -1977,11 +1997,11 @@ mod tests {
             vec![TraceStage::PolicyGate, TraceStage::Tier2Exact],
             vec![ResultReason {
                 memory_id: None,
-                reason_code: "tier2_exact_match",
-                reason_family: "selection",
+                reason_code: "tier2_exact_match".to_string(),
+                reason_family: "selection".to_string(),
                 route_stage: TraceStage::Tier2Exact,
                 policy_filter_applied: false,
-                detail: "candidate survived bounded ranking",
+                detail: "candidate survived bounded ranking".to_string(),
             }],
             TraceOmissionSummary {
                 policy_redacted: 0,
@@ -1991,6 +2011,7 @@ mod tests {
                 duplicate_collapsed: 0,
                 low_confidence_suppressed: 0,
                 stale_bypassed: 0,
+                confidence_filtered: 0,
             },
             vec![TraceScoreComponent {
                 signal_family: "relevance",
@@ -2016,8 +2037,8 @@ mod tests {
                 )],
             },
             TraceProvenanceSummary {
-                source_kind: "memory",
-                source_reference: "memory_id",
+                source_kind: "memory".to_string(),
+                source_reference: "memory_id".to_string(),
                 lineage_ancestors: Vec::new(),
             },
             vec![FreshnessMarker {
@@ -2152,10 +2173,7 @@ mod tests {
         );
         assert_eq!(
             repair_rollback.reason_names(),
-            vec![
-                "repair_rollback_required",
-                "repair_rollback_in_progress",
-            ],
+            vec!["repair_rollback_required", "repair_rollback_in_progress",],
         );
         assert_eq!(
             repair_rollback.recovery_condition_names(),

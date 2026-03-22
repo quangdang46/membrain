@@ -5,7 +5,6 @@
 //! score. It produces explain payloads that downstream surfaces can inspect.
 
 use crate::engine::contradiction::ContradictionExplain;
-use crate::types::MemoryId;
 
 // ── Score components ─────────────────────────────────────────────────────────
 
@@ -47,6 +46,8 @@ pub enum ScoreFamily {
     Provenance,
     /// Contradiction-aware penalty or boost.
     ConflictAdjustment,
+    /// Confidence-derived reliability signal from evidence inputs.
+    Confidence,
 }
 
 impl ScoreFamily {
@@ -58,17 +59,19 @@ impl ScoreFamily {
             Self::Strength => "strength",
             Self::Provenance => "provenance",
             Self::ConflictAdjustment => "conflict_adjustment",
+            Self::Confidence => "confidence",
         }
     }
 
     /// Default weight for this signal family (0..100).
     pub const fn default_weight(self) -> u8 {
         match self {
-            Self::Recency => 30,
-            Self::Salience => 30,
-            Self::Strength => 25,
-            Self::Provenance => 10,
-            Self::ConflictAdjustment => 5,
+            Self::Recency => 28,
+            Self::Salience => 28,
+            Self::Strength => 22,
+            Self::Provenance => 8,
+            Self::ConflictAdjustment => 4,
+            Self::Confidence => 10,
         }
     }
 }
@@ -83,6 +86,7 @@ pub struct RankingProfile {
     pub strength_weight: u8,
     pub provenance_weight: u8,
     pub conflict_weight: u8,
+    pub confidence_weight: u8,
 }
 
 impl RankingProfile {
@@ -94,28 +98,43 @@ impl RankingProfile {
             strength_weight: ScoreFamily::Strength.default_weight(),
             provenance_weight: ScoreFamily::Provenance.default_weight(),
             conflict_weight: ScoreFamily::ConflictAdjustment.default_weight(),
+            confidence_weight: ScoreFamily::Confidence.default_weight(),
         }
     }
 
     /// Recency-biased profile for "what happened recently" queries.
     pub const fn recency_biased() -> Self {
         Self {
-            recency_weight: 45,
-            salience_weight: 25,
+            recency_weight: 40,
+            salience_weight: 23,
             strength_weight: 15,
-            provenance_weight: 10,
-            conflict_weight: 5,
+            provenance_weight: 8,
+            conflict_weight: 4,
+            confidence_weight: 10,
         }
     }
 
     /// Strength-biased profile for reinforced-memory queries.
     pub const fn strength_biased() -> Self {
         Self {
+            recency_weight: 12,
+            salience_weight: 18,
+            strength_weight: 45,
+            provenance_weight: 8,
+            conflict_weight: 4,
+            confidence_weight: 13,
+        }
+    }
+
+    /// Confidence-biased profile for high-stakes queries where reliability matters most.
+    pub const fn confidence_biased() -> Self {
+        Self {
             recency_weight: 15,
-            salience_weight: 20,
-            strength_weight: 50,
+            salience_weight: 15,
+            strength_weight: 15,
             provenance_weight: 10,
             conflict_weight: 5,
+            confidence_weight: 40,
         }
     }
 }
@@ -142,6 +161,9 @@ pub struct RankingInput {
     /// Conflict adjustment: positive boosts preferred, negative penalizes superseded.
     /// Stored as 500 = neutral, 0 = max penalty, 1000 = max boost.
     pub conflict: u16,
+    /// Confidence-derived reliability score (0..1000, higher = more certain).
+    /// Computed from evidence inputs (corroboration, freshness, contradiction, provenance).
+    pub confidence: u16,
 }
 
 /// Declared local reranker mode for the final bounded candidate slice.
@@ -218,6 +240,7 @@ pub fn fuse_scores(input: RankingInput, profile: RankingProfile) -> RankingResul
             input.conflict,
             profile.conflict_weight,
         ),
+        ScoreSignal::new("confidence", input.confidence, profile.confidence_weight),
     ];
 
     let total_weighted: u32 = signals.iter().map(|s| s.weighted_value).sum();
@@ -230,6 +253,8 @@ pub fn fuse_scores(input: RankingInput, profile: RankingProfile) -> RankingResul
         "recency_biased"
     } else if profile == RankingProfile::strength_biased() {
         "strength_biased"
+    } else if profile == RankingProfile::confidence_biased() {
+        "confidence_biased"
     } else {
         "custom"
     };
@@ -287,15 +312,87 @@ impl RankingExplain {
             signal_for(ScoreFamily::Strength),
             signal_for(ScoreFamily::Provenance),
             signal_for(ScoreFamily::ConflictAdjustment),
+            signal_for(ScoreFamily::Confidence),
         ];
 
         Self {
             final_score: result.final_score,
-            total_weighted_score: result.signals.iter().map(|signal| signal.weighted_value).sum(),
+            total_weighted_score: result
+                .signals
+                .iter()
+                .map(|signal| signal.weighted_value)
+                .sum(),
             signal_breakdown,
             profile: result.profile_name.to_string(),
             has_conflict: !result.contradiction_explains.is_empty(),
             contradiction_details: result.contradiction_explains.clone(),
+        }
+    }
+}
+
+// ── Confidence-aware display and filtering ────────────────────────────────────
+
+/// Confidence interval data attached to retrieval explain outputs.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct ConfidenceIntervalDisplay {
+    /// Point estimate of confidence (0..1000).
+    pub point: u16,
+    /// Lower bound of the confidence interval.
+    pub lower: u16,
+    /// Upper bound of the confidence interval.
+    pub upper: u16,
+    /// Width of the interval (upper - lower).
+    pub width: u16,
+}
+
+/// Configuration for confidence-aware retrieval filtering and display.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct ConfidenceDisplayConfig {
+    /// Minimum confidence score (0..1000) for a result to be included.
+    /// Results below this threshold are suppressed from the output.
+    pub min_confidence_threshold: u16,
+    /// Whether to compute and display confidence intervals.
+    pub show_confidence_intervals: bool,
+    /// Whether to include uncertainty breakdown (corroboration, freshness, etc.) in explain.
+    pub show_uncertainty_breakdown: bool,
+    /// Whether to tag low-confidence results with a warning marker.
+    pub tag_low_confidence: bool,
+    /// Threshold below which results are tagged as "low_confidence" (0..1000).
+    pub low_confidence_tag_threshold: u16,
+}
+
+impl Default for ConfidenceDisplayConfig {
+    fn default() -> Self {
+        Self {
+            min_confidence_threshold: 100,
+            show_confidence_intervals: true,
+            show_uncertainty_breakdown: true,
+            tag_low_confidence: true,
+            low_confidence_tag_threshold: 400,
+        }
+    }
+}
+
+impl ConfidenceDisplayConfig {
+    /// Permissive config that never filters and always shows everything.
+    pub const fn permissive() -> Self {
+        Self {
+            min_confidence_threshold: 0,
+            show_confidence_intervals: true,
+            show_uncertainty_breakdown: true,
+            tag_low_confidence: false,
+            low_confidence_tag_threshold: 0,
+        }
+    }
+
+    /// Strict config for high-stakes queries.
+    pub const fn strict() -> Self {
+        Self {
+            min_confidence_threshold: 500,
+            show_confidence_intervals: true,
+            show_uncertainty_breakdown: true,
+            tag_low_confidence: true,
+            low_confidence_tag_threshold: 600,
         }
     }
 }
@@ -336,7 +433,8 @@ mod tests {
             + p.salience_weight as u16
             + p.strength_weight as u16
             + p.provenance_weight as u16
-            + p.conflict_weight as u16;
+            + p.conflict_weight as u16
+            + p.confidence_weight as u16;
         assert_eq!(total, 100);
     }
 
@@ -347,7 +445,8 @@ mod tests {
             + p.salience_weight as u16
             + p.strength_weight as u16
             + p.provenance_weight as u16
-            + p.conflict_weight as u16;
+            + p.conflict_weight as u16
+            + p.confidence_weight as u16;
         assert_eq!(total, 100);
     }
 
@@ -358,7 +457,8 @@ mod tests {
             + p.salience_weight as u16
             + p.strength_weight as u16
             + p.provenance_weight as u16
-            + p.conflict_weight as u16;
+            + p.conflict_weight as u16
+            + p.confidence_weight as u16;
         assert_eq!(total, 100);
     }
 
@@ -370,6 +470,7 @@ mod tests {
             strength: 1000,
             provenance: 1000,
             conflict: 1000,
+            confidence: 1000,
         };
         let result = fuse_scores(input, RankingProfile::balanced());
         assert_eq!(result.final_score, 1000);
@@ -384,6 +485,7 @@ mod tests {
             strength: 0,
             provenance: 0,
             conflict: 0,
+            confidence: 0,
         };
         let result = fuse_scores(input, RankingProfile::balanced());
         assert_eq!(result.final_score, 0);
@@ -397,6 +499,7 @@ mod tests {
             strength: 1000,
             provenance: 300,
             conflict: 500,
+            confidence: 500,
         };
         let high_recency = RankingInput {
             recency: 1000,
@@ -404,6 +507,7 @@ mod tests {
             strength: 200,
             provenance: 300,
             conflict: 500,
+            confidence: 500,
         };
 
         let profile = RankingProfile::strength_biased();
@@ -421,6 +525,7 @@ mod tests {
             strength: 900,
             provenance: 700,
             conflict: 500,
+            confidence: 500,
         };
         let result = fuse_scores(input, RankingProfile::balanced());
         let explain = RankingExplain::from_result(&result);
@@ -428,10 +533,20 @@ mod tests {
         assert_eq!(explain.final_score, result.final_score);
         assert_eq!(explain.profile, "balanced");
         assert!(!explain.has_conflict);
-        assert_eq!(explain.total_weighted_score, result.signals.iter().map(|signal| signal.weighted_value).sum::<u32>());
-        assert_eq!(explain.signal_breakdown.len(), 5);
+        assert_eq!(
+            explain.total_weighted_score,
+            result
+                .signals
+                .iter()
+                .map(|signal| signal.weighted_value)
+                .sum::<u32>()
+        );
+        assert_eq!(explain.signal_breakdown.len(), 6);
         assert_eq!(explain.signal_breakdown[0].0, ScoreFamily::Recency);
-        assert_eq!(explain.signal_breakdown[0].3, result.signals[0].weighted_value);
+        assert_eq!(
+            explain.signal_breakdown[0].3,
+            result.signals[0].weighted_value
+        );
     }
 
     #[test]
@@ -450,10 +565,20 @@ mod tests {
 
         let explain = RankingExplain::from_result(&result);
 
-        assert_eq!(explain.signal_breakdown.len(), 5);
+        assert_eq!(explain.signal_breakdown.len(), 6);
         assert_eq!(explain.total_weighted_score, 600);
-        assert_eq!(explain.signal_breakdown[0], (ScoreFamily::Recency, 800, 15, 120));
-        assert_eq!(explain.signal_breakdown[1], (ScoreFamily::Salience, 0, 30, 0));
+        assert_eq!(
+            explain.signal_breakdown[5],
+            (ScoreFamily::Confidence, 0, 10, 0)
+        );
+        assert_eq!(
+            explain.signal_breakdown[0],
+            (ScoreFamily::Recency, 800, 15, 120)
+        );
+        assert_eq!(
+            explain.signal_breakdown[1],
+            (ScoreFamily::Salience, 0, 28, 0)
+        );
         assert_eq!(
             explain.signal_breakdown[2],
             (ScoreFamily::Strength, 900, 50, 450)
@@ -464,7 +589,11 @@ mod tests {
         );
         assert_eq!(
             explain.signal_breakdown[4],
-            (ScoreFamily::ConflictAdjustment, 0, 5, 0)
+            (ScoreFamily::ConflictAdjustment, 0, 4, 0)
+        );
+        assert_eq!(
+            explain.signal_breakdown[5],
+            (ScoreFamily::Confidence, 0, 10, 0)
         );
     }
 
@@ -479,10 +608,14 @@ mod tests {
             strength: 500,
             provenance: 500,
             conflict: 500,
+            confidence: 500,
         };
         let result = engine.rank_candidate(input, RankingProfile::balanced());
         assert_eq!(result.final_score, 500);
-        assert_eq!(result.rerank_metadata.local_reranker_mode.as_str(), "disabled");
+        assert_eq!(
+            result.rerank_metadata.local_reranker_mode.as_str(),
+            "disabled"
+        );
         assert!(!result.rerank_metadata.local_reranker_applied);
     }
 
@@ -495,5 +628,411 @@ mod tests {
         assert_eq!(metadata.local_reranker_mode, LocalRerankerMode::Disabled);
         assert!(!metadata.local_reranker_applied);
         assert_eq!(metadata.rerank_score_delta, 0);
+    }
+
+    // ── Calibration fixtures and score-breakdown artifacts ────────────────
+
+    /// A single calibration input with a stable label for regression detection.
+    #[derive(Debug, Clone, PartialEq)]
+    pub struct CalibrationFixture {
+        /// Stable human-readable label for this fixture.
+        pub label: &'static str,
+        /// Ranking input signals.
+        pub input: RankingInput,
+    }
+
+    /// Expected ordering invariant for a set of calibration fixtures.
+    #[derive(Debug, Clone, PartialEq, Eq)]
+    pub struct OrderingInvariant {
+        /// Label of the item expected to rank higher.
+        pub higher: &'static str,
+        /// Label of the item expected to rank lower.
+        pub lower: &'static str,
+    }
+
+    /// Score breakdown for one candidate captured in a calibration artifact.
+    #[derive(Debug, Clone, PartialEq, Eq)]
+    pub struct ScoreBreakdownArtifact {
+        /// Label of the candidate.
+        pub label: &'static str,
+        /// Final fused score.
+        pub final_score: u16,
+        /// Per-signal weighted contributions in order.
+        pub signal_contributions: Vec<(&'static str, u16, u8, u32)>,
+    }
+
+    /// Calibration artifact produced by running fixtures through a profile.
+    #[derive(Debug, Clone, PartialEq)]
+    pub struct CalibrationArtifact {
+        /// Profile name used for this calibration run.
+        pub profile_name: &'static str,
+        /// Score breakdowns ordered by descending final score.
+        pub ranked_candidates: Vec<ScoreBreakdownArtifact>,
+        /// Whether all ordering invariants held.
+        pub ordering_invariants_satisfied: bool,
+        /// Total weighted score sum before capping.
+        pub total_weighted_sum: u32,
+    }
+
+    /// Representative calibration fixtures covering distinct signal patterns.
+    pub fn calibration_fixtures() -> Vec<CalibrationFixture> {
+        vec![
+            CalibrationFixture {
+                label: "recent_low_strength",
+                input: RankingInput {
+                    recency: 900,
+                    salience: 300,
+                    strength: 200,
+                    provenance: 500,
+                    conflict: 500,
+                    confidence: 500,
+                },
+            },
+            CalibrationFixture {
+                label: "strong_old",
+                input: RankingInput {
+                    recency: 100,
+                    salience: 400,
+                    strength: 950,
+                    provenance: 600,
+                    conflict: 500,
+                    confidence: 500,
+                },
+            },
+            CalibrationFixture {
+                label: "high_salience_med",
+                input: RankingInput {
+                    recency: 500,
+                    salience: 950,
+                    strength: 500,
+                    provenance: 400,
+                    conflict: 500,
+                    confidence: 500,
+                },
+            },
+            CalibrationFixture {
+                label: "provenance_heavy",
+                input: RankingInput {
+                    recency: 300,
+                    salience: 300,
+                    strength: 300,
+                    provenance: 950,
+                    conflict: 500,
+                    confidence: 500,
+                },
+            },
+            CalibrationFixture {
+                label: "conflict_penalized",
+                input: RankingInput {
+                    recency: 100,
+                    salience: 100,
+                    strength: 100,
+                    provenance: 100,
+                    conflict: 0,
+                    confidence: 0,
+                },
+            },
+            CalibrationFixture {
+                label: "all_mid",
+                input: RankingInput {
+                    recency: 500,
+                    salience: 500,
+                    strength: 500,
+                    provenance: 500,
+                    conflict: 500,
+                    confidence: 500,
+                },
+            },
+            CalibrationFixture {
+                label: "zero_signals",
+                input: RankingInput {
+                    recency: 0,
+                    salience: 0,
+                    strength: 0,
+                    provenance: 0,
+                    conflict: 0,
+                    confidence: 0,
+                },
+            },
+            CalibrationFixture {
+                label: "max_signals",
+                input: RankingInput {
+                    recency: 1000,
+                    salience: 1000,
+                    strength: 1000,
+                    provenance: 1000,
+                    conflict: 1000,
+                    confidence: 1000,
+                },
+            },
+        ]
+    }
+
+    /// Ordering invariants that must hold for the balanced profile.
+    pub fn balanced_ordering_invariants() -> Vec<OrderingInvariant> {
+        vec![
+            OrderingInvariant {
+                higher: "max_signals",
+                lower: "all_mid",
+            },
+            OrderingInvariant {
+                higher: "all_mid",
+                lower: "zero_signals",
+            },
+            OrderingInvariant {
+                higher: "recent_low_strength",
+                lower: "conflict_penalized",
+            },
+        ]
+    }
+
+    /// Runs calibration fixtures through a profile and produces an artifact.
+    pub fn run_calibration(
+        fixtures: &[CalibrationFixture],
+        profile: RankingProfile,
+        profile_name: &'static str,
+        invariants: &[OrderingInvariant],
+    ) -> CalibrationArtifact {
+        let mut scored: Vec<(CalibrationFixture, RankingResult)> = fixtures
+            .iter()
+            .map(|f| (f.clone(), fuse_scores(f.input, profile)))
+            .collect();
+
+        scored.sort_by(|a, b| b.1.final_score.cmp(&a.1.final_score));
+
+        let ranked_candidates = scored
+            .iter()
+            .map(|(fixture, result)| ScoreBreakdownArtifact {
+                label: fixture.label,
+                final_score: result.final_score,
+                signal_contributions: result
+                    .signals
+                    .iter()
+                    .map(|s| (s.name, s.raw_value, s.weight, s.weighted_value))
+                    .collect(),
+            })
+            .collect();
+
+        let label_to_score: std::collections::HashMap<&str, u16> = scored
+            .iter()
+            .map(|(f, r)| (f.label, r.final_score))
+            .collect();
+
+        let ordering_invariants_satisfied = invariants.iter().all(|inv| {
+            let higher_score = label_to_score.get(inv.higher).copied().unwrap_or(0);
+            let lower_score = label_to_score.get(inv.lower).copied().unwrap_or(0);
+            higher_score >= lower_score
+        });
+
+        let total_weighted_sum = scored
+            .iter()
+            .map(|(_, r)| r.signals.iter().map(|s| s.weighted_value).sum::<u32>())
+            .sum();
+
+        CalibrationArtifact {
+            profile_name,
+            ranked_candidates,
+            ordering_invariants_satisfied,
+            total_weighted_sum,
+        }
+    }
+
+    #[test]
+    fn calibration_fixtures_cover_eight_signal_patterns() {
+        let fixtures = calibration_fixtures();
+        assert_eq!(fixtures.len(), 8);
+        let labels: Vec<&str> = fixtures.iter().map(|f| f.label).collect();
+        assert!(labels.contains(&"recent_low_strength"));
+        assert!(labels.contains(&"strong_old"));
+        assert!(labels.contains(&"max_signals"));
+        assert!(labels.contains(&"zero_signals"));
+    }
+
+    #[test]
+    fn calibration_artifact_ranked_descending() {
+        let fixtures = calibration_fixtures();
+        let invariants = balanced_ordering_invariants();
+        let artifact = run_calibration(
+            &fixtures,
+            RankingProfile::balanced(),
+            "balanced",
+            &invariants,
+        );
+
+        assert_eq!(artifact.profile_name, "balanced");
+        assert_eq!(artifact.ranked_candidates.len(), 8);
+        // Verify descending order.
+        for window in artifact.ranked_candidates.windows(2) {
+            assert!(
+                window[0].final_score >= window[1].final_score,
+                "{} ({}) should >= {} ({})",
+                window[0].label,
+                window[0].final_score,
+                window[1].label,
+                window[1].final_score,
+            );
+        }
+    }
+
+    #[test]
+    fn calibration_ordering_invariants_hold_for_balanced() {
+        let fixtures = calibration_fixtures();
+        let invariants = balanced_ordering_invariants();
+        let artifact = run_calibration(
+            &fixtures,
+            RankingProfile::balanced(),
+            "balanced",
+            &invariants,
+        );
+        assert!(artifact.ordering_invariants_satisfied);
+    }
+
+    #[test]
+    fn calibration_max_beats_mid_beats_zero() {
+        let fixtures = calibration_fixtures();
+        let invariants = balanced_ordering_invariants();
+        let artifact = run_calibration(
+            &fixtures,
+            RankingProfile::balanced(),
+            "balanced",
+            &invariants,
+        );
+
+        let max = artifact
+            .ranked_candidates
+            .iter()
+            .find(|c| c.label == "max_signals")
+            .unwrap();
+        let mid = artifact
+            .ranked_candidates
+            .iter()
+            .find(|c| c.label == "all_mid")
+            .unwrap();
+        let zero = artifact
+            .ranked_candidates
+            .iter()
+            .find(|c| c.label == "zero_signals")
+            .unwrap();
+
+        assert_eq!(max.final_score, 1000);
+        assert_eq!(mid.final_score, 500);
+        assert_eq!(zero.final_score, 0);
+    }
+
+    #[test]
+    fn calibration_score_breakdown_shows_signal_contributions() {
+        let fixtures = calibration_fixtures();
+        let invariants = balanced_ordering_invariants();
+        let artifact = run_calibration(
+            &fixtures,
+            RankingProfile::balanced(),
+            "balanced",
+            &invariants,
+        );
+
+        let all_mid = artifact
+            .ranked_candidates
+            .iter()
+            .find(|c| c.label == "all_mid")
+            .unwrap();
+
+        assert_eq!(all_mid.signal_contributions.len(), 6);
+        // Each signal: raw=500, weight varies, weighted = raw * weight / 100
+        let recency_contrib = all_mid.signal_contributions[0];
+        assert_eq!(recency_contrib.0, "recency");
+        assert_eq!(recency_contrib.1, 500);
+        assert_eq!(recency_contrib.2, 28); // default weight
+        assert_eq!(recency_contrib.3, 140); // 500 * 28 / 100
+    }
+
+    #[test]
+    fn calibration_recency_biased_ranks_recent_higher_than_balanced() {
+        let fixtures = calibration_fixtures();
+        let invariants = vec![];
+
+        let balanced_artifact = run_calibration(
+            &fixtures,
+            RankingProfile::balanced(),
+            "balanced",
+            &invariants,
+        );
+        let recency_artifact = run_calibration(
+            &fixtures,
+            RankingProfile::recency_biased(),
+            "recency_biased",
+            &invariants,
+        );
+
+        let balanced_recent = balanced_artifact
+            .ranked_candidates
+            .iter()
+            .find(|c| c.label == "recent_low_strength")
+            .unwrap();
+        let recency_recent = recency_artifact
+            .ranked_candidates
+            .iter()
+            .find(|c| c.label == "recent_low_strength")
+            .unwrap();
+
+        // With recency bias, "recent_low_strength" should score higher.
+        assert!(recency_recent.final_score > balanced_recent.final_score);
+    }
+
+    #[test]
+    fn calibration_strength_biased_ranks_strong_higher_than_balanced() {
+        let fixtures = calibration_fixtures();
+        let invariants = vec![];
+
+        let balanced_artifact = run_calibration(
+            &fixtures,
+            RankingProfile::balanced(),
+            "balanced",
+            &invariants,
+        );
+        let strength_artifact = run_calibration(
+            &fixtures,
+            RankingProfile::strength_biased(),
+            "strength_biased",
+            &invariants,
+        );
+
+        let balanced_strong = balanced_artifact
+            .ranked_candidates
+            .iter()
+            .find(|c| c.label == "strong_old")
+            .unwrap();
+        let strength_strong = strength_artifact
+            .ranked_candidates
+            .iter()
+            .find(|c| c.label == "strong_old")
+            .unwrap();
+
+        assert!(strength_strong.final_score > balanced_strong.final_score);
+    }
+
+    #[test]
+    fn calibration_conflict_penalized_scores_below_all_mid() {
+        let fixtures = calibration_fixtures();
+        let invariants = balanced_ordering_invariants();
+        let artifact = run_calibration(
+            &fixtures,
+            RankingProfile::balanced(),
+            "balanced",
+            &invariants,
+        );
+
+        let conflict = artifact
+            .ranked_candidates
+            .iter()
+            .find(|c| c.label == "conflict_penalized")
+            .unwrap();
+        let mid = artifact
+            .ranked_candidates
+            .iter()
+            .find(|c| c.label == "all_mid")
+            .unwrap();
+
+        // conflict_penalized has high signals but conflict=100, should score below all_mid
+        assert!(conflict.final_score < mid.final_score);
     }
 }
