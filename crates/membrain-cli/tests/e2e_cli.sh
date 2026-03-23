@@ -1,46 +1,75 @@
 #!/usr/bin/env bash
-set -e
+set -euo pipefail
 
 # e2e_cli.sh
-# End-to-end test script demonstrating CLI parity, validation, and denial cases.
-# Run this script to simulate CLI usage and verify expected log outputs.
+# Logging-heavy CLI parity artifact for the currently exposed CLI surface.
+#
+# This script is intentionally honest about the current repo state:
+# - it uses the real clap spellings exposed by crates/membrain-cli/src/main.rs
+# - it does not invent unsupported flags like --content / --query / --limit
+# - if the CLI binary does not compile, it reports that blocker explicitly
+#
+# Usage:
+#   bash crates/membrain-cli/tests/e2e_cli.sh
 
-CLI_BIN="cargo run -p membrain-cli --"
+CLI_CMD=(cargo run -p membrain-cli --)
 
-echo "=== Membrain CLI End-to-End Test Suite ==="
+run_json() {
+  local label="$1"
+  shift
+  echo "=== ${label} ==="
+  if ! output="$(${CLI_CMD[@]} "$@" 2>&1)"; then
+    echo "$output"
+    return 1
+  fi
+  echo "$output"
+  echo
+}
 
-echo "1. Encode path test"
-$CLI_BIN encode --content "Paris is the capital of France" --namespace "test_ns" --memory-type "factual"
-echo "[OK] Encode path successful"
+echo "=== Membrain CLI parity artifact ==="
+echo "Binary: membrain"
+echo
 
-echo "2. Recall path test"
-$CLI_BIN recall --query "capital of France" --namespace "test_ns" --limit 5
-echo "[OK] Recall path successful"
+if ! help_output="$(${CLI_CMD[@]} --help 2>&1)"; then
+  echo "$help_output"
+  echo
+  echo "CLI build/help is currently blocked before end-to-end command checks can run."
+  echo "Known blocker path: crates/membrain-core/src/engine/reconsolidation.rs"
+  exit 1
+fi
 
-echo "3. Inspect path test"
-$CLI_BIN inspect --id 123 --namespace "test_ns"
-echo "[OK] Inspect path successful"
+echo "$help_output"
+echo
 
-echo "4. Explain path test"
-$CLI_BIN explain --query "capital of France" --namespace "test_ns"
-echo "[OK] Explain path successful"
+run_json "encode (json)" \
+  encode "Paris is the capital of France" \
+  --namespace test_ns \
+  --kind semantic \
+  --source cli-e2e \
+  --json
 
-echo "5. Maintenance path test"
-$CLI_BIN maintenance --action "repair" --namespace "test_ns"
-echo "[OK] Maintenance path successful"
+run_json "recall (json)" \
+  recall "capital of France" \
+  --namespace test_ns \
+  --top 3 \
+  --explain full \
+  --json
 
-echo "6. Benchmark path test"
-$CLI_BIN benchmark --target "latency" --iters 10
-echo "[OK] Benchmark path successful"
+run_json "inspect missing memory (json failure envelope)" \
+  inspect --id 123 --namespace test_ns --json
 
-echo "7. Doctor path test"
-$CLI_BIN doctor
-echo "[OK] Doctor path successful"
+run_json "explain (json)" \
+  explain "how to deploy the service after the last incident?" \
+  --namespace test_ns \
+  --json
 
-echo "8. Policy Denial Test (Simulated)"
-# Simulated: a command that fails due to policy/redaction. 
-# Requires future engine wired up to return proper `anyhow::bail!` for policy.
-echo "Simulating policy denial... (mocking expected stderr)"
-echo "Output: {\"status\": \"error\", \"category\": \"policy_denied\", \"reason\": \"Namespace access restricted\"}" >&2
+run_json "maintenance repair (json)" \
+  maintenance --action repair --namespace test_ns --json
 
-echo "=== All CLI tests passed ==="
+run_json "audit slice (json)" \
+  audit --namespace team.alpha --id 21 --recent 1 --json
+
+run_json "doctor (json)" \
+  doctor
+
+echo "=== CLI parity artifact completed ==="

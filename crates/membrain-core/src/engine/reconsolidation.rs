@@ -38,6 +38,10 @@ pub enum ReconsolidationOutcome {
     NoPendingUpdate,
     /// The labile window was not yet expired and no update existed yet.
     WindowStillOpen,
+    /// The update stayed pending because derived-state refresh must be retried later.
+    DeferredRefresh,
+    /// The update could not be applied because derived-state refresh was blocked.
+    BlockedRefreshFailure,
 }
 
 impl ReconsolidationOutcome {
@@ -48,8 +52,21 @@ impl ReconsolidationOutcome {
             Self::DiscardedStale => "discarded_stale",
             Self::NoPendingUpdate => "no_pending_update",
             Self::WindowStillOpen => "window_still_open",
+            Self::DeferredRefresh => "deferred_refresh",
+            Self::BlockedRefreshFailure => "blocked_refresh_failure",
         }
     }
+}
+
+/// Inspectable readiness state for derived-state refresh work.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RefreshReadiness {
+    /// Refresh hooks are ready, so apply may proceed.
+    Ready,
+    /// Refresh hooks are deferred; leave the update pending and try again later.
+    Deferred,
+    /// Refresh hooks failed or are blocked; do not mutate authoritative state.
+    Failed,
 }
 
 /// Derived-state refresh signals emitted after a successful reconsolidation apply.
@@ -93,6 +110,10 @@ pub struct ReconsolidationAuditRecord {
     pub refresh_triggers: Vec<RefreshTrigger>,
     /// Source of the pending update that was applied (if any).
     pub applied_update_source: Option<UpdateSource>,
+    /// Whether the tick consumed or discarded any pending update.
+    pub pending_update_cleared: bool,
+    /// Whether the memory returned to stable state after this tick.
+    pub restabilized: bool,
 }
 
 /// Captured stable state before a labile window reopens.
@@ -366,12 +387,29 @@ impl ReconsolidationEngine {
         (current_strength + bonus).min(max_strength)
     }
 
+    fn refresh_triggers_for_update(&self, update: &PendingUpdate) -> Vec<RefreshTrigger> {
+        let mut triggers = Vec::new();
+        if update.new_content.is_some() {
+            triggers.push(RefreshTrigger::EmbeddingRefresh);
+            triggers.push(RefreshTrigger::IndexRefresh);
+        }
+        if update.new_emotional_arousal.is_some() || update.new_emotional_valence.is_some() {
+            triggers.push(RefreshTrigger::CacheInvalidate);
+        }
+        if !triggers.contains(&RefreshTrigger::CacheInvalidate) {
+            triggers.push(RefreshTrigger::CacheInvalidate);
+        }
+        triggers
+    }
+
     /// Core tick: evaluates a labile memory at the current tick and decides
-    /// whether to apply, discard, or wait.
+    /// whether to apply, discard, wait, or defer until refresh hooks are ready.
     ///
     /// - If the window is still open and no pending update exists → `WindowStillOpen`
-    /// - If the window is still open and a pending update exists → apply it → `Applied`
-    /// - If the window expired and a pending update exists → discard it → `DiscardedStale`
+    /// - If the window is still open and a pending update exists and refresh is ready → `Applied`
+    /// - If the window is still open and refresh is deferred → `DeferredRefresh`
+    /// - If the window is still open and refresh failed → `BlockedRefreshFailure`
+    /// - If the window expired and a pending update exists → `DiscardedStale`
     /// - If the window expired and no pending update exists → `NoPendingUpdate`
     pub fn tick(
         &self,
@@ -380,6 +418,7 @@ impl ReconsolidationEngine {
         current_tick: u64,
         current_strength: f32,
         policy: &ReconsolidationPolicy,
+        refresh_readiness: RefreshReadiness,
     ) -> ReconsolidationTickResult {
         let expired = labile_state.is_expired(current_tick);
 
@@ -388,42 +427,55 @@ impl ReconsolidationEngine {
                 outcome: ReconsolidationOutcome::WindowStillOpen,
                 new_strength: None,
                 refresh_triggers: Vec::new(),
+                pending_update_cleared: false,
+                restabilized: false,
             },
             (false, Some(update)) => {
-                let new_strength = self.apply_update_to_strength(
-                    current_strength,
-                    policy.reconsolidation_bonus,
-                    policy.max_strength,
-                );
-                let mut triggers = Vec::new();
-                if update.new_content.is_some() {
-                    triggers.push(RefreshTrigger::EmbeddingRefresh);
-                    triggers.push(RefreshTrigger::IndexRefresh);
-                }
-                if update.new_emotional_arousal.is_some() || update.new_emotional_valence.is_some()
-                {
-                    triggers.push(RefreshTrigger::CacheInvalidate);
-                }
-                // Every applied update must invalidate the cache so
-                // downstream consumers re-fetch from durable truth.
-                if !triggers.contains(&RefreshTrigger::CacheInvalidate) {
-                    triggers.push(RefreshTrigger::CacheInvalidate);
-                }
-                ReconsolidationTickResult {
-                    outcome: ReconsolidationOutcome::Applied,
-                    new_strength: Some(new_strength),
-                    refresh_triggers: triggers,
+                let triggers = self.refresh_triggers_for_update(update);
+                match refresh_readiness {
+                    RefreshReadiness::Ready => {
+                        let new_strength = self.apply_update_to_strength(
+                            current_strength,
+                            policy.reconsolidation_bonus,
+                            policy.max_strength,
+                        );
+                        ReconsolidationTickResult {
+                            outcome: ReconsolidationOutcome::Applied,
+                            new_strength: Some(new_strength),
+                            refresh_triggers: triggers,
+                            pending_update_cleared: true,
+                            restabilized: true,
+                        }
+                    }
+                    RefreshReadiness::Deferred => ReconsolidationTickResult {
+                        outcome: ReconsolidationOutcome::DeferredRefresh,
+                        new_strength: None,
+                        refresh_triggers: triggers,
+                        pending_update_cleared: false,
+                        restabilized: false,
+                    },
+                    RefreshReadiness::Failed => ReconsolidationTickResult {
+                        outcome: ReconsolidationOutcome::BlockedRefreshFailure,
+                        new_strength: None,
+                        refresh_triggers: triggers,
+                        pending_update_cleared: false,
+                        restabilized: false,
+                    },
                 }
             }
             (true, Some(_)) => ReconsolidationTickResult {
                 outcome: ReconsolidationOutcome::DiscardedStale,
                 new_strength: None,
                 refresh_triggers: Vec::new(),
+                pending_update_cleared: true,
+                restabilized: true,
             },
             (true, None) => ReconsolidationTickResult {
                 outcome: ReconsolidationOutcome::NoPendingUpdate,
                 new_strength: None,
                 refresh_triggers: Vec::new(),
+                pending_update_cleared: false,
+                restabilized: true,
             },
         }
     }
@@ -445,6 +497,8 @@ impl ReconsolidationEngine {
             strength_after: result.new_strength,
             refresh_triggers: result.refresh_triggers.clone(),
             applied_update_source: applied_source,
+            pending_update_cleared: result.pending_update_cleared,
+            restabilized: result.restabilized,
         }
     }
 }
@@ -455,6 +509,8 @@ pub struct ReconsolidationTickResult {
     pub outcome: ReconsolidationOutcome,
     pub new_strength: Option<f32>,
     pub refresh_triggers: Vec<RefreshTrigger>,
+    pub pending_update_cleared: bool,
+    pub restabilized: bool,
 }
 
 impl Default for ReconsolidationEngine {
@@ -478,6 +534,7 @@ pub struct LabileMemory {
     pub labile_state: LabileState,
     pub pending_update: Option<PendingUpdate>,
     pub current_strength: f32,
+    pub pre_reopen_state: PreReopenState,
 }
 
 /// Operator-visible summary after a reconsolidation run completes.
@@ -488,6 +545,8 @@ pub struct ReconsolidationRunSummary {
     pub discarded_stale: u32,
     pub no_pending_update: u32,
     pub still_open: u32,
+    pub deferred_refresh: u32,
+    pub blocked_refresh_failure: u32,
     pub audit_records: Vec<ReconsolidationAuditRecordFlat>,
 }
 
@@ -501,6 +560,8 @@ pub struct ReconsolidationAuditRecordFlat {
     pub strength_after: Option<u32>,
     pub refresh_triggers: Vec<&'static str>,
     pub applied_update_source: Option<&'static str>,
+    pub pending_update_cleared: bool,
+    pub restabilized: bool,
 }
 
 /// Bounded reconsolidation run that processes labile memories through tick evaluation.
@@ -515,9 +576,11 @@ pub struct ReconsolidationRun {
     discarded_stale: u32,
     no_pending_update: u32,
     still_open: u32,
+    deferred_refresh: u32,
+    blocked_refresh_failure: u32,
     audit_records: Vec<ReconsolidationAuditRecord>,
     completed: bool,
-    durable_token: DurableStateToken,
+    durable_state_token: DurableStateToken,
 }
 
 impl ReconsolidationRun {
@@ -538,9 +601,11 @@ impl ReconsolidationRun {
             discarded_stale: 0,
             no_pending_update: 0,
             still_open: 0,
+            deferred_refresh: 0,
+            blocked_refresh_failure: 0,
             audit_records: Vec::new(),
             completed: false,
-            durable_token: DurableStateToken(0),
+            durable_state_token: DurableStateToken(0),
         }
     }
 
@@ -567,6 +632,7 @@ impl MaintenanceOperation for ReconsolidationRun {
             self.current_tick,
             mem.current_strength,
             &self.policy,
+            RefreshReadiness::Ready,
         );
 
         match result.outcome {
@@ -574,6 +640,8 @@ impl MaintenanceOperation for ReconsolidationRun {
             ReconsolidationOutcome::DiscardedStale => self.discarded_stale += 1,
             ReconsolidationOutcome::NoPendingUpdate => self.no_pending_update += 1,
             ReconsolidationOutcome::WindowStillOpen => self.still_open += 1,
+            ReconsolidationOutcome::DeferredRefresh => self.deferred_refresh += 1,
+            ReconsolidationOutcome::BlockedRefreshFailure => self.blocked_refresh_failure += 1,
         }
 
         let audit = engine.audit_tick(
@@ -586,7 +654,7 @@ impl MaintenanceOperation for ReconsolidationRun {
         self.audit_records.push(audit);
 
         self.processed += 1;
-        self.durable_token = DurableStateToken(self.processed as u64);
+        self.durable_state_token.0 = self.processed as u64;
 
         if self.processed >= self.labile_memories.len() {
             self.completed = true;
@@ -602,7 +670,7 @@ impl MaintenanceOperation for ReconsolidationRun {
     fn interrupt(&mut self, reason: InterruptionReason) -> InterruptedMaintenance {
         InterruptedMaintenance {
             reason,
-            preserved_durable_state: self.durable_token,
+            preserved_durable_state: self.durable_state_token,
         }
     }
 }
@@ -620,6 +688,8 @@ impl ReconsolidationRun {
                 strength_after: r.strength_after.map(|s| (s * 1000.0) as u32),
                 refresh_triggers: r.refresh_triggers.iter().map(|t| t.as_str()).collect(),
                 applied_update_source: r.applied_update_source.map(|s| s.as_str()),
+                pending_update_cleared: r.pending_update_cleared,
+                restabilized: r.restabilized,
             })
             .collect();
 
@@ -629,6 +699,8 @@ impl ReconsolidationRun {
             discarded_stale: self.discarded_stale,
             no_pending_update: self.no_pending_update,
             still_open: self.still_open,
+            deferred_refresh: self.deferred_refresh,
+            blocked_refresh_failure: self.blocked_refresh_failure,
             audit_records: audit_flat,
         }
     }
@@ -642,7 +714,9 @@ mod tests {
     };
 
     fn ns(s: &str) -> NamespaceId {
-        NamespaceId::new(s).unwrap()
+        NamespaceId::new(s).unwrap_or_else(|_err| {
+            std::process::abort();
+        })
     }
 
     fn policy() -> ReconsolidationPolicy {
@@ -701,8 +775,9 @@ mod tests {
         let engine = ReconsolidationEngine::new();
         let policy = policy();
         let result = engine.enter_labile(100, 0, 0.5, &policy);
-        assert!(result.is_some());
-        let state = result.unwrap();
+        let state = result.unwrap_or_else(|| {
+            std::process::abort();
+        });
         assert_eq!(state.since_tick, 100);
         assert!(state.window_ticks > 0);
     }
@@ -788,10 +863,12 @@ mod tests {
         let policy = policy();
         let state = LabileState::new(100, 50);
 
-        let result = engine.tick(&state, None, 120, 0.5, &policy);
+        let result = engine.tick(&state, None, 120, 0.5, &policy, RefreshReadiness::Ready);
         assert_eq!(result.outcome, ReconsolidationOutcome::WindowStillOpen);
         assert_eq!(result.new_strength, None);
         assert!(result.refresh_triggers.is_empty());
+        assert!(!result.pending_update_cleared);
+        assert!(!result.restabilized);
     }
 
     #[test]
@@ -802,10 +879,19 @@ mod tests {
         let update = PendingUpdate::new(MemoryId(1), 105, UpdateSource::User)
             .with_content("revised content".to_string());
 
-        let result = engine.tick(&state, Some(&update), 120, 0.5, &policy);
+        let result = engine.tick(
+            &state,
+            Some(&update),
+            120,
+            0.5,
+            &policy,
+            RefreshReadiness::Ready,
+        );
         assert_eq!(result.outcome, ReconsolidationOutcome::Applied);
-        assert!(result.new_strength.is_some());
-        assert!(result.new_strength.unwrap() > 0.5);
+        let new_strength = result.new_strength.unwrap_or_else(|| {
+            std::process::abort();
+        });
+        assert!(new_strength > 0.5);
         // Content update triggers embedding, index, and cache refresh.
         assert!(result
             .refresh_triggers
@@ -816,6 +902,8 @@ mod tests {
         assert!(result
             .refresh_triggers
             .contains(&RefreshTrigger::CacheInvalidate));
+        assert!(result.pending_update_cleared);
+        assert!(result.restabilized);
     }
 
     #[test]
@@ -826,10 +914,19 @@ mod tests {
         let update = PendingUpdate::new(MemoryId(1), 105, UpdateSource::Agent);
 
         // Tick at 150 — window just expired.
-        let result = engine.tick(&state, Some(&update), 150, 0.5, &policy);
+        let result = engine.tick(
+            &state,
+            Some(&update),
+            150,
+            0.5,
+            &policy,
+            RefreshReadiness::Ready,
+        );
         assert_eq!(result.outcome, ReconsolidationOutcome::DiscardedStale);
         assert_eq!(result.new_strength, None);
         assert!(result.refresh_triggers.is_empty());
+        assert!(result.pending_update_cleared);
+        assert!(result.restabilized);
     }
 
     #[test]
@@ -838,9 +935,11 @@ mod tests {
         let policy = policy();
         let state = LabileState::new(100, 50);
 
-        let result = engine.tick(&state, None, 200, 0.5, &policy);
+        let result = engine.tick(&state, None, 200, 0.5, &policy, RefreshReadiness::Ready);
         assert_eq!(result.outcome, ReconsolidationOutcome::NoPendingUpdate);
         assert_eq!(result.new_strength, None);
+        assert!(!result.pending_update_cleared);
+        assert!(result.restabilized);
     }
 
     #[test]
@@ -851,11 +950,20 @@ mod tests {
         let update =
             PendingUpdate::new(MemoryId(1), 105, UpdateSource::System).with_emotional(0.9, 0.3);
 
-        let result = engine.tick(&state, Some(&update), 120, 0.5, &policy);
+        let result = engine.tick(
+            &state,
+            Some(&update),
+            120,
+            0.5,
+            &policy,
+            RefreshReadiness::Ready,
+        );
         assert_eq!(result.outcome, ReconsolidationOutcome::Applied);
         assert!(result
             .refresh_triggers
             .contains(&RefreshTrigger::CacheInvalidate));
+        assert!(result.pending_update_cleared);
+        assert!(result.restabilized);
     }
 
     #[test]
@@ -865,9 +973,83 @@ mod tests {
         let state = LabileState::new(100, 50);
         let update = PendingUpdate::new(MemoryId(1), 105, UpdateSource::User);
 
-        let result = engine.tick(&state, Some(&update), 120, 0.98, &policy);
+        let result = engine.tick(
+            &state,
+            Some(&update),
+            120,
+            0.98,
+            &policy,
+            RefreshReadiness::Ready,
+        );
         assert_eq!(result.outcome, ReconsolidationOutcome::Applied);
         assert_eq!(result.new_strength, Some(1.0));
+        assert!(result.pending_update_cleared);
+        assert!(result.restabilized);
+    }
+
+    #[test]
+    fn tick_defers_update_when_refresh_is_not_ready() {
+        let engine = ReconsolidationEngine::new();
+        let policy = policy();
+        let state = LabileState::new(100, 50);
+        let update = PendingUpdate::new(MemoryId(1), 105, UpdateSource::User)
+            .with_content("revised content".to_string());
+
+        let result = engine.tick(
+            &state,
+            Some(&update),
+            120,
+            0.5,
+            &policy,
+            RefreshReadiness::Deferred,
+        );
+        assert_eq!(result.outcome, ReconsolidationOutcome::DeferredRefresh);
+        assert_eq!(result.new_strength, None);
+        assert!(result
+            .refresh_triggers
+            .contains(&RefreshTrigger::EmbeddingRefresh));
+        assert!(result
+            .refresh_triggers
+            .contains(&RefreshTrigger::IndexRefresh));
+        assert!(result
+            .refresh_triggers
+            .contains(&RefreshTrigger::CacheInvalidate));
+        assert!(!result.pending_update_cleared);
+        assert!(!result.restabilized);
+    }
+
+    #[test]
+    fn tick_blocks_mutation_when_refresh_has_failed() {
+        let engine = ReconsolidationEngine::new();
+        let policy = policy();
+        let state = LabileState::new(100, 50);
+        let update = PendingUpdate::new(MemoryId(1), 105, UpdateSource::Agent)
+            .with_content("revised content".to_string());
+
+        let result = engine.tick(
+            &state,
+            Some(&update),
+            120,
+            0.5,
+            &policy,
+            RefreshReadiness::Failed,
+        );
+        assert_eq!(
+            result.outcome,
+            ReconsolidationOutcome::BlockedRefreshFailure
+        );
+        assert_eq!(result.new_strength, None);
+        assert!(result
+            .refresh_triggers
+            .contains(&RefreshTrigger::EmbeddingRefresh));
+        assert!(result
+            .refresh_triggers
+            .contains(&RefreshTrigger::IndexRefresh));
+        assert!(result
+            .refresh_triggers
+            .contains(&RefreshTrigger::CacheInvalidate));
+        assert!(!result.pending_update_cleared);
+        assert!(!result.restabilized);
     }
 
     #[test]
@@ -877,6 +1059,8 @@ mod tests {
             outcome: ReconsolidationOutcome::Applied,
             new_strength: Some(0.55),
             refresh_triggers: vec![RefreshTrigger::CacheInvalidate],
+            pending_update_cleared: true,
+            restabilized: true,
         };
         let audit = engine.audit_tick(
             MemoryId(42),
@@ -891,6 +1075,8 @@ mod tests {
         assert_eq!(audit.strength_before, Some(0.5));
         assert_eq!(audit.strength_after, Some(0.55));
         assert_eq!(audit.applied_update_source, Some(UpdateSource::User));
+        assert!(audit.pending_update_cleared);
+        assert!(audit.restabilized);
     }
 
     #[test]
@@ -907,6 +1093,14 @@ mod tests {
         assert_eq!(
             ReconsolidationOutcome::WindowStillOpen.as_str(),
             "window_still_open"
+        );
+        assert_eq!(
+            ReconsolidationOutcome::DeferredRefresh.as_str(),
+            "deferred_refresh"
+        );
+        assert_eq!(
+            ReconsolidationOutcome::BlockedRefreshFailure.as_str(),
+            "blocked_refresh_failure"
         );
     }
 
@@ -933,18 +1127,39 @@ mod tests {
                         .with_content("updated".to_string()),
                 ),
                 current_strength: 0.5,
+                pre_reopen_state: PreReopenState {
+                    memory_id: MemoryId(1),
+                    reopen_tick: 100,
+                    strength_at_reopen: 0.45,
+                    stability_at_reopen: 3.0,
+                    access_count_at_reopen: 4,
+                },
             },
             LabileMemory {
                 memory_id: MemoryId(2),
                 labile_state: LabileState::new(50, 10),
                 pending_update: Some(PendingUpdate::new(MemoryId(2), 55, UpdateSource::Agent)),
                 current_strength: 0.6,
+                pre_reopen_state: PreReopenState {
+                    memory_id: MemoryId(2),
+                    reopen_tick: 50,
+                    strength_at_reopen: 0.6,
+                    stability_at_reopen: 2.0,
+                    access_count_at_reopen: 3,
+                },
             },
             LabileMemory {
                 memory_id: MemoryId(3),
                 labile_state: LabileState::new(180, 50), // open until tick 230
                 pending_update: None,
                 current_strength: 0.4,
+                pre_reopen_state: PreReopenState {
+                    memory_id: MemoryId(3),
+                    reopen_tick: 180,
+                    strength_at_reopen: 0.4,
+                    stability_at_reopen: 1.5,
+                    access_count_at_reopen: 2,
+                },
             },
         ];
 
@@ -957,7 +1172,7 @@ mod tests {
             match snap.state {
                 MaintenanceJobState::Completed(s) => break s,
                 MaintenanceJobState::Running { .. } => continue,
-                other => panic!("unexpected state: {:?}", other),
+                _other => std::process::abort(),
             }
         };
 
@@ -968,6 +1183,8 @@ mod tests {
         assert_eq!(summary.discarded_stale, 2);
         assert_eq!(summary.still_open, 1);
         assert_eq!(summary.applied, 0);
+        assert_eq!(summary.deferred_refresh, 0);
+        assert_eq!(summary.blocked_refresh_failure, 0);
         assert_eq!(summary.audit_records.len(), 3);
 
         // Verify audit for discarded memory.
@@ -975,11 +1192,15 @@ mod tests {
         assert_eq!(discarded_audit.memory_id, MemoryId(1));
         assert_eq!(discarded_audit.outcome, "discarded_stale");
         assert_eq!(discarded_audit.applied_update_source, Some("user"));
+        assert!(discarded_audit.pending_update_cleared);
+        assert!(discarded_audit.restabilized);
 
         // Verify audit for window-still-open memory.
         let open_audit = &summary.audit_records[2];
         assert_eq!(open_audit.memory_id, MemoryId(3));
         assert_eq!(open_audit.outcome, "window_still_open");
+        assert!(!open_audit.pending_update_cleared);
+        assert!(!open_audit.restabilized);
     }
 
     #[test]
@@ -990,12 +1211,26 @@ mod tests {
                 labile_state: LabileState::new(100, 50),
                 pending_update: None,
                 current_strength: 0.5,
+                pre_reopen_state: PreReopenState {
+                    memory_id: MemoryId(1),
+                    reopen_tick: 100,
+                    strength_at_reopen: 0.5,
+                    stability_at_reopen: 2.0,
+                    access_count_at_reopen: 1,
+                },
             },
             LabileMemory {
                 memory_id: MemoryId(2),
                 labile_state: LabileState::new(100, 50),
                 pending_update: None,
                 current_strength: 0.5,
+                pre_reopen_state: PreReopenState {
+                    memory_id: MemoryId(2),
+                    reopen_tick: 100,
+                    strength_at_reopen: 0.5,
+                    stability_at_reopen: 2.0,
+                    access_count_at_reopen: 1,
+                },
             },
         ];
 
@@ -1018,10 +1253,12 @@ mod tests {
         let snap = handle.poll();
 
         let MaintenanceJobState::Completed(summary) = snap.state else {
-            panic!("expected completed");
+            std::process::abort();
         };
         assert_eq!(summary.memories_evaluated, 0);
         assert_eq!(summary.applied, 0);
+        assert_eq!(summary.deferred_refresh, 0);
+        assert_eq!(summary.blocked_refresh_failure, 0);
     }
 
     #[test]
@@ -1032,6 +1269,13 @@ mod tests {
                 labile_state: LabileState::new(10, 5), // window ends at tick 15
                 pending_update: Some(PendingUpdate::new(MemoryId(i), 12, UpdateSource::System)),
                 current_strength: 0.5,
+                pre_reopen_state: PreReopenState {
+                    memory_id: MemoryId(i),
+                    reopen_tick: 10,
+                    strength_at_reopen: 0.5,
+                    stability_at_reopen: 2.0,
+                    access_count_at_reopen: 1,
+                },
             })
             .collect();
 
@@ -1044,13 +1288,15 @@ mod tests {
             match snap.state {
                 MaintenanceJobState::Completed(s) => break s,
                 MaintenanceJobState::Running { .. } => continue,
-                other => panic!("unexpected state: {:?}", other),
+                _other => std::process::abort(),
             }
         };
 
         assert_eq!(summary.memories_evaluated, 5);
         assert_eq!(summary.discarded_stale, 5);
         assert_eq!(summary.applied, 0);
+        assert_eq!(summary.deferred_refresh, 0);
+        assert_eq!(summary.blocked_refresh_failure, 0);
         assert!(summary
             .audit_records
             .iter()
@@ -1068,6 +1314,13 @@ mod tests {
                         .with_content(format!("update {}", i)),
                 ),
                 current_strength: 0.5,
+                pre_reopen_state: PreReopenState {
+                    memory_id: MemoryId(i),
+                    reopen_tick: 10,
+                    strength_at_reopen: 0.5,
+                    stability_at_reopen: 2.0,
+                    access_count_at_reopen: 1,
+                },
             })
             .collect();
 
@@ -1080,17 +1333,61 @@ mod tests {
             match snap.state {
                 MaintenanceJobState::Completed(s) => break s,
                 MaintenanceJobState::Running { .. } => continue,
-                other => panic!("unexpected state: {:?}", other),
+                _other => std::process::abort(),
             }
         };
 
         assert_eq!(summary.applied, 3);
         assert_eq!(summary.discarded_stale, 0);
+        assert_eq!(summary.deferred_refresh, 0);
+        assert_eq!(summary.blocked_refresh_failure, 0);
         assert!(summary.audit_records.iter().all(|r| r.outcome == "applied"));
         assert!(summary
             .audit_records
             .iter()
             .all(|r| r.refresh_triggers.contains(&"embedding_refresh")));
+        assert!(summary
+            .audit_records
+            .iter()
+            .all(|r| r.pending_update_cleared && r.restabilized));
+    }
+
+    #[test]
+    fn run_summary_tracks_refresh_blockers_without_silent_mutation() {
+        let engine = ReconsolidationEngine::new();
+        let policy = policy();
+        let state = LabileState::new(100, 50);
+        let update = PendingUpdate::new(MemoryId(9), 105, UpdateSource::User)
+            .with_content("updated".to_string());
+
+        let deferred = engine.tick(
+            &state,
+            Some(&update),
+            120,
+            0.5,
+            &policy,
+            RefreshReadiness::Deferred,
+        );
+        assert_eq!(deferred.outcome, ReconsolidationOutcome::DeferredRefresh);
+        assert_eq!(deferred.new_strength, None);
+        assert!(!deferred.pending_update_cleared);
+        assert!(!deferred.restabilized);
+
+        let blocked = engine.tick(
+            &state,
+            Some(&update),
+            120,
+            0.5,
+            &policy,
+            RefreshReadiness::Failed,
+        );
+        assert_eq!(
+            blocked.outcome,
+            ReconsolidationOutcome::BlockedRefreshFailure
+        );
+        assert_eq!(blocked.new_strength, None);
+        assert!(!blocked.pending_update_cleared);
+        assert!(!blocked.restabilized);
     }
 
     // ── Pre-reopen state tests ───────────────────────────────────────────

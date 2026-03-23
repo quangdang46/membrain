@@ -128,12 +128,22 @@ fn reconsolidation_applies_strength_bonus() {
     let update =
         PendingUpdate::new(mid(1), 105, UpdateSource::User).with_content("revised".to_string());
 
-    let result = recon_engine.tick(&labile, Some(&update), 120, 0.5, &policy);
+    let result = recon_engine.tick(
+        &labile,
+        Some(&update),
+        120,
+        0.5,
+        &policy,
+        membrain_core::engine::reconsolidation::RefreshReadiness::Ready,
+    );
     assert_eq!(result.outcome, ReconsolidationOutcome::Applied);
-    assert!(result.new_strength.unwrap() > 0.5);
+    let new_strength = result.new_strength.unwrap_or_else(|| {
+        std::process::abort();
+    });
+    assert!(new_strength > 0.5);
 
     // Strength bonus should be capped
-    assert!(result.new_strength.unwrap() <= 1.0);
+    assert!(new_strength <= 1.0);
 }
 
 #[test]
@@ -145,7 +155,14 @@ fn reconsolidation_discards_stale_updates() {
     let update = PendingUpdate::new(mid(1), 105, UpdateSource::System);
 
     // Tick after window expires
-    let result = engine.tick(&labile, Some(&update), 200, 0.5, &policy);
+    let result = engine.tick(
+        &labile,
+        Some(&update),
+        200,
+        0.5,
+        &policy,
+        membrain_core::engine::reconsolidation::RefreshReadiness::Ready,
+    );
     assert_eq!(result.outcome, ReconsolidationOutcome::DiscardedStale);
     assert_eq!(result.new_strength, None);
 }
@@ -175,14 +192,10 @@ fn ltp_then_recall_then_ltd_lifecycle() {
 
     // Archive when below threshold
     let decision = engine.evaluate_decay(&state, 1000, &policy);
-    match decision {
-        DecayDecision::Archive { .. } => {
-            // Expected for highly decayed memories
-        }
-        DecayDecision::ApplyLTD { new_strength, .. } => {
-            assert!(new_strength < state.base_strength);
-        }
-        _ => panic!("unexpected decay decision"),
+    if let DecayDecision::ApplyLTD { new_strength, .. } = decision {
+        assert!(new_strength < state.base_strength);
+    } else {
+        assert!(matches!(decision, DecayDecision::Archive { .. }));
     }
 }
 
@@ -268,7 +281,14 @@ fn full_lifecycle_is_deterministic() {
         let labile = LabileState::new(10, 50);
         let update =
             PendingUpdate::new(mid(1), 15, UpdateSource::User).with_content("revised".to_string());
-        let recon = recon_engine.tick(&labile, Some(&update), 30, 0.6, &recon_policy);
+        let recon = recon_engine.tick(
+            &labile,
+            Some(&update),
+            30,
+            0.6,
+            &recon_policy,
+            membrain_core::engine::reconsolidation::RefreshReadiness::Ready,
+        );
         assert_eq!(recon.outcome, ReconsolidationOutcome::Applied);
     }
 }
@@ -307,12 +327,10 @@ fn max_strength_memory_resists_all_decay() {
     assert!(effective > 0.3);
 
     let decision = engine.evaluate_decay(&state, 10, &policy);
-    match decision {
-        DecayDecision::ApplyLTD { new_strength, .. } => {
-            assert!(new_strength > 0.3);
-        }
-        DecayDecision::Archive { .. } => panic!("max strength memory should not archive"),
-        _ => {}
+    if let DecayDecision::ApplyLTD { new_strength, .. } = decision {
+        assert!(new_strength > 0.3);
+    } else {
+        assert!(!matches!(decision, DecayDecision::Archive { .. }));
     }
 }
 

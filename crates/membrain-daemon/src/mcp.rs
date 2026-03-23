@@ -1010,7 +1010,7 @@ mod tests {
         let json = serde_json::to_value(&payload).unwrap();
         assert_eq!(json["request_id"], "req-1");
         assert_eq!(json["namespace"], "mcp.team");
-        assert_eq!(json["outcome_class"], "Accepted");
+        assert_eq!(json["outcome_class"], "accepted");
         assert!(json["result"].get("evidence_pack").is_some());
         assert!(json["result"].get("action_pack").is_some());
         assert!(json["result"].get("deferred_payloads").is_some());
@@ -1219,7 +1219,7 @@ mod tests {
             "retrieval": {
                 "request_id": "req-5",
                 "namespace": "mcp.team",
-                "outcome_class": "Accepted",
+                "outcome_class": "accepted",
                 "partial_success": false,
                 "explain_trace": {
                     "route_summary": {"route_family": "exact_id_tier1"},
@@ -1248,7 +1248,7 @@ mod tests {
             "retrieval": {
                 "request_id": "req-6",
                 "namespace": "mcp.team",
-                "outcome_class": "Accepted",
+                "outcome_class": "accepted",
                 "partial_success": false,
                 "explain_trace": {
                     "route_summary": {"route_family": "exact_id_tier1"},

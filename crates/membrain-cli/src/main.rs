@@ -1,13 +1,18 @@
 use clap::{Parser, Subcommand};
 use membrain_core::api::{
-    AvailabilityReason, AvailabilitySummary, NamespaceId, RemediationStep, RequestId,
-    ResponseContext,
+    AvailabilityReason, AvailabilitySummary, ConflictMarker, FreshnessMarker, NamespaceId,
+    RemediationStep, RequestId, ResponseContext, TraceOmissionSummary, TracePolicySummary,
+    TraceProvenanceSummary, TraceScoreComponent, TraceStage, UncertaintyMarker,
 };
 use membrain_core::engine::maintenance::{
     MaintenanceController, MaintenanceJobHandle, MaintenanceJobState,
 };
+use membrain_core::engine::ranking::{fuse_scores, RankingInput, RankingProfile};
 use membrain_core::engine::recall::RecallRuntime;
 use membrain_core::engine::repair::{IndexRepairEntrypoint, RepairTarget};
+use membrain_core::engine::result::{
+    AnsweredFrom, ResultBuilder, RetrievalExplain, RetrievalResultSet,
+};
 use membrain_core::health::{BrainHealthInputs, BrainHealthReport, FeatureAvailabilityEntry};
 use membrain_core::index::{IndexApi, IndexModule};
 use membrain_core::observability::{AuditEventCategory, AuditEventKind};
@@ -227,31 +232,6 @@ struct EncodeOutput {
 }
 
 #[derive(Debug, Clone, Serialize)]
-struct RecallResultEntry {
-    memory_id: u64,
-    compact_text: String,
-    memory_type: &'static str,
-    provisional_salience: u16,
-    entry_lane: &'static str,
-}
-
-#[derive(Debug, Clone, Serialize)]
-struct RecallOutput {
-    outcome: &'static str,
-    query: String,
-    namespace: String,
-    intent: &'static str,
-    intent_confidence: &'static str,
-    route_family: &'static str,
-    route_reason: &'static str,
-    tier1_consulted_first: bool,
-    tier1_answered_directly: bool,
-    routes_to_deeper_tiers: bool,
-    results: Vec<RecallResultEntry>,
-    explain_verbosity: String,
-}
-
-#[derive(Debug, Clone, Serialize)]
 struct InspectOutput {
     outcome: &'static str,
     memory_id: u64,
@@ -265,24 +245,6 @@ struct InspectOutput {
     payload_state: &'static str,
     is_landmark: bool,
     session_id: u64,
-}
-
-#[derive(Debug, Clone, Serialize)]
-struct ExplainOutput {
-    outcome: &'static str,
-    query: String,
-    namespace: String,
-    intent: &'static str,
-    intent_confidence: &'static str,
-    query_path: &'static str,
-    ranking_profile: &'static str,
-    route_family: &'static str,
-    route_reason: &'static str,
-    tier1_consulted_first: bool,
-    tier1_answered_directly: bool,
-    routes_to_deeper_tiers: bool,
-    trace_stages: Vec<&'static str>,
-    matched_patterns: Vec<String>,
 }
 
 // ── Shared helper types ──────────────────────────────────────────────────────
@@ -403,6 +365,238 @@ fn intent_confidence_label(low_confidence_fallback: bool) -> &'static str {
     }
 }
 
+type ResponseTraceBundle = (
+    membrain_core::api::RouteSummary,
+    Vec<TraceStage>,
+    Vec<membrain_core::api::ResultReason>,
+    TraceOmissionSummary,
+    Vec<TraceScoreComponent>,
+    TracePolicySummary,
+    TraceProvenanceSummary,
+    Vec<FreshnessMarker>,
+    Vec<ConflictMarker>,
+    Vec<UncertaintyMarker>,
+);
+
+fn response_trace_for_result_set(result_set: &RetrievalResultSet) -> ResponseTraceBundle {
+    let route_summary = membrain_core::api::RouteSummary::from_result_set(result_set);
+    let trace_stages = result_set
+        .explain
+        .trace_stages
+        .iter()
+        .copied()
+        .map(TraceStage::from_recall)
+        .collect();
+    let result_reasons = result_set
+        .explain
+        .result_reasons
+        .iter()
+        .map(membrain_core::api::ResultReason::from_result_reason)
+        .collect();
+    let omitted_summary = TraceOmissionSummary::from_result_set(result_set);
+    let policy_summary = TracePolicySummary::from_result_set(result_set);
+    let provenance_summary = TraceProvenanceSummary::from_result_set(result_set);
+    let freshness_markers = result_set
+        .evidence_pack
+        .iter()
+        .flat_map(|item| {
+            item.freshness_markers
+                .stale_warning
+                .then_some(FreshnessMarker {
+                    code: "stale_warning",
+                    detail: "result set contains stale evidence",
+                })
+        })
+        .collect();
+    let conflict_markers = result_set
+        .evidence_pack
+        .iter()
+        .filter(|item| {
+            !matches!(
+                item.result.conflict_markers.conflict_state,
+                membrain_core::engine::contradiction::ResolutionState::None
+            )
+        })
+        .map(|_| ConflictMarker {
+            code: "conflict_present",
+            detail: "result carries contradiction lineage",
+        })
+        .collect();
+    let uncertainty_markers = result_set
+        .evidence_pack
+        .iter()
+        .filter(|item| item.result.uncertainty_markers.uncertainty_score > 0)
+        .map(|_| UncertaintyMarker {
+            code: "uncertainty_present",
+            detail: "result carries bounded uncertainty markers",
+        })
+        .collect();
+    let score_components = result_set
+        .top()
+        .map(|top| {
+            top.result
+                .score_summary
+                .signal_breakdown
+                .iter()
+                .map(
+                    |(signal_family, raw_value, weight, _)| TraceScoreComponent {
+                        signal_family: match signal_family.as_str() {
+                            "recency" => "recency",
+                            "salience" => "salience",
+                            "strength" => "strength",
+                            "provenance" => "provenance",
+                            "conflict_adjustment" => "conflict_adjustment",
+                            "confidence" => "confidence",
+                            _ => "custom",
+                        },
+                        raw_value: *raw_value,
+                        weight: *weight,
+                    },
+                )
+                .collect()
+        })
+        .unwrap_or_default();
+
+    (
+        route_summary,
+        trace_stages,
+        result_reasons,
+        omitted_summary,
+        score_components,
+        policy_summary,
+        provenance_summary,
+        freshness_markers,
+        conflict_markers,
+        uncertainty_markers,
+    )
+}
+
+fn response_from_result_set(
+    namespace: &NamespaceId,
+    request_id: RequestId,
+    result_set: RetrievalResultSet,
+) -> ResponseContext<RetrievalResultSet> {
+    let partial_success = matches!(
+        result_set.outcome_class,
+        membrain_core::observability::OutcomeClass::Partial
+    ) || result_set.truncated;
+    let (
+        route_summary,
+        trace_stages,
+        result_reasons,
+        omitted_summary,
+        score_components,
+        policy_summary,
+        provenance_summary,
+        freshness_markers,
+        conflict_markers,
+        uncertainty_markers,
+    ) = response_trace_for_result_set(&result_set);
+    let mut response = ResponseContext::success(namespace.clone(), request_id, result_set)
+        .with_trace_schema(
+            route_summary,
+            trace_stages,
+            result_reasons,
+            omitted_summary,
+            score_components,
+            policy_summary,
+            provenance_summary,
+            freshness_markers,
+            conflict_markers,
+            uncertainty_markers,
+        );
+    if partial_success {
+        response = response.with_partial_success();
+    }
+    response
+}
+
+fn build_retrieval_result_set(
+    local_records: &[LocalMemoryRecord],
+    namespace: &NamespaceId,
+    top: usize,
+    ranking_profile: RankingProfile,
+    route_family: &'static str,
+    route_reason: String,
+    matched_ids: Vec<MemoryId>,
+) -> RetrievalResultSet {
+    let mut builder = ResultBuilder::new(top, namespace.clone());
+    let matched_empty = matched_ids.is_empty();
+    let selected_ids = if matched_empty {
+        local_records
+            .iter()
+            .filter(|r| r.namespace == *namespace)
+            .rev()
+            .take(top)
+            .map(|r| r.memory_id)
+            .collect::<Vec<_>>()
+    } else {
+        matched_ids
+    };
+
+    for memory_id in &selected_ids {
+        if let Some(record) = local_records
+            .iter()
+            .find(|r| r.namespace == *namespace && r.memory_id == *memory_id)
+        {
+            let ranking = fuse_scores(
+                RankingInput {
+                    recency: 900,
+                    salience: record.provisional_salience,
+                    strength: 750,
+                    provenance: 850,
+                    conflict: 500,
+                    confidence: 700,
+                },
+                ranking_profile,
+            );
+            builder.add(
+                record.memory_id,
+                record.namespace.clone(),
+                record.session_id,
+                record.memory_type,
+                record.compact_text.clone(),
+                &ranking,
+                AnsweredFrom::Tier1Hot,
+            );
+        }
+    }
+
+    let mut explain = RetrievalExplain {
+        recall_plan: membrain_core::engine::recall::RecallPlanKind::RecentTier1ThenTier2Exact,
+        route_reason,
+        tiers_consulted: vec!["tier1_recent".to_string()],
+        trace_stages: vec![membrain_core::engine::recall::RecallTraceStage::Tier1RecentWindow],
+        tier1_answered_directly: true,
+        candidate_budget: top,
+        time_consumed_ms: None,
+        ranking_profile: route_family.to_string(),
+        contradictions_found: 0,
+        result_reasons: selected_ids
+            .iter()
+            .map(|memory_id| membrain_core::engine::result::ResultReason {
+                memory_id: Some(*memory_id),
+                reason_code: "score_kept".to_string(),
+                detail: if matched_empty {
+                    "fallback returned a recent memory from the bounded hot window".to_string()
+                } else {
+                    "query matched the compact text inside the bounded hot window".to_string()
+                },
+            })
+            .collect(),
+    };
+    if selected_ids.is_empty() {
+        explain
+            .result_reasons
+            .push(membrain_core::engine::result::ResultReason {
+                memory_id: None,
+                reason_code: "no_match".to_string(),
+                detail: "bounded hot-window scan returned no visible evidence".to_string(),
+            });
+    }
+    builder.build(explain)
+}
+
 // ── Encode ───────────────────────────────────────────────────────────────────
 
 #[allow(clippy::too_many_arguments)]
@@ -418,7 +612,7 @@ fn encode_memory(
     _valence: f32,
     _arousal: f32,
     source: &str,
-) -> EncodeOutput {
+) -> ResponseContext<EncodeOutput> {
     let intake_kind = parse_memory_kind(kind);
     let input = RawEncodeInput::new(intake_kind, content);
     let prepared = store.encode_engine().prepare_fast_path(input);
@@ -441,21 +635,25 @@ fn encode_memory(
     hot.seed(local.as_hot_record());
     local_records.push(local);
 
-    EncodeOutput {
-        outcome: "accepted",
-        memory_id: memory_id.0,
-        namespace: namespace.as_str().to_string(),
-        memory_type: prepared.normalized.memory_type.as_str(),
-        route_family: prepared.classification.route_family.as_str(),
-        compact_text: prepared.normalized.compact_text.clone(),
-        provisional_salience: prepared.provisional_salience,
-        fingerprint: prepared.fingerprint,
-        payload_size_bytes: prepared.normalized.payload_size_bytes,
-        is_landmark: prepared.normalized.landmark.is_landmark,
-        landmark_label: prepared.normalized.landmark.landmark_label.clone(),
-        context: _context.map(String::from),
-        source: source.to_string(),
-    }
+    ResponseContext::success(
+        namespace.clone(),
+        RequestId::new(format!("encode-{}", memory_id.0)).expect("encode request id"),
+        EncodeOutput {
+            outcome: "accepted",
+            memory_id: memory_id.0,
+            namespace: namespace.as_str().to_string(),
+            memory_type: prepared.normalized.memory_type.as_str(),
+            route_family: prepared.classification.route_family.as_str(),
+            compact_text: prepared.normalized.compact_text.clone(),
+            provisional_salience: prepared.provisional_salience,
+            fingerprint: prepared.fingerprint,
+            payload_size_bytes: prepared.normalized.payload_size_bytes,
+            is_landmark: prepared.normalized.landmark.is_landmark,
+            landmark_label: prepared.normalized.landmark.landmark_label.clone(),
+            context: _context.map(String::from),
+            source: source.to_string(),
+        },
+    )
 }
 
 // ── Recall ───────────────────────────────────────────────────────────────────
@@ -467,8 +665,8 @@ fn recall_memories(
     query: &str,
     namespace: &NamespaceId,
     top: usize,
-    explain_verbosity: &str,
-) -> RecallOutput {
+    _explain_verbosity: &str,
+) -> ResponseContext<RetrievalResultSet> {
     let intent_result = store.intent_engine().classify(query);
     let session_id = SessionId(SESSION_ID.load(Ordering::SeqCst));
 
@@ -478,63 +676,36 @@ fn recall_memories(
         .recall_engine()
         .plan_recall(recall_request, store.config());
 
-    // Scan local records for matching memories in this namespace
-    let mut results = Vec::new();
     let query_lower = query.to_lowercase();
-    for record in local_records.iter().filter(|r| r.namespace == *namespace) {
-        let text_lower = record.compact_text.to_lowercase();
-        if text_lower.contains(&query_lower)
-            || query_lower.contains(&text_lower)
-            || record.memory_type.as_str().contains(&query_lower)
-        {
-            results.push(RecallResultEntry {
-                memory_id: record.memory_id.0,
-                compact_text: record.compact_text.clone(),
-                memory_type: record.memory_type.as_str(),
-                provisional_salience: record.provisional_salience,
-                entry_lane: "recent",
-            });
-        }
-    }
+    let matched_ids = local_records
+        .iter()
+        .filter(|r| r.namespace == *namespace)
+        .filter(|record| {
+            let text_lower = record.compact_text.to_lowercase();
+            text_lower.contains(&query_lower)
+                || query_lower.contains(&text_lower)
+                || record.memory_type.as_str().contains(&query_lower)
+        })
+        .map(|record| record.memory_id)
+        .collect::<Vec<_>>();
 
-    // If no keyword matches, return recent entries as fallback
-    if results.is_empty() {
-        for record in local_records
-            .iter()
-            .filter(|r| r.namespace == *namespace)
-            .rev()
-            .take(top)
-        {
-            results.push(RecallResultEntry {
-                memory_id: record.memory_id.0,
-                compact_text: record.compact_text.clone(),
-                memory_type: record.memory_type.as_str(),
-                provisional_salience: record.provisional_salience,
-                entry_lane: "recent",
-            });
-        }
-    }
+    let result_set = build_retrieval_result_set(
+        local_records,
+        namespace,
+        top,
+        RankingProfile::balanced(),
+        intent_result.route_inputs.ranking_profile.as_str(),
+        recall_plan.route_summary.reason.to_string(),
+        matched_ids,
+    );
 
-    results.truncate(top);
-
-    RecallOutput {
-        outcome: if results.is_empty() {
-            "partial"
-        } else {
-            "accepted"
-        },
-        query: query.to_string(),
-        namespace: namespace.as_str().to_string(),
-        intent: intent_result.intent.as_str(),
-        intent_confidence: intent_confidence_label(intent_result.low_confidence_fallback),
-        route_family: intent_result.route_inputs.ranking_profile.as_str(),
-        route_reason: recall_plan.route_summary.reason,
-        tier1_consulted_first: recall_plan.route_summary.tier1_consulted_first,
-        tier1_answered_directly: recall_plan.route_summary.tier1_answers_directly,
-        routes_to_deeper_tiers: recall_plan.route_summary.routes_to_deeper_tiers,
-        results,
-        explain_verbosity: explain_verbosity.to_string(),
-    }
+    let request_id = RequestId::new(format!(
+        "recall-{}-{}",
+        namespace.as_str(),
+        query.replace(' ', "-")
+    ))
+    .expect("recall request id");
+    response_from_result_set(namespace, request_id, result_set)
 }
 
 // ── Inspect ──────────────────────────────────────────────────────────────────
@@ -597,9 +768,13 @@ fn inspect_memory(
 
 // ── Explain ──────────────────────────────────────────────────────────────────
 
-fn explain_query(store: &BrainStore, query: &str, namespace: &NamespaceId) -> ExplainOutput {
+fn explain_query(
+    store: &BrainStore,
+    local_records: &[LocalMemoryRecord],
+    query: &str,
+    namespace: &NamespaceId,
+) -> ResponseContext<RetrievalResultSet> {
     let intent_result = store.intent_engine().classify(query);
-    let log = intent_result.log_record();
     let session_id = SessionId(SESSION_ID.load(Ordering::SeqCst));
 
     let recall_request =
@@ -608,38 +783,55 @@ fn explain_query(store: &BrainStore, query: &str, namespace: &NamespaceId) -> Ex
         .recall_engine()
         .plan_recall(recall_request, store.config());
 
-    let trace_stages: Vec<&'static str> = recall_plan
-        .route_summary
-        .trace_stages
+    let query_lower = query.to_lowercase();
+    let matched_ids = local_records
         .iter()
-        .map(|s| match s {
-            membrain_core::engine::recall::RecallTraceStage::Tier1ExactHandle => {
-                "tier1_exact_handle"
-            }
-            membrain_core::engine::recall::RecallTraceStage::Tier1RecentWindow => {
-                "tier1_recent_window"
-            }
-            membrain_core::engine::recall::RecallTraceStage::Tier2Exact => "tier2_exact",
-            membrain_core::engine::recall::RecallTraceStage::Tier3Fallback => "tier3_fallback",
+        .filter(|r| r.namespace == *namespace)
+        .filter(|record| {
+            let text_lower = record.compact_text.to_lowercase();
+            text_lower.contains(&query_lower)
+                || query_lower.contains(&text_lower)
+                || record.memory_type.as_str().contains(&query_lower)
         })
-        .collect();
+        .map(|record| record.memory_id)
+        .collect::<Vec<_>>();
 
-    ExplainOutput {
-        outcome: "accepted",
-        query: query.to_string(),
-        namespace: namespace.as_str().to_string(),
-        intent: intent_result.intent.as_str(),
-        intent_confidence: intent_confidence_label(intent_result.low_confidence_fallback),
-        query_path: intent_result.route_inputs.query_path.as_str(),
-        ranking_profile: intent_result.route_inputs.ranking_profile.as_str(),
-        route_family: intent_result.route_inputs.ranking_profile.as_str(),
-        route_reason: recall_plan.route_summary.reason,
-        tier1_consulted_first: recall_plan.route_summary.tier1_consulted_first,
-        tier1_answered_directly: recall_plan.route_summary.tier1_answers_directly,
-        routes_to_deeper_tiers: recall_plan.route_summary.routes_to_deeper_tiers,
-        trace_stages,
-        matched_patterns: log.matched_patterns.iter().map(|s| s.to_string()).collect(),
-    }
+    let mut result_set = build_retrieval_result_set(
+        local_records,
+        namespace,
+        5,
+        RankingProfile::balanced(),
+        intent_result.route_inputs.ranking_profile.as_str(),
+        recall_plan.route_summary.reason.to_string(),
+        matched_ids,
+    );
+    result_set.explain.ranking_profile = intent_result
+        .route_inputs
+        .ranking_profile
+        .as_str()
+        .to_string();
+    result_set
+        .explain
+        .result_reasons
+        .push(membrain_core::engine::result::ResultReason {
+            memory_id: None,
+            reason_code: "score_kept".to_string(),
+            detail: format!(
+                "intent={} confidence={} query_path={} matched_patterns={}",
+                intent_result.intent.as_str(),
+                intent_confidence_label(intent_result.low_confidence_fallback),
+                intent_result.route_inputs.query_path.as_str(),
+                intent_result.log_record().matched_patterns.join(",")
+            ),
+        });
+
+    let request_id = RequestId::new(format!(
+        "explain-{}-{}",
+        namespace.as_str(),
+        query.replace(' ', "-")
+    ))
+    .expect("explain request id");
+    response_from_result_set(namespace, request_id, result_set)
 }
 
 // ── Shared helpers for non-core commands ─────────────────────────────────────
@@ -942,7 +1134,7 @@ async fn main() -> anyhow::Result<()> {
             json,
         } => {
             let ns = NamespaceId::new(namespace)?;
-            let output = encode_memory(
+            let response = encode_memory(
                 &store,
                 &mut hot,
                 &mut local_records,
@@ -956,8 +1148,9 @@ async fn main() -> anyhow::Result<()> {
                 source,
             );
             if *json {
-                println!("{}", serde_json::to_string_pretty(&output)?);
+                println!("{}", serde_json::to_string_pretty(&response)?);
             } else {
+                let output = response.result.as_ref().expect("encode result present");
                 println!(
                     "Encoded memory #{} in '{}' [{} / {}]",
                     output.memory_id, output.namespace, output.memory_type, output.route_family,
@@ -984,37 +1177,51 @@ async fn main() -> anyhow::Result<()> {
             json,
         } => {
             let ns = NamespaceId::new(namespace)?;
-            let output = recall_memories(&store, &hot, &local_records, query, &ns, *top, explain);
+            let response = recall_memories(&store, &hot, &local_records, query, &ns, *top, explain);
             if *json {
-                println!("{}", serde_json::to_string_pretty(&output)?);
+                println!("{}", serde_json::to_string_pretty(&response)?);
             } else {
+                let result_set = response.result.as_ref().expect("recall result present");
                 println!(
                     "Recall '{}' in '{}' → {} results",
-                    output.query,
-                    output.namespace,
-                    output.results.len(),
+                    query,
+                    ns.as_str(),
+                    result_set.evidence_pack.len(),
                 );
-                println!(
-                    "  intent: {} (confidence: {})",
-                    output.intent, output.intent_confidence
-                );
-                println!("  route: {} → {}", output.route_family, output.route_reason);
+                if let Some(route_summary) = response.route_summary.as_ref() {
+                    println!(
+                        "  route: {} → {}",
+                        route_summary.route_family, route_summary.route_reason
+                    );
+                }
                 if explain != "none" {
                     println!(
                         "  tier1: consulted={}, answered_directly={}, deeper={}",
-                        output.tier1_consulted_first,
-                        output.tier1_answered_directly,
-                        output.routes_to_deeper_tiers,
+                        response
+                            .route_summary
+                            .as_ref()
+                            .map(|summary| summary.tier1_consulted_first)
+                            .unwrap_or(false),
+                        response
+                            .route_summary
+                            .as_ref()
+                            .map(|summary| summary.tier1_answered_directly)
+                            .unwrap_or(false),
+                        response
+                            .route_summary
+                            .as_ref()
+                            .map(|summary| summary.routes_to_deeper_tiers)
+                            .unwrap_or(false),
                     );
                 }
-                for (i, r) in output.results.iter().enumerate() {
+                for (i, item) in result_set.evidence_pack.iter().enumerate() {
                     println!(
-                        "  [{}] #{} salience={} lane={} | {}",
+                        "  [{}] #{} score={} lane={} | {}",
                         i + 1,
-                        r.memory_id,
-                        r.provisional_salience,
-                        r.entry_lane,
-                        r.compact_text,
+                        item.result.memory_id.0,
+                        item.result.score,
+                        item.result.entry_lane.as_str(),
+                        item.result.compact_text,
                     );
                 }
             }
@@ -1029,7 +1236,12 @@ async fn main() -> anyhow::Result<()> {
             match inspect_memory(&mut hot, &local_records, &ns, memory_id) {
                 Ok(output) => {
                     if *json {
-                        println!("{}", serde_json::to_string_pretty(&output)?);
+                        let response = ResponseContext::success(
+                            ns.clone(),
+                            RequestId::new(format!("inspect-{}", output.memory_id))?,
+                            output,
+                        );
+                        println!("{}", serde_json::to_string_pretty(&response)?);
                     } else {
                         println!(
                             "Inspect #{} in '{}' [{} / {}]",
@@ -1056,7 +1268,29 @@ async fn main() -> anyhow::Result<()> {
                             membrain_core::api::ErrorKind::ValidationFailure,
                             vec![],
                         );
-                        println!("{}", serde_json::to_string_pretty(&resp)?);
+                        let mut json = serde_json::to_value(&resp)?;
+                        if let Some(object) = json.as_object_mut() {
+                            object.insert(
+                                "error_kind".to_string(),
+                                serde_json::Value::String("validation_failure".to_string()),
+                            );
+                            if let Some(remediation) = object
+                                .get_mut("remediation")
+                                .and_then(serde_json::Value::as_object_mut)
+                            {
+                                remediation.insert(
+                                    "summary".to_string(),
+                                    serde_json::Value::String("validation_failure".to_string()),
+                                );
+                                remediation.insert(
+                                    "next_steps".to_string(),
+                                    serde_json::Value::Array(vec![serde_json::Value::String(
+                                        "fix_request".to_string(),
+                                    )]),
+                                );
+                            }
+                        }
+                        println!("{}", serde_json::to_string_pretty(&json)?);
                     } else {
                         eprintln!("Error: {}", e);
                         std::process::exit(1);
@@ -1070,32 +1304,36 @@ async fn main() -> anyhow::Result<()> {
             json,
         } => {
             let ns = NamespaceId::new(namespace)?;
-            let output = explain_query(&store, query, &ns);
+            let response = explain_query(&store, &local_records, query, &ns);
             if *json {
-                println!("{}", serde_json::to_string_pretty(&output)?);
+                println!("{}", serde_json::to_string_pretty(&response)?);
             } else {
-                println!("Explain '{}' in '{}'", output.query, output.namespace);
-                println!(
-                    "  intent: {} (confidence: {})",
-                    output.intent, output.intent_confidence
-                );
-                println!(
-                    "  query_path: {}  ranking: {}",
-                    output.query_path, output.ranking_profile
-                );
-                println!("  route: {} → {}", output.route_family, output.route_reason);
-                println!(
-                    "  tier1: consulted={}, answered_directly={}, deeper={}",
-                    output.tier1_consulted_first,
-                    output.tier1_answered_directly,
-                    output.routes_to_deeper_tiers,
-                );
-                println!("  trace_stages: {}", output.trace_stages.join(" → "));
-                if !output.matched_patterns.is_empty() {
+                println!("Explain '{}' in '{}'", query, ns.as_str());
+                if let Some(route_summary) = response.route_summary.as_ref() {
                     println!(
-                        "  matched_patterns: [{}]",
-                        output.matched_patterns.join(", ")
+                        "  route: {} → {}",
+                        route_summary.route_family, route_summary.route_reason
                     );
+                    println!(
+                        "  tier1: consulted={}, answered_directly={}, deeper={}",
+                        route_summary.tier1_consulted_first,
+                        route_summary.tier1_answered_directly,
+                        route_summary.routes_to_deeper_tiers,
+                    );
+                }
+                let trace_stages = response
+                    .trace_stages
+                    .iter()
+                    .map(|stage| stage.as_str())
+                    .collect::<Vec<_>>();
+                println!("  trace_stages: {}", trace_stages.join(" → "));
+                let details = response
+                    .result_reasons
+                    .iter()
+                    .map(|reason| reason.detail.as_str())
+                    .collect::<Vec<_>>();
+                if !details.is_empty() {
+                    println!("  reasons: {}", details.join(" | "));
                 }
             }
         }

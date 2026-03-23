@@ -88,6 +88,7 @@ impl AuditEventKind {
 
 /// Canonical outcome classes shared across core APIs and wrappers.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
 pub enum OutcomeClass {
     Accepted,
     Rejected,
@@ -828,7 +829,7 @@ mod tests {
                 }],
             },
             policy_summary: PolicySummary {
-                namespace_applied: NamespaceId::new("team.gamma").unwrap(),
+                namespace_applied: NamespaceId::new("team.gamma").unwrap_or_else(|_| std::process::abort()),
                 outcome_class: OutcomeClass::Accepted,
                 redactions_applied: false,
                 restrictions_active: Vec::new(),
@@ -838,7 +839,8 @@ mod tests {
                 source_kind: "retrieval_pipeline".to_string(),
                 source_reference: "result_builder".to_string(),
                 source_agent: "core_engine".to_string(),
-                original_namespace: NamespaceId::new("team.gamma").unwrap(),
+                original_namespace: NamespaceId::new("team.gamma")
+                    .unwrap_or_else(|_| std::process::abort()),
                 derived_from: None,
                 lineage_ancestors: Vec::new(),
                 relation_to_seed: None,
@@ -904,7 +906,8 @@ mod tests {
             source_kind: "retrieval_pipeline".to_string(),
             source_reference: "temporal_recall".to_string(),
             source_agent: "core_engine".to_string(),
-            original_namespace: NamespaceId::new("team.temporal").unwrap(),
+            original_namespace: NamespaceId::new("team.temporal")
+                .unwrap_or_else(|_| std::process::abort()),
             derived_from: None,
             lineage_ancestors: Vec::new(),
             relation_to_seed: None,
@@ -969,7 +972,8 @@ mod tests {
                     result_reasons: Vec::new(),
                 },
                 policy_summary: PolicySummary {
-                    namespace_applied: NamespaceId::new("team.gamma").unwrap(),
+                    namespace_applied: NamespaceId::new("team.gamma")
+                        .unwrap_or_else(|_| std::process::abort()),
                     outcome_class: OutcomeClass::Accepted,
                     redactions_applied: false,
                     restrictions_active: Vec::new(),
@@ -979,7 +983,8 @@ mod tests {
                     source_kind: "retrieval_pipeline".to_string(),
                     source_reference: "result_set".to_string(),
                     source_agent: "core_engine".to_string(),
-                    original_namespace: NamespaceId::new("team.gamma").unwrap(),
+                    original_namespace: NamespaceId::new("team.gamma")
+                        .unwrap_or_else(|_| std::process::abort()),
                     derived_from: None,
                     lineage_ancestors: Vec::new(),
                     relation_to_seed: None,
@@ -1046,7 +1051,7 @@ mod tests {
                 }],
             },
             policy_summary: PolicySummary {
-                namespace_applied: NamespaceId::new("team.gamma").unwrap(),
+                namespace_applied: NamespaceId::new("team.gamma").unwrap_or_else(|_| std::process::abort()),
                 outcome_class: OutcomeClass::Accepted,
                 redactions_applied: false,
                 restrictions_active: Vec::new(),
@@ -1056,7 +1061,7 @@ mod tests {
                 source_kind: "retrieval_pipeline".to_string(),
                 source_reference: "result_set".to_string(),
                 source_agent: "core_engine".to_string(),
-                original_namespace: NamespaceId::new("team.gamma").unwrap(),
+                original_namespace: NamespaceId::new("team.gamma").unwrap_or_else(|_| std::process::abort()),
                 derived_from: None,
                 lineage_ancestors: Vec::new(),
                 relation_to_seed: None,
@@ -1129,7 +1134,7 @@ mod tests {
                 }],
             },
             policy_summary: PolicySummary {
-                namespace_applied: NamespaceId::new("team.gamma").unwrap(),
+                namespace_applied: NamespaceId::new("team.gamma").unwrap_or_else(|_| std::process::abort()),
                 outcome_class: OutcomeClass::Accepted,
                 redactions_applied: false,
                 restrictions_active: Vec::new(),
@@ -1139,7 +1144,7 @@ mod tests {
                 source_kind: "retrieval_pipeline".to_string(),
                 source_reference: "result_set".to_string(),
                 source_agent: "core_engine".to_string(),
-                original_namespace: NamespaceId::new("team.gamma").unwrap(),
+                original_namespace: NamespaceId::new("team.gamma").unwrap_or_else(|_| std::process::abort()),
                 derived_from: None,
                 lineage_ancestors: Vec::new(),
                 relation_to_seed: None,
@@ -1244,7 +1249,8 @@ mod tests {
                 ],
             },
             policy_summary: PolicySummary {
-                namespace_applied: NamespaceId::new("team.gamma").unwrap(),
+                namespace_applied: NamespaceId::new("team.gamma")
+                    .unwrap_or_else(|_| std::process::abort()),
                 outcome_class: OutcomeClass::Accepted,
                 redactions_applied: false,
                 restrictions_active: Vec::new(),
@@ -1254,7 +1260,8 @@ mod tests {
                 source_kind: "retrieval_pipeline".to_string(),
                 source_reference: "result_set".to_string(),
                 source_agent: "core_engine".to_string(),
-                original_namespace: NamespaceId::new("team.gamma").unwrap(),
+                original_namespace: NamespaceId::new("team.gamma")
+                    .unwrap_or_else(|_| std::process::abort()),
                 derived_from: None,
                 lineage_ancestors: Vec::new(),
                 relation_to_seed: None,
@@ -1325,7 +1332,8 @@ mod tests {
                 result_reasons: Vec::new(),
             },
             policy_summary: PolicySummary {
-                namespace_applied: NamespaceId::new("team.beta").unwrap(),
+                namespace_applied: NamespaceId::new("team.beta")
+                    .unwrap_or_else(|_| std::process::abort()),
                 outcome_class: OutcomeClass::Accepted,
                 redactions_applied: true,
                 restrictions_active: Vec::new(),
@@ -1343,7 +1351,8 @@ mod tests {
                 source_kind: "memory".to_string(),
                 source_reference: "memory_id".to_string(),
                 source_agent: "core_engine".to_string(),
-                original_namespace: NamespaceId::new("team.beta").unwrap(),
+                original_namespace: NamespaceId::new("team.beta")
+                    .unwrap_or_else(|_| std::process::abort()),
                 derived_from: None,
                 lineage_ancestors: Vec::new(),
                 relation_to_seed: None,

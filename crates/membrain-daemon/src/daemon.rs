@@ -12,6 +12,7 @@ use membrain_core::api::{NamespaceId, RequestId};
 use membrain_core::config::RuntimeConfig;
 use membrain_core::engine::recall::{RecallEngine, RecallRequest, RecallRuntime};
 use membrain_core::engine::result::{RetrievalExplain, RetrievalResultSet};
+use membrain_core::engine::retrieval_planner::RetrievalRequest;
 use membrain_core::types::{MemoryId, SessionId};
 use serde_json::json;
 use std::collections::VecDeque;
@@ -24,6 +25,14 @@ use tokio::net::{UnixListener, UnixStream};
 use tokio::sync::{Mutex, Notify, Semaphore};
 use tokio::task::JoinSet;
 use tokio::time::{sleep, Duration};
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct NormalizedRecallContract {
+    planner_request: RecallRequest,
+    normalized_query_by_example:
+        membrain_core::engine::retrieval_planner::QueryByExampleNormalization,
+    result_budget: usize,
+}
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct DaemonRuntimeConfig {
@@ -710,22 +719,27 @@ impl DaemonRuntime {
         min_confidence: Option<f64>,
         request_correlation_id: u64,
     ) -> Result<McpResponse, String> {
-        let request =
-            Self::recall_request_from_params(query_text, like_id, unlike_id, result_budget)?;
+        let namespace_id = NamespaceId::new(namespace).map_err(|err| err.to_string())?;
+        let normalized = Self::normalize_recall_contract(
+            namespace_id,
+            query_text,
+            like_id,
+            unlike_id,
+            result_budget,
+        )?;
         let degraded_summary = Self::recall_degraded_summary(
             &context_text,
             &effort,
             include_public,
-            like_id,
-            unlike_id,
             as_of_tick,
             at_snapshot.as_deref(),
             min_confidence,
+            &normalized,
         );
         Self::handle_retrieval_method(
-            request,
+            normalized.planner_request,
             namespace,
-            result_budget,
+            Some(normalized.result_budget),
             request_correlation_id,
             "recall",
             &degraded_summary,
@@ -753,11 +767,17 @@ impl DaemonRuntime {
         limit: Option<usize>,
         request_correlation_id: u64,
     ) -> Result<McpResponse, String> {
-        let request = Self::recall_request_from_params(Some(query.to_string()), None, None, limit)?;
-        Self::handle_retrieval_method(
-            request,
-            namespace,
+        let normalized = Self::normalize_recall_contract(
+            NamespaceId::new(namespace).map_err(|err| err.to_string())?,
+            Some(query.to_string()),
+            None,
+            None,
             limit,
+        )?;
+        Self::handle_retrieval_method(
+            normalized.planner_request,
+            namespace,
+            Some(normalized.result_budget),
             request_correlation_id,
             "explain",
             "planner-only explain envelope; evidence hydration not implemented",
@@ -776,7 +796,7 @@ impl DaemonRuntime {
         let request_id = RequestId::new(format!("daemon-{method_name}-{request_correlation_id}"))
             .map_err(|err| err.to_string())?;
         let plan = RecallEngine.plan_recall(request, RuntimeConfig::default());
-        let result_budget = Self::canonical_result_budget(request, limit);
+        let result_budget = Self::canonical_result_budget(&request, limit);
         let mut result = RetrievalResultSet::empty(
             RetrievalExplain::from_plan(&plan, "balanced"),
             namespace.clone(),
@@ -791,40 +811,56 @@ impl DaemonRuntime {
         Ok(McpResponse::retrieval_success(payload))
     }
 
-    fn recall_request_from_params(
+    fn normalize_recall_contract(
+        namespace: NamespaceId,
         query_text: Option<String>,
         like_id: Option<u64>,
         unlike_id: Option<u64>,
         result_budget: Option<usize>,
-    ) -> Result<RecallRequest, String> {
+    ) -> Result<NormalizedRecallContract, String> {
         let result_budget = result_budget.unwrap_or(10);
-
-        if let Some(like_id) = like_id {
-            return Ok(RecallRequest::small_session_lookup(SessionId(like_id)));
-        }
-
-        if let Some(unlike_id) = unlike_id {
-            return Ok(RecallRequest::small_session_lookup(SessionId(unlike_id)));
-        }
-
-        if let Some(query) = query_text.as_deref() {
+        let planner_request = if let Some(query) = query_text.as_deref() {
             if let Some(memory_id) = query.strip_prefix("memory:") {
                 let memory_id = memory_id
                     .parse::<u64>()
                     .map_err(|_| format!("invalid memory query '{query}'"))?;
-                return Ok(RecallRequest::exact(MemoryId(memory_id)));
-            }
-
-            if let Some(session_id) = query.strip_prefix("session:") {
+                RecallRequest::exact(MemoryId(memory_id))
+            } else if let Some(session_id) = query.strip_prefix("session:") {
                 let session_id = session_id
                     .parse::<u64>()
                     .map_err(|_| format!("invalid session query '{query}'"))?;
-                return Ok(RecallRequest::small_session_lookup(SessionId(session_id)));
+                RecallRequest::small_session_lookup(SessionId(session_id))
+            } else {
+                RecallRequest::default()
             }
-        }
+        } else {
+            RecallRequest::default()
+        };
 
-        let _ = result_budget;
-        Ok(RecallRequest::default())
+        let retrieval_request =
+            RetrievalRequest::hybrid(namespace, query_text.unwrap_or_default(), result_budget)
+                .with_budget(result_budget)
+                .with_tier3_fallback(true)
+                .with_graph_expansion(false);
+        let retrieval_request = if let Some(like_id) = like_id {
+            retrieval_request.with_like_memory(MemoryId(like_id))
+        } else {
+            retrieval_request
+        };
+        let retrieval_request = if let Some(unlike_id) = unlike_id {
+            retrieval_request.with_unlike_memory(MemoryId(unlike_id))
+        } else {
+            retrieval_request
+        };
+        let normalized_query_by_example = retrieval_request
+            .normalize_query_by_example()
+            .map_err(|err| err.as_str().to_string())?;
+
+        Ok(NormalizedRecallContract {
+            planner_request,
+            normalized_query_by_example,
+            result_budget,
+        })
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -832,13 +868,19 @@ impl DaemonRuntime {
         context_text: &Option<String>,
         effort: &Option<String>,
         include_public: Option<bool>,
-        like_id: Option<u64>,
-        unlike_id: Option<u64>,
         as_of_tick: Option<u64>,
         at_snapshot: Option<&str>,
         min_confidence: Option<f64>,
+        normalized: &NormalizedRecallContract,
     ) -> String {
         let mut facets = Vec::new();
+        if normalized
+            .normalized_query_by_example
+            .normalized_query_text
+            .is_some()
+        {
+            facets.push("query_text");
+        }
         if context_text.is_some() {
             facets.push("context_text");
         }
@@ -848,11 +890,8 @@ impl DaemonRuntime {
         if include_public.unwrap_or(false) {
             facets.push("include_public");
         }
-        if like_id.is_some() {
-            facets.push("like_id");
-        }
-        if unlike_id.is_some() {
-            facets.push("unlike_id");
+        if normalized.normalized_query_by_example.has_example_seeds() {
+            facets.push("query_by_example");
         }
         if as_of_tick.is_some() {
             facets.push("as_of_tick");
@@ -864,17 +903,39 @@ impl DaemonRuntime {
             facets.push("min_confidence");
         }
 
-        if facets.is_empty() {
+        let mut summary = if facets.is_empty() {
             "planner-only recall envelope; evidence hydration not implemented".to_string()
         } else {
             format!(
                 "planner-only recall envelope; evidence hydration not implemented; normalized params: {}",
                 facets.join(", ")
             )
+        };
+
+        if normalized.normalized_query_by_example.has_example_seeds() {
+            let seed_ids = normalized
+                .normalized_query_by_example
+                .seed_memory_ids()
+                .into_iter()
+                .map(|id| id.0.to_string())
+                .collect::<Vec<_>>()
+                .join(", ");
+            let seed_polarities = normalized
+                .normalized_query_by_example
+                .seed_polarities()
+                .join(", ");
+            summary.push_str(&format!(
+                "; primary_cue={}, seed_memory_ids=[{}], seed_polarities=[{}]",
+                normalized.normalized_query_by_example.primary_cue.as_str(),
+                seed_ids,
+                seed_polarities
+            ));
         }
+
+        summary
     }
 
-    fn canonical_result_budget(request: RecallRequest, limit: Option<usize>) -> usize {
+    fn canonical_result_budget(request: &RecallRequest, limit: Option<usize>) -> usize {
         if request.exact_memory_id.is_some() {
             return 1;
         }
@@ -1153,6 +1214,9 @@ impl Drop for BackgroundJobGuard {
 mod tests {
     use super::{DaemonRuntime, DaemonRuntimeConfig};
     use crate::rpc::RuntimeStatus;
+    use membrain_core::api::NamespaceId;
+    use membrain_core::engine::recall::RecallRequest;
+    use membrain_core::types::MemoryId;
     use serde_json::{json, Value};
     use std::path::PathBuf;
     use std::sync::Arc;
@@ -1607,7 +1671,7 @@ mod tests {
 
         let retrieval = &result["retrieval"];
         assert_eq!(retrieval["request_id"], json!("daemon-recall-1"));
-        assert_eq!(retrieval["outcome_class"], json!("Degraded"));
+        assert_eq!(retrieval["outcome_class"], json!("degraded"));
         assert_eq!(retrieval["partial_success"], json!(false));
         assert!(retrieval["result"].get("evidence_pack").is_some());
         assert!(retrieval["result"].get("action_pack").is_some());
@@ -1634,7 +1698,7 @@ mod tests {
             .is_some());
         assert_eq!(
             retrieval["result"]["packaging_metadata"]["degraded_summary"],
-            json!("planner-only recall envelope; evidence hydration not implemented")
+            json!("planner-only recall envelope; evidence hydration not implemented; normalized params: query_text")
         );
 
         let shutdown_response = send_request(
@@ -1769,11 +1833,11 @@ mod tests {
         assert_eq!(recall_response["result"]["status"], json!("ok"));
         assert_eq!(
             recall_response["result"]["retrieval"]["outcome_class"],
-            json!("Degraded")
+            json!("degraded")
         );
         assert_eq!(
             recall_response["result"]["retrieval"]["result"]["outcome_class"],
-            json!("Degraded")
+            json!("degraded")
         );
         assert_eq!(
             recall_response["result"]["retrieval"]["result"]["packaging_metadata"]["result_budget"],
@@ -1782,7 +1846,7 @@ mod tests {
         assert_eq!(
             recall_response["result"]["retrieval"]["result"]["packaging_metadata"]
                 ["degraded_summary"],
-            json!("planner-only recall envelope; evidence hydration not implemented")
+            json!("planner-only recall envelope; evidence hydration not implemented; normalized params: query_text")
         );
         assert_eq!(
             recall_response["result"]["retrieval"]["result"]["explain"]["recall_plan"],
@@ -1843,17 +1907,20 @@ mod tests {
         );
         assert_eq!(
             recall_response["result"]["retrieval"]["result"]["explain"]["recall_plan"],
-            json!("RecentTier1ThenTier2Exact")
+            json!("Tier2ExactThenTier3Fallback")
         );
         let degraded_summary = recall_response["result"]["retrieval"]["result"]
             ["packaging_metadata"]["degraded_summary"]
             .as_str()
             .unwrap();
-        assert!(degraded_summary.contains("like_id"));
+        assert!(degraded_summary.contains("query_by_example"));
         assert!(degraded_summary.contains("context_text"));
         assert!(degraded_summary.contains("effort"));
         assert!(degraded_summary.contains("include_public"));
         assert!(degraded_summary.contains("min_confidence"));
+        assert!(degraded_summary.contains("primary_cue=like_id"));
+        assert!(degraded_summary.contains("seed_memory_ids=[7]"));
+        assert!(degraded_summary.contains("seed_polarities=[like]"));
 
         let shutdown_response = send_request(
             &socket_path,
@@ -1866,6 +1933,54 @@ mod tests {
             .unwrap()
             .unwrap()
             .unwrap();
+    }
+
+    #[test]
+    fn normalize_recall_contract_preserves_query_by_example_seed_semantics() {
+        let normalized = DaemonRuntime::normalize_recall_contract(
+            NamespaceId::new("team.alpha").unwrap(),
+            Some("  debugging trail  ".to_string()),
+            Some(7),
+            Some(9),
+            Some(4),
+        )
+        .unwrap();
+
+        assert_eq!(normalized.result_budget, 4);
+        assert_eq!(normalized.planner_request, RecallRequest::default());
+        assert_eq!(
+            normalized
+                .normalized_query_by_example
+                .normalized_query_text
+                .as_deref(),
+            Some("debugging trail")
+        );
+        assert_eq!(
+            normalized.normalized_query_by_example.primary_cue.as_str(),
+            "query_text"
+        );
+        assert_eq!(
+            normalized.normalized_query_by_example.seed_memory_ids(),
+            vec![MemoryId(7), MemoryId(9)]
+        );
+        assert_eq!(
+            normalized.normalized_query_by_example.seed_polarities(),
+            vec!["like", "unlike"]
+        );
+    }
+
+    #[test]
+    fn normalize_recall_contract_rejects_duplicate_query_by_example_cues() {
+        let error = DaemonRuntime::normalize_recall_contract(
+            NamespaceId::new("team.alpha").unwrap(),
+            None,
+            Some(7),
+            Some(7),
+            Some(4),
+        )
+        .unwrap_err();
+
+        assert_eq!(error, "duplicate_example_cue");
     }
 
     #[tokio::test]
@@ -1952,7 +2067,7 @@ mod tests {
         assert_eq!(
             recall_response["result"]["retrieval"]["result"]["packaging_metadata"]
                 ["degraded_summary"],
-            json!("planner-only recall envelope; evidence hydration not implemented")
+            json!("planner-only recall envelope; evidence hydration not implemented; normalized params: query_text")
         );
 
         let shutdown_response = send_request(
@@ -2292,7 +2407,7 @@ mod tests {
 
         let retrieval = &result["retrieval"];
         assert_eq!(retrieval["request_id"], json!("daemon-inspect-1"));
-        assert_eq!(retrieval["outcome_class"], json!("Degraded"));
+        assert_eq!(retrieval["outcome_class"], json!("degraded"));
         assert_eq!(retrieval["partial_success"], json!(false));
         assert!(retrieval["result"].get("evidence_pack").is_some());
         assert!(retrieval["result"].get("action_pack").is_some());

@@ -372,6 +372,7 @@ impl CacheHealthReport {
                 &cache.ann_probe.metrics,
                 cache.ann_probe.is_disabled(),
             ),
+            prefetch_family_health(cache),
             cache_family_health(
                 CacheFamily::SessionWarmup,
                 &cache.session_warmup.metrics,
@@ -518,6 +519,26 @@ fn cache_family_health(
         bypass_count: metrics.bypass_count,
         invalidation_count: metrics.invalidation_count,
         stale_warning_count: metrics.stale_warning_count,
+    }
+}
+
+fn prefetch_family_health(cache: &CacheManager) -> CacheFamilyHealth {
+    let metrics = &cache.prefetch.metrics;
+    let state = if !cache.prefetch.is_enabled() {
+        SubsystemHealthState::Unavailable
+    } else if metrics.hints_dropped > 0 {
+        SubsystemHealthState::Degraded
+    } else {
+        SubsystemHealthState::Healthy
+    };
+    CacheFamilyHealth {
+        family: CacheFamily::PrefetchHints.as_str(),
+        state,
+        hit_count: metrics.hints_consumed,
+        miss_count: 0,
+        bypass_count: metrics.hints_dropped,
+        invalidation_count: 0,
+        stale_warning_count: 0,
     }
 }
 
@@ -754,5 +775,77 @@ mod tests {
             .iter()
             .any(|family| family.family == CacheFamily::ResultCache.as_str()
                 && family.state == SubsystemHealthState::Unavailable));
+        assert!(report.cache.family_status.iter().any(|family| family.family
+            == CacheFamily::PrefetchHints.as_str()
+            && family.state == SubsystemHealthState::Healthy
+            && family.hit_count == 0
+            && family.bypass_count == 0));
+    }
+
+    #[test]
+    fn health_report_includes_prefetch_family_drop_metrics() {
+        let mut cache = CacheManager::new(4, 4);
+        cache.prefetch.submit_hint(
+            NamespaceId::new("health").expect("namespace"),
+            crate::store::cache::PrefetchTrigger::SessionRecency,
+            vec![crate::types::MemoryId(1)],
+        );
+        cache.prefetch.submit_hint(
+            NamespaceId::new("health").expect("namespace"),
+            crate::store::cache::PrefetchTrigger::TaskIntent,
+            vec![crate::types::MemoryId(2)],
+        );
+        let dropped = cache.prefetch.cancel_namespace(
+            &NamespaceId::new("health").expect("namespace"),
+            crate::store::cache::PrefetchBypassReason::ScopeChanged,
+        );
+        assert_eq!(dropped, 2);
+
+        let report = BrainHealthReport::from_inputs(
+            BrainHealthInputs {
+                hot_memories: 0,
+                hot_capacity: 10,
+                cold_memories: 0,
+                avg_strength: 0.0,
+                avg_confidence: 0.0,
+                low_confidence_count: 0,
+                decay_rate: 0.0,
+                archive_count: 0,
+                total_engrams: 0,
+                avg_cluster_size: 0.0,
+                top_engrams: Vec::new(),
+                landmark_count: 0,
+                unresolved_conflicts: 0,
+                uncertain_count: 0,
+                dream_links_total: 0,
+                last_dream_tick: None,
+                total_recalls: 0,
+                total_encodes: 0,
+                current_tick: 0,
+                daemon_uptime_ticks: 0,
+                index_reports: IndexModule.health_reports(),
+                availability: None,
+                feature_availability: Vec::new(),
+                previous_total_recalls: None,
+                previous_total_encodes: None,
+                previous_repair_queue_depth: None,
+            },
+            &cache,
+            None,
+        );
+
+        let prefetch_family = report
+            .cache
+            .family_status
+            .iter()
+            .find(|family| family.family == CacheFamily::PrefetchHints.as_str())
+            .expect("prefetch family should be reported");
+        assert_eq!(prefetch_family.state, SubsystemHealthState::Degraded);
+        assert_eq!(prefetch_family.hit_count, 0);
+        assert_eq!(prefetch_family.bypass_count, 2);
+        assert_eq!(report.cache.hints_submitted, 2);
+        assert_eq!(report.cache.hints_dropped, 2);
+        assert_eq!(report.cache.total_bypass_count, 2);
+        assert_eq!(report.cache.state, SubsystemHealthState::Degraded);
     }
 }
