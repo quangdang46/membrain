@@ -2,6 +2,7 @@ use crate::api::ApiModule;
 use crate::api::NamespaceId;
 use crate::config::RuntimeConfig;
 use crate::embed::EmbedModule;
+use crate::engine::confidence::ConfidenceEngine;
 use crate::engine::consolidation::ConsolidationEngine;
 use crate::engine::contradiction::{
     ContradictionCandidate, ContradictionEngine, ContradictionError, ContradictionKind,
@@ -51,6 +52,7 @@ pub struct BrainStore {
     intent: IntentEngine,
     ranking: RankingEngine,
     contradiction: ContradictionEngine,
+    confidence: ConfidenceEngine,
     consolidation: ConsolidationEngine,
     forgetting: ForgettingEngine,
     repair: RepairEngine,
@@ -78,6 +80,7 @@ impl BrainStore {
             intent: IntentEngine,
             ranking: RankingEngine,
             contradiction: ContradictionEngine::new(),
+            confidence: ConfidenceEngine,
             consolidation: ConsolidationEngine,
             forgetting: ForgettingEngine,
             repair: RepairEngine,
@@ -146,6 +149,11 @@ impl BrainStore {
     /// Returns the mutable contradiction engine surface used by wrappers.
     pub fn contradiction_engine_mut(&mut self) -> &mut ContradictionEngine {
         &mut self.contradiction
+    }
+
+    /// Returns the shared confidence engine surface owned by the core crate.
+    pub fn confidence_engine(&self) -> &ConfidenceEngine {
+        &self.confidence
     }
 
     /// Records an encode-side contradiction branch without silently overwriting either memory.
@@ -498,6 +506,20 @@ mod tests {
         let store = BrainStore::default();
 
         assert_eq!(store.audit_log_store_component_name(), "store.audit");
+    }
+
+    #[test]
+    fn brain_store_exposes_confidence_engine_component_identity() {
+        let store = BrainStore::default();
+
+        assert_eq!(store.confidence_engine().component_name(), "engine.confidence");
+    }
+
+    #[test]
+    fn brain_store_confidence_engine_matches_direct_engine_default() {
+        let store = BrainStore::default();
+
+        assert_eq!(store.confidence_engine(), &crate::engine::confidence::ConfidenceEngine);
     }
 
     #[test]

@@ -147,7 +147,7 @@ impl Default for ConfidencePolicy {
 // ── Confidence engine ────────────────────────────────────────────────────────
 
 /// Canonical confidence engine owned by the core crate.
-#[derive(Debug, Default, Clone, Copy, PartialEq)]
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
 pub struct ConfidenceEngine;
 
 impl ConfidenceEngine {
