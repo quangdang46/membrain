@@ -514,11 +514,9 @@ mod tests {
             log.entries_for_kind(AuditEventKind::MaintenanceRepairRollbackCompleted);
 
         assert_eq!(namespace_entries.len(), 3);
-        assert!(
-            namespace_entries
-                .iter()
-                .all(|entry| entry.category == AuditEventCategory::Maintenance)
-        );
+        assert!(namespace_entries
+            .iter()
+            .all(|entry| entry.category == AuditEventCategory::Maintenance));
         assert_eq!(rollback_entries.len(), 3);
         assert_eq!(degraded_entries.len(), 1);
         assert_eq!(rollback_trigger_entries.len(), 1);

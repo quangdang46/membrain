@@ -3,13 +3,14 @@ use crate::api::NamespaceId;
 use crate::config::RuntimeConfig;
 use crate::embed::EmbedModule;
 use crate::engine::confidence::ConfidenceEngine;
-use crate::engine::consolidation::ConsolidationEngine;
+use crate::engine::consolidation::{ConsolidationEngine, ConsolidationSummary};
 use crate::engine::contradiction::{
     ContradictionCandidate, ContradictionEngine, ContradictionError, ContradictionKind,
 };
 use crate::engine::encode::{ContradictionWriteOutcome, EncodeEngine, WriteBranchOutcome};
 use crate::engine::forgetting::ForgettingEngine;
 use crate::engine::intent::IntentEngine;
+use crate::engine::maintenance::MaintenanceController;
 use crate::engine::ranking::RankingEngine;
 use crate::engine::recall::RecallEngine;
 use crate::engine::repair::RepairEngine;
@@ -217,6 +218,30 @@ impl BrainStore {
         &self.consolidation
     }
 
+    /// Returns an inspectable summary of one bounded consolidation pass.
+    pub fn summarize_consolidation_pass(
+        &self,
+        namespace: NamespaceId,
+        policy: crate::engine::consolidation::ConsolidationPolicy,
+        estimated_groups: u32,
+    ) -> ConsolidationSummary {
+        use crate::engine::maintenance::{MaintenanceJobHandle, MaintenanceJobState};
+
+        let run = self
+            .consolidation
+            .create_run(namespace, policy, estimated_groups);
+        let mut handle = MaintenanceJobHandle::new(run, estimated_groups.max(1) + 1);
+
+        loop {
+            let snapshot = handle.poll();
+            match snapshot.state {
+                MaintenanceJobState::Completed(summary) => return summary,
+                MaintenanceJobState::Running { .. } => continue,
+                other => panic!("unexpected consolidation state: {other:?}"),
+            }
+        }
+    }
+
     /// Returns the shared forgetting surface owned by the core crate.
     pub fn forgetting_engine(&self) -> &ForgettingEngine {
         &self.forgetting
@@ -355,6 +380,7 @@ impl Default for BrainStore {
 mod tests {
     use super::{BrainStore, PreparedTier2Layout};
     use crate::api::NamespaceId;
+    use crate::engine::consolidation::ConsolidationPolicy;
     use crate::engine::contradiction::ContradictionStore;
     use crate::migrate::DurableSchemaObject;
     use crate::observability::Tier1LookupOutcome;
@@ -392,6 +418,60 @@ mod tests {
             &layout.metadata.landmark
         );
         assert_eq!(layout.prefilter_trace().payload_fetch_count, 0);
+    }
+
+    #[test]
+    fn summarize_consolidation_pass_exposes_lineage_preserving_artifacts() {
+        let store = BrainStore::default();
+        let summary = store.summarize_consolidation_pass(
+            NamespaceId::new("tests/consolidation").unwrap(),
+            ConsolidationPolicy {
+                minimum_candidates: 1,
+                batch_size: 2,
+                ..Default::default()
+            },
+            2,
+        );
+
+        assert_eq!(summary.groups_evaluated, 2);
+        assert_eq!(summary.episode_source_sets, 2);
+        assert_eq!(summary.derivations_emitted, 2);
+        assert_eq!(summary.derivation_partial_failures, 2);
+        assert_eq!(summary.derived_artifacts.len(), 2);
+        assert_eq!(summary.derivation_failures.len(), 2);
+        assert_eq!(summary.derived_artifacts[0].source_ids, vec![MemoryId(1)]);
+        assert_eq!(
+            summary.derived_artifacts[0].continuity_keys,
+            vec!["singleton"]
+        );
+        assert!(summary.derived_artifacts[0]
+            .content
+            .contains("summary(singleton)"));
+        assert_eq!(
+            summary.derivation_failures[0].reason,
+            "single_source_group_kept_evidence_only"
+        );
+        assert!(summary.derivation_failures[0].lineage_preserved);
+    }
+
+    #[test]
+    fn summarize_consolidation_pass_respects_minimum_candidate_gate() {
+        let store = BrainStore::default();
+        let summary = store.summarize_consolidation_pass(
+            NamespaceId::new("tests/consolidation-gated").unwrap(),
+            ConsolidationPolicy {
+                minimum_candidates: 3,
+                batch_size: 2,
+                ..Default::default()
+            },
+            2,
+        );
+
+        assert_eq!(summary.groups_evaluated, 0);
+        assert_eq!(summary.episode_source_sets, 0);
+        assert_eq!(summary.derivations_emitted, 0);
+        assert!(summary.derived_artifacts.is_empty());
+        assert!(summary.derivation_failures.is_empty());
     }
 
     #[test]
@@ -512,14 +592,20 @@ mod tests {
     fn brain_store_exposes_confidence_engine_component_identity() {
         let store = BrainStore::default();
 
-        assert_eq!(store.confidence_engine().component_name(), "engine.confidence");
+        assert_eq!(
+            store.confidence_engine().component_name(),
+            "engine.confidence"
+        );
     }
 
     #[test]
     fn brain_store_confidence_engine_matches_direct_engine_default() {
         let store = BrainStore::default();
 
-        assert_eq!(store.confidence_engine(), &crate::engine::confidence::ConfidenceEngine);
+        assert_eq!(
+            store.confidence_engine(),
+            &crate::engine::confidence::ConfidenceEngine
+        );
     }
 
     #[test]

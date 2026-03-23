@@ -475,6 +475,12 @@ impl BoundedExpansionPlanner {
         Self { constraints }
     }
 
+    fn record_cutoff(explain: &mut GraphExplain, reason: CutoffReason) {
+        if !explain.cutoff_reasons.contains(&reason) {
+            explain.cutoff_reasons.push(reason);
+        }
+    }
+
     fn should_follow_edge(&self, current: EntityId, edge: &GraphEdge) -> bool {
         if edge.from == current {
             true
@@ -538,18 +544,15 @@ impl BoundedExpansionPlanner {
             }
 
             if depth >= self.constraints.max_depth {
-                explain
-                    .cutoff_reasons
-                    .push(CutoffReason::MaxDepthReached(depth));
+                Self::record_cutoff(&mut explain, CutoffReason::MaxDepthReached(depth));
                 neighborhood.truncated = true;
                 continue;
             }
 
             if explain.expanded_nodes >= self.constraints.max_entities {
-                explain
-                    .cutoff_reasons
-                    .push(CutoffReason::MaxNodesReached(explain.expanded_nodes));
-                explain.cutoff_reasons.push(CutoffReason::BudgetExhausted);
+                let expanded_nodes = explain.expanded_nodes;
+                Self::record_cutoff(&mut explain, CutoffReason::MaxNodesReached(expanded_nodes));
+                Self::record_cutoff(&mut explain, CutoffReason::BudgetExhausted);
                 neighborhood.truncated = true;
                 break;
             }
@@ -565,10 +568,11 @@ impl BoundedExpansionPlanner {
                 }
 
                 if neighborhood.entities.len() >= self.constraints.max_entities {
-                    explain
-                        .cutoff_reasons
-                        .push(CutoffReason::MaxNodesReached(self.constraints.max_entities));
-                    explain.cutoff_reasons.push(CutoffReason::BudgetExhausted);
+                    Self::record_cutoff(
+                        &mut explain,
+                        CutoffReason::MaxNodesReached(self.constraints.max_entities),
+                    );
+                    Self::record_cutoff(&mut explain, CutoffReason::BudgetExhausted);
                     neighborhood.truncated = true;
                     break;
                 }
@@ -694,9 +698,9 @@ impl DerivedGraphRebuilder {
     }
 
     fn entity_for_concept(concept: &str) -> EntityId {
-        let hash = concept
-            .bytes()
-            .fold(0u64, |acc, byte| acc.wrapping_mul(131).wrapping_add(byte as u64));
+        let hash = concept.bytes().fold(0u64, |acc, byte| {
+            acc.wrapping_mul(131).wrapping_add(byte as u64)
+        });
         EntityId(1_000_000 + hash)
     }
 
@@ -1236,9 +1240,70 @@ mod tests {
             follow_reverse: false,
         });
 
-        let (_, ex) =
+        let (nb, ex) =
             planner.plan_bfs_with_additional_seeds(EntityId(1), &[EntityId(9)], |_| Vec::new());
 
+        assert!(nb.entities.is_empty());
+        assert_eq!(ex.expanded_nodes, 1);
+        assert!(ex
+            .cutoff_reasons
+            .contains(&CutoffReason::MaxNodesReached(1)));
+        assert!(ex.cutoff_reasons.contains(&CutoffReason::BudgetExhausted));
+    }
+
+    #[test]
+    fn bfs_allows_seed_plus_one_neighbor_when_entity_cap_is_one() {
+        let planner = BoundedExpansionPlanner::new(ExpansionConstraints {
+            max_depth: 2,
+            max_entities: 1,
+            min_strength: 50,
+            follow_reverse: false,
+        });
+
+        let seed = EntityId(1);
+        let (nb, ex) = planner.plan_bfs(seed, |current| {
+            if current == seed {
+                vec![
+                    (
+                        GraphEdge {
+                            from: current,
+                            to: EntityId(2),
+                            relation: RelationKind::Mentions,
+                            strength: 100,
+                        },
+                        GraphEntity {
+                            id: EntityId(2),
+                            kind: EntityKind::Concept,
+                            label: "first".into(),
+                            namespace: NamespaceId::new("ns").unwrap(),
+                            memory_id: None,
+                        },
+                    ),
+                    (
+                        GraphEdge {
+                            from: current,
+                            to: EntityId(3),
+                            relation: RelationKind::Mentions,
+                            strength: 100,
+                        },
+                        GraphEntity {
+                            id: EntityId(3),
+                            kind: EntityKind::Concept,
+                            label: "second".into(),
+                            namespace: NamespaceId::new("ns").unwrap(),
+                            memory_id: None,
+                        },
+                    ),
+                ]
+            } else {
+                Vec::new()
+            }
+        });
+
+        assert_eq!(nb.entities.len(), 1);
+        assert_eq!(nb.entities[0].id, EntityId(2));
+        assert_eq!(ex.expanded_nodes, 1);
+        assert_eq!(ex.edges_followed, 1);
         assert!(ex
             .cutoff_reasons
             .contains(&CutoffReason::MaxNodesReached(1)));

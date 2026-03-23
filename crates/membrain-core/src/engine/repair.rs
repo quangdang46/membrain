@@ -741,9 +741,7 @@ mod tests {
                         .hooks_run
                         .iter()
                         .any(|hook| hook.as_str() == "verify_consistency_snapshot"));
-                    assert!(graph_report
-                        .operator_log
-                        .contains("failure_injection=none"));
+                    assert!(graph_report.operator_log.contains("failure_injection=none"));
                     let semantic_hot_report = summary
                         .operator_reports
                         .iter()

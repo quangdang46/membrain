@@ -897,19 +897,61 @@ pub struct McpError {
     pub is_policy_denial: bool,
 }
 
-/// Extensions for MCP Resources (`mb-23u.7.2`)
+/// Typed inspect payload that reuses the canonical explain families instead of inventing an
+/// inspect-only wrapper-local schema.
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct McpInspectPayload {
+    pub request_id: RequestId,
+    pub namespace: NamespaceId,
+    pub memory_id: u64,
+    pub tier: String,
+    pub lineage: serde_json::Value,
+    pub policy_flags: serde_json::Value,
+    pub lifecycle_state: serde_json::Value,
+    pub index_presence: serde_json::Value,
+    pub graph_neighborhood_summary: serde_json::Value,
+    pub decay_retention: serde_json::Value,
+    pub explain_trace: McpInspectExplainTrace,
+}
+
+/// Embedded explain families for inspect responses.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct McpInspectExplainTrace {
+    pub policy_summary: serde_json::Value,
+    pub provenance_summary: serde_json::Value,
+    pub freshness_markers: serde_json::Value,
+    pub conflict_markers: serde_json::Value,
+    pub passive_observation: Option<serde_json::Value>,
+    pub trace_stages: Vec<String>,
+}
+
+/// Typed MCP resource descriptor for explicit resource listings and later integration tests.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct McpResource {
     pub uri: String,
     pub name: String,
     pub mime_type: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub description: Option<String>,
+}
+
+/// Typed MCP resource-list payload.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct McpResourceListing {
+    pub request_id: RequestId,
+    pub namespace: NamespaceId,
+    pub resources: Vec<McpResource>,
 }
 
 #[cfg(test)]
 mod tests {
     use super::{
-        CommonRequestFields, EncodeParams, ExplainParams, InspectParams, McpError, McpRequest,
+        CommonRequestFields, EncodeParams, ExplainParams, InspectParams, McpError,
+        McpInspectExplainTrace, McpInspectPayload, McpRequest, McpResource, McpResourceListing,
         McpResponse, McpRetrievalPayload, RecallParams,
     };
     use membrain_core::api::{NamespaceId, RequestId};
@@ -1148,6 +1190,87 @@ mod tests {
     }
 
     #[test]
+    fn inspect_payload_reuses_canonical_explain_families() {
+        let payload = McpInspectPayload {
+            request_id: RequestId::new("inspect-req-1").unwrap(),
+            namespace: NamespaceId::new("team.alpha").unwrap(),
+            memory_id: 42,
+            tier: "tier1".to_string(),
+            lineage: serde_json::json!({"ancestors": [7, 9]}),
+            policy_flags: serde_json::json!({"sharing_scope": "private"}),
+            lifecycle_state: serde_json::json!({"state": "active"}),
+            index_presence: serde_json::json!({"tier1": true, "tier2": false}),
+            graph_neighborhood_summary: serde_json::json!({"neighbors": 3}),
+            decay_retention: serde_json::json!({"pinned": false, "strength": 400}),
+            explain_trace: McpInspectExplainTrace {
+                policy_summary: serde_json::json!({"effective_namespace": "team.alpha"}),
+                provenance_summary: serde_json::json!({"source_reference": "memory:42"}),
+                freshness_markers: serde_json::json!({"stale_warning": false}),
+                conflict_markers: serde_json::json!({"conflicted": false}),
+                passive_observation: Some(serde_json::json!({"source": "user_input"})),
+                trace_stages: vec!["inspect_lookup".to_string(), "policy_gate".to_string()],
+            },
+        };
+
+        let json = serde_json::to_value(&payload).unwrap();
+        assert_eq!(json["request_id"], "inspect-req-1");
+        assert_eq!(json["namespace"], "team.alpha");
+        assert_eq!(json["memory_id"], 42);
+        assert_eq!(json["tier"], "tier1");
+        assert_eq!(
+            json["explain_trace"]["policy_summary"]["effective_namespace"],
+            "team.alpha"
+        );
+        assert_eq!(
+            json["explain_trace"]["provenance_summary"]["source_reference"],
+            "memory:42"
+        );
+        assert_eq!(
+            json["explain_trace"]["trace_stages"],
+            serde_json::json!(["inspect_lookup", "policy_gate"])
+        );
+        assert!(json["explain_trace"].get("passive_observation").is_some());
+    }
+
+    #[test]
+    fn resource_listing_round_trips_typed_resources() {
+        let listing = McpResourceListing {
+            request_id: RequestId::new("resource-req-1").unwrap(),
+            namespace: NamespaceId::new("team.alpha").unwrap(),
+            resources: vec![
+                McpResource {
+                    uri: "membrain://team.alpha/memories/42".to_string(),
+                    name: "memory-42".to_string(),
+                    mime_type: "application/json".to_string(),
+                    description: Some("Typed inspect payload for memory 42".to_string()),
+                },
+                McpResource {
+                    uri: "membrain://team.alpha/snapshots/pre-migration".to_string(),
+                    name: "snapshot-pre-migration".to_string(),
+                    mime_type: "application/json".to_string(),
+                    description: None,
+                },
+            ],
+        };
+
+        let json = serde_json::to_value(&listing).unwrap();
+        assert_eq!(json["request_id"], "resource-req-1");
+        assert_eq!(json["namespace"], "team.alpha");
+        assert_eq!(
+            json["resources"][0]["uri"],
+            "membrain://team.alpha/memories/42"
+        );
+        assert_eq!(json["resources"][0]["mime_type"], "application/json");
+        assert_eq!(json["resources"][1]["name"], "snapshot-pre-migration");
+        assert!(json["resources"][1].get("description").is_none());
+
+        let decoded: McpResourceListing = serde_json::from_value(json).unwrap();
+        assert_eq!(decoded.resources.len(), 2);
+        assert_eq!(decoded.resources[0].name, "memory-42");
+        assert!(decoded.resources[1].description.is_none());
+    }
+
+    #[test]
     fn mcp_param_structs_reject_unknown_fields() {
         let encode_error = serde_json::from_value::<EncodeParams>(serde_json::json!({
             "content": "hello",
@@ -1283,6 +1406,50 @@ mod tests {
         }))
         .unwrap_err();
 
+        assert!(error.to_string().contains("unknown field `unexpected`"));
+    }
+
+    #[test]
+    fn inspect_payload_rejects_unknown_fields() {
+        let error = serde_json::from_value::<McpInspectPayload>(serde_json::json!({
+            "request_id": "inspect-req-1",
+            "namespace": "team.alpha",
+            "memory_id": 42,
+            "tier": "tier1",
+            "lineage": {},
+            "policy_flags": {},
+            "lifecycle_state": {},
+            "index_presence": {},
+            "graph_neighborhood_summary": {},
+            "decay_retention": {},
+            "explain_trace": {
+                "policy_summary": {},
+                "provenance_summary": {},
+                "freshness_markers": {},
+                "conflict_markers": {},
+                "trace_stages": []
+            },
+            "unexpected": true
+        }))
+        .unwrap_err();
+        assert!(error.to_string().contains("unknown field `unexpected`"));
+    }
+
+    #[test]
+    fn resource_listing_rejects_unknown_nested_resource_fields() {
+        let error = serde_json::from_value::<McpResourceListing>(serde_json::json!({
+            "request_id": "resource-req-1",
+            "namespace": "team.alpha",
+            "resources": [
+                {
+                    "uri": "membrain://team.alpha/memories/42",
+                    "name": "memory-42",
+                    "mime_type": "application/json",
+                    "unexpected": true
+                }
+            ]
+        }))
+        .unwrap_err();
         assert!(error.to_string().contains("unknown field `unexpected`"));
     }
 

@@ -138,31 +138,38 @@ pub struct RuntimeMethodRequest {
     pub id: Option<Value>,
 }
 
-fn parse_optional_limit(params: &Value) -> Result<Option<usize>, JsonRpcError> {
-    match params.get("limit") {
+fn parse_optional_positive_usize(
+    params: &Value,
+    field: &'static str,
+) -> Result<Option<usize>, JsonRpcError> {
+    match params.get(field) {
         None | Some(Value::Null) => Ok(None),
         Some(Value::Number(value)) => {
             let parsed = value.as_u64().and_then(|value| usize::try_from(value).ok());
             match parsed {
                 Some(0) => Err(JsonRpcError {
                     code: -32602,
-                    message: "limit must be at least 1".to_string(),
+                    message: format!("{field} must be at least 1"),
                     data: None,
                 }),
                 Some(limit) => Ok(Some(limit)),
                 None => Err(JsonRpcError {
                     code: -32602,
-                    message: "limit must be a positive integer".to_string(),
+                    message: format!("{field} must be a positive integer"),
                     data: None,
                 }),
             }
         }
         Some(_) => Err(JsonRpcError {
             code: -32602,
-            message: "limit must be a positive integer".to_string(),
+            message: format!("{field} must be a positive integer"),
             data: None,
         }),
     }
+}
+
+fn parse_optional_limit(params: &Value) -> Result<Option<usize>, JsonRpcError> {
+    parse_optional_positive_usize(params, "limit")
 }
 
 fn parse_required_u64(params: &Value, field: &'static str) -> Result<u64, JsonRpcError> {
@@ -448,16 +455,30 @@ impl RuntimeMethodRequest {
                         "query",
                         "query_text",
                         "namespace",
+                        "mode",
                         "limit",
                         "result_budget",
+                        "token_budget",
+                        "time_budget_ms",
                         "context_text",
                         "effort",
                         "include_public",
                         "like_id",
                         "unlike_id",
+                        "graph_mode",
+                        "cold_tier",
+                        "workspace_id",
+                        "agent_id",
+                        "session_id",
+                        "task_id",
+                        "memory_kinds",
+                        "era_id",
                         "as_of_tick",
                         "at_snapshot",
+                        "min_strength",
                         "min_confidence",
+                        "show_decaying",
+                        "mood_congruent",
                     ],
                 )?;
                 let query = parse_optional_string(&self.params, "query")?;
@@ -471,15 +492,33 @@ impl RuntimeMethodRequest {
                         message: "missing namespace".to_string(),
                         data: None,
                     })?;
+                let mode = parse_optional_string(&self.params, "mode")?;
                 let result_budget = parse_optional_budget(&self.params)?;
+                let token_budget = parse_optional_positive_usize(&self.params, "token_budget")?;
+                let time_budget_ms = parse_optional_u32(&self.params, "time_budget_ms")?;
                 let context_text = parse_optional_string(&self.params, "context_text")?;
                 let effort = parse_optional_string(&self.params, "effort")?;
                 let include_public = parse_optional_bool(&self.params, "include_public")?;
                 let like_id = parse_optional_positive_u64(&self.params, "like_id")?;
                 let unlike_id = parse_optional_positive_u64(&self.params, "unlike_id")?;
+                let graph_mode = parse_optional_string(&self.params, "graph_mode")?;
+                let cold_tier = parse_optional_bool(&self.params, "cold_tier")?;
+                let workspace_id = parse_optional_string(&self.params, "workspace_id")?;
+                let agent_id = parse_optional_string(&self.params, "agent_id")?;
+                let session_id = parse_optional_string(&self.params, "session_id")?;
+                let task_id = parse_optional_string(&self.params, "task_id")?;
+                let memory_kinds = match self.params.get("memory_kinds") {
+                    None | Some(Value::Null) => None,
+                    Some(_) => Some(parse_string_array(&self.params, "memory_kinds")?),
+                };
+                let era_id = parse_optional_string(&self.params, "era_id")?;
                 let as_of_tick = parse_optional_u64(&self.params, "as_of_tick")?;
                 let at_snapshot = parse_optional_string(&self.params, "at_snapshot")?;
+                let min_strength =
+                    parse_optional_u32(&self.params, "min_strength")?.map(|value| value as u16);
                 let min_confidence = parse_optional_f64(&self.params, "min_confidence")?;
+                let show_decaying = parse_optional_bool(&self.params, "show_decaying")?;
+                let mood_congruent = parse_optional_bool(&self.params, "mood_congruent")?;
 
                 if as_of_tick.is_some() && at_snapshot.is_some() {
                     return Err(JsonRpcError {
@@ -501,15 +540,29 @@ impl RuntimeMethodRequest {
                 Ok(RuntimeRequest::Recall {
                     query_text: primary_query,
                     namespace: namespace.to_string(),
+                    mode,
                     result_budget,
+                    token_budget,
+                    time_budget_ms,
                     context_text,
                     effort,
                     include_public,
                     like_id,
                     unlike_id,
+                    graph_mode,
+                    cold_tier,
+                    workspace_id,
+                    agent_id,
+                    session_id,
+                    task_id,
+                    memory_kinds,
+                    era_id,
                     as_of_tick,
                     at_snapshot,
+                    min_strength,
                     min_confidence,
+                    show_decaying,
+                    mood_congruent,
                 })
             }
             "inspect" => {
@@ -592,6 +645,16 @@ impl RuntimeMethodRequest {
                     bypass_flags: parse_string_array(&self.params, "bypass_flags")?,
                 })
             }
+            "resources.list" => {
+                reject_unknown_fields(&self.params, &[])?;
+                Ok(RuntimeRequest::ResourcesList)
+            }
+            "resource.read" => {
+                reject_unknown_fields(&self.params, &["uri"])?;
+                Ok(RuntimeRequest::ResourceRead {
+                    uri: parse_required_string(&self.params, "uri")?,
+                })
+            }
             "sleep" => {
                 let millis = self
                     .params
@@ -638,6 +701,7 @@ impl RuntimeMethodRequest {
                 })
             }
             "run_maintenance" => {
+                reject_unknown_fields(&self.params, &["polls_budget", "step_delay_ms"])?;
                 let polls_budget = parse_optional_u32(&self.params, "polls_budget")?;
                 let step_delay_ms =
                     parse_optional_u32(&self.params, "step_delay_ms")?.map(u64::from);
@@ -735,6 +799,7 @@ impl RuntimeMethodRequest {
 }
 
 #[derive(Debug, Clone, PartialEq)]
+#[allow(clippy::large_enum_variant)]
 pub enum RuntimeRequest {
     Ping,
     Status,
@@ -747,15 +812,29 @@ pub enum RuntimeRequest {
     Recall {
         query_text: Option<String>,
         namespace: String,
+        mode: Option<String>,
         result_budget: Option<usize>,
+        token_budget: Option<usize>,
+        time_budget_ms: Option<u32>,
         context_text: Option<String>,
         effort: Option<String>,
         include_public: Option<bool>,
         like_id: Option<u64>,
         unlike_id: Option<u64>,
+        graph_mode: Option<String>,
+        cold_tier: Option<bool>,
+        workspace_id: Option<String>,
+        agent_id: Option<String>,
+        session_id: Option<String>,
+        task_id: Option<String>,
+        memory_kinds: Option<Vec<String>>,
+        era_id: Option<String>,
         as_of_tick: Option<u64>,
         at_snapshot: Option<String>,
+        min_strength: Option<u16>,
         min_confidence: Option<f64>,
+        show_decaying: Option<bool>,
+        mood_congruent: Option<bool>,
     },
     Inspect {
         id: u64,
@@ -809,6 +888,10 @@ pub enum RuntimeRequest {
         namespace: String,
         authorization_token: String,
         bypass_flags: Vec<String>,
+    },
+    ResourcesList,
+    ResourceRead {
+        uri: String,
     },
     Sleep {
         millis: u64,
@@ -963,6 +1046,24 @@ mod tests {
     }
 
     #[test]
+    fn parse_method_run_maintenance_rejects_unknown_fields() {
+        let request = RuntimeMethodRequest {
+            jsonrpc: "2.0".to_string(),
+            method: "run_maintenance".to_string(),
+            params: json!({
+                "polls_budget": 4,
+                "step_delay_ms": 15,
+                "unexpected": true
+            }),
+            id: Some(json!(8)),
+        };
+
+        let error = request.parse_method().unwrap_err();
+        assert_eq!(error.code, -32602);
+        assert_eq!(error.message, "unknown field unexpected");
+    }
+
+    #[test]
     fn parse_method_accepts_doctor_without_params() {
         let request = RuntimeMethodRequest {
             jsonrpc: "2.0".to_string(),
@@ -988,15 +1089,29 @@ mod tests {
             RuntimeRequest::Recall {
                 query_text: Some("memory:42".to_string()),
                 namespace: "team.alpha".to_string(),
+                mode: None,
                 result_budget: Some(3),
+                token_budget: None,
+                time_budget_ms: None,
                 context_text: None,
                 effort: None,
                 include_public: None,
                 like_id: None,
                 unlike_id: None,
+                graph_mode: None,
+                cold_tier: None,
+                workspace_id: None,
+                agent_id: None,
+                session_id: None,
+                task_id: None,
+                memory_kinds: None,
+                era_id: None,
                 as_of_tick: None,
                 at_snapshot: None,
+                min_strength: None,
                 min_confidence: None,
+                show_decaying: None,
+                mood_congruent: None,
             }
         );
     }
@@ -1234,6 +1349,30 @@ mod tests {
                 bypass_flags: vec!["manual_override".to_string()],
             }
         );
+
+        let resources = RuntimeMethodRequest {
+            jsonrpc: "2.0".to_string(),
+            method: "resources.list".to_string(),
+            params: json!({}),
+            id: Some(json!(13)),
+        };
+        assert_eq!(
+            resources.parse_method().unwrap(),
+            RuntimeRequest::ResourcesList
+        );
+
+        let resource_read = RuntimeMethodRequest {
+            jsonrpc: "2.0".to_string(),
+            method: "resource.read".to_string(),
+            params: json!({ "uri": "membrain://inspect/team.alpha/42" }),
+            id: Some(json!(14)),
+        };
+        assert_eq!(
+            resource_read.parse_method().unwrap(),
+            RuntimeRequest::ResourceRead {
+                uri: "membrain://inspect/team.alpha/42".to_string(),
+            }
+        );
     }
 
     #[test]
@@ -1312,6 +1451,29 @@ mod tests {
         let error = allow.parse_method().unwrap_err();
         assert_eq!(error.code, -32602);
         assert_eq!(error.message, "unknown field unexpected");
+
+        let resources = RuntimeMethodRequest {
+            jsonrpc: "2.0".to_string(),
+            method: "resources.list".to_string(),
+            params: json!({ "unexpected": true }),
+            id: Some(json!(18)),
+        };
+        let error = resources.parse_method().unwrap_err();
+        assert_eq!(error.code, -32602);
+        assert_eq!(error.message, "unknown field unexpected");
+
+        let resource_read = RuntimeMethodRequest {
+            jsonrpc: "2.0".to_string(),
+            method: "resource.read".to_string(),
+            params: json!({
+                "uri": "membrain://inspect/team.alpha/42",
+                "unexpected": true
+            }),
+            id: Some(json!(19)),
+        };
+        let error = resource_read.parse_method().unwrap_err();
+        assert_eq!(error.code, -32602);
+        assert_eq!(error.message, "unknown field unexpected");
     }
 
     #[test]
@@ -1322,14 +1484,28 @@ mod tests {
             params: json!({
                 "query_text": "session:7",
                 "namespace": "team.alpha",
+                "mode": "semantic",
                 "result_budget": 4,
+                "token_budget": 256,
+                "time_budget_ms": 75,
                 "context_text": "triaging recall drift",
                 "effort": "high",
                 "include_public": true,
                 "like_id": 11,
                 "unlike_id": 17,
+                "graph_mode": "expand",
+                "cold_tier": true,
+                "workspace_id": "ws-7",
+                "agent_id": "agent-3",
+                "session_id": "session-9",
+                "task_id": "task-2",
+                "memory_kinds": ["user_preference", "session_note"],
+                "era_id": "incident-2026",
                 "as_of_tick": 42,
-                "min_confidence": 0.8
+                "min_strength": 200,
+                "min_confidence": 0.8,
+                "show_decaying": true,
+                "mood_congruent": true
             }),
             id: Some(json!(18)),
         };
@@ -1339,15 +1515,32 @@ mod tests {
             RuntimeRequest::Recall {
                 query_text: Some("session:7".to_string()),
                 namespace: "team.alpha".to_string(),
+                mode: Some("semantic".to_string()),
                 result_budget: Some(4),
+                token_budget: Some(256),
+                time_budget_ms: Some(75),
                 context_text: Some("triaging recall drift".to_string()),
                 effort: Some("high".to_string()),
                 include_public: Some(true),
                 like_id: Some(11),
                 unlike_id: Some(17),
+                graph_mode: Some("expand".to_string()),
+                cold_tier: Some(true),
+                workspace_id: Some("ws-7".to_string()),
+                agent_id: Some("agent-3".to_string()),
+                session_id: Some("session-9".to_string()),
+                task_id: Some("task-2".to_string()),
+                memory_kinds: Some(vec![
+                    "user_preference".to_string(),
+                    "session_note".to_string()
+                ]),
+                era_id: Some("incident-2026".to_string()),
                 as_of_tick: Some(42),
                 at_snapshot: None,
+                min_strength: Some(200),
                 min_confidence: Some(0.8),
+                show_decaying: Some(true),
+                mood_congruent: Some(true),
             }
         );
 
@@ -1367,17 +1560,76 @@ mod tests {
             RuntimeRequest::Recall {
                 query_text: None,
                 namespace: "team.alpha".to_string(),
+                mode: None,
                 result_budget: Some(2),
+                token_budget: None,
+                time_budget_ms: None,
                 context_text: None,
                 effort: None,
                 include_public: None,
                 like_id: Some(99),
                 unlike_id: None,
+                graph_mode: None,
+                cold_tier: None,
+                workspace_id: None,
+                agent_id: None,
+                session_id: None,
+                task_id: None,
+                memory_kinds: None,
+                era_id: None,
                 as_of_tick: None,
                 at_snapshot: None,
+                min_strength: None,
                 min_confidence: None,
+                show_decaying: None,
+                mood_congruent: None,
             }
         );
+    }
+
+    #[test]
+    fn parse_method_recall_rejects_invalid_extended_contract_fields() {
+        let invalid_memory_kinds = RuntimeMethodRequest {
+            jsonrpc: "2.0".to_string(),
+            method: "recall".to_string(),
+            params: json!({
+                "query_text": "memory:42",
+                "namespace": "team.alpha",
+                "memory_kinds": ["user_preference", 7]
+            }),
+            id: Some(json!(20)),
+        };
+        let error = invalid_memory_kinds.parse_method().unwrap_err();
+        assert_eq!(error.code, -32602);
+        assert_eq!(error.message, "memory_kinds must be an array of strings");
+
+        let invalid_token_budget = RuntimeMethodRequest {
+            jsonrpc: "2.0".to_string(),
+            method: "recall".to_string(),
+            params: json!({
+                "query_text": "memory:42",
+                "namespace": "team.alpha",
+                "token_budget": 0
+            }),
+            id: Some(json!(21)),
+        };
+        let error = invalid_token_budget.parse_method().unwrap_err();
+        assert_eq!(error.code, -32602);
+        assert_eq!(error.message, "token_budget must be at least 1");
+
+        let invalid_min_strength = RuntimeMethodRequest {
+            jsonrpc: "2.0".to_string(),
+            method: "recall".to_string(),
+            params: json!({
+                "query_text": "memory:42",
+                "namespace": "team.alpha",
+                "min_strength": 0
+            }),
+            id: Some(json!(22)),
+        };
+        let error = invalid_min_strength.parse_method().unwrap_err();
+        assert_eq!(error.code, -32602);
+        assert_eq!(error.message, "min_strength must be at least 1");
     }
 
     #[test]

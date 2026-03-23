@@ -1781,10 +1781,8 @@ mod tests {
             vec![MemoryId(3)],
         );
 
-        let dropped = pf.cancel_namespace(
-            &ns("team.alpha"),
-            PrefetchBypassReason::NamespaceNarrowed,
-        );
+        let dropped =
+            pf.cancel_namespace(&ns("team.alpha"), PrefetchBypassReason::NamespaceNarrowed);
 
         assert_eq!(dropped, 2);
         assert_eq!(pf.queue_depth(), 1);
@@ -1801,10 +1799,8 @@ mod tests {
             vec![MemoryId(1)],
         );
 
-        let dropped = pf.cancel_namespace(
-            &ns("team.alpha"),
-            PrefetchBypassReason::NamespaceWidened,
-        );
+        let dropped =
+            pf.cancel_namespace(&ns("team.alpha"), PrefetchBypassReason::NamespaceWidened);
 
         assert_eq!(dropped, 1);
         assert_eq!(pf.metrics.hints_dropped, 1);

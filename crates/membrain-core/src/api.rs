@@ -1,5 +1,6 @@
 use crate::engine::encode::PassiveObservationInspect;
-use crate::engine::result::{OmissionSummary, RetrievalResultSet};
+use crate::engine::result::{EntryLane, OmissionSummary, RetrievalResultSet};
+use crate::graph::RelationKind;
 use crate::observability::OutcomeClass;
 use crate::policy::{
     PolicyGateway, PolicySummary, SafeguardOutcome as PolicySafeguardOutcome, SharingAccessOutcome,
@@ -613,6 +614,22 @@ pub struct TraceProvenanceSummary {
     pub source_kind: String,
     pub source_reference: String,
     pub lineage_ancestors: Vec<MemoryId>,
+    pub relation_to_seed: FieldPresence<&'static str>,
+    pub graph_seed: FieldPresence<u64>,
+}
+
+/// Shared graph-expansion evidence for explain surfaces.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+pub struct GraphExpansionSummary {
+    pub graph_assistance: &'static str,
+    pub seed_memory_ids: Vec<u64>,
+    pub graph_seed: FieldPresence<u64>,
+    pub graph_entry_points: Vec<u64>,
+    pub followed_relations: Vec<&'static str>,
+    pub supporting_memory_ids: Vec<u64>,
+    pub omitted_neighbor_ids: Vec<u64>,
+    pub omitted_neighbor_count: usize,
+    pub cutoff_reasons: Vec<&'static str>,
 }
 
 /// Shared omission summary for explain surfaces.
@@ -626,11 +643,12 @@ pub struct TraceOmissionSummary {
     pub low_confidence_suppressed: usize,
     pub stale_bypassed: usize,
     pub confidence_filtered: usize,
+    pub graph_omitted_neighbors: usize,
 }
 
 impl TraceOmissionSummary {
     /// Builds the shared omission summary from canonical retrieval omission state.
-    pub const fn from_omission(omission: &OmissionSummary) -> Self {
+    pub fn from_omission(omission: &OmissionSummary, graph_omitted_neighbors: usize) -> Self {
         Self {
             policy_redacted: omission.policy_redacted,
             threshold_dropped: omission.threshold_dropped,
@@ -640,12 +658,118 @@ impl TraceOmissionSummary {
             low_confidence_suppressed: omission.low_confidence_suppressed,
             stale_bypassed: omission.stale_bypassed,
             confidence_filtered: omission.confidence_filtered,
+            graph_omitted_neighbors,
         }
     }
 
     /// Builds the shared omission summary from one retrieval result set.
-    pub const fn from_result_set(result_set: &RetrievalResultSet) -> Self {
-        Self::from_omission(&result_set.omitted_summary)
+    pub fn from_result_set(result_set: &RetrievalResultSet) -> Self {
+        Self::from_omission(
+            &result_set.omitted_summary,
+            GraphExpansionSummary::from_result_set(result_set).omitted_neighbor_count,
+        )
+    }
+}
+
+impl GraphExpansionSummary {
+    /// Builds the shared graph-expansion summary from one retrieval result set.
+    pub fn from_result_set(result_set: &RetrievalResultSet) -> Self {
+        let graph_seed = result_set.provenance_summary.graph_seed.map(|seed| seed.0);
+        let mut seed_memory_ids = match result_set.provenance_summary.graph_seed {
+            Some(graph_seed) => result_set
+                .evidence_pack
+                .iter()
+                .filter_map(|item| {
+                    (item.provenance_summary.graph_seed == Some(graph_seed))
+                        .then_some(item.result.memory_id.0)
+                })
+                .collect::<Vec<_>>(),
+            None => Vec::new(),
+        };
+        seed_memory_ids.sort_unstable();
+        seed_memory_ids.dedup();
+
+        let mut graph_entry_points = result_set
+            .evidence_pack
+            .iter()
+            .filter_map(|item| item.provenance_summary.graph_seed.map(|seed| seed.0))
+            .collect::<Vec<_>>();
+        graph_entry_points.sort_unstable();
+        graph_entry_points.dedup();
+
+        let mut supporting_memory_ids = result_set
+            .evidence_pack
+            .iter()
+            .filter(|item| matches!(item.result.entry_lane, EntryLane::Graph))
+            .map(|item| item.result.memory_id.0)
+            .collect::<Vec<_>>();
+        supporting_memory_ids.sort_unstable();
+        supporting_memory_ids.dedup();
+
+        let mut omitted_neighbor_ids = result_set
+            .deferred_payloads
+            .iter()
+            .filter_map(|payload| {
+                payload
+                    .reason
+                    .contains("graph_omitted_neighbor")
+                    .then_some(payload.memory_id.0)
+            })
+            .collect::<Vec<_>>();
+        omitted_neighbor_ids.sort_unstable();
+        omitted_neighbor_ids.dedup();
+        let omitted_neighbor_count = omitted_neighbor_ids.len();
+
+        let mut followed_relations = result_set
+            .evidence_pack
+            .iter()
+            .filter_map(|item| {
+                item.provenance_summary
+                    .relation_to_seed
+                    .map(RelationKind::as_str)
+            })
+            .collect::<Vec<_>>();
+        followed_relations.sort_unstable();
+        followed_relations.dedup();
+
+        let cutoff_reasons = result_set
+            .explain
+            .result_reasons
+            .iter()
+            .filter_map(|reason| match reason.reason_code.as_str() {
+                "graph_cutoff_max_depth" => Some("max_depth_reached"),
+                "graph_cutoff_budget" => Some("budget_exhausted"),
+                "graph_cutoff_policy_namespace" => Some("policy_namespace_blocked"),
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+
+        let graph_assistance = if matches!(
+            result_set.explain.recall_plan,
+            crate::engine::recall::RecallPlanKind::Tier2ExactThenGraphExpansion
+        ) {
+            if supporting_memory_ids.is_empty() {
+                "graph_considered_without_new_neighbors"
+            } else {
+                "graph_expanded_supporting_neighbors"
+            }
+        } else {
+            "none"
+        };
+
+        Self {
+            graph_assistance,
+            seed_memory_ids,
+            graph_seed: graph_seed
+                .map(FieldPresence::Present)
+                .unwrap_or(FieldPresence::Absent),
+            graph_entry_points,
+            followed_relations,
+            supporting_memory_ids,
+            omitted_neighbor_ids,
+            omitted_neighbor_count,
+            cutoff_reasons,
+        }
     }
 }
 
@@ -832,6 +956,18 @@ impl TraceProvenanceSummary {
             source_kind: result_set.provenance_summary.source_kind.clone(),
             source_reference: result_set.provenance_summary.source_reference.clone(),
             lineage_ancestors: result_set.provenance_summary.lineage_ancestors.clone(),
+            relation_to_seed: result_set
+                .provenance_summary
+                .relation_to_seed
+                .map(RelationKind::as_str)
+                .map(FieldPresence::Present)
+                .unwrap_or(FieldPresence::Absent),
+            graph_seed: result_set
+                .provenance_summary
+                .graph_seed
+                .map(|seed| seed.0)
+                .map(FieldPresence::Present)
+                .unwrap_or(FieldPresence::Absent),
         }
     }
 }
@@ -901,6 +1037,7 @@ pub struct ExplainTraceSchema {
     pub trace_stages: Vec<TraceStage>,
     pub result_reasons: Vec<ResultReason>,
     pub omitted_summary: TraceOmissionSummary,
+    pub graph_expansion: GraphExpansionSummary,
     pub score_components: Vec<TraceScoreComponent>,
     pub policy_summary: TracePolicySummary,
     pub provenance_summary: TraceProvenanceSummary,
@@ -920,6 +1057,7 @@ pub struct ResponseContext<T> {
     pub route_summary: Option<RouteSummary>,
     pub trace_stages: Vec<TraceStage>,
     pub result_reasons: Vec<ResultReason>,
+    pub graph_expansion: Option<GraphExpansionSummary>,
     pub outcome_class: OutcomeClass,
     pub error_kind: Option<ErrorKind>,
     pub retryable: bool,
@@ -949,6 +1087,7 @@ impl<T> ResponseContext<T> {
             route_summary: None,
             trace_stages: Vec::new(),
             result_reasons: Vec::new(),
+            graph_expansion: None,
             outcome_class: OutcomeClass::Accepted,
             error_kind: None,
             retryable: false,
@@ -975,6 +1114,7 @@ impl<T> ResponseContext<T> {
         trace_stages: Vec<TraceStage>,
         result_reasons: Vec<ResultReason>,
         omitted_summary: TraceOmissionSummary,
+        graph_expansion: GraphExpansionSummary,
         score_components: Vec<TraceScoreComponent>,
         policy_summary: TracePolicySummary,
         provenance_summary: TraceProvenanceSummary,
@@ -987,6 +1127,7 @@ impl<T> ResponseContext<T> {
             trace_stages: trace_stages.clone(),
             result_reasons: result_reasons.clone(),
             omitted_summary,
+            graph_expansion: graph_expansion.clone(),
             score_components,
             policy_summary: policy_summary.clone(),
             provenance_summary: provenance_summary.clone(),
@@ -997,6 +1138,7 @@ impl<T> ResponseContext<T> {
         self.route_summary = Some(route_summary);
         self.trace_stages = trace_stages;
         self.result_reasons = result_reasons;
+        self.graph_expansion = Some(graph_expansion);
         self.policy_summary = Some(policy_summary);
         self.provenance_summary = Some(provenance_summary);
         self.freshness_markers = freshness_markers;
@@ -1030,6 +1172,7 @@ impl<T> ResponseContext<T> {
             route_summary: None,
             trace_stages: Vec::new(),
             result_reasons: Vec::new(),
+            graph_expansion: None,
             outcome_class: OutcomeClass::Rejected,
             retryable: error_kind.retryable(),
             error_kind: Some(error_kind),
@@ -1106,15 +1249,19 @@ mod tests {
     use super::{
         ApiModule, AvailabilityPosture, AvailabilityReason, AvailabilitySummary, ConflictMarker,
         ContextValidationError, ErrorKind, ExplainTraceSchema, FieldPresence, FreshnessMarker,
-        NamespaceId, PassiveObservationInspectSummary, PolicyContext, PolicyFilterSummary,
-        RemediationHint, RemediationStep, RequestContext, RequestId, ResponseContext,
-        ResponseWarning, ResultReason, RouteSummary, TraceOmissionSummary, TracePolicySummary,
-        TraceProvenanceSummary, TraceScoreComponent, TraceStage, UncertaintyMarker,
+        GraphExpansionSummary, NamespaceId, PassiveObservationInspectSummary, PolicyContext,
+        PolicyFilterSummary, RemediationHint, RemediationStep, RequestContext, RequestId,
+        ResponseContext, ResponseWarning, ResultReason, RouteSummary, TraceOmissionSummary,
+        TracePolicySummary, TraceProvenanceSummary, TraceScoreComponent, TraceStage,
+        UncertaintyMarker,
     };
+    use crate::engine::ranking::{RankingExplain, RerankMetadata};
     use crate::engine::recall::{RecallPlanKind, RecallTraceStage};
     use crate::engine::result::{
-        DualOutputMode, FreshnessMarkers, OmissionSummary, PackagingMetadata, PolicySummary,
-        ProvenanceSummary, RetrievalExplain, RetrievalResultSet,
+        AnsweredFrom, ConflictMarkers, DualOutputMode, EntryLane, EvidenceItem, EvidenceRole,
+        FreshnessMarkers, OmissionSummary, PackagingMetadata, PayloadState, PolicySummary,
+        ProvenanceSummary, RetrievalExplain, RetrievalResult, RetrievalResultSet,
+        UncertaintyMarkers,
     };
     use crate::observability::OutcomeClass;
     use crate::policy::{
@@ -1123,6 +1270,7 @@ mod tests {
         SafeguardOutcome as PolicySafeguardOutcome, SafeguardReasonCode, SafeguardRequest,
         SharingAccessDecision, SharingVisibility,
     };
+    use crate::types::CanonicalMemoryType;
     use crate::types::SessionId;
     use serde_json::Value;
 
@@ -1659,6 +1807,151 @@ mod tests {
     }
 
     #[test]
+    fn graph_expansion_summary_does_not_treat_non_graph_results_as_seeded() {
+        let result_set = RetrievalResultSet {
+            outcome_class: OutcomeClass::Accepted,
+            evidence_pack: vec![EvidenceItem {
+                result: RetrievalResult {
+                    memory_id: crate::types::MemoryId(7),
+                    namespace: NamespaceId::new("team.temporal").unwrap(),
+                    session_id: crate::types::SessionId(3),
+                    memory_type: CanonicalMemoryType::Event,
+                    compact_text: "round trip".into(),
+                    role: EvidenceRole::Primary,
+                    entry_lane: EntryLane::Recent,
+                    payload_state: PayloadState::Inline,
+                    score: 900,
+                    score_summary: crate::engine::result::ScoreSummary {
+                        final_score: 900,
+                        total_weighted_score: 900,
+                        signal_breakdown: Vec::new(),
+                        profile: "balanced".to_string(),
+                    },
+                    ranking_explain: RankingExplain {
+                        final_score: 900,
+                        total_weighted_score: 900,
+                        signal_breakdown: Vec::new(),
+                        profile: "balanced".to_string(),
+                        has_conflict: false,
+                        contradiction_details: Vec::new(),
+                    },
+                    contradiction_explains: Vec::new(),
+                    conflict_markers: ConflictMarkers {
+                        conflict_state: crate::engine::contradiction::ResolutionState::None,
+                        conflict_record_ids: Vec::new(),
+                        belief_chain_id: None,
+                        superseded_by: None,
+                        contradiction_lineage_pairs: Vec::new(),
+                        resolution_reasons: Vec::new(),
+                        audit_visible_count: 0,
+                        omitted_conflict_siblings: 0,
+                    },
+                    uncertainty_markers: UncertaintyMarkers {
+                        confidence: 900,
+                        uncertainty_score: 0,
+                        freshness_uncertainty: None,
+                        contradiction_uncertainty: None,
+                        missing_evidence_uncertainty: None,
+                        corroboration_uncertainty: None,
+                        confidence_interval: None,
+                    },
+                    answered_from: AnsweredFrom::Tier2Indexed,
+                    rerank_metadata: RerankMetadata::float32_only(1, 1),
+                },
+                provenance_summary: ProvenanceSummary {
+                    source_kind: "retrieval_pipeline".to_string(),
+                    source_reference: "temporal_recall".to_string(),
+                    source_agent: "core_engine".to_string(),
+                    original_namespace: NamespaceId::new("team.temporal").unwrap(),
+                    derived_from: None,
+                    lineage_ancestors: Vec::new(),
+                    relation_to_seed: None,
+                    graph_seed: None,
+                },
+                freshness_markers: FreshnessMarkers {
+                    oldest_item_days: 0,
+                    newest_item_days: 0,
+                    volatile_items_included: false,
+                    stale_warning: false,
+                    as_of_tick: Some(42),
+                },
+                omitted_fields: Vec::new(),
+            }],
+            action_pack: None,
+            deferred_payloads: Vec::new(),
+            explain: RetrievalExplain {
+                recall_plan: RecallPlanKind::RecentTier1ThenTier2Exact,
+                route_reason:
+                    "small session lookup scans the Tier1 recent window before Tier2 exact"
+                        .to_string(),
+                tiers_consulted: vec!["tier1_recent".to_string(), "tier2_exact".to_string()],
+                trace_stages: vec![
+                    RecallTraceStage::Tier1RecentWindow,
+                    RecallTraceStage::Tier2Exact,
+                ],
+                tier1_answered_directly: false,
+                candidate_budget: 8,
+                time_consumed_ms: Some(7),
+                ranking_profile: "balanced".to_string(),
+                contradictions_found: 0,
+                result_reasons: Vec::new(),
+            },
+            policy_summary: PolicySummary {
+                namespace_applied: NamespaceId::new("team.temporal").unwrap(),
+                outcome_class: OutcomeClass::Accepted,
+                redactions_applied: false,
+                restrictions_active: Vec::new(),
+                filters: Vec::new(),
+            },
+            provenance_summary: ProvenanceSummary {
+                source_kind: "retrieval_pipeline".to_string(),
+                source_reference: "temporal_recall".to_string(),
+                source_agent: "core_engine".to_string(),
+                original_namespace: NamespaceId::new("team.temporal").unwrap(),
+                derived_from: None,
+                lineage_ancestors: Vec::new(),
+                relation_to_seed: None,
+                graph_seed: None,
+            },
+            omitted_summary: OmissionSummary {
+                policy_redacted: 0,
+                threshold_dropped: 0,
+                dedup_dropped: 0,
+                budget_capped: 0,
+                duplicate_collapsed: 0,
+                low_confidence_suppressed: 0,
+                stale_bypassed: 0,
+                confidence_filtered: 0,
+            },
+            freshness_markers: FreshnessMarkers {
+                oldest_item_days: 0,
+                newest_item_days: 0,
+                volatile_items_included: false,
+                stale_warning: false,
+                as_of_tick: Some(42),
+            },
+            packaging_metadata: PackagingMetadata {
+                result_budget: 5,
+                token_budget: None,
+                graph_assistance: "none".to_string(),
+                degraded_summary: None,
+                packaging_mode: "evidence_only".to_string(),
+                rerank_metadata: None,
+            },
+            output_mode: DualOutputMode::Balanced,
+            truncated: false,
+            total_candidates: 1,
+        };
+
+        let graph = GraphExpansionSummary::from_result_set(&result_set);
+
+        assert_eq!(graph.graph_assistance, "none");
+        assert!(graph.seed_memory_ids.is_empty());
+        assert_eq!(graph.graph_seed, FieldPresence::Absent);
+        assert!(graph.graph_entry_points.is_empty());
+    }
+
+    #[test]
     fn result_reason_from_temporal_reason_maps_temporal_family_and_stage() {
         let reason = crate::engine::result::ResultReason {
             memory_id: Some(crate::types::MemoryId(21)),
@@ -1719,6 +2012,18 @@ mod tests {
                 low_confidence_suppressed: 0,
                 stale_bypassed: 0,
                 confidence_filtered: 0,
+                graph_omitted_neighbors: 0,
+            },
+            GraphExpansionSummary {
+                graph_assistance: "none",
+                seed_memory_ids: Vec::new(),
+                graph_seed: FieldPresence::Absent,
+                graph_entry_points: Vec::new(),
+                followed_relations: Vec::new(),
+                supporting_memory_ids: Vec::new(),
+                omitted_neighbor_ids: Vec::new(),
+                omitted_neighbor_count: 0,
+                cutoff_reasons: Vec::new(),
             },
             vec![
                 TraceScoreComponent {
@@ -1754,6 +2059,8 @@ mod tests {
                 source_kind: "memory".to_string(),
                 source_reference: "memory_id".to_string(),
                 lineage_ancestors: Vec::new(),
+                relation_to_seed: FieldPresence::Absent,
+                graph_seed: FieldPresence::Absent,
             },
             vec![FreshnessMarker {
                 code: "fresh",
@@ -1958,6 +2265,18 @@ mod tests {
                     low_confidence_suppressed: 0,
                     stale_bypassed: 0,
                     confidence_filtered: 0,
+                    graph_omitted_neighbors: 0,
+                },
+                graph_expansion: GraphExpansionSummary {
+                    graph_assistance: "none",
+                    seed_memory_ids: Vec::new(),
+                    graph_seed: FieldPresence::Absent,
+                    graph_entry_points: Vec::new(),
+                    followed_relations: Vec::new(),
+                    supporting_memory_ids: Vec::new(),
+                    omitted_neighbor_ids: Vec::new(),
+                    omitted_neighbor_count: 0,
+                    cutoff_reasons: Vec::new(),
                 },
                 score_components: vec![
                     TraceScoreComponent {
@@ -2025,6 +2344,18 @@ mod tests {
                 low_confidence_suppressed: 0,
                 stale_bypassed: 0,
                 confidence_filtered: 0,
+                graph_omitted_neighbors: 0,
+            },
+            GraphExpansionSummary {
+                graph_assistance: "none",
+                seed_memory_ids: Vec::new(),
+                graph_seed: FieldPresence::Absent,
+                graph_entry_points: Vec::new(),
+                followed_relations: Vec::new(),
+                supporting_memory_ids: Vec::new(),
+                omitted_neighbor_ids: Vec::new(),
+                omitted_neighbor_count: 0,
+                cutoff_reasons: Vec::new(),
             },
             vec![TraceScoreComponent {
                 signal_family: "relevance",
@@ -2053,6 +2384,8 @@ mod tests {
                 source_kind: "memory".to_string(),
                 source_reference: "memory_id".to_string(),
                 lineage_ancestors: Vec::new(),
+                relation_to_seed: FieldPresence::Absent,
+                graph_seed: FieldPresence::Absent,
             },
             vec![FreshnessMarker {
                 code: "fresh",

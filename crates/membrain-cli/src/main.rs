@@ -7,7 +7,7 @@ use membrain_core::api::{
 use membrain_core::engine::maintenance::{
     MaintenanceController, MaintenanceJobHandle, MaintenanceJobState,
 };
-use membrain_core::engine::ranking::{RankingInput, RankingProfile, fuse_scores};
+use membrain_core::engine::ranking::{fuse_scores, RankingInput, RankingProfile};
 use membrain_core::engine::recall::RecallRuntime;
 use membrain_core::engine::repair::{IndexRepairEntrypoint, RepairTarget};
 use membrain_core::engine::result::{
@@ -109,10 +109,10 @@ enum Commands {
         /// Query string to match
         query: String,
         /// Namespace to search in
-        #[arg(long, short = 'n', default_value = "default")]
+        #[arg(long, default_value = "default")]
         namespace: String,
         /// Maximum number of results to return
-        #[arg(long, short = 't', default_value_t = 5)]
+        #[arg(long, short = 'n', visible_short_alias = 't', default_value_t = 5)]
         top: usize,
         /// Current context; maps to context_text
         #[arg(long, short = 'c')]
@@ -380,6 +380,7 @@ type ResponseTraceBundle = (
     Vec<TraceStage>,
     Vec<membrain_core::api::ResultReason>,
     TraceOmissionSummary,
+    membrain_core::api::GraphExpansionSummary,
     Vec<TraceScoreComponent>,
     TracePolicySummary,
     TraceProvenanceSummary,
@@ -404,6 +405,7 @@ fn response_trace_for_result_set(result_set: &RetrievalResultSet) -> ResponseTra
         .map(membrain_core::api::ResultReason::from_result_reason)
         .collect();
     let omitted_summary = TraceOmissionSummary::from_result_set(result_set);
+    let graph_expansion = result_set.explain_graph_expansion();
     let policy_summary = TracePolicySummary::from_result_set(result_set);
     let provenance_summary = TraceProvenanceSummary::from_result_set(result_set);
     let freshness_markers = result_set
@@ -472,6 +474,7 @@ fn response_trace_for_result_set(result_set: &RetrievalResultSet) -> ResponseTra
         trace_stages,
         result_reasons,
         omitted_summary,
+        graph_expansion,
         score_components,
         policy_summary,
         provenance_summary,
@@ -495,6 +498,7 @@ fn response_from_result_set(
         trace_stages,
         result_reasons,
         omitted_summary,
+        graph_expansion,
         score_components,
         policy_summary,
         provenance_summary,
@@ -508,6 +512,7 @@ fn response_from_result_set(
             trace_stages,
             result_reasons,
             omitted_summary,
+            graph_expansion,
             score_components,
             policy_summary,
             provenance_summary,
@@ -1604,8 +1609,9 @@ async fn main() -> anyhow::Result<()> {
 mod tests {
     use super::{
         filter_audit_rows, parse_audit_category, parse_audit_kind, print_audit_rows,
-        sample_audit_log,
+        sample_audit_log, Cli, Commands,
     };
+    use clap::Parser;
     use membrain_core::api::NamespaceId;
 
     #[test]
@@ -1622,6 +1628,67 @@ mod tests {
         assert_eq!(
             export.rows[2].request_id.as_deref(),
             Some("req-migration-21")
+        );
+    }
+
+    fn parsed_recall_namespace_and_top(command: Commands) -> Option<(String, usize)> {
+        match command {
+            Commands::Recall { namespace, top, .. } => Some((namespace, top)),
+            _ => None,
+        }
+    }
+
+    #[test]
+    fn recall_top_option_accepts_namespace_short_alias() {
+        let cli = Cli::parse_from([
+            "membrain",
+            "recall",
+            "search-term",
+            "-n",
+            "7",
+            "--namespace",
+            "team.alpha",
+        ]);
+
+        assert_eq!(
+            parsed_recall_namespace_and_top(cli.command),
+            Some(("team.alpha".to_string(), 7))
+        );
+    }
+
+    #[test]
+    fn recall_top_option_accepts_legacy_short_alias() {
+        let cli = Cli::parse_from([
+            "membrain",
+            "recall",
+            "search-term",
+            "-t",
+            "4",
+            "--namespace",
+            "team.alpha",
+        ]);
+
+        assert_eq!(
+            parsed_recall_namespace_and_top(cli.command),
+            Some(("team.alpha".to_string(), 4))
+        );
+    }
+
+    #[test]
+    fn recall_namespace_long_flag_still_works_with_top_short_alias() {
+        let cli = Cli::parse_from([
+            "membrain",
+            "recall",
+            "search-term",
+            "-n",
+            "3",
+            "--namespace",
+            "team.alpha",
+        ]);
+
+        assert_eq!(
+            parsed_recall_namespace_and_top(cli.command),
+            Some(("team.alpha".to_string(), 3))
         );
     }
 

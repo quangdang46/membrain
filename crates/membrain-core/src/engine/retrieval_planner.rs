@@ -140,6 +140,14 @@ impl QueryByExampleNormalization {
         !self.seeds.is_empty()
     }
 
+    /// Returns ordered machine-readable seed descriptors for explain and smoke surfaces.
+    pub fn seed_descriptors(&self) -> Vec<String> {
+        self.seeds
+            .iter()
+            .map(|seed| format!("{}:{}", seed.polarity_name(), seed.memory_id.0))
+            .collect()
+    }
+
     /// Returns ordered machine-readable seed polarity names for explain and smoke surfaces.
     pub fn seed_polarities(&self) -> Vec<&'static str> {
         self.seeds
@@ -380,7 +388,12 @@ impl RetrievalRequest {
 
     /// Returns whether this request should schedule lexical prefiltering.
     pub fn requires_lexical_prefilter(&self) -> bool {
-        self.query_path.requires_lexical_prefilter() && self.query_text.is_some()
+        self.query_path.requires_lexical_prefilter()
+            && self
+                .query_text
+                .as_ref()
+                .map(|text| !text.trim().is_empty())
+                .unwrap_or(false)
     }
 
     /// Returns whether this request should schedule semantic search.
@@ -1051,6 +1064,7 @@ mod tests {
         assert_eq!(normalized.seeds.len(), 2);
         assert_eq!(normalized.seeds[0].polarity, QueryExamplePolarity::Like);
         assert_eq!(normalized.seeds[1].polarity, QueryExamplePolarity::Unlike);
+        assert_eq!(normalized.seed_descriptors(), vec!["like:11", "unlike:12"]);
         assert_eq!(normalized.seed_polarities(), vec!["like", "unlike"]);
         assert_eq!(
             normalized.seed_memory_ids(),
@@ -1080,6 +1094,7 @@ mod tests {
         assert_eq!(normalized.primary_cue, PrimaryCue::UnlikeId);
         assert!(!normalized.uses_query_text_as_primary_cue());
         assert!(normalized.has_example_seeds());
+        assert_eq!(normalized.seed_descriptors(), vec!["unlike:17"]);
         assert_eq!(normalized.seed_polarities(), vec!["unlike"]);
         assert_eq!(normalized.seed_memory_ids(), vec![MemoryId(17)]);
     }
@@ -1227,6 +1242,21 @@ mod tests {
 
         let plan = RetrievalPlan::new(request);
 
+        assert!(!plan.stages.contains(&PlannerStage::LexicalPrefilter));
+        assert!(plan.stages.contains(&PlannerStage::HotSemanticSearch));
+        assert!(plan.stages.contains(&PlannerStage::Float32Rescore));
+    }
+
+    #[test]
+    fn whitespace_only_query_text_with_example_seed_skips_lexical_prefilter() {
+        let ns = test_namespace();
+        let request = RetrievalRequest::hybrid(ns, "   ", 10).with_like_memory(MemoryId(3));
+
+        let normalized = request.normalize_query_by_example().unwrap();
+        let plan = RetrievalPlan::new(request);
+
+        assert_eq!(normalized.normalized_query_text, None);
+        assert_eq!(normalized.primary_cue, PrimaryCue::LikeId);
         assert!(!plan.stages.contains(&PlannerStage::LexicalPrefilter));
         assert!(plan.stages.contains(&PlannerStage::HotSemanticSearch));
         assert!(plan.stages.contains(&PlannerStage::Float32Rescore));

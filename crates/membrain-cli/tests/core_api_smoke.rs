@@ -334,6 +334,7 @@ fn cli_can_observe_query_by_example_normalization_and_seed_order() {
     assert_eq!(normalized.primary_cue, PrimaryCue::QueryText);
     assert!(normalized.uses_query_text_as_primary_cue());
     assert!(normalized.has_example_seeds());
+    assert_eq!(normalized.seed_descriptors(), vec!["like:21", "unlike:22"]);
     assert_eq!(normalized.seed_polarities(), vec!["like", "unlike"]);
     assert_eq!(
         normalized.seed_memory_ids(),
@@ -343,6 +344,19 @@ fn cli_can_observe_query_by_example_normalization_and_seed_order() {
         normalized.normalized_query_text.as_deref(),
         Some("example cue")
     );
+}
+
+#[test]
+fn cli_treats_whitespace_only_query_text_as_absent_for_query_by_example() {
+    let namespace = NamespaceId::new("cli.team").unwrap();
+    let request = RetrievalRequest::hybrid(namespace, "   ", 4).with_like_memory(MemoryId(21));
+    let normalized = request.normalize_query_by_example().unwrap();
+
+    assert_eq!(normalized.normalized_query_text, None);
+    assert_eq!(normalized.primary_cue, PrimaryCue::LikeId);
+    assert_eq!(normalized.seed_descriptors(), vec!["like:21"]);
+    assert!(!request.requires_lexical_prefilter());
+    assert!(request.requires_semantic_search());
 }
 
 #[test]

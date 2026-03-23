@@ -475,6 +475,11 @@ impl RetrievalResultSet {
         ObservabilityModule.explain_policy_and_provenance(self)
     }
 
+    /// Builds the shared graph-expansion summary from the canonical envelope.
+    pub fn explain_graph_expansion(&self) -> crate::api::GraphExpansionSummary {
+        ObservabilityModule.explain_graph_expansion(self)
+    }
+
     /// Builds the shared freshness, conflict, and uncertainty marker families.
     pub fn explain_markers(
         &self,

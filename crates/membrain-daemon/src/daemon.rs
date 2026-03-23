@@ -1,4 +1,4 @@
-use crate::mcp::{McpResponse, McpRetrievalPayload};
+use crate::mcp::{McpResource, McpResourceListing, McpResponse, McpRetrievalPayload};
 use crate::preflight::{
     PreflightAllowRequest, PreflightExplainResponse, PreflightOutcome, PreflightRunRequest,
 };
@@ -13,6 +13,11 @@ use membrain_core::config::RuntimeConfig;
 use membrain_core::engine::recall::{RecallEngine, RecallRequest, RecallRuntime};
 use membrain_core::engine::result::{RetrievalExplain, RetrievalResultSet};
 use membrain_core::engine::retrieval_planner::RetrievalRequest;
+use membrain_core::observability::OutcomeClass;
+use membrain_core::policy::{
+    OperationClass, PolicyDecision, PolicyGateway, PolicyModule, PreflightCheck,
+    PreflightCheckStatus, PreflightState, SafeguardOutcome, SafeguardReasonCode, SafeguardRequest,
+};
 use membrain_core::types::{MemoryId, SessionId};
 use serde_json::json;
 use std::collections::VecDeque;
@@ -32,6 +37,14 @@ struct NormalizedRecallContract {
     normalized_query_by_example:
         membrain_core::engine::retrieval_planner::QueryByExampleNormalization,
     result_budget: usize,
+}
+
+#[derive(Debug, Clone)]
+struct EvaluatedPreflight {
+    request_id: String,
+    preflight_id: String,
+    execution_id: Option<String>,
+    outcome: SafeguardOutcome,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -474,27 +487,55 @@ impl DaemonRuntime {
             RuntimeRequest::Recall {
                 query_text,
                 namespace,
+                mode,
                 result_budget,
+                token_budget,
+                time_budget_ms,
                 context_text,
                 effort,
                 include_public,
                 like_id,
                 unlike_id,
+                graph_mode,
+                cold_tier,
+                workspace_id,
+                agent_id,
+                session_id,
+                task_id,
+                memory_kinds,
+                era_id,
                 as_of_tick,
                 at_snapshot,
+                min_strength,
                 min_confidence,
+                show_decaying,
+                mood_congruent,
             } => match Self::handle_recall(
                 query_text,
                 &namespace,
+                mode,
                 result_budget,
+                token_budget,
+                time_budget_ms,
                 context_text,
                 effort,
                 include_public,
                 like_id,
                 unlike_id,
+                graph_mode,
+                cold_tier,
+                workspace_id,
+                agent_id,
+                session_id,
+                task_id,
+                memory_kinds,
+                era_id,
                 as_of_tick,
                 at_snapshot,
+                min_strength,
                 min_confidence,
+                show_decaying,
+                mood_congruent,
                 request_correlation_id,
             ) {
                 Ok(response) => JsonRpcResponse::success(request_id, json!(response)),
@@ -552,6 +593,72 @@ impl DaemonRuntime {
             ) {
                 Ok(response) => JsonRpcResponse::success(request_id, json!(response)),
                 Err(message) => JsonRpcResponse::error(request_id, -32602, message, None),
+            },
+            RuntimeRequest::ResourcesList => JsonRpcResponse::success(
+                request_id,
+                json!(McpResponse::success(
+                    serde_json::to_value(McpResourceListing {
+                        request_id: RequestId::new(format!(
+                            "daemon-resources-{request_correlation_id}"
+                        ))
+                        .expect("daemon-generated resource list request ids are valid"),
+                        namespace: NamespaceId::new("daemon.runtime")
+                            .expect("static daemon resource namespace is valid"),
+                        resources: vec![
+                            McpResource {
+                                uri: "membrain://daemon/runtime/status".to_string(),
+                                name: "runtime-status".to_string(),
+                                mime_type: "application/json".to_string(),
+                                description: Some(
+                                    "Bounded runtime posture, queue, and maintenance status"
+                                        .to_string(),
+                                ),
+                            },
+                            McpResource {
+                                uri: "membrain://daemon/runtime/doctor".to_string(),
+                                name: "runtime-doctor".to_string(),
+                                mime_type: "application/json".to_string(),
+                                description: Some(
+                                    "Inspectable runtime doctor report and index availability"
+                                        .to_string(),
+                                ),
+                            },
+                        ],
+                    })
+                    .expect("resource listing serializes")
+                )),
+            ),
+            RuntimeRequest::ResourceRead { uri } => match uri.as_str() {
+                "membrain://daemon/runtime/status" => {
+                    let status = state.status().await;
+                    JsonRpcResponse::success(
+                        request_id,
+                        json!(McpResponse::success(json!({
+                            "uri": uri,
+                            "mime_type": "application/json",
+                            "bounded": true,
+                            "payload": status,
+                        }))),
+                    )
+                }
+                "membrain://daemon/runtime/doctor" => {
+                    let report = state.doctor_report().await;
+                    JsonRpcResponse::success(
+                        request_id,
+                        json!(McpResponse::success(json!({
+                            "uri": uri,
+                            "mime_type": "application/json",
+                            "bounded": true,
+                            "payload": report,
+                        }))),
+                    )
+                }
+                _ => JsonRpcResponse::error(
+                    request_id,
+                    -32602,
+                    format!("unknown resource uri '{uri}'"),
+                    None,
+                ),
             },
             RuntimeRequest::Sleep { millis } => {
                 tokio::select! {
@@ -708,15 +815,29 @@ impl DaemonRuntime {
     fn handle_recall(
         query_text: Option<String>,
         namespace: &str,
+        mode: Option<String>,
         result_budget: Option<usize>,
+        token_budget: Option<usize>,
+        time_budget_ms: Option<u32>,
         context_text: Option<String>,
         effort: Option<String>,
         include_public: Option<bool>,
         like_id: Option<u64>,
         unlike_id: Option<u64>,
+        graph_mode: Option<String>,
+        cold_tier: Option<bool>,
+        workspace_id: Option<String>,
+        agent_id: Option<String>,
+        session_id: Option<String>,
+        task_id: Option<String>,
+        memory_kinds: Option<Vec<String>>,
+        era_id: Option<String>,
         as_of_tick: Option<u64>,
         at_snapshot: Option<String>,
+        min_strength: Option<u16>,
         min_confidence: Option<f64>,
+        show_decaying: Option<bool>,
+        mood_congruent: Option<bool>,
         request_correlation_id: u64,
     ) -> Result<McpResponse, String> {
         let namespace_id = NamespaceId::new(namespace).map_err(|err| err.to_string())?;
@@ -725,15 +846,30 @@ impl DaemonRuntime {
             query_text,
             like_id,
             unlike_id,
+            graph_mode.as_deref(),
             result_budget,
         )?;
         let degraded_summary = Self::recall_degraded_summary(
+            &mode,
+            token_budget,
+            time_budget_ms,
             &context_text,
             &effort,
             include_public,
+            &graph_mode,
+            cold_tier,
+            workspace_id.as_deref(),
+            agent_id.as_deref(),
+            session_id.as_deref(),
+            task_id.as_deref(),
+            memory_kinds.as_deref(),
+            era_id.as_deref(),
             as_of_tick,
             at_snapshot.as_deref(),
+            min_strength,
             min_confidence,
+            show_decaying,
+            mood_congruent,
             &normalized,
         );
         Self::handle_retrieval_method(
@@ -770,6 +906,7 @@ impl DaemonRuntime {
         let normalized = Self::normalize_recall_contract(
             NamespaceId::new(namespace).map_err(|err| err.to_string())?,
             Some(query.to_string()),
+            None,
             None,
             None,
             limit,
@@ -816,6 +953,7 @@ impl DaemonRuntime {
         query_text: Option<String>,
         like_id: Option<u64>,
         unlike_id: Option<u64>,
+        graph_mode: Option<&str>,
         result_budget: Option<usize>,
     ) -> Result<NormalizedRecallContract, String> {
         let result_budget = result_budget.unwrap_or(10);
@@ -835,13 +973,15 @@ impl DaemonRuntime {
             }
         } else {
             RecallRequest::default()
-        };
+        }
+        .with_graph_expansion(matches!(graph_mode, Some("expand")));
 
+        let graph_expansion = matches!(graph_mode, Some("expand"));
         let retrieval_request =
             RetrievalRequest::hybrid(namespace, query_text.unwrap_or_default(), result_budget)
                 .with_budget(result_budget)
                 .with_tier3_fallback(true)
-                .with_graph_expansion(false);
+                .with_graph_expansion(graph_expansion);
         let retrieval_request = if let Some(like_id) = like_id {
             retrieval_request.with_like_memory(MemoryId(like_id))
         } else {
@@ -865,12 +1005,26 @@ impl DaemonRuntime {
 
     #[allow(clippy::too_many_arguments)]
     fn recall_degraded_summary(
+        mode: &Option<String>,
+        token_budget: Option<usize>,
+        time_budget_ms: Option<u32>,
         context_text: &Option<String>,
         effort: &Option<String>,
         include_public: Option<bool>,
+        graph_mode: &Option<String>,
+        cold_tier: Option<bool>,
+        workspace_id: Option<&str>,
+        agent_id: Option<&str>,
+        session_id: Option<&str>,
+        task_id: Option<&str>,
+        memory_kinds: Option<&[String]>,
+        era_id: Option<&str>,
         as_of_tick: Option<u64>,
         at_snapshot: Option<&str>,
+        min_strength: Option<u16>,
         min_confidence: Option<f64>,
+        show_decaying: Option<bool>,
+        mood_congruent: Option<bool>,
         normalized: &NormalizedRecallContract,
     ) -> String {
         let mut facets = Vec::new();
@@ -881,6 +1035,15 @@ impl DaemonRuntime {
         {
             facets.push("query_text");
         }
+        if mode.is_some() {
+            facets.push("mode");
+        }
+        if token_budget.is_some() {
+            facets.push("token_budget");
+        }
+        if time_budget_ms.is_some() {
+            facets.push("time_budget_ms");
+        }
         if context_text.is_some() {
             facets.push("context_text");
         }
@@ -889,6 +1052,30 @@ impl DaemonRuntime {
         }
         if include_public.unwrap_or(false) {
             facets.push("include_public");
+        }
+        if graph_mode.is_some() {
+            facets.push("graph_mode");
+        }
+        if cold_tier.is_some() {
+            facets.push("cold_tier");
+        }
+        if workspace_id.is_some() {
+            facets.push("workspace_id");
+        }
+        if agent_id.is_some() {
+            facets.push("agent_id");
+        }
+        if session_id.is_some() {
+            facets.push("session_id");
+        }
+        if task_id.is_some() {
+            facets.push("task_id");
+        }
+        if memory_kinds.is_some() {
+            facets.push("memory_kinds");
+        }
+        if era_id.is_some() {
+            facets.push("era_id");
         }
         if normalized.normalized_query_by_example.has_example_seeds() {
             facets.push("query_by_example");
@@ -899,8 +1086,17 @@ impl DaemonRuntime {
         if at_snapshot.is_some() {
             facets.push("at_snapshot");
         }
+        if min_strength.is_some() {
+            facets.push("min_strength");
+        }
         if min_confidence.is_some() {
             facets.push("min_confidence");
+        }
+        if show_decaying.is_some() {
+            facets.push("show_decaying");
+        }
+        if mood_congruent.is_some() {
+            facets.push("mood_congruent");
         }
 
         let mut summary = if facets.is_empty() {
@@ -963,41 +1159,368 @@ impl DaemonRuntime {
             .map_err(|err| err.to_string())
     }
 
-    fn handle_preflight_run(
+    fn preflight_request(
+        namespace: &str,
+        original_query: &str,
+        proposed_action: &str,
+        local_confirmation: bool,
+        confirmed_generation: Option<u64>,
+    ) -> SafeguardRequest {
+        let namespace_bound = NamespaceId::new(namespace).is_ok();
+        let query = format!("{original_query} {proposed_action}").to_ascii_lowercase();
+        let is_destructive = query.contains("delete") || query.contains("purge");
+        let legal_hold = query.contains("legal hold");
+        let snapshot_required = query.contains("snapshot") || query.contains("archive");
+        let stale = query.contains("stale");
+        let missing_scope = query.contains("ambiguous") || query.contains("all namespaces");
+        let maintenance_window_required = query.contains("rewrite") || query.contains("reindex");
+        let maintenance_window_active = !query.contains("window closed");
+        let dependencies_ready = !query.contains("dependency pending");
+        let confidence_ready = !query.contains("low confidence");
+        let authoritative_input_readable = !query.contains("input unreadable");
+        let can_degrade = query.contains("degraded") || query.contains("fallback");
+
+        SafeguardRequest {
+            operation_class: if legal_hold || query.contains("contradiction") {
+                OperationClass::ContradictionArchive
+            } else if is_destructive {
+                OperationClass::IrreversibleMutation
+            } else if maintenance_window_required {
+                OperationClass::AuthoritativeRewrite
+            } else {
+                OperationClass::ReadOnlyAssessment
+            },
+            preview_only: false,
+            namespace_bound,
+            policy_allowed: namespace_bound && !legal_hold,
+            requires_confirmation: is_destructive,
+            local_confirmation,
+            force_allowed: is_destructive,
+            generation_bound: confirmed_generation,
+            generation_matches: !stale,
+            snapshot_required,
+            snapshot_available: !query.contains("snapshot missing"),
+            maintenance_window_required,
+            maintenance_window_active,
+            dependencies_ready,
+            scope_precise: !missing_scope,
+            authoritative_input_readable,
+            confidence_ready,
+            can_degrade,
+            legal_hold,
+        }
+    }
+
+    fn evaluate_preflight(
         namespace: &str,
         original_query: &str,
         proposed_action: &str,
         request_correlation_id: u64,
-    ) -> Result<PreflightOutcome, String> {
+        local_confirmation: bool,
+        preview_only: bool,
+    ) -> Result<EvaluatedPreflight, String> {
         Self::validate_preflight_namespace(namespace)?;
         let _request = PreflightRunRequest {
             namespace: namespace.to_string(),
             original_query: original_query.to_string(),
             proposed_action: proposed_action.to_string(),
         };
+        let request_id = if preview_only {
+            format!("daemon-preflight-explain-{request_correlation_id}")
+        } else if local_confirmation {
+            format!("daemon-preflight-allow-{request_correlation_id}")
+        } else {
+            format!("daemon-preflight-run-{request_correlation_id}")
+        };
         let preflight_id = format!("preflight-{request_correlation_id}");
-        let execution_id = format!("exec-{request_correlation_id}");
-        let lowered = proposed_action.to_ascii_lowercase();
-        let blocked_reasons = if lowered.contains("purge") || lowered.contains("delete") {
-            vec!["confirmation_required".to_string()]
-        } else {
-            Vec::new()
-        };
-        let preflight_state = if blocked_reasons.is_empty() {
-            "ready"
-        } else {
-            "blocked"
-        };
-        Ok(PreflightOutcome {
-            success: blocked_reasons.is_empty(),
-            preflight_state: preflight_state.to_string(),
-            blocked_reasons,
-            request_id: Some(format!("daemon-preflight-run-{request_correlation_id}")),
-            preflight_id: Some(preflight_id),
-            execution_id: Some(execution_id),
-            degraded: false,
-            confirmation_reason: None,
+        let mut request = Self::preflight_request(
+            namespace,
+            original_query,
+            proposed_action,
+            local_confirmation,
+            Some(request_correlation_id),
+        );
+        request.preview_only = preview_only;
+        let mut outcome = PolicyModule.evaluate_safeguard(request);
+        outcome.audit.actor_source = "daemon_jsonrpc";
+        outcome.audit.request_id = Box::leak(request_id.clone().into_boxed_str());
+        outcome.audit.preview_id = Some(Box::leak(preflight_id.clone().into_boxed_str()));
+        Ok(EvaluatedPreflight {
+            request_id,
+            preflight_id,
+            execution_id: (!preview_only
+                && matches!(
+                    outcome.outcome_class,
+                    OutcomeClass::Accepted | OutcomeClass::Degraded
+                ))
+            .then(|| format!("exec-{request_correlation_id}")),
+            outcome,
         })
+    }
+
+    fn check_status_label(status: PreflightCheckStatus) -> String {
+        match status {
+            PreflightCheckStatus::Passed => "passed",
+            PreflightCheckStatus::Blocked => "blocked",
+            PreflightCheckStatus::Degraded => "degraded",
+            PreflightCheckStatus::Rejected => "rejected",
+        }
+        .to_string()
+    }
+
+    fn reason_code_label(reason: SafeguardReasonCode) -> String {
+        match reason {
+            SafeguardReasonCode::ConfirmationRequired => "confirmation_required",
+            SafeguardReasonCode::StalePreflight => "stale_preflight",
+            SafeguardReasonCode::GenerationMismatch => "generation_mismatch",
+            SafeguardReasonCode::SnapshotRequired => "snapshot_required",
+            SafeguardReasonCode::MaintenanceWindowRequired => "maintenance_window_required",
+            SafeguardReasonCode::DependencyPending => "dependency_pending",
+            SafeguardReasonCode::ScopeAmbiguous => "scope_ambiguous",
+            SafeguardReasonCode::AuthoritativeInputUnreadable => "authoritative_input_unreadable",
+            SafeguardReasonCode::ConfidenceTooLow => "confidence_too_low",
+            SafeguardReasonCode::PolicyDenied => "policy_denied",
+            SafeguardReasonCode::LegalHold => "legal_hold",
+        }
+        .to_string()
+    }
+
+    fn check_view(check: &PreflightCheck) -> crate::preflight::PreflightCheckView {
+        crate::preflight::PreflightCheckView {
+            check_name: check.check_name.to_string(),
+            status: Self::check_status_label(check.status),
+            reason_codes: check
+                .reason_codes
+                .iter()
+                .copied()
+                .map(Self::reason_code_label)
+                .collect(),
+            checked_scope: check.checked_scope.to_string(),
+        }
+    }
+
+    fn preflight_state_label(state: PreflightState) -> &'static str {
+        match state {
+            PreflightState::Ready => "ready",
+            PreflightState::Blocked => "blocked",
+            PreflightState::MissingData => "missing_data",
+            PreflightState::StaleKnowledge => "stale_knowledge",
+        }
+    }
+
+    fn policy_decision_label(decision: PolicyDecision) -> &'static str {
+        match decision {
+            PolicyDecision::Allow => "allow",
+            PolicyDecision::Deny => "deny",
+        }
+    }
+
+    fn preflight_outcome_label(
+        outcome: &SafeguardOutcome,
+        local_confirmation: bool,
+    ) -> &'static str {
+        if local_confirmation
+            && matches!(
+                outcome.outcome_class,
+                OutcomeClass::Accepted | OutcomeClass::Degraded
+            )
+        {
+            "force_confirmed"
+        } else {
+            match outcome.outcome_class {
+                OutcomeClass::Preview => "preview_only",
+                OutcomeClass::Blocked => "blocked",
+                OutcomeClass::Degraded => "degraded",
+                OutcomeClass::Accepted => "ready",
+                OutcomeClass::Rejected => "blocked",
+                OutcomeClass::Partial => "degraded",
+            }
+        }
+    }
+
+    fn confirmation_reason(outcome: &SafeguardOutcome, local_confirmation: bool) -> Option<String> {
+        (local_confirmation
+            && matches!(
+                outcome.outcome_class,
+                OutcomeClass::Accepted | OutcomeClass::Degraded
+            ))
+        .then_some("operator confirmed exact previewed scope".to_string())
+    }
+
+    fn blocked_reason_message(reasons: &[String]) -> Option<String> {
+        reasons.first().map(|reason| {
+            match reason.as_str() {
+                "confirmation_required" => "destructive action requires explicit confirmation",
+                "policy_denied" => "policy denied the requested action",
+                "legal_hold" => "legal hold blocks the requested action",
+                "snapshot_required" => "snapshot is required before this action can proceed",
+                "stale_preflight" | "generation_mismatch" => {
+                    "preflight confirmation is stale for the requested scope"
+                }
+                "scope_ambiguous" => "requested scope is ambiguous",
+                "maintenance_window_required" => "maintenance window is required",
+                "dependency_pending" => "operation dependencies are not ready",
+                "confidence_too_low" => "confidence is too low for this action",
+                "authoritative_input_unreadable" => "authoritative inputs are unreadable",
+                _ => "preflight blocked the requested action",
+            }
+            .to_string()
+        })
+    }
+
+    fn required_overrides(outcome: &SafeguardOutcome) -> Vec<String> {
+        let mut overrides = Vec::new();
+        if outcome
+            .blocked_reasons
+            .contains(&SafeguardReasonCode::ConfirmationRequired)
+        {
+            overrides.push("human_confirmation".to_string());
+        }
+        overrides
+    }
+
+    fn policy_context(namespace: &str, outcome: &SafeguardOutcome) -> String {
+        let action = match outcome.operation_class {
+            OperationClass::ReadOnlyAssessment => "read-only assessment",
+            OperationClass::DerivedSurfaceMutation => "derived surface mutation",
+            OperationClass::AuthoritativeRewrite => "authoritative rewrite",
+            OperationClass::IrreversibleMutation => "irreversible mutation",
+            OperationClass::ContradictionArchive => "contradiction archive",
+        };
+        format!(
+            "namespace {namespace} preflight safeguard evaluation ({action}; {})",
+            outcome.impact_summary
+        )
+    }
+
+    fn to_preflight_outcome(
+        evaluated: EvaluatedPreflight,
+        local_confirmation: bool,
+    ) -> PreflightOutcome {
+        let outcome = evaluated.outcome;
+        let blocked_reasons = outcome
+            .blocked_reasons
+            .iter()
+            .copied()
+            .map(Self::reason_code_label)
+            .collect::<Vec<_>>();
+        let outcome_class = outcome.outcome_class.as_str().to_string();
+        let degraded = matches!(outcome.outcome_class, OutcomeClass::Degraded);
+        let success = matches!(
+            outcome.outcome_class,
+            OutcomeClass::Accepted | OutcomeClass::Degraded
+        );
+        PreflightOutcome {
+            success,
+            preflight_state: Self::preflight_state_label(outcome.preflight_state).to_string(),
+            preflight_outcome: Self::preflight_outcome_label(&outcome, local_confirmation)
+                .to_string(),
+            outcome_class,
+            blocked_reasons,
+            check_results: outcome.check_results.iter().map(Self::check_view).collect(),
+            confirmation: crate::preflight::ConfirmationView {
+                required: outcome.confirmation.required,
+                force_allowed: outcome.confirmation.force_allowed,
+                confirmed: outcome.confirmation.confirmed,
+                generation_bound: outcome.confirmation.generation_bound,
+            },
+            audit: crate::preflight::AuditView {
+                event_kind: outcome.audit.event_kind.to_string(),
+                actor_source: outcome.audit.actor_source.to_string(),
+                request_id: outcome.audit.request_id.to_string(),
+                preview_id: outcome.audit.preview_id.map(str::to_string),
+                related_run: outcome.audit.related_run.map(str::to_string),
+                scope_handle: outcome.audit.scope_handle.to_string(),
+            },
+            policy_summary: crate::preflight::PolicySummaryView {
+                decision: Self::policy_decision_label(outcome.policy_summary.decision).to_string(),
+                namespace_bound: outcome.policy_summary.namespace_bound,
+                outcome_class: outcome.policy_summary.outcome_class.as_str().to_string(),
+            },
+            request_id: Some(evaluated.request_id),
+            preflight_id: Some(evaluated.preflight_id),
+            execution_id: evaluated.execution_id,
+            degraded,
+            confirmation_reason: Self::confirmation_reason(&outcome, local_confirmation),
+        }
+    }
+
+    fn to_preflight_explain_response(
+        namespace: &str,
+        evaluated: EvaluatedPreflight,
+    ) -> PreflightExplainResponse {
+        let outcome = evaluated.outcome;
+        let mut blocked_reasons = outcome
+            .blocked_reasons
+            .iter()
+            .copied()
+            .map(Self::reason_code_label)
+            .collect::<Vec<_>>();
+        if outcome.confirmation.required && !outcome.confirmation.confirmed {
+            blocked_reasons.push("confirmation_required".to_string());
+        }
+        let allowed = matches!(
+            outcome.outcome_class,
+            OutcomeClass::Accepted | OutcomeClass::Degraded
+        );
+        let preflight_state = if blocked_reasons.is_empty() {
+            Self::preflight_state_label(outcome.preflight_state).to_string()
+        } else {
+            "blocked".to_string()
+        };
+        PreflightExplainResponse {
+            allowed,
+            preflight_state,
+            preflight_outcome: Self::preflight_outcome_label(&outcome, false).to_string(),
+            blocked_reasons: blocked_reasons.clone(),
+            blocked_reason: Self::blocked_reason_message(&blocked_reasons),
+            required_overrides: if outcome.confirmation.required && !outcome.confirmation.confirmed
+            {
+                vec!["human_confirmation".to_string()]
+            } else {
+                Self::required_overrides(&outcome)
+            },
+            policy_context: Self::policy_context(namespace, &outcome),
+            check_results: outcome.check_results.iter().map(Self::check_view).collect(),
+            confirmation: crate::preflight::ConfirmationView {
+                required: outcome.confirmation.required,
+                force_allowed: outcome.confirmation.force_allowed,
+                confirmed: outcome.confirmation.confirmed,
+                generation_bound: outcome.confirmation.generation_bound,
+            },
+            audit: crate::preflight::AuditView {
+                event_kind: outcome.audit.event_kind.to_string(),
+                actor_source: outcome.audit.actor_source.to_string(),
+                request_id: outcome.audit.request_id.to_string(),
+                preview_id: outcome.audit.preview_id.map(str::to_string),
+                related_run: outcome.audit.related_run.map(str::to_string),
+                scope_handle: outcome.audit.scope_handle.to_string(),
+            },
+            policy_summary: crate::preflight::PolicySummaryView {
+                decision: Self::policy_decision_label(outcome.policy_summary.decision).to_string(),
+                namespace_bound: outcome.policy_summary.namespace_bound,
+                outcome_class: outcome.policy_summary.outcome_class.as_str().to_string(),
+            },
+            request_id: Some(evaluated.request_id),
+            preflight_id: Some(evaluated.preflight_id),
+        }
+    }
+
+    fn handle_preflight_run(
+        namespace: &str,
+        original_query: &str,
+        proposed_action: &str,
+        request_correlation_id: u64,
+    ) -> Result<PreflightOutcome, String> {
+        let evaluated = Self::evaluate_preflight(
+            namespace,
+            original_query,
+            proposed_action,
+            request_correlation_id,
+            false,
+            false,
+        )?;
+        Ok(Self::to_preflight_outcome(evaluated, false))
     }
 
     fn handle_preflight_explain(
@@ -1006,37 +1529,15 @@ impl DaemonRuntime {
         proposed_action: &str,
         request_correlation_id: u64,
     ) -> Result<PreflightExplainResponse, String> {
-        Self::validate_preflight_namespace(namespace)?;
-        let _request = PreflightRunRequest {
-            namespace: namespace.to_string(),
-            original_query: original_query.to_string(),
-            proposed_action: proposed_action.to_string(),
-        };
-        let lowered = proposed_action.to_ascii_lowercase();
-        let blocked_reasons = if lowered.contains("purge") || lowered.contains("delete") {
-            vec!["confirmation_required".to_string()]
-        } else {
-            Vec::new()
-        };
-        let blocked_reason = blocked_reasons
-            .first()
-            .map(|_| "destructive action requires explicit confirmation".to_string());
-        let allowed = blocked_reasons.is_empty();
-        let required_overrides = if allowed {
-            Vec::new()
-        } else {
-            vec!["human_confirmation".to_string()]
-        };
-        Ok(PreflightExplainResponse {
-            allowed,
-            preflight_state: if allowed { "ready" } else { "blocked" }.to_string(),
-            blocked_reasons,
-            blocked_reason,
-            required_overrides,
-            policy_context: format!("namespace {namespace} preflight safeguard evaluation"),
-            request_id: Some(format!("daemon-preflight-explain-{request_correlation_id}")),
-            preflight_id: Some(format!("preflight-{request_correlation_id}")),
-        })
+        let evaluated = Self::evaluate_preflight(
+            namespace,
+            original_query,
+            proposed_action,
+            request_correlation_id,
+            false,
+            true,
+        )?;
+        Ok(Self::to_preflight_explain_response(namespace, evaluated))
     }
 
     fn handle_preflight_allow(
@@ -1053,29 +1554,16 @@ impl DaemonRuntime {
         };
         let confirmed = authorization_token.starts_with("allow-")
             && bypass_flags.iter().any(|flag| flag == "manual_override");
-        let blocked_reasons = if confirmed {
-            Vec::new()
-        } else {
-            vec!["confirmation_required".to_string()]
-        };
-        Ok(PreflightOutcome {
-            success: confirmed,
-            preflight_state: if confirmed { "ready" } else { "blocked" }.to_string(),
-            blocked_reasons,
-            request_id: Some(format!("daemon-preflight-allow-{request_correlation_id}")),
-            preflight_id: Some(format!("preflight-{request_correlation_id}")),
-            execution_id: if confirmed {
-                Some(format!("exec-{request_correlation_id}"))
-            } else {
-                None
-            },
-            degraded: false,
-            confirmation_reason: if confirmed {
-                Some("operator confirmed exact previewed scope".to_string())
-            } else {
-                None
-            },
-        })
+        let action = "allow exact previewed scope delete";
+        let evaluated = Self::evaluate_preflight(
+            namespace,
+            "confirm previously previewed action",
+            action,
+            request_correlation_id,
+            confirmed,
+            false,
+        )?;
+        Ok(Self::to_preflight_outcome(evaluated, confirmed))
     }
 
     async fn maintenance_loop(state: Arc<RuntimeState>, config: DaemonRuntimeConfig) {
@@ -1922,6 +2410,61 @@ mod tests {
         assert!(degraded_summary.contains("seed_memory_ids=[7]"));
         assert!(degraded_summary.contains("seed_polarities=[like]"));
 
+        let full_contract_recall_response = send_request(
+            &socket_path,
+            json!({
+                "jsonrpc":"2.0",
+                "method":"recall",
+                "params":{
+                    "query_text":"memory:42",
+                    "namespace":"team.alpha",
+                    "mode":"semantic",
+                    "result_budget":3,
+                    "token_budget":256,
+                    "time_budget_ms":75,
+                    "context_text":"triaging parity drift",
+                    "effort":"high",
+                    "include_public":true,
+                    "graph_mode":"expand",
+                    "cold_tier":true,
+                    "workspace_id":"ws-7",
+                    "agent_id":"agent-3",
+                    "session_id":"session-9",
+                    "task_id":"task-2",
+                    "memory_kinds":["user_preference","session_note"],
+                    "era_id":"incident-2026",
+                    "min_strength":200,
+                    "min_confidence":0.8,
+                    "show_decaying":true,
+                    "mood_congruent":true
+                },
+                "id":"recall-full-contract"
+            }),
+        )
+        .await;
+        assert_eq!(
+            full_contract_recall_response["result"]["status"],
+            json!("ok")
+        );
+        let degraded_summary = full_contract_recall_response["result"]["retrieval"]["result"]
+            ["packaging_metadata"]["degraded_summary"]
+            .as_str()
+            .unwrap();
+        assert!(degraded_summary.contains("mode"));
+        assert!(degraded_summary.contains("token_budget"));
+        assert!(degraded_summary.contains("time_budget_ms"));
+        assert!(degraded_summary.contains("graph_mode"));
+        assert!(degraded_summary.contains("cold_tier"));
+        assert!(degraded_summary.contains("workspace_id"));
+        assert!(degraded_summary.contains("agent_id"));
+        assert!(degraded_summary.contains("session_id"));
+        assert!(degraded_summary.contains("task_id"));
+        assert!(degraded_summary.contains("memory_kinds"));
+        assert!(degraded_summary.contains("era_id"));
+        assert!(degraded_summary.contains("min_strength"));
+        assert!(degraded_summary.contains("show_decaying"));
+        assert!(degraded_summary.contains("mood_congruent"));
+
         let shutdown_response = send_request(
             &socket_path,
             json!({"jsonrpc":"2.0","method":"shutdown","params":{},"id":"done"}),
@@ -1942,6 +2485,7 @@ mod tests {
             Some("  debugging trail  ".to_string()),
             Some(7),
             Some(9),
+            None,
             Some(4),
         )
         .unwrap();
@@ -1976,11 +2520,45 @@ mod tests {
             None,
             Some(7),
             Some(7),
+            None,
             Some(4),
         )
         .unwrap_err();
 
         assert_eq!(error, "duplicate_example_cue");
+    }
+
+    #[test]
+    fn normalize_recall_contract_respects_graph_mode_expand() {
+        let normalized = DaemonRuntime::normalize_recall_contract(
+            NamespaceId::new("team.alpha").unwrap(),
+            Some("debugging trail".to_string()),
+            None,
+            None,
+            Some("expand"),
+            Some(4),
+        )
+        .unwrap();
+
+        assert_eq!(
+            normalized.planner_request,
+            RecallRequest::default().with_graph_expansion(true)
+        );
+    }
+
+    #[test]
+    fn normalize_recall_contract_keeps_graph_expansion_disabled_without_expand_mode() {
+        let normalized = DaemonRuntime::normalize_recall_contract(
+            NamespaceId::new("team.alpha").unwrap(),
+            Some("debugging trail".to_string()),
+            None,
+            None,
+            Some("off"),
+            Some(4),
+        )
+        .unwrap();
+
+        assert_eq!(normalized.planner_request, RecallRequest::default());
     }
 
     #[tokio::test]
@@ -2118,6 +2696,10 @@ mod tests {
             json!("blocked")
         );
         assert_eq!(
+            explain_response["result"]["preflight_outcome"],
+            json!("preview_only")
+        );
+        assert_eq!(
             explain_response["result"]["blocked_reasons"],
             json!(["confirmation_required"])
         );
@@ -2127,7 +2709,23 @@ mod tests {
         );
         assert_eq!(
             explain_response["result"]["policy_context"],
-            json!("namespace team.alpha preflight safeguard evaluation")
+            json!("namespace team.alpha preflight safeguard evaluation (irreversible mutation; irreversible_mutation)")
+        );
+        assert_eq!(
+            explain_response["result"]["confirmation"]["required"],
+            json!(true)
+        );
+        assert_eq!(
+            explain_response["result"]["confirmation"]["confirmed"],
+            json!(false)
+        );
+        assert_eq!(
+            explain_response["result"]["check_results"][0]["check_name"],
+            json!("policy")
+        );
+        assert_eq!(
+            explain_response["result"]["audit"]["actor_source"],
+            json!("daemon_jsonrpc")
         );
 
         let run_response = send_request(
@@ -2146,8 +2744,18 @@ mod tests {
         .await;
         assert_eq!(run_response["result"]["success"], json!(true));
         assert_eq!(run_response["result"]["preflight_state"], json!("ready"));
+        assert_eq!(run_response["result"]["preflight_outcome"], json!("ready"));
+        assert_eq!(run_response["result"]["outcome_class"], json!("accepted"));
         assert_eq!(run_response["result"]["blocked_reasons"], json!([]));
         assert_eq!(run_response["result"]["degraded"], json!(false));
+        assert_eq!(
+            run_response["result"]["policy_summary"]["decision"],
+            json!("allow")
+        );
+        assert_eq!(
+            run_response["result"]["check_results"][0]["status"],
+            json!("passed")
+        );
         assert!(run_response["result"].get("execution_id").is_some());
 
         let allow_response = send_request(
@@ -2166,6 +2774,15 @@ mod tests {
         .await;
         assert_eq!(allow_response["result"]["success"], json!(true));
         assert_eq!(allow_response["result"]["preflight_state"], json!("ready"));
+        assert_eq!(
+            allow_response["result"]["preflight_outcome"],
+            json!("force_confirmed")
+        );
+        assert_eq!(allow_response["result"]["outcome_class"], json!("accepted"));
+        assert_eq!(
+            allow_response["result"]["confirmation"]["confirmed"],
+            json!(true)
+        );
         assert_eq!(
             allow_response["result"]["confirmation_reason"],
             json!("operator confirmed exact previewed scope")
@@ -2232,8 +2849,16 @@ mod tests {
         assert_eq!(denied_allow["result"]["success"], json!(false));
         assert_eq!(denied_allow["result"]["preflight_state"], json!("blocked"));
         assert_eq!(
+            denied_allow["result"]["preflight_outcome"],
+            json!("blocked")
+        );
+        assert_eq!(
             denied_allow["result"]["blocked_reasons"],
             json!(["confirmation_required"])
+        );
+        assert_eq!(
+            denied_allow["result"]["confirmation"]["confirmed"],
+            json!(false)
         );
         assert!(denied_allow["result"].get("execution_id").is_none());
 
@@ -2664,6 +3289,122 @@ mod tests {
         )
         .await;
         assert_eq!(read_only["result"]["posture"], json!("read_only"));
+
+        let shutdown_response = send_request(
+            &socket_path,
+            json!({"jsonrpc":"2.0","method":"shutdown","params":{},"id":"done"}),
+        )
+        .await;
+        assert_eq!(shutdown_response["result"]["shutting_down"], json!(true));
+        timeout(Duration::from_secs(2), handle)
+            .await
+            .unwrap()
+            .unwrap()
+            .unwrap();
+    }
+
+    #[tokio::test]
+    async fn runtime_resources_list_and_read_return_bounded_typed_payloads() {
+        let socket_path = unique_path("resources-list-and-read");
+        let mut config = DaemonRuntimeConfig::new(&socket_path);
+        config.maintenance_interval = Duration::from_secs(3600);
+        let handle = spawn_runtime(config).await;
+
+        timeout(Duration::from_secs(2), async {
+            while tokio::fs::metadata(&socket_path).await.is_err() {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .unwrap();
+
+        let resources_response = send_request(
+            &socket_path,
+            json!({
+                "jsonrpc":"2.0",
+                "method":"resources.list",
+                "params":{},
+                "id":"resources-list"
+            }),
+        )
+        .await;
+        assert_eq!(resources_response["result"]["status"], json!("ok"));
+        assert_eq!(
+            resources_response["result"]["payload"]["namespace"],
+            json!("daemon.runtime")
+        );
+        assert_eq!(
+            resources_response["result"]["payload"]["resources"][0]["uri"],
+            json!("membrain://daemon/runtime/status")
+        );
+        assert_eq!(
+            resources_response["result"]["payload"]["resources"][1]["uri"],
+            json!("membrain://daemon/runtime/doctor")
+        );
+
+        let status_resource = send_request(
+            &socket_path,
+            json!({
+                "jsonrpc":"2.0",
+                "method":"resource.read",
+                "params":{"uri":"membrain://daemon/runtime/status"},
+                "id":"resource-read-status"
+            }),
+        )
+        .await;
+        assert_eq!(status_resource["result"]["status"], json!("ok"));
+        assert_eq!(
+            status_resource["result"]["payload"]["uri"],
+            json!("membrain://daemon/runtime/status")
+        );
+        assert_eq!(
+            status_resource["result"]["payload"]["mime_type"],
+            json!("application/json")
+        );
+        assert_eq!(status_resource["result"]["payload"]["bounded"], json!(true));
+        assert_eq!(
+            status_resource["result"]["payload"]["payload"]["posture"],
+            json!("full")
+        );
+
+        let doctor_resource = send_request(
+            &socket_path,
+            json!({
+                "jsonrpc":"2.0",
+                "method":"resource.read",
+                "params":{"uri":"membrain://daemon/runtime/doctor"},
+                "id":"resource-read-doctor"
+            }),
+        )
+        .await;
+        assert_eq!(doctor_resource["result"]["status"], json!("ok"));
+        assert_eq!(
+            doctor_resource["result"]["payload"]["uri"],
+            json!("membrain://daemon/runtime/doctor")
+        );
+        assert_eq!(
+            doctor_resource["result"]["payload"]["payload"]["status"],
+            json!("ok")
+        );
+        assert!(doctor_resource["result"]["payload"]["payload"]
+            .get("index")
+            .is_some());
+
+        let unknown_resource = send_request(
+            &socket_path,
+            json!({
+                "jsonrpc":"2.0",
+                "method":"resource.read",
+                "params":{"uri":"membrain://daemon/runtime/missing"},
+                "id":"resource-read-missing"
+            }),
+        )
+        .await;
+        assert_eq!(unknown_resource["error"]["code"], json!(-32602));
+        assert_eq!(
+            unknown_resource["error"]["message"],
+            json!("unknown resource uri 'membrain://daemon/runtime/missing'")
+        );
 
         let shutdown_response = send_request(
             &socket_path,

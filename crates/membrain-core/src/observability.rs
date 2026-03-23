@@ -425,6 +425,8 @@ pub struct TraceProvenanceSummary {
     pub source_kind: &'static str,
     pub source_reference: &'static str,
     pub lineage_ancestors: Vec<u64>,
+    pub relation_to_seed: crate::api::FieldPresence<&'static str>,
+    pub graph_seed: crate::api::FieldPresence<u64>,
 }
 
 impl TraceProvenanceSummary {
@@ -443,6 +445,14 @@ impl TraceProvenanceSummary {
                 .iter()
                 .map(|memory_id| memory_id.0)
                 .collect(),
+            relation_to_seed: match provenance.relation_to_seed {
+                Some(relation) => crate::api::FieldPresence::Present(relation.as_str()),
+                None => crate::api::FieldPresence::Absent,
+            },
+            graph_seed: match provenance.graph_seed {
+                Some(seed) => crate::api::FieldPresence::Present(seed.0),
+                None => crate::api::FieldPresence::Absent,
+            },
         }
     }
 }
@@ -516,6 +526,14 @@ impl ObservabilityModule {
             TracePolicySummary::from_result_set(result_set),
             TraceProvenanceSummary::from_result_set(result_set),
         )
+    }
+
+    /// Builds the shared graph-expansion summary from a result set.
+    pub fn explain_graph_expansion(
+        &self,
+        result_set: &RetrievalResultSet,
+    ) -> crate::api::GraphExpansionSummary {
+        crate::api::GraphExpansionSummary::from_result_set(result_set)
     }
 
     /// Builds the shared freshness, conflict, and uncertainty marker families.
@@ -742,7 +760,7 @@ mod tests {
         EncodeFastPathStage, ExplainResultReason, ObservabilityModule, OutcomeClass,
         Tier1LookupLane, Tier1LookupOutcome, Tier2PrefilterOutcome, TraceStage,
     };
-    use crate::api::NamespaceId;
+    use crate::api::{FieldPresence, NamespaceId};
     use crate::engine::recall::{RecallPlanKind, RecallTraceStage};
     use crate::engine::result::{
         FreshnessMarkers, OmissionSummary, PackagingMetadata, PolicySummary, ProvenanceSummary,
@@ -891,6 +909,7 @@ mod tests {
 
         let (route, stages) = ObservabilityModule.explain_route(&result_set);
         let reasons = ObservabilityModule.explain_result_reasons(&result_set);
+        let graph = ObservabilityModule.explain_graph_expansion(&result_set);
 
         assert_eq!(route.route_family, "recent_tier1_then_tier2_exact");
         assert_eq!(route.route_reason, "small_session_lookup");
@@ -911,6 +930,10 @@ mod tests {
                 detail: "candidate survived bounded ranking".to_string(),
             }]
         );
+        assert_eq!(graph.graph_assistance, "none");
+        assert_eq!(graph.graph_seed, FieldPresence::Absent);
+        assert!(graph.followed_relations.is_empty());
+        assert!(graph.omitted_neighbor_ids.is_empty());
     }
 
     #[test]
@@ -923,8 +946,8 @@ mod tests {
                 .unwrap_or_else(|_| std::process::abort()),
             derived_from: None,
             lineage_ancestors: Vec::new(),
-            relation_to_seed: None,
-            graph_seed: None,
+            relation_to_seed: Some(crate::graph::RelationKind::SharedTopic),
+            graph_seed: Some(crate::graph::EntityId(44)),
         };
 
         let trace = super::TraceProvenanceSummary::from_provenance(&provenance);
@@ -932,6 +955,11 @@ mod tests {
         assert_eq!(trace.source_kind, "retrieval_pipeline");
         assert_eq!(trace.source_reference, "temporal_recall");
         assert!(trace.lineage_ancestors.is_empty());
+        assert_eq!(
+            trace.relation_to_seed,
+            FieldPresence::Present("shared_topic")
+        );
+        assert_eq!(trace.graph_seed, FieldPresence::Present(44));
     }
 
     #[test]

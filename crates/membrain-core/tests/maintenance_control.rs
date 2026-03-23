@@ -2,6 +2,9 @@ use std::cell::RefCell;
 use std::rc::Rc;
 
 use membrain_core::api::NamespaceId;
+use membrain_core::engine::consolidation::{
+    ConsolidationEngine, ConsolidationPolicy, DerivedArtifactKind,
+};
 use membrain_core::engine::maintenance::{
     DurableStateToken, InterruptedMaintenance, InterruptionReason, MaintenanceController,
     MaintenanceJobHandle, MaintenanceJobState, MaintenanceOperation, MaintenanceProgress,
@@ -11,6 +14,7 @@ use membrain_core::engine::repair::{
     IndexRepairEntrypoint, RepairEngine, RepairStatus, RepairTarget,
 };
 use membrain_core::migrate::DurableSchemaObject;
+use membrain_core::types::MemoryId;
 
 #[derive(Debug, Clone)]
 struct ScriptedMaintenance {
@@ -354,6 +358,86 @@ fn repeated_cancel_requests_stay_stable_until_poll_finalizes_cancellation() {
         })
     );
     assert_eq!(cancelled.polls_used, 1);
+}
+
+#[test]
+fn consolidation_runs_emit_lineage_preserving_artifacts_through_maintenance_handle() {
+    let namespace = NamespaceId::new("test.consolidation").unwrap();
+    let engine = ConsolidationEngine;
+    let run = engine.create_run(
+        namespace,
+        ConsolidationPolicy {
+            minimum_candidates: 1,
+            batch_size: 3,
+            ..Default::default()
+        },
+        3,
+    );
+    let mut handle = MaintenanceJobHandle::new(run, 10);
+
+    handle.start();
+    let snapshot = handle.poll();
+    let MaintenanceJobState::Completed(summary) = snapshot.state else {
+        panic!("expected completed consolidation summary");
+    };
+
+    assert_eq!(summary.groups_evaluated, 3);
+    assert_eq!(summary.episode_source_sets, 3);
+    assert_eq!(summary.derivations_emitted, 3);
+    assert_eq!(summary.derivation_partial_failures, 3);
+    assert_eq!(summary.derived_artifacts.len(), 3);
+    assert_eq!(summary.derivation_failures.len(), 3);
+    assert_eq!(
+        summary.derived_artifacts[0].kind,
+        DerivedArtifactKind::Summary
+    );
+    assert_eq!(summary.derived_artifacts[0].source_ids, vec![MemoryId(1)]);
+    assert_eq!(summary.derived_artifacts[1].source_ids, vec![MemoryId(2)]);
+    assert_eq!(summary.derivation_failures[0].stage, "gist_compaction");
+    assert_eq!(
+        summary.derivation_failures[0].reason,
+        "single_source_group_kept_evidence_only"
+    );
+    assert!(summary
+        .derivation_failures
+        .iter()
+        .all(|failure| failure.lineage_preserved));
+    assert_eq!(summary.grouping_logs.len(), 3);
+
+    assert_eq!(handle.snapshot().polls_used, 1);
+    assert_eq!(handle.start(), handle.snapshot());
+    assert_eq!(handle.poll(), handle.snapshot());
+    assert_eq!(handle.cancel(), handle.snapshot());
+}
+
+#[test]
+fn consolidation_runs_respect_minimum_candidate_gate() {
+    let namespace = NamespaceId::new("test.consolidation.gated").unwrap();
+    let engine = ConsolidationEngine;
+    let run = engine.create_run(
+        namespace,
+        ConsolidationPolicy {
+            minimum_candidates: 4,
+            batch_size: 3,
+            ..Default::default()
+        },
+        3,
+    );
+    let mut handle = MaintenanceJobHandle::new(run, 10);
+
+    let snapshot = handle.poll();
+    let MaintenanceJobState::Completed(summary) = snapshot.state else {
+        panic!("expected gated consolidation summary");
+    };
+
+    assert_eq!(summary.groups_evaluated, 0);
+    assert_eq!(summary.episode_source_sets, 0);
+    assert_eq!(summary.derivations_emitted, 0);
+    assert_eq!(summary.derivation_partial_failures, 0);
+    assert!(summary.derived_artifacts.is_empty());
+    assert!(summary.derivation_failures.is_empty());
+    assert!(summary.grouping_logs.is_empty());
+    assert_eq!(snapshot.polls_used, 1);
 }
 
 #[test]
