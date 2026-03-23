@@ -552,6 +552,7 @@ pub enum TraceStage {
     Tier1ExactHandle,
     Tier1RecentWindow,
     Tier2Exact,
+    GraphExpansion,
     Tier3Fallback,
     PolicyGate,
     Packaging,
@@ -564,6 +565,7 @@ impl TraceStage {
             Self::Tier1ExactHandle => "tier1_exact_handle",
             Self::Tier1RecentWindow => "tier1_recent_window",
             Self::Tier2Exact => "tier2_exact",
+            Self::GraphExpansion => "graph_expansion",
             Self::Tier3Fallback => "tier3_fallback",
             Self::PolicyGate => "policy_gate",
             Self::Packaging => "packaging",
@@ -575,6 +577,7 @@ impl TraceStage {
             crate::engine::recall::RecallTraceStage::Tier1ExactHandle => Self::Tier1ExactHandle,
             crate::engine::recall::RecallTraceStage::Tier1RecentWindow => Self::Tier1RecentWindow,
             crate::engine::recall::RecallTraceStage::Tier2Exact => Self::Tier2Exact,
+            crate::engine::recall::RecallTraceStage::GraphExpansion => Self::GraphExpansion,
             crate::engine::recall::RecallTraceStage::Tier3Fallback => Self::Tier3Fallback,
         }
     }
@@ -654,6 +657,9 @@ impl RouteSummary {
             crate::engine::recall::RecallPlanKind::RecentTier1ThenTier2Exact => {
                 "recent_tier1_then_tier2_exact"
             }
+            crate::engine::recall::RecallPlanKind::Tier2ExactThenGraphExpansion => {
+                "tier2_exact_then_graph_expansion"
+            }
             crate::engine::recall::RecallPlanKind::Tier2ExactThenTier3Fallback => {
                 "tier2_exact_then_tier3_fallback"
             }
@@ -665,6 +671,9 @@ impl RouteSummary {
             "small lookup for active session can stay on hot recent window before durable fallback"
             | "small session lookup scans the Tier1 recent window before Tier2 exact" => {
                 "small_session_lookup"
+            }
+            "request uses bounded graph expansion from the Tier2-authorized seed shortlist" => {
+                "bounded_graph_expansion"
             }
             "request needs broader durable retrieval before cold fallback"
             | "request lacks a direct Tier1 answer and escalates to deeper indexed retrieval" => {
@@ -678,6 +687,9 @@ impl RouteSummary {
                 .trace_stages
                 .last()
                 .and_then(|stage| match stage {
+                    crate::engine::recall::RecallTraceStage::GraphExpansion => {
+                        Some("bounded_graph_expansion")
+                    }
                     crate::engine::recall::RecallTraceStage::Tier3Fallback => {
                         Some("tier3_fallback")
                     }
@@ -710,6 +722,7 @@ impl RouteSummary {
                 matches!(
                     stage,
                     crate::engine::recall::RecallTraceStage::Tier2Exact
+                        | crate::engine::recall::RecallTraceStage::GraphExpansion
                         | crate::engine::recall::RecallTraceStage::Tier3Fallback
                 )
             }),

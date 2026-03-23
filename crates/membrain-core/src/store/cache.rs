@@ -882,14 +882,21 @@ impl PrefetchTrigger {
 }
 
 /// Bypass reason for why a prefetch hint was dropped or ignored.
+///
+/// These labels stay aligned with the shared cache taxonomy so prefetch drops
+/// preserve explicit namespace/policy versus intent/budget causes.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum PrefetchBypassReason {
     /// Budget for speculative work is exhausted.
     BudgetExhausted,
     /// User or task intent changed since the hint was queued.
     IntentChanged,
-    /// Namespace or policy scope change invalidated the hint.
-    ScopeChanged,
+    /// Namespace scope narrowed since the hint was queued.
+    NamespaceNarrowed,
+    /// Namespace scope widened since the hint was queued.
+    NamespaceWidened,
+    /// Policy scope change invalidated the hint.
+    PolicyDenied,
     /// Prefetch system is disabled.
     Disabled,
 }
@@ -900,7 +907,9 @@ impl PrefetchBypassReason {
         match self {
             Self::BudgetExhausted => "budget_exhausted",
             Self::IntentChanged => "intent_changed",
-            Self::ScopeChanged => "scope_changed",
+            Self::NamespaceNarrowed => "namespace_narrowed",
+            Self::NamespaceWidened => "namespace_widened",
+            Self::PolicyDenied => "policy_denied",
             Self::Disabled => "disabled",
         }
     }
@@ -954,7 +963,9 @@ impl PrefetchController {
             PrefetchBypassReason::IntentChanged => {
                 self.metrics.dropped_intent_changed += count;
             }
-            PrefetchBypassReason::ScopeChanged => {
+            PrefetchBypassReason::NamespaceNarrowed
+            | PrefetchBypassReason::NamespaceWidened
+            | PrefetchBypassReason::PolicyDenied => {
                 self.metrics.dropped_scope_changed += count;
             }
             PrefetchBypassReason::Disabled => {
@@ -1025,7 +1036,7 @@ impl PrefetchController {
     pub fn cancel_all(&mut self) {
         let dropped = self.queue.len() as u64;
         self.queue.clear();
-        self.record_drop(PrefetchBypassReason::ScopeChanged, dropped);
+        self.record_drop(PrefetchBypassReason::PolicyDenied, dropped);
     }
 
     /// Returns the current queue depth.
@@ -1033,9 +1044,16 @@ impl PrefetchController {
         self.queue.len()
     }
 
-    /// Disables the prefetch system.
+    /// Disables the prefetch system and discards queued speculative hints.
     pub fn disable(&mut self) {
-        self.enabled = false;
+        if self.enabled {
+            let dropped = self.queue.len() as u64;
+            self.queue.clear();
+            if dropped > 0 {
+                self.record_drop(PrefetchBypassReason::Disabled, dropped);
+            }
+            self.enabled = false;
+        }
     }
 
     /// Re-enables the prefetch system.
@@ -1380,7 +1398,7 @@ impl CacheManager {
 
         let prefetch_dropped = if namespace_scoped {
             self.prefetch
-                .cancel_namespace(namespace, PrefetchBypassReason::ScopeChanged)
+                .cancel_namespace(namespace, PrefetchBypassReason::NamespaceNarrowed)
         } else {
             let dropped = self.prefetch.queue_depth();
             self.prefetch.cancel_all();
@@ -1720,7 +1738,32 @@ mod tests {
     }
 
     #[test]
-    fn cancel_namespace_tracks_scope_change_reason() {
+    fn disable_prefetch_clears_queued_hints_and_counts_them_disabled() {
+        let mut pf = PrefetchController::new(5);
+        pf.submit_hint(
+            ns("team.alpha"),
+            PrefetchTrigger::SessionRecency,
+            vec![MemoryId(1)],
+        );
+        pf.submit_hint(
+            ns("team.beta"),
+            PrefetchTrigger::TaskIntent,
+            vec![MemoryId(2)],
+        );
+
+        pf.disable();
+
+        assert_eq!(pf.queue_depth(), 0);
+        assert_eq!(pf.metrics.hints_dropped, 2);
+        assert_eq!(pf.metrics.dropped_disabled, 2);
+
+        pf.enable();
+        assert!(pf.consume_hint(&ns("team.alpha")).is_none());
+        assert!(pf.consume_hint(&ns("team.beta")).is_none());
+    }
+
+    #[test]
+    fn cancel_namespace_tracks_namespace_narrowed_reason() {
         let mut pf = PrefetchController::new(5);
         pf.submit_hint(
             ns("team.alpha"),
@@ -1738,12 +1781,34 @@ mod tests {
             vec![MemoryId(3)],
         );
 
-        let dropped = pf.cancel_namespace(&ns("team.alpha"), PrefetchBypassReason::ScopeChanged);
+        let dropped = pf.cancel_namespace(
+            &ns("team.alpha"),
+            PrefetchBypassReason::NamespaceNarrowed,
+        );
 
         assert_eq!(dropped, 2);
         assert_eq!(pf.queue_depth(), 1);
         assert_eq!(pf.metrics.hints_dropped, 2);
         assert_eq!(pf.metrics.dropped_scope_changed, 2);
+    }
+
+    #[test]
+    fn cancel_namespace_tracks_namespace_widened_reason() {
+        let mut pf = PrefetchController::new(5);
+        pf.submit_hint(
+            ns("team.alpha"),
+            PrefetchTrigger::TaskIntent,
+            vec![MemoryId(1)],
+        );
+
+        let dropped = pf.cancel_namespace(
+            &ns("team.alpha"),
+            PrefetchBypassReason::NamespaceWidened,
+        );
+
+        assert_eq!(dropped, 1);
+        assert_eq!(pf.metrics.hints_dropped, 1);
+        assert_eq!(pf.metrics.dropped_scope_changed, 1);
     }
 
     #[test]
@@ -1759,6 +1824,27 @@ mod tests {
 
         assert_eq!(dropped, 1);
         assert_eq!(pf.metrics.dropped_intent_changed, 1);
+    }
+
+    #[test]
+    fn cancel_all_tracks_policy_denied_reason() {
+        let mut pf = PrefetchController::new(5);
+        pf.submit_hint(
+            ns("team.alpha"),
+            PrefetchTrigger::SessionRecency,
+            vec![MemoryId(1)],
+        );
+        pf.submit_hint(
+            ns("team.beta"),
+            PrefetchTrigger::ColdStart,
+            vec![MemoryId(2)],
+        );
+
+        pf.cancel_all();
+
+        assert_eq!(pf.queue_depth(), 0);
+        assert_eq!(pf.metrics.hints_dropped, 2);
+        assert_eq!(pf.metrics.dropped_scope_changed, 2);
     }
 
     // ── § 9.6  Namespace invalidation ────────────────────────────────────

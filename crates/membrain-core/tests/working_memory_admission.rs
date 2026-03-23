@@ -5,13 +5,8 @@ use membrain_core::RuntimeConfig;
 
 fn test_config() -> RuntimeConfig {
     RuntimeConfig {
-        tier1_candidate_budget: 128,
-        tier2_candidate_budget: 5_000,
         working_memory_capacity: 2,
-        working_memory_attention_threshold: 200,
-        working_memory_promote_threshold: 700,
-        cache_per_family_capacity: 1000,
-        prefetch_queue_capacity: 50,
+        ..RuntimeConfig::default()
     }
 }
 

@@ -174,6 +174,72 @@ impl AuditLogEntry {
     }
 }
 
+/// Bounded filter used to inspect one audit-history slice.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct AuditLogFilter {
+    pub namespace: Option<NamespaceId>,
+    pub memory_id: Option<MemoryId>,
+    pub session_id: Option<SessionId>,
+    pub category: Option<AuditEventCategory>,
+    pub kind: Option<AuditEventKind>,
+    pub request_id: Option<String>,
+    pub related_run: Option<String>,
+    pub min_sequence: Option<u64>,
+    pub max_sequence: Option<u64>,
+    pub redacted: Option<bool>,
+}
+
+impl AuditLogFilter {
+    /// Returns whether the entry matches the configured slice constraints.
+    pub fn matches(&self, entry: &AuditLogEntry) -> bool {
+        self.namespace
+            .as_ref()
+            .is_none_or(|namespace| &entry.namespace == namespace)
+            && self
+                .memory_id
+                .is_none_or(|memory_id| entry.memory_id == Some(memory_id))
+            && self
+                .session_id
+                .is_none_or(|session_id| entry.session_id == Some(session_id))
+            && self
+                .category
+                .is_none_or(|category| entry.category == category)
+            && self.kind.is_none_or(|kind| entry.kind == kind)
+            && self
+                .request_id
+                .as_deref()
+                .is_none_or(|request_id| entry.request_id.as_deref() == Some(request_id))
+            && self
+                .related_run
+                .as_deref()
+                .is_none_or(|related_run| entry.related_run.as_deref() == Some(related_run))
+            && self
+                .min_sequence
+                .is_none_or(|min_sequence| entry.sequence >= min_sequence)
+            && self
+                .max_sequence
+                .is_none_or(|max_sequence| entry.sequence <= max_sequence)
+            && self
+                .redacted
+                .is_none_or(|redacted| entry.redacted == redacted)
+    }
+}
+
+/// Structured bounded export for one audit-history slice.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AuditLogSlice {
+    pub rows: Vec<AuditLogEntry>,
+    pub total_matches: usize,
+    pub truncated: bool,
+}
+
+impl AuditLogSlice {
+    /// Returns how many rows are included in the exported slice.
+    pub fn returned_rows(&self) -> usize {
+        self.rows.len()
+    }
+}
+
 /// Bounded append-only audit log preserving insertion order.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct AppendOnlyAuditLog {
@@ -282,11 +348,39 @@ impl AppendOnlyAuditLog {
             .cloned()
             .collect()
     }
+
+    /// Returns one bounded, structured audit-history slice after applying the requested filters.
+    pub fn slice(&self, filter: &AuditLogFilter, limit: Option<usize>) -> AuditLogSlice {
+        let total_matches = self
+            .entries
+            .iter()
+            .filter(|entry| filter.matches(entry))
+            .count();
+
+        let mut rows: Vec<_> = self
+            .entries
+            .iter()
+            .filter(|entry| filter.matches(entry))
+            .cloned()
+            .collect();
+
+        if let Some(limit) = limit {
+            if rows.len() > limit {
+                rows = rows.split_off(rows.len() - limit);
+            }
+        }
+
+        AuditLogSlice {
+            truncated: rows.len() < total_matches,
+            rows,
+            total_matches,
+        }
+    }
 }
 
 #[cfg(test)]
 mod tests {
-    use super::{AppendOnlyAuditLog, AuditLogEntry, AuditLogStore};
+    use super::{AppendOnlyAuditLog, AuditLogEntry, AuditLogFilter, AuditLogSlice, AuditLogStore};
     use crate::api::NamespaceId;
     use crate::engine::contradiction::{
         ContradictionId, ContradictionKind, ContradictionRecord, PreferredAnswerState,
@@ -420,9 +514,11 @@ mod tests {
             log.entries_for_kind(AuditEventKind::MaintenanceRepairRollbackCompleted);
 
         assert_eq!(namespace_entries.len(), 3);
-        assert!(namespace_entries
-            .iter()
-            .all(|entry| entry.category == AuditEventCategory::Maintenance));
+        assert!(
+            namespace_entries
+                .iter()
+                .all(|entry| entry.category == AuditEventCategory::Maintenance)
+        );
         assert_eq!(rollback_entries.len(), 3);
         assert_eq!(degraded_entries.len(), 1);
         assert_eq!(rollback_trigger_entries.len(), 1);
@@ -644,5 +740,111 @@ mod tests {
             log.entries_for_request_id("req-contradiction-10"),
             vec![entry]
         );
+    }
+
+    #[test]
+    fn audit_log_slice_filters_and_limits_rows() {
+        let mut log = AppendOnlyAuditLog::new(8);
+        let namespace = team_alpha();
+
+        log.append(
+            AuditLogEntry::new(
+                AuditEventCategory::Encode,
+                AuditEventKind::EncodeAccepted,
+                namespace.clone(),
+                "encode_engine",
+                "encoded memory into durable flow",
+            )
+            .with_memory_id(MemoryId(51))
+            .with_session_id(SessionId(4))
+            .with_request_id("req-encode-51"),
+        );
+        log.append(
+            AuditLogEntry::new(
+                AuditEventCategory::Policy,
+                AuditEventKind::PolicyRedacted,
+                namespace.clone(),
+                "policy_module",
+                "redacted sensitive actor fields",
+            )
+            .with_memory_id(MemoryId(51))
+            .with_request_id("req-policy-51")
+            .with_related_run("incident-2026-03-23")
+            .with_redaction(),
+        );
+        log.append(
+            AuditLogEntry::new(
+                AuditEventCategory::Maintenance,
+                AuditEventKind::MaintenanceMigrationApplied,
+                namespace.clone(),
+                "migration_runner",
+                "applied audit-log schema migration",
+            )
+            .with_memory_id(MemoryId(51))
+            .with_related_run("migration-0043"),
+        );
+
+        let filter = AuditLogFilter {
+            namespace: Some(namespace.clone()),
+            memory_id: Some(MemoryId(51)),
+            min_sequence: Some(2),
+            ..AuditLogFilter::default()
+        };
+        let slice = log.slice(&filter, Some(1));
+
+        assert_eq!(slice.total_matches, 2);
+        assert!(slice.truncated);
+        assert_eq!(slice.returned_rows(), 1);
+        assert_eq!(
+            slice.rows[0].kind,
+            AuditEventKind::MaintenanceMigrationApplied
+        );
+    }
+
+    #[test]
+    fn audit_log_slice_can_filter_by_request_id_kind_and_redaction() {
+        let mut log = AppendOnlyAuditLog::new(8);
+        let namespace = team_alpha();
+
+        log.append(
+            AuditLogEntry::new(
+                AuditEventCategory::Policy,
+                AuditEventKind::PolicyDenied,
+                namespace.clone(),
+                "policy_module",
+                "denied namespace widening",
+            )
+            .with_request_id("req-policy-denied"),
+        );
+        log.append(
+            AuditLogEntry::new(
+                AuditEventCategory::Policy,
+                AuditEventKind::PolicyRedacted,
+                namespace,
+                "policy_module",
+                "redacted actor metadata",
+            )
+            .with_request_id("req-policy-redacted")
+            .with_redaction(),
+        );
+
+        let filter = AuditLogFilter {
+            kind: Some(AuditEventKind::PolicyRedacted),
+            request_id: Some("req-policy-redacted".to_string()),
+            redacted: Some(true),
+            ..AuditLogFilter::default()
+        };
+        let AuditLogSlice {
+            rows,
+            total_matches,
+            truncated,
+        } = log.slice(&filter, Some(8));
+
+        assert_eq!(total_matches, 1);
+        assert!(!truncated);
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].kind, AuditEventKind::PolicyRedacted);
+        assert_eq!(rows[0].request_id.as_deref(), Some("req-policy-redacted"));
+        assert!(rows[0].redacted);
     }
 }

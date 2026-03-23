@@ -601,12 +601,192 @@ pub struct EdgeDerivationInput {
     pub confidence: u16,
 }
 
+/// Stable graph-repair hook names for rebuild runs and operator traces.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum GraphRebuildHook {
+    SnapshotDurableTruth,
+    RebuildAdjacencyProjection,
+    RebuildNeighborhoodCache,
+    VerifyConsistencySnapshot,
+}
+
+impl GraphRebuildHook {
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::SnapshotDurableTruth => "snapshot_durable_truth",
+            Self::RebuildAdjacencyProjection => "rebuild_adjacency_projection",
+            Self::RebuildNeighborhoodCache => "rebuild_neighborhood_cache",
+            Self::VerifyConsistencySnapshot => "verify_consistency_snapshot",
+        }
+    }
+}
+
+/// Named failure-injection modes for graph rebuild testing.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum GraphFailureInjection {
+    None,
+    DropLastDerivedEdge,
+    AbortAfterAdjacencyProjection,
+}
+
+impl GraphFailureInjection {
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::None => "none",
+            Self::DropLastDerivedEdge => "drop_last_derived_edge",
+            Self::AbortAfterAdjacencyProjection => "abort_after_adjacency_projection",
+        }
+    }
+}
+
+/// Stable graph-repair metrics confirming whether a rebuild succeeded safely.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct GraphRebuildMetrics {
+    pub durable_inputs_seen: usize,
+    pub rebuilt_edges: usize,
+    pub dropped_edges: usize,
+    pub verification_passed: bool,
+}
+
+/// Operator-visible report for one graph rebuild run.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct GraphRebuildReport {
+    pub hooks_run: Vec<GraphRebuildHook>,
+    pub failure_injection: GraphFailureInjection,
+    pub metrics: GraphRebuildMetrics,
+    pub rebuilt_edges: Vec<GraphEdge>,
+    pub operator_log: String,
+}
+
+impl GraphRebuildReport {
+    pub fn metric_names(&self) -> [&'static str; 4] {
+        [
+            "graph_rebuild_durable_inputs_seen",
+            "graph_rebuild_edges_total",
+            "graph_rebuild_dropped_edges_total",
+            "graph_rebuild_verification_passed",
+        ]
+    }
+}
+
 /// Defines how the graph recovers from staleness or loss.
 pub trait GraphRebuilder {
     /// Rebuilds association edges from a durable payload, ignoring any previously
     /// derived graph state. This ensures the graph remains a derivable index
     /// rather than disjoint state.
     fn rebuild_edges_from_truth(&self, input: EdgeDerivationInput) -> Vec<GraphEdge>;
+
+    /// Runs a named graph rebuild sequence and produces an operator-visible report.
+    fn rebuild_with_hooks(
+        &self,
+        inputs: &[EdgeDerivationInput],
+        failure_injection: GraphFailureInjection,
+    ) -> GraphRebuildReport;
+}
+
+/// Deterministic graph rebuilder used by repair and failure-injection tests.
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+pub struct DerivedGraphRebuilder;
+
+impl DerivedGraphRebuilder {
+    fn entity_for_memory(memory_id: MemoryId) -> EntityId {
+        EntityId(memory_id.0 + 1)
+    }
+
+    fn entity_for_concept(concept: &str) -> EntityId {
+        let hash = concept
+            .bytes()
+            .fold(0u64, |acc, byte| acc.wrapping_mul(131).wrapping_add(byte as u64));
+        EntityId(1_000_000 + hash)
+    }
+
+    fn edge_from_input(&self, input: EdgeDerivationInput) -> Option<GraphEdge> {
+        match (input.target_memory, input.extracted_concept.as_deref()) {
+            (Some(target_memory), _) => Some(GraphEdge {
+                from: Self::entity_for_memory(input.source_memory),
+                to: Self::entity_for_memory(target_memory),
+                relation: input.relation,
+                strength: input.confidence,
+            }),
+            (None, Some(concept)) => Some(GraphEdge {
+                from: Self::entity_for_memory(input.source_memory),
+                to: Self::entity_for_concept(concept),
+                relation: input.relation,
+                strength: input.confidence,
+            }),
+            (None, None) => None,
+        }
+    }
+}
+
+impl GraphRebuilder for DerivedGraphRebuilder {
+    fn rebuild_edges_from_truth(&self, input: EdgeDerivationInput) -> Vec<GraphEdge> {
+        self.edge_from_input(input).into_iter().collect()
+    }
+
+    fn rebuild_with_hooks(
+        &self,
+        inputs: &[EdgeDerivationInput],
+        failure_injection: GraphFailureInjection,
+    ) -> GraphRebuildReport {
+        let mut hooks_run = vec![GraphRebuildHook::SnapshotDurableTruth];
+        let mut rebuilt_edges = inputs
+            .iter()
+            .cloned()
+            .filter_map(|input| self.edge_from_input(input))
+            .collect::<Vec<_>>();
+        let durable_inputs_seen = inputs.len();
+        let mut dropped_edges = 0;
+        let mut verification_passed = true;
+
+        hooks_run.push(GraphRebuildHook::RebuildAdjacencyProjection);
+
+        match failure_injection {
+            GraphFailureInjection::None => {
+                hooks_run.push(GraphRebuildHook::RebuildNeighborhoodCache);
+                hooks_run.push(GraphRebuildHook::VerifyConsistencySnapshot);
+            }
+            GraphFailureInjection::DropLastDerivedEdge => {
+                if rebuilt_edges.pop().is_some() {
+                    dropped_edges = 1;
+                }
+                hooks_run.push(GraphRebuildHook::RebuildNeighborhoodCache);
+                hooks_run.push(GraphRebuildHook::VerifyConsistencySnapshot);
+                verification_passed = false;
+            }
+            GraphFailureInjection::AbortAfterAdjacencyProjection => {
+                verification_passed = false;
+            }
+        }
+
+        let metrics = GraphRebuildMetrics {
+            durable_inputs_seen,
+            rebuilt_edges: rebuilt_edges.len(),
+            dropped_edges,
+            verification_passed,
+        };
+        let operator_log = format!(
+            "hooks={} failure_injection={} durable_inputs_seen={} rebuilt_edges={} dropped_edges={} verification_passed={}",
+            hooks_run
+                .iter()
+                .map(|hook| hook.as_str())
+                .collect::<Vec<_>>()
+                .join(","),
+            failure_injection.as_str(),
+            metrics.durable_inputs_seen,
+            metrics.rebuilt_edges,
+            metrics.dropped_edges,
+            metrics.verification_passed,
+        );
+
+        GraphRebuildReport {
+            hooks_run,
+            failure_injection,
+            metrics,
+            rebuilt_edges,
+            operator_log,
+        }
+    }
 }
 
 // ── Graph trait ──────────────────────────────────────────────────────────────

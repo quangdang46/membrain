@@ -275,6 +275,7 @@ pub fn bench_recall(
                 exact_memory_id: None,
                 session_id: Some(SessionId(9)),
                 small_lookup: false,
+                graph_expansion: false,
             },
         ),
     ];

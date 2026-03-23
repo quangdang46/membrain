@@ -10,6 +10,8 @@ pub struct RecallRequest {
     pub session_id: Option<SessionId>,
     /// Whether the caller is asking for a bounded small lookup.
     pub small_lookup: bool,
+    /// Whether bounded graph/engram expansion may run after Tier2 exact retrieval.
+    pub graph_expansion: bool,
 }
 
 impl RecallRequest {
@@ -19,6 +21,7 @@ impl RecallRequest {
             exact_memory_id: Some(memory_id),
             session_id: None,
             small_lookup: false,
+            graph_expansion: false,
         }
     }
 
@@ -28,15 +31,23 @@ impl RecallRequest {
             exact_memory_id: None,
             session_id: Some(session_id),
             small_lookup: true,
+            graph_expansion: false,
         }
+    }
+
+    /// Enables bounded graph/engram expansion after Tier2 exact retrieval.
+    pub const fn with_graph_expansion(mut self, enabled: bool) -> Self {
+        self.graph_expansion = enabled;
+        self
     }
 }
 
-/// Stable planner branches for exact-id, recent, and deeper fallback routing.
+/// Stable planner branches for exact-id, recent, bounded graph expansion, and deeper fallback routing.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum RecallPlanKind {
     ExactIdTier1,
     RecentTier1ThenTier2Exact,
+    Tier2ExactThenGraphExpansion,
     Tier2ExactThenTier3Fallback,
 }
 
@@ -46,6 +57,7 @@ pub enum RecallTraceStage {
     Tier1ExactHandle,
     Tier1RecentWindow,
     Tier2Exact,
+    GraphExpansion,
     Tier3Fallback,
 }
 
@@ -124,6 +136,10 @@ impl RecallEngine {
         RecallTraceStage::Tier1RecentWindow,
         RecallTraceStage::Tier2Exact,
     ];
+    const TIER2_THEN_GRAPH_TRACE: &'static [RecallTraceStage] = &[
+        RecallTraceStage::Tier2Exact,
+        RecallTraceStage::GraphExpansion,
+    ];
     const TIER2_THEN_TIER3_TRACE: &'static [RecallTraceStage] = &[
         RecallTraceStage::Tier2Exact,
         RecallTraceStage::Tier3Fallback,
@@ -182,6 +198,31 @@ impl RecallRuntime for RecallEngine {
                     candidate_budget: tier1_candidate_budget,
                     pre_tier1_candidates: tier1_candidate_budget,
                     post_tier1_candidates: tier1_candidate_budget,
+                },
+            };
+        }
+
+        if request.graph_expansion {
+            return RecallPlan {
+                kind: RecallPlanKind::Tier2ExactThenGraphExpansion,
+                exact_memory_id: None,
+                session_id: request.session_id,
+                tier1_candidate_budget,
+                route_summary: RecallRouteSummary {
+                    tier1_answers_directly: false,
+                    tier1_consulted_first: false,
+                    routes_to_deeper_tiers: true,
+                    reason:
+                        "request uses bounded graph expansion from the Tier2-authorized seed shortlist",
+                    trace_stages: Self::TIER2_THEN_GRAPH_TRACE,
+                },
+                trace: Tier1PlanTrace {
+                    route_name: "tier2.exact_then_graph_expansion",
+                    tier1_answered_directly: false,
+                    stayed_within_latency_budget: true,
+                    candidate_budget: tier1_candidate_budget,
+                    pre_tier1_candidates: 0,
+                    post_tier1_candidates: config.graph_max_nodes.min(config.tier2_candidate_budget),
                 },
             };
         }
@@ -297,6 +338,7 @@ mod tests {
                 exact_memory_id: None,
                 session_id: Some(SessionId(9)),
                 small_lookup: false,
+                graph_expansion: false,
             },
             RuntimeConfig::default(),
         );
@@ -305,6 +347,7 @@ mod tests {
                 exact_memory_id: None,
                 session_id: None,
                 small_lookup: true,
+                graph_expansion: false,
             },
             RuntimeConfig::default(),
         );
@@ -347,6 +390,7 @@ mod tests {
                 exact_memory_id: None,
                 session_id: Some(SessionId(11)),
                 small_lookup: false,
+                graph_expansion: false,
             },
             RuntimeConfig::default(),
         );
@@ -377,5 +421,53 @@ mod tests {
         );
         assert_eq!(plan.trace.pre_tier1_candidates, 0);
         assert_eq!(plan.trace.post_tier1_candidates, 0);
+    }
+
+    #[test]
+    fn graph_expansion_requests_route_to_bounded_graph_stage() {
+        let engine = RecallEngine;
+        let config = RuntimeConfig::default();
+
+        let plan = engine.plan_recall(
+            RecallRequest {
+                exact_memory_id: None,
+                session_id: Some(SessionId(13)),
+                small_lookup: false,
+                graph_expansion: true,
+            },
+            config,
+        );
+
+        assert_eq!(plan.kind, RecallPlanKind::Tier2ExactThenGraphExpansion);
+        assert_eq!(plan.session_id, Some(SessionId(13)));
+        assert!(!plan.terminates_in_tier1());
+        assert!(!plan.route_summary.tier1_answers_directly);
+        assert!(!plan.route_summary.tier1_consulted_first);
+        assert!(plan.route_summary.routes_to_deeper_tiers);
+        assert_eq!(
+            plan.route_summary.reason,
+            "request uses bounded graph expansion from the Tier2-authorized seed shortlist"
+        );
+        assert_eq!(
+            plan.route_summary.trace_stages,
+            &[
+                RecallTraceStage::Tier2Exact,
+                RecallTraceStage::GraphExpansion,
+            ]
+        );
+        assert_eq!(plan.trace.route_name, "tier2.exact_then_graph_expansion");
+        assert_eq!(
+            plan.trace.post_tier1_candidates,
+            config.graph_max_nodes.min(config.tier2_candidate_budget)
+        );
+    }
+
+    #[test]
+    fn graph_expansion_builder_toggles_request_flag() {
+        let request = RecallRequest::small_session_lookup(SessionId(21)).with_graph_expansion(true);
+
+        assert!(request.graph_expansion);
+        assert_eq!(request.session_id, Some(SessionId(21)));
+        assert!(request.small_lookup);
     }
 }

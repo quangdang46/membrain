@@ -499,6 +499,7 @@ impl RetrievalExplain {
                     crate::engine::recall::RecallTraceStage::Tier1ExactHandle => "tier1_exact",
                     crate::engine::recall::RecallTraceStage::Tier1RecentWindow => "tier1_recent",
                     crate::engine::recall::RecallTraceStage::Tier2Exact => "tier2_exact",
+                    crate::engine::recall::RecallTraceStage::GraphExpansion => "graph_expansion",
                     crate::engine::recall::RecallTraceStage::Tier3Fallback => "tier3_fallback",
                 }
                 .to_string()

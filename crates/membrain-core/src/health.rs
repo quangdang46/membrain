@@ -632,6 +632,7 @@ mod tests {
             results: Vec::new(),
             verification_artifacts: HashMap::new(),
             operator_reports: Vec::new(),
+            graph_rebuild_reports: HashMap::new(),
         });
 
         assert_eq!(report.state, SubsystemHealthState::Blocked);
@@ -697,6 +698,7 @@ mod tests {
                 verification_artifact_name: "fts5_lexical_parity",
                 operator_log: "target=lexical_index status=corrupt".to_string(),
             }],
+            graph_rebuild_reports: HashMap::new(),
         };
 
         let report = BrainHealthReport::from_inputs(
@@ -797,7 +799,7 @@ mod tests {
         );
         let dropped = cache.prefetch.cancel_namespace(
             &NamespaceId::new("health").expect("namespace"),
-            crate::store::cache::PrefetchBypassReason::ScopeChanged,
+            crate::store::cache::PrefetchBypassReason::NamespaceNarrowed,
         );
         assert_eq!(dropped, 2);
 

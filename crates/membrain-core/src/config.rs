@@ -15,6 +15,12 @@ pub struct RuntimeConfig {
     pub cache_per_family_capacity: usize,
     /// Maximum queued prefetch hints before oldest hints are dropped.
     pub prefetch_queue_capacity: usize,
+    /// Maximum bounded graph expansion depth from the authorized seed shortlist.
+    pub graph_max_depth: u8,
+    /// Maximum bounded graph expansion nodes from the authorized seed shortlist.
+    pub graph_max_nodes: usize,
+    /// Minimum graph edge strength required before bounded traversal can follow an edge.
+    pub graph_min_edge_strength: u16,
 }
 
 impl Default for RuntimeConfig {
@@ -27,6 +33,9 @@ impl Default for RuntimeConfig {
             working_memory_promote_threshold: 700,
             cache_per_family_capacity: crate::constants::DEFAULT_CACHE_PER_FAMILY_CAPACITY,
             prefetch_queue_capacity: crate::constants::DEFAULT_PREFETCH_QUEUE_CAPACITY,
+            graph_max_depth: crate::constants::DEFAULT_GRAPH_MAX_DEPTH,
+            graph_max_nodes: crate::constants::DEFAULT_GRAPH_MAX_NODES,
+            graph_min_edge_strength: crate::constants::DEFAULT_GRAPH_MIN_EDGE_STRENGTH,
         }
     }
 }

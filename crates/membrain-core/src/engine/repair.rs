@@ -8,7 +8,12 @@ use crate::engine::maintenance::{
     DurableStateToken, InterruptedMaintenance, InterruptionReason, MaintenanceOperation,
     MaintenanceProgress, MaintenanceStep,
 };
+use crate::graph::{
+    DerivedGraphRebuilder, EdgeDerivationInput, GraphFailureInjection, GraphRebuildReport,
+    GraphRebuilder, RelationKind,
+};
 use crate::migrate::DurableSchemaObject;
+use crate::types::MemoryId;
 use std::collections::HashMap;
 
 // ── Repair targets ───────────────────────────────────────────────────────────
@@ -175,6 +180,7 @@ pub struct RepairSummary {
     pub results: Vec<RepairCheckResult>,
     pub verification_artifacts: HashMap<RepairTarget, VerificationArtifact>,
     pub operator_reports: Vec<RepairOperatorReport>,
+    pub graph_rebuild_reports: HashMap<RepairTarget, GraphRebuildReport>,
 }
 
 /// Operator-visible per-target repair report suitable for logs and handoff surfaces.
@@ -223,6 +229,7 @@ pub struct RepairRun {
     entrypoint: IndexRepairEntrypoint,
     results: Vec<RepairCheckResult>,
     verification_artifacts: HashMap<RepairTarget, VerificationArtifact>,
+    graph_rebuild_reports: HashMap<RepairTarget, GraphRebuildReport>,
     completed: bool,
     durable_token: DurableStateToken,
 }
@@ -272,6 +279,7 @@ impl RepairRun {
             entrypoint,
             results: Vec::new(),
             verification_artifacts: HashMap::new(),
+            graph_rebuild_reports: HashMap::new(),
             completed: false,
             durable_token: DurableStateToken(0),
         }
@@ -347,6 +355,7 @@ impl RepairRun {
             results: self.results.clone(),
             verification_artifacts: self.verification_artifacts.clone(),
             operator_reports,
+            graph_rebuild_reports: self.graph_rebuild_reports.clone(),
         }
     }
 
@@ -374,6 +383,58 @@ impl RepairRun {
             verification_passed: true,
         }
     }
+
+    fn graph_failure_injection_for(
+        &self,
+        target: RepairTarget,
+        entrypoint: IndexRepairEntrypoint,
+    ) -> GraphFailureInjection {
+        if target != RepairTarget::GraphConsistency {
+            return GraphFailureInjection::None;
+        }
+
+        match entrypoint {
+            IndexRepairEntrypoint::VerifyOnly => GraphFailureInjection::DropLastDerivedEdge,
+            IndexRepairEntrypoint::RebuildIfNeeded | IndexRepairEntrypoint::ForceRebuild => {
+                GraphFailureInjection::None
+            }
+        }
+    }
+
+    fn graph_truth_inputs(&self, target: RepairTarget) -> Vec<EdgeDerivationInput> {
+        if target != RepairTarget::GraphConsistency {
+            return Vec::new();
+        }
+
+        vec![
+            EdgeDerivationInput {
+                source_memory: MemoryId(11),
+                target_memory: Some(MemoryId(12)),
+                extracted_concept: None,
+                relation: RelationKind::DerivedFrom,
+                confidence: 920,
+            },
+            EdgeDerivationInput {
+                source_memory: MemoryId(11),
+                target_memory: None,
+                extracted_concept: Some("graph-repair".to_string()),
+                relation: RelationKind::Mentions,
+                confidence: 780,
+            },
+        ]
+    }
+
+    fn graph_rebuild_report(&self, target: RepairTarget) -> Option<GraphRebuildReport> {
+        if target != RepairTarget::GraphConsistency {
+            return None;
+        }
+
+        let rebuilder = DerivedGraphRebuilder;
+        Some(rebuilder.rebuild_with_hooks(
+            &self.graph_truth_inputs(target),
+            self.graph_failure_injection_for(target, self.entrypoint),
+        ))
+    }
 }
 
 impl MaintenanceOperation for RepairRun {
@@ -392,7 +453,15 @@ impl MaintenanceOperation for RepairRun {
             .ne(&IndexRepairEntrypoint::VerifyOnly)
             .then(|| RepairEngine.plan_rebuild_from_durable_truth(target, self.entrypoint))
             .flatten();
+        let graph_rebuild_report = self.graph_rebuild_report(target);
         let verification_artifact = self.mock_verification_artifact(target);
+        let graph_detail = graph_rebuild_report.as_ref().map(|report| {
+            if report.metrics.verification_passed {
+                "verified_against_durable_truth"
+            } else {
+                "graph_failure_injection_detected_during_verification"
+            }
+        });
         let (status, detail, rebuild_entrypoint, rebuilt_outputs) = if let Some(plan) = rebuild_plan
         {
             (
@@ -400,6 +469,21 @@ impl MaintenanceOperation for RepairRun {
                 "rebuilt_from_durable_truth_and_verified",
                 Some(plan.entrypoint),
                 plan.rebuilt_outputs,
+            )
+        } else if let Some(detail) = graph_detail {
+            (
+                if verification_artifact.verification_passed
+                    && graph_rebuild_report
+                        .as_ref()
+                        .is_none_or(|report| report.metrics.verification_passed)
+                {
+                    RepairStatus::Healthy
+                } else {
+                    RepairStatus::Degraded
+                },
+                detail,
+                None,
+                Vec::new(),
             )
         } else if self.entrypoint == IndexRepairEntrypoint::VerifyOnly {
             (
@@ -418,6 +502,9 @@ impl MaintenanceOperation for RepairRun {
         };
         self.verification_artifacts
             .insert(target, verification_artifact.clone());
+        if let Some(report) = graph_rebuild_report {
+            self.graph_rebuild_reports.insert(target, report);
+        }
         self.results.push(RepairCheckResult {
             target,
             status,
@@ -642,6 +729,21 @@ mod tests {
                     assert_eq!(summary.results.len(), 10);
                     assert_eq!(summary.verification_artifacts.len(), 10);
                     assert_eq!(summary.operator_reports.len(), 10);
+                    let graph_report = summary
+                        .graph_rebuild_reports
+                        .get(&RepairTarget::GraphConsistency)
+                        .unwrap();
+                    assert_eq!(graph_report.metrics.durable_inputs_seen, 2);
+                    assert_eq!(graph_report.metrics.rebuilt_edges, 2);
+                    assert_eq!(graph_report.metrics.dropped_edges, 0);
+                    assert!(graph_report.metrics.verification_passed);
+                    assert!(graph_report
+                        .hooks_run
+                        .iter()
+                        .any(|hook| hook.as_str() == "verify_consistency_snapshot"));
+                    assert!(graph_report
+                        .operator_log
+                        .contains("failure_injection=none"));
                     let semantic_hot_report = summary
                         .operator_reports
                         .iter()
@@ -704,6 +806,7 @@ mod tests {
                     assert_eq!(summary.rebuilt, 0);
                     assert_eq!(summary.verification_artifacts.len(), 3);
                     assert_eq!(summary.operator_reports.len(), 3);
+                    assert!(summary.graph_rebuild_reports.is_empty());
                     assert!(summary
                         .verification_artifacts
                         .contains_key(&RepairTarget::SemanticColdIndex));
@@ -1118,5 +1221,65 @@ mod tests {
                 && report.rebuild_entrypoint.is_none()
                 && report.verification_passed
         }));
+        let graph_report = summary
+            .graph_rebuild_reports
+            .get(&RepairTarget::GraphConsistency)
+            .expect("graph consistency should emit rebuild report");
+        assert_eq!(graph_report.metrics.durable_inputs_seen, 2);
+        assert_eq!(graph_report.metrics.rebuilt_edges, 2);
+        assert_eq!(graph_report.metrics.dropped_edges, 0);
+        assert!(graph_report.metrics.verification_passed);
+        assert_eq!(
+            graph_report.metric_names(),
+            [
+                "graph_rebuild_durable_inputs_seen",
+                "graph_rebuild_edges_total",
+                "graph_rebuild_dropped_edges_total",
+                "graph_rebuild_verification_passed",
+            ]
+        );
+        assert!(graph_report
+            .operator_log
+            .contains("hooks=snapshot_durable_truth,rebuild_adjacency_projection,rebuild_neighborhood_cache,verify_consistency_snapshot"));
+    }
+
+    #[test]
+    fn graph_verify_only_run_records_failure_injection_without_losing_durable_truth() {
+        let engine = RepairEngine;
+        let run = engine.create_targeted(
+            ns("test"),
+            vec![RepairTarget::GraphConsistency],
+            IndexRepairEntrypoint::VerifyOnly,
+        );
+        let mut handle = MaintenanceJobHandle::new(run, 10);
+
+        handle.start();
+        let completed = handle.poll();
+        let MaintenanceJobState::Completed(summary) = completed.state else {
+            panic!("expected completed repair summary after first poll");
+        };
+
+        assert_eq!(summary.targets_checked, 1);
+        assert_eq!(summary.healthy, 0);
+        assert_eq!(summary.degraded, 1);
+        let result = summary.results.first().unwrap();
+        assert_eq!(result.target, RepairTarget::GraphConsistency);
+        assert_eq!(
+            result.detail,
+            "graph_failure_injection_detected_during_verification"
+        );
+        assert_eq!(result.status, RepairStatus::Degraded);
+        let graph_report = summary
+            .graph_rebuild_reports
+            .get(&RepairTarget::GraphConsistency)
+            .unwrap();
+        assert_eq!(
+            graph_report.failure_injection,
+            GraphFailureInjection::DropLastDerivedEdge
+        );
+        assert_eq!(graph_report.metrics.rebuilt_edges, 1);
+        assert_eq!(graph_report.metrics.dropped_edges, 1);
+        assert!(!graph_report.metrics.verification_passed);
+        assert_eq!(graph_report.rebuilt_edges.len(), 1);
     }
 }

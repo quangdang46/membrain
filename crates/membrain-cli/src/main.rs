@@ -7,7 +7,7 @@ use membrain_core::api::{
 use membrain_core::engine::maintenance::{
     MaintenanceController, MaintenanceJobHandle, MaintenanceJobState,
 };
-use membrain_core::engine::ranking::{fuse_scores, RankingInput, RankingProfile};
+use membrain_core::engine::ranking::{RankingInput, RankingProfile, fuse_scores};
 use membrain_core::engine::recall::RecallRuntime;
 use membrain_core::engine::repair::{IndexRepairEntrypoint, RepairTarget};
 use membrain_core::engine::result::{
@@ -16,7 +16,9 @@ use membrain_core::engine::result::{
 use membrain_core::health::{BrainHealthInputs, BrainHealthReport, FeatureAvailabilityEntry};
 use membrain_core::index::{IndexApi, IndexModule};
 use membrain_core::observability::{AuditEventCategory, AuditEventKind};
-use membrain_core::store::audit::{AppendOnlyAuditLog, AuditLogEntry, AuditLogStore};
+use membrain_core::store::audit::{
+    AppendOnlyAuditLog, AuditLogEntry, AuditLogFilter, AuditLogSlice, AuditLogStore,
+};
 use membrain_core::store::cache::CacheManager;
 use membrain_core::store::hot::Tier1HotMetadataStore;
 use membrain_core::types::{MemoryId, RawEncodeInput, RawIntakeKind, SessionId, Tier1HotRecord};
@@ -295,6 +297,14 @@ struct AuditRow {
     related_run: Option<String>,
     redacted: bool,
     note: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+struct AuditExport {
+    total_matches: usize,
+    returned_rows: usize,
+    truncated: bool,
+    rows: Vec<AuditRow>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
@@ -892,6 +902,42 @@ fn sample_audit_log(namespace: &NamespaceId) -> AppendOnlyAuditLog {
     log
 }
 
+fn parse_audit_category(value: &str) -> Option<AuditEventCategory> {
+    match value {
+        "encode" => Some(AuditEventCategory::Encode),
+        "recall" => Some(AuditEventCategory::Recall),
+        "policy" => Some(AuditEventCategory::Policy),
+        "maintenance" => Some(AuditEventCategory::Maintenance),
+        "archive" => Some(AuditEventCategory::Archive),
+        _ => None,
+    }
+}
+
+fn parse_audit_kind(value: &str) -> Option<AuditEventKind> {
+    match value {
+        "encode_accepted" => Some(AuditEventKind::EncodeAccepted),
+        "encode_rejected" => Some(AuditEventKind::EncodeRejected),
+        "recall_served" => Some(AuditEventKind::RecallServed),
+        "recall_denied" => Some(AuditEventKind::RecallDenied),
+        "policy_denied" => Some(AuditEventKind::PolicyDenied),
+        "policy_redacted" => Some(AuditEventKind::PolicyRedacted),
+        "maintenance_repair_started" => Some(AuditEventKind::MaintenanceRepairStarted),
+        "maintenance_repair_completed" => Some(AuditEventKind::MaintenanceRepairCompleted),
+        "maintenance_repair_degraded" => Some(AuditEventKind::MaintenanceRepairDegraded),
+        "maintenance_repair_rollback_triggered" => {
+            Some(AuditEventKind::MaintenanceRepairRollbackTriggered)
+        }
+        "maintenance_repair_rollback_completed" => {
+            Some(AuditEventKind::MaintenanceRepairRollbackCompleted)
+        }
+        "maintenance_migration_applied" => Some(AuditEventKind::MaintenanceMigrationApplied),
+        "maintenance_compaction_applied" => Some(AuditEventKind::MaintenanceCompactionApplied),
+        "incident_recorded" => Some(AuditEventKind::IncidentRecorded),
+        "archive_recorded" => Some(AuditEventKind::ArchiveRecorded),
+        _ => None,
+    }
+}
+
 fn filter_audit_rows(
     log: &AppendOnlyAuditLog,
     namespace: &NamespaceId,
@@ -899,44 +945,52 @@ fn filter_audit_rows(
     since: Option<u64>,
     op: Option<&str>,
     recent: Option<usize>,
-) -> Vec<AuditRow> {
+) -> AuditExport {
     let op = op.map(str::trim).filter(|value| !value.is_empty());
-    let mut rows: Vec<_> = log
-        .entries_for_namespace(namespace)
-        .into_iter()
-        .filter(|entry| since.is_none_or(|min_sequence| entry.sequence >= min_sequence))
-        .filter(|entry| {
-            memory_id.is_none_or(|expected| entry.memory_id == Some(MemoryId(expected)))
-        })
-        .filter(|entry| {
-            op.is_none_or(|needle| {
-                entry.kind.as_str() == needle || entry.category.as_str() == needle
-            })
-        })
-        .map(AuditRow::from)
-        .collect();
+    let filter = AuditLogFilter {
+        namespace: Some(namespace.clone()),
+        memory_id: memory_id.map(MemoryId),
+        category: op.and_then(parse_audit_category),
+        kind: op.and_then(parse_audit_kind),
+        min_sequence: since,
+        ..AuditLogFilter::default()
+    };
+    let AuditLogSlice {
+        rows,
+        total_matches,
+        truncated,
+    } = log.slice(&filter, recent);
+    let rows = rows.into_iter().map(AuditRow::from).collect::<Vec<_>>();
 
-    if let Some(limit) = recent {
-        if rows.len() > limit {
-            rows = rows.split_off(rows.len() - limit);
-        }
+    AuditExport {
+        total_matches,
+        returned_rows: rows.len(),
+        truncated,
+        rows,
     }
-
-    rows
 }
 
-fn print_audit_rows(rows: &[AuditRow], json: bool) -> anyhow::Result<()> {
+fn print_audit_rows(export: &AuditExport, json: bool) -> anyhow::Result<()> {
     if json {
-        println!("{}", serde_json::to_string_pretty(rows)?);
+        println!("{}", serde_json::to_string_pretty(export)?);
         return Ok(());
     }
 
-    if rows.is_empty() {
-        println!("No audit rows matched the requested filters.");
+    println!(
+        "matched={} returned={} truncated={}",
+        export.total_matches, export.returned_rows, export.truncated
+    );
+
+    if export.rows.is_empty() {
+        if export.total_matches == 0 {
+            println!("No audit rows matched the requested filters.");
+        } else {
+            println!("Audit rows matched, but the requested slice returned zero rows.");
+        }
         return Ok(());
     }
 
-    for row in rows {
+    for row in &export.rows {
         println!(
             "#{} {} {} ns={} memory={:?} session={:?} actor={} request_id={:?} redacted={} run={:?} note={}",
             row.sequence,
@@ -1526,8 +1580,8 @@ async fn main() -> anyhow::Result<()> {
         } => {
             let ns = NamespaceId::new(namespace)?;
             let log = sample_audit_log(&ns);
-            let rows = filter_audit_rows(&log, &ns, *id, *since, op.as_deref(), *recent);
-            print_audit_rows(&rows, *json)?;
+            let export = filter_audit_rows(&log, &ns, *id, *since, op.as_deref(), *recent);
+            print_audit_rows(&export, *json)?;
         }
         Commands::Daemon {
             socket_path,
@@ -1548,28 +1602,66 @@ async fn main() -> anyhow::Result<()> {
 #[cfg(test)]
 #[allow(clippy::items_after_test_module)]
 mod tests {
-    use super::{filter_audit_rows, print_audit_rows, sample_audit_log};
+    use super::{
+        filter_audit_rows, parse_audit_category, parse_audit_kind, print_audit_rows,
+        sample_audit_log,
+    };
     use membrain_core::api::NamespaceId;
 
     #[test]
     fn audit_rows_preserve_request_id_in_json_export() {
         let namespace = NamespaceId::new("team.alpha").expect("valid namespace");
         let log = sample_audit_log(&namespace);
-        let rows = filter_audit_rows(&log, &namespace, Some(21), None, None, None);
+        let export = filter_audit_rows(&log, &namespace, Some(21), None, None, None);
 
-        assert_eq!(rows.len(), 3);
-        assert_eq!(rows[0].request_id.as_deref(), Some("req-encode-21"));
-        assert_eq!(rows[1].request_id.as_deref(), Some("req-policy-21"));
-        assert_eq!(rows[2].request_id.as_deref(), Some("req-migration-21"));
+        assert_eq!(export.total_matches, 3);
+        assert_eq!(export.returned_rows, 3);
+        assert!(!export.truncated);
+        assert_eq!(export.rows[0].request_id.as_deref(), Some("req-encode-21"));
+        assert_eq!(export.rows[1].request_id.as_deref(), Some("req-policy-21"));
+        assert_eq!(
+            export.rows[2].request_id.as_deref(),
+            Some("req-migration-21")
+        );
+    }
+
+    #[test]
+    fn audit_export_reports_truncation_for_recent_limit() {
+        let namespace = NamespaceId::new("team.alpha").expect("valid namespace");
+        let log = sample_audit_log(&namespace);
+        let export = filter_audit_rows(&log, &namespace, Some(21), None, None, Some(1));
+
+        assert_eq!(export.total_matches, 3);
+        assert_eq!(export.returned_rows, 1);
+        assert!(export.truncated);
+        assert_eq!(
+            export.rows[0].request_id.as_deref(),
+            Some("req-migration-21")
+        );
+    }
+
+    #[test]
+    fn audit_op_filters_accept_both_category_and_kind_names() {
+        assert_eq!(
+            parse_audit_category("policy"),
+            Some(membrain_core::observability::AuditEventCategory::Policy)
+        );
+        assert_eq!(
+            parse_audit_kind("policy_redacted"),
+            Some(membrain_core::observability::AuditEventKind::PolicyRedacted)
+        );
+        assert_eq!(parse_audit_category("unknown"), None);
+        assert_eq!(parse_audit_kind("unknown"), None);
     }
 
     #[test]
     fn text_export_includes_request_id_field() {
         let namespace = NamespaceId::new("team.alpha").expect("valid namespace");
         let log = sample_audit_log(&namespace);
-        let rows = filter_audit_rows(&log, &namespace, Some(21), None, None, Some(1));
+        let export = filter_audit_rows(&log, &namespace, Some(21), None, None, Some(1));
 
-        let rendered = rows
+        let rendered = export
+            .rows
             .iter()
             .map(|row| {
                 format!(
@@ -1593,6 +1685,19 @@ mod tests {
         assert!(rendered.contains("request_id=Some(\"req-migration-21\")"));
         assert!(rendered.contains("run=Some(\"migration-0042\")"));
 
-        print_audit_rows(&rows, false).expect("text export should render");
+        print_audit_rows(&export, false).expect("text export should render");
+    }
+
+    #[test]
+    fn audit_text_export_distinguishes_empty_slice_from_no_matches() {
+        let namespace = NamespaceId::new("team.alpha").expect("valid namespace");
+        let log = sample_audit_log(&namespace);
+        let export = filter_audit_rows(&log, &namespace, Some(21), None, None, Some(0));
+
+        assert_eq!(export.total_matches, 3);
+        assert_eq!(export.returned_rows, 0);
+        assert!(export.truncated);
+
+        print_audit_rows(&export, false).expect("text export should render zero-row slice");
     }
 }

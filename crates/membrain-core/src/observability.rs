@@ -293,7 +293,9 @@ impl RouteSummary {
             tier1_consulted_first: explain.trace_stages.iter().all(|stage| {
                 !matches!(
                     stage,
-                    RecallTraceStage::Tier2Exact | RecallTraceStage::Tier3Fallback
+                    RecallTraceStage::Tier2Exact
+                        | RecallTraceStage::GraphExpansion
+                        | RecallTraceStage::Tier3Fallback
                 )
             }) || explain
                 .trace_stages
@@ -311,7 +313,9 @@ impl RouteSummary {
                         .position(|stage| {
                             matches!(
                                 stage,
-                                RecallTraceStage::Tier2Exact | RecallTraceStage::Tier3Fallback
+                                RecallTraceStage::Tier2Exact
+                                    | RecallTraceStage::GraphExpansion
+                                    | RecallTraceStage::Tier3Fallback
                             )
                         })
                         .is_none_or(|deeper_pos| tier1_pos < deeper_pos)
@@ -319,7 +323,9 @@ impl RouteSummary {
             routes_to_deeper_tiers: explain.trace_stages.iter().any(|stage| {
                 matches!(
                     stage,
-                    RecallTraceStage::Tier2Exact | RecallTraceStage::Tier3Fallback
+                    RecallTraceStage::Tier2Exact
+                        | RecallTraceStage::GraphExpansion
+                        | RecallTraceStage::Tier3Fallback
                 )
             }),
         }
@@ -332,6 +338,7 @@ pub enum TraceStage {
     Tier1ExactHandle,
     Tier1RecentWindow,
     Tier2Exact,
+    GraphExpansion,
     Tier3Fallback,
     PolicyGate,
     Packaging,
@@ -344,6 +351,7 @@ impl TraceStage {
             Self::Tier1ExactHandle => "tier1_exact_handle",
             Self::Tier1RecentWindow => "tier1_recent_window",
             Self::Tier2Exact => "tier2_exact",
+            Self::GraphExpansion => "graph_expansion",
             Self::Tier3Fallback => "tier3_fallback",
             Self::PolicyGate => "policy_gate",
             Self::Packaging => "packaging",
@@ -356,6 +364,7 @@ impl TraceStage {
             RecallTraceStage::Tier1ExactHandle => Self::Tier1ExactHandle,
             RecallTraceStage::Tier1RecentWindow => Self::Tier1RecentWindow,
             RecallTraceStage::Tier2Exact => Self::Tier2Exact,
+            RecallTraceStage::GraphExpansion => Self::GraphExpansion,
             RecallTraceStage::Tier3Fallback => Self::Tier3Fallback,
         }
     }
@@ -537,6 +546,7 @@ fn route_family(plan: RecallPlanKind) -> &'static str {
     match plan {
         RecallPlanKind::ExactIdTier1 => "exact_id_tier1",
         RecallPlanKind::RecentTier1ThenTier2Exact => "recent_tier1_then_tier2_exact",
+        RecallPlanKind::Tier2ExactThenGraphExpansion => "tier2_exact_then_graph_expansion",
         RecallPlanKind::Tier2ExactThenTier3Fallback => "tier2_exact_then_tier3_fallback",
     }
 }
@@ -549,6 +559,9 @@ fn route_reason_label(reason: &str) -> &'static str {
         "small lookup for active session can stay on hot recent window before durable fallback"
         | "small session lookup scans the Tier1 recent window before Tier2 exact" => {
             "small_session_lookup"
+        }
+        "request uses bounded graph expansion from the Tier2-authorized seed shortlist" => {
+            "bounded_graph_expansion"
         }
         "request needs broader durable retrieval before cold fallback"
         | "request lacks a direct Tier1 answer and escalates to deeper indexed retrieval" => {

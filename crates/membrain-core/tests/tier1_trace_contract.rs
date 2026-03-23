@@ -226,6 +226,7 @@ fn planner_trace_names_fallback_route_and_preserves_candidate_budget_evidence() 
             exact_memory_id: None,
             session_id: Some(SessionId(12)),
             small_lookup: false,
+            graph_expansion: false,
         },
         RuntimeConfig::default(),
     );
@@ -272,6 +273,7 @@ fn tier1_trace_consumer_budget_evidence_stays_explicit_across_routes() {
             exact_memory_id: None,
             session_id: Some(SessionId(12)),
             small_lookup: false,
+            graph_expansion: false,
         },
         config,
     );
