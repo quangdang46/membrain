@@ -42,6 +42,19 @@ pub enum CacheFamily {
 }
 
 impl CacheFamily {
+    pub const ALL: [Self; 10] = [
+        Self::Tier1Item,
+        Self::NegativeCache,
+        Self::ResultCache,
+        Self::EntityNeighborhood,
+        Self::SummaryCache,
+        Self::AnnProbeCache,
+        Self::PrefetchHints,
+        Self::SessionWarmup,
+        Self::GoalConditioned,
+        Self::ColdStartMitigation,
+    ];
+
     /// Returns the canonical machine-readable tag for serialization and traces.
     pub const fn as_str(&self) -> &'static str {
         match self {
@@ -55,6 +68,21 @@ impl CacheFamily {
             Self::SessionWarmup => "session_warmup",
             Self::GoalConditioned => "goal_conditioned",
             Self::ColdStartMitigation => "cold_start_mitigation",
+        }
+    }
+
+    const fn metric_index(self) -> usize {
+        match self {
+            Self::Tier1Item => 0,
+            Self::NegativeCache => 1,
+            Self::ResultCache => 2,
+            Self::EntityNeighborhood => 3,
+            Self::SummaryCache => 4,
+            Self::AnnProbeCache => 5,
+            Self::PrefetchHints => 6,
+            Self::SessionWarmup => 7,
+            Self::GoalConditioned => 8,
+            Self::ColdStartMitigation => 9,
         }
     }
 }
@@ -1071,8 +1099,22 @@ impl PrefetchController {
 // § 5  Per-request cache metrics  (mb-23u.9.3)
 // ──────────────────────────────────────────────────────────────────────────────
 
-/// Per-request cache metrics populated in the common response envelope.
+/// Per-family breakdown of request cache outcomes.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct CacheFamilyRequestBreakdown {
+    pub hit_count: u32,
+    pub miss_count: u32,
+    pub bypass_count: u32,
+    pub invalidation_count: u32,
+    pub stale_warning_count: u32,
+    pub disabled_count: u32,
+    pub prefetch_drop_count: u32,
+    pub session_expired_count: u32,
+    pub repair_warmup_count: u32,
+}
+
+/// Per-request cache metrics populated in the common response envelope.
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CacheRequestMetrics {
     /// Number of cache hits across all families for this request.
     pub cache_hit_count: u32,
@@ -1104,15 +1146,50 @@ pub struct CacheRequestMetrics {
     pub ann_probe_hit_count: u32,
     /// Hits served from the prefetch queue.
     pub prefetch_hit_count: u32,
+    /// Per-family event breakdown for all cache families participating in a request.
+    pub per_family: [CacheFamilyRequestBreakdown; CacheFamily::ALL.len()],
+}
+
+impl Default for CacheRequestMetrics {
+    fn default() -> Self {
+        Self {
+            cache_hit_count: 0,
+            cache_miss_count: 0,
+            cache_bypass_count: 0,
+            cache_invalidation_count: 0,
+            prefetch_used_count: 0,
+            prefetch_dropped_count: 0,
+            cold_fallback_count: 0,
+            degraded_mode_served: false,
+            tier1_item_hit_count: 0,
+            negative_cache_hit_count: 0,
+            result_cache_hit_count: 0,
+            entity_neighborhood_hit_count: 0,
+            summary_cache_hit_count: 0,
+            ann_probe_hit_count: 0,
+            prefetch_hit_count: 0,
+            per_family: [CacheFamilyRequestBreakdown::default(); CacheFamily::ALL.len()],
+        }
+    }
 }
 
 impl CacheRequestMetrics {
+    pub fn family_breakdown(&self, family: CacheFamily) -> &CacheFamilyRequestBreakdown {
+        &self.per_family[family.metric_index()]
+    }
+
+    fn family_breakdown_mut(&mut self, family: CacheFamily) -> &mut CacheFamilyRequestBreakdown {
+        &mut self.per_family[family.metric_index()]
+    }
+
     /// Records a cache lookup result into per-request metrics.
     pub fn record_lookup(&mut self, result: &CacheLookupResult) {
+        let family = result.family;
         match result.event {
             CacheEvent::Hit => {
                 self.cache_hit_count += 1;
-                match result.family {
+                self.family_breakdown_mut(family).hit_count += 1;
+                match family {
                     CacheFamily::Tier1Item => self.tier1_item_hit_count += 1,
                     CacheFamily::NegativeCache => self.negative_cache_hit_count += 1,
                     CacheFamily::ResultCache => self.result_cache_hit_count += 1,
@@ -1130,22 +1207,43 @@ impl CacheRequestMetrics {
             }
             CacheEvent::Miss => {
                 self.cache_miss_count += 1;
+                self.family_breakdown_mut(family).miss_count += 1;
             }
-            CacheEvent::Bypass => self.cache_bypass_count += 1,
+            CacheEvent::Bypass => {
+                self.cache_bypass_count += 1;
+                self.family_breakdown_mut(family).bypass_count += 1;
+            }
             CacheEvent::StaleWarning => {
                 self.cache_bypass_count += 1;
+                let breakdown = self.family_breakdown_mut(family);
+                breakdown.bypass_count += 1;
+                breakdown.stale_warning_count += 1;
             }
             CacheEvent::Disabled => {
                 self.degraded_mode_served = true;
                 self.cache_bypass_count += 1;
+                let breakdown = self.family_breakdown_mut(family);
+                breakdown.bypass_count += 1;
+                breakdown.disabled_count += 1;
             }
-            CacheEvent::Invalidation => self.cache_invalidation_count += 1,
-            CacheEvent::PrefetchDrop => self.prefetch_dropped_count += 1,
+            CacheEvent::Invalidation => {
+                self.cache_invalidation_count += 1;
+                self.family_breakdown_mut(family).invalidation_count += 1;
+            }
+            CacheEvent::PrefetchDrop => {
+                self.prefetch_dropped_count += 1;
+                self.family_breakdown_mut(family).prefetch_drop_count += 1;
+            }
             CacheEvent::SessionExpired => {
                 self.cache_bypass_count += 1;
                 self.prefetch_dropped_count += 1;
+                let breakdown = self.family_breakdown_mut(family);
+                breakdown.bypass_count += 1;
+                breakdown.session_expired_count += 1;
             }
-            CacheEvent::RepairWarmup => {}
+            CacheEvent::RepairWarmup => {
+                self.family_breakdown_mut(family).repair_warmup_count += 1;
+            }
         }
     }
 
@@ -2213,6 +2311,113 @@ mod tests {
         assert_eq!(req.entity_neighborhood_hit_count, 1);
         assert_eq!(req.summary_cache_hit_count, 1);
         assert_eq!(req.ann_probe_hit_count, 1);
+        assert_eq!(req.family_breakdown(CacheFamily::NegativeCache).hit_count, 1);
+        assert_eq!(req.family_breakdown(CacheFamily::ResultCache).hit_count, 1);
+        assert_eq!(
+            req.family_breakdown(CacheFamily::EntityNeighborhood).hit_count,
+            1
+        );
+        assert_eq!(req.family_breakdown(CacheFamily::SummaryCache).hit_count, 1);
+        assert_eq!(req.family_breakdown(CacheFamily::AnnProbeCache).hit_count, 1);
+    }
+
+    #[test]
+    fn per_request_metrics_preserve_per_family_event_breakdown() {
+        let mut req = CacheRequestMetrics::default();
+        req.record_lookup(&CacheLookupResult {
+            family: CacheFamily::Tier1Item,
+            event: CacheEvent::Miss,
+            reason: None,
+            warm_source: None,
+            generation_status: GenerationStatus::Unknown,
+            memory_ids: vec![],
+            candidates_after: 0,
+        });
+        req.record_lookup(&CacheLookupResult {
+            family: CacheFamily::ResultCache,
+            event: CacheEvent::StaleWarning,
+            reason: Some(CacheReason::GenerationAnchorMismatch),
+            warm_source: None,
+            generation_status: GenerationStatus::Stale,
+            memory_ids: vec![],
+            candidates_after: 0,
+        });
+        req.record_lookup(&CacheLookupResult {
+            family: CacheFamily::SummaryCache,
+            event: CacheEvent::Disabled,
+            reason: None,
+            warm_source: None,
+            generation_status: GenerationStatus::Unknown,
+            memory_ids: vec![],
+            candidates_after: 0,
+        });
+        req.record_lookup(&CacheLookupResult {
+            family: CacheFamily::PrefetchHints,
+            event: CacheEvent::PrefetchDrop,
+            reason: Some(CacheReason::BudgetExhausted),
+            warm_source: None,
+            generation_status: GenerationStatus::Unknown,
+            memory_ids: vec![],
+            candidates_after: 0,
+        });
+        req.record_lookup(&CacheLookupResult {
+            family: CacheFamily::SessionWarmup,
+            event: CacheEvent::SessionExpired,
+            reason: Some(CacheReason::NamespaceNarrowed),
+            warm_source: None,
+            generation_status: GenerationStatus::Unknown,
+            memory_ids: vec![],
+            candidates_after: 0,
+        });
+        req.record_lookup(&CacheLookupResult {
+            family: CacheFamily::GoalConditioned,
+            event: CacheEvent::Invalidation,
+            reason: Some(CacheReason::PolicyChanged),
+            warm_source: None,
+            generation_status: GenerationStatus::Unknown,
+            memory_ids: vec![],
+            candidates_after: 0,
+        });
+        req.record_lookup(&CacheLookupResult {
+            family: CacheFamily::ColdStartMitigation,
+            event: CacheEvent::RepairWarmup,
+            reason: None,
+            warm_source: Some(WarmSource::ColdStartMitigation),
+            generation_status: GenerationStatus::Valid,
+            memory_ids: vec![MemoryId(99)],
+            candidates_after: 1,
+        });
+
+        assert_eq!(req.cache_miss_count, 1);
+        assert_eq!(req.cache_bypass_count, 3);
+        assert_eq!(req.cache_invalidation_count, 1);
+        assert_eq!(req.prefetch_dropped_count, 2);
+        assert!(req.degraded_mode_served);
+        assert_eq!(req.family_breakdown(CacheFamily::Tier1Item).miss_count, 1);
+        let result_breakdown = req.family_breakdown(CacheFamily::ResultCache);
+        assert_eq!(result_breakdown.bypass_count, 1);
+        assert_eq!(result_breakdown.stale_warning_count, 1);
+        let summary_breakdown = req.family_breakdown(CacheFamily::SummaryCache);
+        assert_eq!(summary_breakdown.bypass_count, 1);
+        assert_eq!(summary_breakdown.disabled_count, 1);
+        assert_eq!(
+            req.family_breakdown(CacheFamily::PrefetchHints)
+                .prefetch_drop_count,
+            1
+        );
+        let session_breakdown = req.family_breakdown(CacheFamily::SessionWarmup);
+        assert_eq!(session_breakdown.bypass_count, 1);
+        assert_eq!(session_breakdown.session_expired_count, 1);
+        assert_eq!(
+            req.family_breakdown(CacheFamily::GoalConditioned)
+                .invalidation_count,
+            1
+        );
+        assert_eq!(
+            req.family_breakdown(CacheFamily::ColdStartMitigation)
+                .repair_warmup_count,
+            1
+        );
     }
 
     #[test]

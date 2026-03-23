@@ -41,6 +41,9 @@ pub enum AuditEventKind {
     MaintenanceRepairRollbackCompleted,
     MaintenanceMigrationApplied,
     MaintenanceCompactionApplied,
+    MaintenanceConsolidationStarted,
+    MaintenanceConsolidationCompleted,
+    MaintenanceConsolidationPartial,
     IncidentRecorded,
     ArchiveRecorded,
 }
@@ -62,6 +65,9 @@ impl AuditEventKind {
             Self::MaintenanceRepairRollbackCompleted => "maintenance_repair_rollback_completed",
             Self::MaintenanceMigrationApplied => "maintenance_migration_applied",
             Self::MaintenanceCompactionApplied => "maintenance_compaction_applied",
+            Self::MaintenanceConsolidationStarted => "maintenance_consolidation_started",
+            Self::MaintenanceConsolidationCompleted => "maintenance_consolidation_completed",
+            Self::MaintenanceConsolidationPartial => "maintenance_consolidation_partial",
             Self::IncidentRecorded => "incident_recorded",
             Self::ArchiveRecorded => "archive_recorded",
         }
@@ -80,6 +86,9 @@ impl AuditEventKind {
             | Self::MaintenanceRepairRollbackCompleted
             | Self::MaintenanceMigrationApplied
             | Self::MaintenanceCompactionApplied
+            | Self::MaintenanceConsolidationStarted
+            | Self::MaintenanceConsolidationCompleted
+            | Self::MaintenanceConsolidationPartial
             | Self::IncidentRecorded => AuditEventCategory::Maintenance,
             Self::ArchiveRecorded => AuditEventCategory::Archive,
         }
@@ -753,12 +762,57 @@ pub struct CacheEvalTrace {
     pub warm_reuse: bool,
 }
 
+/// Machine-readable status for a bounded maintenance queue snapshot.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub enum MaintenanceQueueStatus {
+    Idle,
+    Running,
+    Partial,
+    Completed,
+}
+
+impl MaintenanceQueueStatus {
+    /// Returns the stable machine-readable maintenance queue status label.
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Idle => "idle",
+            Self::Running => "running",
+            Self::Partial => "partial",
+            Self::Completed => "completed",
+        }
+    }
+}
+
+/// Stable per-run metrics for bounded maintenance scheduling and partial-failure reporting.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct MaintenanceQueueReport {
+    /// Stable queue family name.
+    pub queue_family: &'static str,
+    /// Current queue status after the bounded run.
+    pub queue_status: MaintenanceQueueStatus,
+    /// Number of jobs waiting before the run started.
+    pub queue_depth_before: u32,
+    /// Number of jobs still waiting after the run finished.
+    pub queue_depth_after: u32,
+    /// Number of jobs processed during this bounded run.
+    pub jobs_processed: u32,
+    /// Total bounded work units processed during the run.
+    pub affected_item_count: u32,
+    /// Total wall-clock duration captured for the run.
+    pub duration_ms: u64,
+    /// Number of retry attempts consumed by the run.
+    pub retry_attempts: u32,
+    /// Whether the run completed with partial-failure reporting.
+    pub partial_run: bool,
+}
+
 #[cfg(test)]
 mod tests {
     use super::{
         AdmissionOutcomeKind, AuditEventCategory, AuditEventKind, CacheLookupOutcome,
-        EncodeFastPathStage, ExplainResultReason, ObservabilityModule, OutcomeClass,
-        Tier1LookupLane, Tier1LookupOutcome, Tier2PrefilterOutcome, TraceStage,
+        EncodeFastPathStage, ExplainResultReason, MaintenanceQueueReport, MaintenanceQueueStatus,
+        ObservabilityModule, OutcomeClass, Tier1LookupLane, Tier1LookupOutcome,
+        Tier2PrefilterOutcome, TraceStage,
     };
     use crate::api::{FieldPresence, NamespaceId};
     use crate::engine::recall::{RecallPlanKind, RecallTraceStage};
@@ -820,6 +874,51 @@ mod tests {
             AuditEventKind::MaintenanceRepairRollbackCompleted.category(),
             AuditEventCategory::Maintenance
         );
+    }
+
+    #[test]
+    fn maintenance_consolidation_audit_events_and_queue_labels_remain_stable() {
+        assert_eq!(
+            AuditEventKind::MaintenanceConsolidationStarted.as_str(),
+            "maintenance_consolidation_started"
+        );
+        assert_eq!(
+            AuditEventKind::MaintenanceConsolidationCompleted.as_str(),
+            "maintenance_consolidation_completed"
+        );
+        assert_eq!(
+            AuditEventKind::MaintenanceConsolidationPartial.as_str(),
+            "maintenance_consolidation_partial"
+        );
+        assert_eq!(
+            AuditEventKind::MaintenanceConsolidationPartial.category(),
+            AuditEventCategory::Maintenance
+        );
+        assert_eq!(MaintenanceQueueStatus::Idle.as_str(), "idle");
+        assert_eq!(MaintenanceQueueStatus::Running.as_str(), "running");
+        assert_eq!(MaintenanceQueueStatus::Partial.as_str(), "partial");
+        assert_eq!(MaintenanceQueueStatus::Completed.as_str(), "completed");
+
+        let report = MaintenanceQueueReport {
+            queue_family: "consolidation",
+            queue_status: MaintenanceQueueStatus::Partial,
+            queue_depth_before: 4,
+            queue_depth_after: 2,
+            jobs_processed: 2,
+            affected_item_count: 7,
+            duration_ms: 41,
+            retry_attempts: 1,
+            partial_run: true,
+        };
+        assert_eq!(report.queue_family, "consolidation");
+        assert_eq!(report.queue_status, MaintenanceQueueStatus::Partial);
+        assert_eq!(report.queue_depth_before, 4);
+        assert_eq!(report.queue_depth_after, 2);
+        assert_eq!(report.jobs_processed, 2);
+        assert_eq!(report.affected_item_count, 7);
+        assert_eq!(report.duration_ms, 41);
+        assert_eq!(report.retry_attempts, 1);
+        assert!(report.partial_run);
     }
 
     #[test]

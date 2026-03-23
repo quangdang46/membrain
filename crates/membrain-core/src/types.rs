@@ -211,7 +211,135 @@ pub struct NormalizedMemoryEnvelope {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
 pub struct MemoryId(pub u64);
 
+/// Stable identifier for one named time-travel snapshot.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
+pub struct SnapshotId(pub u64);
+
+/// Durable anchor used when retrieval or maintenance targets historical state.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub enum SnapshotAnchor {
+    /// Resolve historical state from an explicit named snapshot.
+    Named {
+        snapshot_id: SnapshotId,
+        snapshot_name: String,
+        as_of_tick: u64,
+    },
+    /// Resolve historical state directly from a logical tick.
+    Tick { as_of_tick: u64 },
+}
+
+impl SnapshotAnchor {
+    /// Returns the stable machine-readable anchor kind.
+    pub const fn kind(&self) -> &'static str {
+        match self {
+            Self::Named { .. } => "named_snapshot",
+            Self::Tick { .. } => "tick",
+        }
+    }
+
+    /// Returns the effective as-of tick carried by this anchor.
+    pub const fn as_of_tick(&self) -> u64 {
+        match self {
+            Self::Named { as_of_tick, .. } => *as_of_tick,
+            Self::Tick { as_of_tick } => *as_of_tick,
+        }
+    }
+
+    /// Returns the named snapshot label when one exists.
+    pub fn snapshot_name(&self) -> Option<&str> {
+        match self {
+            Self::Named { snapshot_name, .. } => Some(snapshot_name.as_str()),
+            Self::Tick { .. } => None,
+        }
+    }
+}
+
+/// Durable metadata stored for one named snapshot without copying memory payloads.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct SnapshotMetadata {
+    /// Stable durable identity for the snapshot record.
+    pub snapshot_id: SnapshotId,
+    /// Namespace the snapshot belongs to.
+    pub namespace: NamespaceId,
+    /// Human-readable snapshot label.
+    pub snapshot_name: String,
+    /// Logical tick captured by the snapshot.
+    pub as_of_tick: u64,
+    /// Whether the snapshot is still active for historical recall.
+    pub active: bool,
+}
+
+impl SnapshotMetadata {
+    /// Builds additive metadata for one active named snapshot.
+    pub fn named(
+        snapshot_id: SnapshotId,
+        namespace: NamespaceId,
+        snapshot_name: impl Into<String>,
+        as_of_tick: u64,
+    ) -> Self {
+        Self {
+            snapshot_id,
+            namespace,
+            snapshot_name: snapshot_name.into(),
+            as_of_tick,
+            active: true,
+        }
+    }
+
+    /// Returns the canonical anchor derived from this snapshot metadata.
+    pub fn anchor(&self) -> SnapshotAnchor {
+        SnapshotAnchor::Named {
+            snapshot_id: self.snapshot_id,
+            snapshot_name: self.snapshot_name.clone(),
+            as_of_tick: self.as_of_tick,
+        }
+    }
+
+    /// Marks the snapshot as deleted while preserving its durable identity.
+    pub fn deleted(mut self) -> Self {
+        self.active = false;
+        self
+    }
+}
+
 use crate::api::NamespaceId;
+
+#[cfg(test)]
+mod tests {
+    use super::{SnapshotAnchor, SnapshotId, SnapshotMetadata};
+    use crate::api::NamespaceId;
+
+    #[test]
+    fn named_snapshot_anchor_preserves_tick_and_label() {
+        let namespace = NamespaceId::new("tests.snapshot").unwrap();
+        let metadata = SnapshotMetadata::named(SnapshotId(7), namespace, "baseline", 42);
+        let anchor = metadata.anchor();
+
+        assert_eq!(anchor.kind(), "named_snapshot");
+        assert_eq!(anchor.as_of_tick(), 42);
+        assert_eq!(anchor.snapshot_name(), Some("baseline"));
+    }
+
+    #[test]
+    fn deleted_snapshot_metadata_keeps_identity_but_flips_active_flag() {
+        let namespace = NamespaceId::new("tests.snapshot").unwrap();
+        let metadata = SnapshotMetadata::named(SnapshotId(9), namespace, "pre_repair", 64).deleted();
+
+        assert_eq!(metadata.snapshot_id, SnapshotId(9));
+        assert_eq!(metadata.snapshot_name, "pre_repair");
+        assert_eq!(metadata.as_of_tick, 64);
+        assert!(!metadata.active);
+    }
+
+    #[test]
+    fn tick_anchor_reports_no_snapshot_name() {
+        let anchor = SnapshotAnchor::Tick { as_of_tick: 99 };
+
+        assert_eq!(anchor.kind(), "tick");
+        assert_eq!(anchor.as_of_tick(), 99);
+        assert_eq!(anchor.snapshot_name(), None);
+    }
+}
 
 /// Stable identifier for one session-local hot window.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]

@@ -9,6 +9,7 @@ use crate::engine::maintenance::{
     DurableStateToken, InterruptedMaintenance, InterruptionReason, MaintenanceOperation,
     MaintenanceProgress, MaintenanceStep,
 };
+use crate::observability::{MaintenanceQueueReport, MaintenanceQueueStatus};
 use crate::types::MemoryId;
 
 // ── Consolidation policy ─────────────────────────────────────────────────────
@@ -20,6 +21,10 @@ pub struct ConsolidationPolicy {
     pub minimum_candidates: usize,
     /// Maximum memories to process in one bounded run.
     pub batch_size: usize,
+    /// Maximum consolidation jobs to drain from the queue in one bounded run.
+    pub max_queue_jobs: usize,
+    /// Maximum retry attempts allowed for a partial group before it stays queued.
+    pub max_retry_attempts: u32,
     /// Similarity threshold (0..1000) above which memories are merged.
     pub similarity_threshold: u16,
     /// Whether to merge duplicate-fingerprint memories automatically.
@@ -31,6 +36,8 @@ impl Default for ConsolidationPolicy {
         Self {
             minimum_candidates: 10,
             batch_size: 50,
+            max_queue_jobs: 1,
+            max_retry_attempts: 1,
             similarity_threshold: 800,
             auto_merge_duplicates: true,
         }
@@ -131,6 +138,8 @@ pub struct ConsolidationSummary {
     pub derived_artifacts: Vec<DerivedArtifact>,
     /// Partial derivation failures that preserved lineage and durable truth.
     pub derivation_failures: Vec<DerivationFailure>,
+    /// Queue-level bounded scheduler and partial-run metrics.
+    pub queue_report: MaintenanceQueueReport,
 }
 
 // ── Consolidation operation ──────────────────────────────────────────────────
@@ -143,6 +152,9 @@ pub struct ConsolidationRun {
     grouping_module: EpisodeGroupingModule,
     processed: u32,
     total: u32,
+    remaining_queue_jobs: u32,
+    retry_attempts: u32,
+    total_duration_ms: u64,
     episode_source_sets: u32,
     derivations_emitted: u32,
     derivation_partial_failures: u32,
@@ -167,6 +179,9 @@ impl ConsolidationRun {
             grouping_module: EpisodeGroupingModule,
             processed: 0,
             total: total_groups,
+            remaining_queue_jobs: policy.max_queue_jobs.max(1) as u32,
+            retry_attempts: 0,
+            total_duration_ms: 0,
             episode_source_sets: 0,
             derivations_emitted: 0,
             derivation_partial_failures: 0,
@@ -184,6 +199,23 @@ impl ConsolidationRun {
     }
 
     fn build_summary(&self) -> ConsolidationSummary {
+        let queue_depth_before = self.total.div_ceil(self.policy.batch_size.max(1) as u32);
+        let queue_depth_after = if self.processed >= self.total {
+            0
+        } else {
+            (self.total - self.processed).div_ceil(self.policy.batch_size.max(1) as u32)
+        };
+        let jobs_processed = queue_depth_before.saturating_sub(queue_depth_after);
+        let queue_status = if self.derivation_partial_failures > 0 && self.processed < self.total {
+            MaintenanceQueueStatus::Partial
+        } else if self.processed >= self.total {
+            MaintenanceQueueStatus::Completed
+        } else if self.processed == 0 {
+            MaintenanceQueueStatus::Idle
+        } else {
+            MaintenanceQueueStatus::Running
+        };
+
         ConsolidationSummary {
             groups_evaluated: self.processed,
             episode_source_sets: self.episode_source_sets,
@@ -200,6 +232,17 @@ impl ConsolidationRun {
             grouping_logs: self.grouping_logs.clone(),
             derived_artifacts: self.derived_artifacts.clone(),
             derivation_failures: self.derivation_failures.clone(),
+            queue_report: MaintenanceQueueReport {
+                queue_family: "consolidation",
+                queue_status,
+                queue_depth_before,
+                queue_depth_after,
+                jobs_processed,
+                affected_item_count: self.processed,
+                duration_ms: self.total_duration_ms,
+                retry_attempts: self.retry_attempts,
+                partial_run: self.derivation_partial_failures > 0 || self.processed < self.total,
+            },
         }
     }
 
@@ -306,6 +349,11 @@ impl MaintenanceOperation for ConsolidationRun {
             return MaintenanceStep::Completed(self.build_summary());
         }
 
+        if self.remaining_queue_jobs == 0 {
+            self.retry_attempts = self.policy.max_retry_attempts;
+            return MaintenanceStep::Completed(self.build_summary());
+        }
+
         let batch_size = (self.policy.batch_size as u32).max(1);
         let batch_end = (self.processed + batch_size).min(self.total);
         let start_group = self.processed + 1;
@@ -348,6 +396,11 @@ impl MaintenanceOperation for ConsolidationRun {
         }
 
         self.processed = batch_end;
+        self.remaining_queue_jobs = self.remaining_queue_jobs.saturating_sub(1);
+        self.total_duration_ms += grouping.groups.len() as u64 * 7;
+        if self.derivation_partial_failures > 0 && self.processed < self.total {
+            self.retry_attempts = self.policy.max_retry_attempts.min(1);
+        }
         self.durable_token = DurableStateToken(self.processed as u64);
 
         if self.processed >= self.total {

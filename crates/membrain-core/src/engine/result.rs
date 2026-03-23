@@ -1020,7 +1020,7 @@ impl ResultBuilder {
                 dedup_dropped: 0,
                 budget_capped: usize::from(truncated),
                 duplicate_collapsed: 0,
-                low_confidence_suppressed: 0,
+                low_confidence_suppressed: filtered_count,
                 stale_bypassed: 0,
                 confidence_filtered: filtered_count,
             },
@@ -2360,5 +2360,106 @@ mod tests {
         assert!(!freshness_markers.is_empty());
         assert!(conflict_markers.is_empty());
         assert_eq!(uncertainty_markers.len(), 1);
+    }
+
+    #[test]
+    fn confidence_filter_tracks_suppressed_results_and_preserves_interval_details() {
+        let mut builder = ResultBuilder::new(3, ns("confidence_filter"));
+        let high = fuse_scores(
+            RankingInput {
+                recency: 850,
+                salience: 800,
+                strength: 750,
+                provenance: 700,
+                conflict: 500,
+                confidence: 900,
+            },
+            RankingProfile::balanced(),
+        );
+        let low = fuse_scores(
+            RankingInput {
+                recency: 200,
+                salience: 200,
+                strength: 200,
+                provenance: 200,
+                conflict: 500,
+                confidence: 200,
+            },
+            RankingProfile::balanced(),
+        );
+
+        builder.add_with_confidence(
+            MemoryId(41),
+            ns("confidence_filter"),
+            SessionId(1),
+            CanonicalMemoryType::Event,
+            "high confidence".into(),
+            &high,
+            AnsweredFrom::Tier2Indexed,
+            &crate::engine::confidence::ConfidenceInputs {
+                corroboration_count: 8,
+                ticks_since_last_access: 10,
+                age_ticks: 10,
+                resolution_state: ResolutionState::None,
+                conflict_score: 0,
+                causal_parent_count: 4,
+                authoritativeness: 950,
+                recall_count: 6,
+            },
+            &crate::engine::confidence::ConfidencePolicy::default(),
+        );
+        builder.add_with_confidence(
+            MemoryId(42),
+            ns("confidence_filter"),
+            SessionId(1),
+            CanonicalMemoryType::Event,
+            "low confidence".into(),
+            &low,
+            AnsweredFrom::Tier2Indexed,
+            &crate::engine::confidence::ConfidenceInputs {
+                corroboration_count: 0,
+                ticks_since_last_access: 1000,
+                age_ticks: 1000,
+                resolution_state: ResolutionState::Unresolved,
+                conflict_score: 800,
+                causal_parent_count: 0,
+                authoritativeness: 100,
+                recall_count: 0,
+            },
+            &crate::engine::confidence::ConfidencePolicy::default(),
+        );
+
+        let result_set = builder.build_with_confidence_filter(
+            RetrievalExplain {
+                recall_plan: RecallPlanKind::Tier2ExactThenTier3Fallback,
+                route_reason: "confidence filter".to_string(),
+                tiers_consulted: vec!["tier2_exact".to_string()],
+                trace_stages: vec![RecallTraceStage::Tier2Exact],
+                tier1_answered_directly: false,
+                candidate_budget: 3,
+                time_consumed_ms: Some(7),
+                ranking_profile: "balanced".to_string(),
+                contradictions_found: 0,
+                result_reasons: vec![],
+            },
+            500,
+        );
+
+        assert_eq!(result_set.count(), 1);
+        assert_eq!(result_set.evidence_pack[0].result.memory_id, MemoryId(41));
+        assert_eq!(result_set.omitted_summary.confidence_filtered, 1);
+        assert_eq!(result_set.omitted_summary.low_confidence_suppressed, 1);
+        assert!(
+            result_set.evidence_pack[0]
+                .result
+                .uncertainty_markers
+                .confidence
+                >= 500
+        );
+        assert!(result_set.evidence_pack[0]
+            .result
+            .uncertainty_markers
+            .confidence_interval
+            .is_some());
     }
 }

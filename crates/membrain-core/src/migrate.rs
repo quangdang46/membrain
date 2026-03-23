@@ -17,6 +17,7 @@ pub enum DurableSchemaObject {
     EngramsTable,
     EngramMembershipTable,
     GraphEdgeTable,
+    SnapshotMetadataTable,
 }
 
 impl DurableSchemaObject {
@@ -34,6 +35,7 @@ impl DurableSchemaObject {
             Self::EngramsTable => "engrams_table",
             Self::EngramMembershipTable => "engram_membership_table",
             Self::GraphEdgeTable => "graph_edge_table",
+            Self::SnapshotMetadataTable => "snapshot_metadata",
         }
     }
 }
@@ -49,7 +51,7 @@ pub struct SchemaVersion {
 
 impl SchemaVersion {
     /// The current canonical schema version.
-    pub const CURRENT: Self = Self { major: 0, minor: 1 };
+    pub const CURRENT: Self = Self { major: 0, minor: 2 };
 
     /// Builds a new schema version.
     pub const fn new(major: u32, minor: u32) -> Self {
@@ -121,6 +123,7 @@ impl MigrationModule {
                 DurableSchemaObject::EngramsTable,
                 DurableSchemaObject::EngramMembershipTable,
                 DurableSchemaObject::GraphEdgeTable,
+                DurableSchemaObject::SnapshotMetadataTable,
             ],
         }
     }
@@ -229,6 +232,9 @@ mod tests {
         assert!(manifest
             .authoritative_tables
             .contains(&DurableSchemaObject::GraphEdgeTable));
+        assert!(manifest
+            .authoritative_tables
+            .contains(&DurableSchemaObject::SnapshotMetadataTable));
     }
 
     #[test]
@@ -257,6 +263,10 @@ mod tests {
         assert_eq!(
             DurableSchemaObject::ConflictRecordsTable.as_str(),
             "conflict_records"
+        );
+        assert_eq!(
+            DurableSchemaObject::SnapshotMetadataTable.as_str(),
+            "snapshot_metadata"
         );
         assert_eq!(DurableSchemaObject::EngramsTable.as_str(), "engrams_table");
         assert_eq!(

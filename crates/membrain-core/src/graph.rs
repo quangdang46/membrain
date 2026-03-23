@@ -671,6 +671,14 @@ impl GraphRebuildReport {
             "graph_rebuild_verification_passed",
         ]
     }
+
+    pub fn hook_names(&self) -> Vec<&'static str> {
+        self.hooks_run.iter().map(|hook| hook.as_str()).collect()
+    }
+
+    pub const fn succeeded_safely(&self) -> bool {
+        self.metrics.verification_passed && self.metrics.dropped_edges == 0
+    }
 }
 
 /// Defines how the graph recovers from staleness or loss.
@@ -894,17 +902,46 @@ mod tests {
     }
 
     #[test]
-    fn test_graph_rebuild_from_truth() {
-        // Mock proof that graph can be repaired or fully rebuilt
-        // solely from DerivationInputs without relying on prior graph state.
-        let input = EdgeDerivationInput {
-            source_memory: MemoryId(0),
-            target_memory: None,
-            extracted_concept: Some("test_concept".into()),
-            relation: RelationKind::Mentions,
-            confidence: 850,
-        };
-        assert_eq!(input.extracted_concept.unwrap(), "test_concept");
+    fn graph_rebuild_from_truth_uses_named_hooks_and_safe_success_metrics() {
+        let rebuilder = DerivedGraphRebuilder;
+        let inputs = vec![
+            EdgeDerivationInput {
+                source_memory: MemoryId(10),
+                target_memory: Some(MemoryId(11)),
+                extracted_concept: None,
+                relation: RelationKind::DerivedFrom,
+                confidence: 920,
+            },
+            EdgeDerivationInput {
+                source_memory: MemoryId(10),
+                target_memory: None,
+                extracted_concept: Some("graph_consistency_snapshot".into()),
+                relation: RelationKind::Mentions,
+                confidence: 870,
+            },
+        ];
+
+        let rebuilt = rebuilder.rebuild_edges_from_truth(inputs[0].clone());
+        let report = rebuilder.rebuild_with_hooks(&inputs, GraphFailureInjection::None);
+
+        assert_eq!(rebuilt.len(), 1);
+        assert_eq!(report.metrics.durable_inputs_seen, 2);
+        assert_eq!(report.metrics.rebuilt_edges, 2);
+        assert_eq!(report.metrics.dropped_edges, 0);
+        assert!(report.metrics.verification_passed);
+        assert!(report.succeeded_safely());
+        assert_eq!(
+            report.hook_names(),
+            vec![
+                "snapshot_durable_truth",
+                "rebuild_adjacency_projection",
+                "rebuild_neighborhood_cache",
+                "verify_consistency_snapshot",
+            ]
+        );
+        assert!(report.operator_log.contains("hooks=snapshot_durable_truth,rebuild_adjacency_projection,rebuild_neighborhood_cache,verify_consistency_snapshot"));
+        assert!(report.operator_log.contains("failure_injection=none"));
+        assert!(report.operator_log.contains("verification_passed=true"));
     }
 
     #[test]
@@ -1311,17 +1348,75 @@ mod tests {
     }
 
     #[test]
-    fn test_graph_failure_injection() {
-        // mb-23u.8.4
-        // A simulated partial rebuild gracefully failing, ensuring
-        // true data is not lost from the source of truth.
-        let is_corrupted = true;
-        let recovered_edges = if !is_corrupted {
-            5
-        } else {
-            // Simulated recovery step isolated failure
-            1 // partially recovered from WAL
-        };
-        assert_eq!(recovered_edges, 1);
+    fn graph_failure_injection_reports_safe_failure_without_losing_truth() {
+        let rebuilder = DerivedGraphRebuilder;
+        let inputs = vec![
+            EdgeDerivationInput {
+                source_memory: MemoryId(21),
+                target_memory: Some(MemoryId(22)),
+                extracted_concept: None,
+                relation: RelationKind::DerivedFrom,
+                confidence: 910,
+            },
+            EdgeDerivationInput {
+                source_memory: MemoryId(22),
+                target_memory: None,
+                extracted_concept: Some("repair_run".into()),
+                relation: RelationKind::Mentions,
+                confidence: 860,
+            },
+        ];
+
+        let dropped_report =
+            rebuilder.rebuild_with_hooks(&inputs, GraphFailureInjection::DropLastDerivedEdge);
+        let aborted_report = rebuilder.rebuild_with_hooks(
+            &inputs,
+            GraphFailureInjection::AbortAfterAdjacencyProjection,
+        );
+
+        assert_eq!(dropped_report.metrics.durable_inputs_seen, 2);
+        assert_eq!(dropped_report.metrics.rebuilt_edges, 1);
+        assert_eq!(dropped_report.metrics.dropped_edges, 1);
+        assert!(!dropped_report.metrics.verification_passed);
+        assert!(!dropped_report.succeeded_safely());
+        assert_eq!(
+            dropped_report.hook_names(),
+            vec![
+                "snapshot_durable_truth",
+                "rebuild_adjacency_projection",
+                "rebuild_neighborhood_cache",
+                "verify_consistency_snapshot",
+            ]
+        );
+        assert!(dropped_report
+            .operator_log
+            .contains("failure_injection=drop_last_derived_edge"));
+        assert!(dropped_report.operator_log.contains("dropped_edges=1"));
+        assert!(dropped_report
+            .operator_log
+            .contains("verification_passed=false"));
+
+        assert_eq!(aborted_report.metrics.durable_inputs_seen, 2);
+        assert_eq!(aborted_report.metrics.rebuilt_edges, 2);
+        assert_eq!(aborted_report.metrics.dropped_edges, 0);
+        assert!(!aborted_report.metrics.verification_passed);
+        assert!(!aborted_report.succeeded_safely());
+        assert_eq!(
+            aborted_report.hook_names(),
+            vec!["snapshot_durable_truth", "rebuild_adjacency_projection",]
+        );
+        assert!(aborted_report
+            .operator_log
+            .contains("failure_injection=abort_after_adjacency_projection"));
+        assert!(aborted_report
+            .operator_log
+            .contains("verification_passed=false"));
+
+        let rebuilt_from_truth = inputs
+            .iter()
+            .cloned()
+            .flat_map(|input| rebuilder.rebuild_edges_from_truth(input))
+            .collect::<Vec<_>>();
+        assert_eq!(rebuilt_from_truth.len(), 2);
     }
 }

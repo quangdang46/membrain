@@ -76,6 +76,7 @@ struct Cli {
 #[derive(Subcommand, Debug)]
 enum Commands {
     /// Encode (store) a new memory
+    #[command(name = "remember", visible_alias = "encode")]
     Encode {
         /// Content to store
         content: String,
@@ -143,6 +144,7 @@ enum Commands {
         json: bool,
     },
     /// Explain the ranking and routing path for a recall query
+    #[command(name = "why", visible_alias = "explain")]
     Explain {
         /// Query string to explain
         query: String,
@@ -1690,6 +1692,55 @@ mod tests {
             parsed_recall_namespace_and_top(cli.command),
             Some(("team.alpha".to_string(), 3))
         );
+    }
+
+    #[test]
+    fn remember_command_preserves_encode_surface() {
+        let cli = Cli::parse_from([
+            "membrain",
+            "remember",
+            "captured memory",
+            "--namespace",
+            "team.alpha",
+        ]);
+
+        match cli.command {
+            Commands::Encode {
+                content,
+                namespace,
+                kind,
+                ..
+            } => {
+                assert_eq!(content, "captured memory");
+                assert_eq!(namespace, "team.alpha");
+                assert_eq!(kind, "episodic");
+            }
+            other => panic!("expected remember to parse as encode surface, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn why_command_preserves_explain_surface() {
+        let cli = Cli::parse_from(["membrain", "why", "routing details", "--namespace", "team.alpha"]);
+
+        match cli.command {
+            Commands::Explain {
+                query, namespace, ..
+            } => {
+                assert_eq!(query, "routing details");
+                assert_eq!(namespace, "team.alpha");
+            }
+            other => panic!("expected why to parse as explain surface, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn legacy_encode_and_explain_aliases_still_parse() {
+        let encode = Cli::parse_from(["membrain", "encode", "legacy path"]);
+        let explain = Cli::parse_from(["membrain", "explain", "legacy why"]);
+
+        assert!(matches!(encode.command, Commands::Encode { .. }));
+        assert!(matches!(explain.command, Commands::Explain { .. }));
     }
 
     #[test]

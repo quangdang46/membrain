@@ -104,6 +104,7 @@ pub struct IntentRouteInputs {
     pub prefer_small_lookup: bool,
     pub prefer_preview_only_on_low_confidence: bool,
     pub high_stakes: bool,
+    pub predictive_preroll_candidate: bool,
 }
 
 /// Inspectable classification result for one query.
@@ -132,6 +133,7 @@ impl IntentClassification {
                 .route_inputs
                 .prefer_preview_only_on_low_confidence,
             high_stakes: self.route_inputs.high_stakes,
+            predictive_preroll_candidate: self.route_inputs.predictive_preroll_candidate,
             low_confidence_fallback: self.low_confidence_fallback,
             matched_signal_kinds: self
                 .matched_signals
@@ -168,6 +170,7 @@ pub struct IntentClassificationLog {
     pub prefer_small_lookup: bool,
     pub prefer_preview_only_on_low_confidence: bool,
     pub high_stakes: bool,
+    pub predictive_preroll_candidate: bool,
     pub low_confidence_fallback: bool,
     pub matched_signal_kinds: Vec<&'static str>,
     pub matched_patterns: Vec<&'static str>,
@@ -519,6 +522,7 @@ fn route_inputs_for(intent: QueryIntent) -> IntentRouteInputs {
             prefer_small_lookup: false,
             prefer_preview_only_on_low_confidence: false,
             high_stakes: false,
+            predictive_preroll_candidate: false,
         },
         QueryIntent::ExistenceCheck => IntentRouteInputs {
             query_path: QueryPath::ExactId,
@@ -526,6 +530,7 @@ fn route_inputs_for(intent: QueryIntent) -> IntentRouteInputs {
             prefer_small_lookup: true,
             prefer_preview_only_on_low_confidence: false,
             high_stakes: false,
+            predictive_preroll_candidate: false,
         },
         QueryIntent::RecentFirst => IntentRouteInputs {
             query_path: QueryPath::Temporal,
@@ -533,6 +538,7 @@ fn route_inputs_for(intent: QueryIntent) -> IntentRouteInputs {
             prefer_small_lookup: true,
             prefer_preview_only_on_low_confidence: false,
             high_stakes: false,
+            predictive_preroll_candidate: true,
         },
         QueryIntent::StrengthWeighted => IntentRouteInputs {
             query_path: QueryPath::Hybrid,
@@ -540,6 +546,7 @@ fn route_inputs_for(intent: QueryIntent) -> IntentRouteInputs {
             prefer_small_lookup: true,
             prefer_preview_only_on_low_confidence: false,
             high_stakes: true,
+            predictive_preroll_candidate: true,
         },
         QueryIntent::UncertaintyFocused => IntentRouteInputs {
             query_path: QueryPath::PartialCue,
@@ -547,6 +554,7 @@ fn route_inputs_for(intent: QueryIntent) -> IntentRouteInputs {
             prefer_small_lookup: false,
             prefer_preview_only_on_low_confidence: true,
             high_stakes: true,
+            predictive_preroll_candidate: false,
         },
         QueryIntent::CausalTrace => IntentRouteInputs {
             query_path: QueryPath::EntityHeavy,
@@ -554,6 +562,7 @@ fn route_inputs_for(intent: QueryIntent) -> IntentRouteInputs {
             prefer_small_lookup: true,
             prefer_preview_only_on_low_confidence: true,
             high_stakes: false,
+            predictive_preroll_candidate: false,
         },
         QueryIntent::TemporalAnchor => IntentRouteInputs {
             query_path: QueryPath::Temporal,
@@ -561,6 +570,7 @@ fn route_inputs_for(intent: QueryIntent) -> IntentRouteInputs {
             prefer_small_lookup: false,
             prefer_preview_only_on_low_confidence: false,
             high_stakes: false,
+            predictive_preroll_candidate: true,
         },
         QueryIntent::DiverseSample => IntentRouteInputs {
             query_path: QueryPath::Hybrid,
@@ -568,6 +578,7 @@ fn route_inputs_for(intent: QueryIntent) -> IntentRouteInputs {
             prefer_small_lookup: false,
             prefer_preview_only_on_low_confidence: false,
             high_stakes: false,
+            predictive_preroll_candidate: false,
         },
         QueryIntent::ProceduralLookup => IntentRouteInputs {
             query_path: QueryPath::EntityHeavy,
@@ -575,6 +586,7 @@ fn route_inputs_for(intent: QueryIntent) -> IntentRouteInputs {
             prefer_small_lookup: true,
             prefer_preview_only_on_low_confidence: true,
             high_stakes: true,
+            predictive_preroll_candidate: true,
         },
         QueryIntent::EmotionalFilter => IntentRouteInputs {
             query_path: QueryPath::SemanticOnly,
@@ -582,6 +594,7 @@ fn route_inputs_for(intent: QueryIntent) -> IntentRouteInputs {
             prefer_small_lookup: false,
             prefer_preview_only_on_low_confidence: true,
             high_stakes: true,
+            predictive_preroll_candidate: false,
         },
     }
 }

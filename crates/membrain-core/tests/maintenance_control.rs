@@ -14,6 +14,7 @@ use membrain_core::engine::repair::{
     IndexRepairEntrypoint, RepairEngine, RepairStatus, RepairTarget,
 };
 use membrain_core::migrate::DurableSchemaObject;
+use membrain_core::observability::MaintenanceQueueStatus;
 use membrain_core::types::MemoryId;
 
 #[derive(Debug, Clone)]
@@ -403,6 +404,18 @@ fn consolidation_runs_emit_lineage_preserving_artifacts_through_maintenance_hand
         .iter()
         .all(|failure| failure.lineage_preserved));
     assert_eq!(summary.grouping_logs.len(), 3);
+    assert_eq!(summary.queue_report.queue_family, "consolidation");
+    assert_eq!(
+        summary.queue_report.queue_status,
+        MaintenanceQueueStatus::Completed
+    );
+    assert_eq!(summary.queue_report.queue_depth_before, 1);
+    assert_eq!(summary.queue_report.queue_depth_after, 0);
+    assert_eq!(summary.queue_report.jobs_processed, 1);
+    assert_eq!(summary.queue_report.affected_item_count, 3);
+    assert_eq!(summary.queue_report.retry_attempts, 0);
+    assert_eq!(summary.queue_report.duration_ms, 21);
+    assert!(summary.queue_report.partial_run);
 
     assert_eq!(handle.snapshot().polls_used, 1);
     assert_eq!(handle.start(), handle.snapshot());
@@ -437,7 +450,62 @@ fn consolidation_runs_respect_minimum_candidate_gate() {
     assert!(summary.derived_artifacts.is_empty());
     assert!(summary.derivation_failures.is_empty());
     assert!(summary.grouping_logs.is_empty());
+    assert_eq!(
+        summary.queue_report.queue_status,
+        MaintenanceQueueStatus::Idle
+    );
+    assert_eq!(summary.queue_report.queue_depth_before, 1);
+    assert_eq!(summary.queue_report.queue_depth_after, 1);
+    assert_eq!(summary.queue_report.jobs_processed, 0);
+    assert_eq!(summary.queue_report.affected_item_count, 0);
     assert_eq!(snapshot.polls_used, 1);
+}
+
+#[test]
+fn consolidation_runs_stop_after_queue_budget_and_report_partial_status() {
+    let namespace = NamespaceId::new("test.consolidation.partial").unwrap();
+    let engine = ConsolidationEngine;
+    let run = engine.create_run(
+        namespace,
+        ConsolidationPolicy {
+            minimum_candidates: 1,
+            batch_size: 2,
+            max_queue_jobs: 1,
+            max_retry_attempts: 2,
+            ..Default::default()
+        },
+        5,
+    );
+    let mut handle = MaintenanceJobHandle::new(run, 10);
+
+    let first = handle.poll();
+    assert_eq!(first.polls_used, 1);
+    assert_eq!(
+        first.state,
+        MaintenanceJobState::Running {
+            progress: Some(MaintenanceProgress::new(2, 5)),
+        }
+    );
+
+    let second = handle.poll();
+    let MaintenanceJobState::Completed(summary) = second.state else {
+        panic!("expected queue-budget completion summary");
+    };
+
+    assert_eq!(summary.groups_evaluated, 2);
+    assert_eq!(summary.derivation_partial_failures, 2);
+    assert_eq!(
+        summary.queue_report.queue_status,
+        MaintenanceQueueStatus::Partial
+    );
+    assert_eq!(summary.queue_report.queue_depth_before, 3);
+    assert_eq!(summary.queue_report.queue_depth_after, 2);
+    assert_eq!(summary.queue_report.jobs_processed, 1);
+    assert_eq!(summary.queue_report.affected_item_count, 2);
+    assert_eq!(summary.queue_report.retry_attempts, 2);
+    assert_eq!(summary.queue_report.duration_ms, 14);
+    assert!(summary.queue_report.partial_run);
+    assert_eq!(second.polls_used, 2);
 }
 
 #[test]

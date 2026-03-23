@@ -1,4 +1,5 @@
 use crate::config::RuntimeConfig;
+use crate::engine::intent::IntentClassification;
 use crate::types::{MemoryId, SessionId};
 
 /// Canonical request shape for deterministic Tier1 planner routing.
@@ -12,6 +13,8 @@ pub struct RecallRequest {
     pub small_lookup: bool,
     /// Whether bounded graph/engram expansion may run after Tier2 exact retrieval.
     pub graph_expansion: bool,
+    /// Whether bounded predictive pre-recall may prepare a hot path before retrieval.
+    pub predictive_preroll: bool,
 }
 
 impl RecallRequest {
@@ -22,6 +25,7 @@ impl RecallRequest {
             session_id: None,
             small_lookup: false,
             graph_expansion: false,
+            predictive_preroll: false,
         }
     }
 
@@ -32,6 +36,7 @@ impl RecallRequest {
             session_id: Some(session_id),
             small_lookup: true,
             graph_expansion: false,
+            predictive_preroll: false,
         }
     }
 
@@ -91,6 +96,10 @@ pub struct Tier1PlanTrace {
     pub pre_tier1_candidates: usize,
     /// Candidate count preserved after Tier1 routing decisions complete.
     pub post_tier1_candidates: usize,
+    /// Whether bounded predictive pre-recall preparation was eligible for this route.
+    pub predictive_preroll_triggered: bool,
+    /// Stable explain label when predictive pre-recall was skipped.
+    pub predictive_preroll_skip_reason: &'static str,
 }
 
 /// Machine-readable route plan for the canonical recall surface.
@@ -114,6 +123,22 @@ impl RecallPlan {
     /// Returns whether the plan may terminate inside Tier1 without routing deeper.
     pub const fn terminates_in_tier1(self) -> bool {
         self.route_summary.tier1_answers_directly
+    }
+}
+
+/// Stable predictive pre-recall trigger contract derived from shallow intent classification.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct PredictivePrerollDecision {
+    pub should_trigger: bool,
+    pub skip_reason: &'static str,
+}
+
+impl PredictivePrerollDecision {
+    pub const fn skipped(reason: &'static str) -> Self {
+        Self {
+            should_trigger: false,
+            skip_reason: reason,
+        }
     }
 }
 
@@ -144,6 +169,42 @@ impl RecallEngine {
         RecallTraceStage::Tier2Exact,
         RecallTraceStage::Tier3Fallback,
     ];
+
+    pub const fn predictive_preroll_decision(
+        &self,
+        classification: &IntentClassification,
+        request: RecallRequest,
+        config: RuntimeConfig,
+    ) -> PredictivePrerollDecision {
+        if !classification.route_inputs.predictive_preroll_candidate {
+            return PredictivePrerollDecision::skipped("intent_not_predictive_candidate");
+        }
+
+        if classification.low_confidence_fallback {
+            return PredictivePrerollDecision::skipped("low_confidence_fallback");
+        }
+
+        if request.exact_memory_id.is_some() {
+            return PredictivePrerollDecision::skipped("exact_id_direct_lookup");
+        }
+
+        if request.graph_expansion {
+            return PredictivePrerollDecision::skipped("graph_expansion_not_predictive");
+        }
+
+        if config.tier1_candidate_budget == 0 {
+            return PredictivePrerollDecision::skipped("tier1_budget_disabled");
+        }
+
+        if request.predictive_preroll {
+            return PredictivePrerollDecision {
+                should_trigger: true,
+                skip_reason: "predictive_preroll_enabled",
+            };
+        }
+
+        PredictivePrerollDecision::skipped("request_not_opted_in")
+    }
 }
 
 impl RecallRuntime for RecallEngine {

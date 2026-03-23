@@ -345,6 +345,23 @@ pub struct ConfidenceIntervalDisplay {
     pub width: u16,
 }
 
+impl ConfidenceIntervalDisplay {
+    /// Builds a display payload from raw interval bounds.
+    pub const fn new(point: u16, lower: u16, upper: u16) -> Self {
+        Self {
+            point,
+            lower,
+            upper,
+            width: upper.saturating_sub(lower),
+        }
+    }
+
+    /// Returns whether the interval spans a non-zero range.
+    pub const fn is_non_degenerate(&self) -> bool {
+        self.width > 0
+    }
+}
+
 /// Configuration for confidence-aware retrieval filtering and display.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct ConfidenceDisplayConfig {
@@ -393,6 +410,72 @@ impl ConfidenceDisplayConfig {
             show_uncertainty_breakdown: true,
             tag_low_confidence: true,
             low_confidence_tag_threshold: 600,
+        }
+    }
+
+    /// Returns whether a result should be included based on its confidence score.
+    pub const fn allows_confidence(&self, confidence: u16) -> bool {
+        confidence >= self.min_confidence_threshold
+    }
+
+    /// Returns whether a result should be tagged as low confidence.
+    pub const fn tags_low_confidence(&self, confidence: u16) -> bool {
+        self.tag_low_confidence && confidence < self.low_confidence_tag_threshold
+    }
+}
+
+/// Confidence-aware explain payload derived from ranking and uncertainty details.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct ConfidenceExplain {
+    /// Confidence score preserved for display and filtering.
+    pub confidence: u16,
+    /// Whether the result passes the current threshold.
+    pub passes_threshold: bool,
+    /// Whether the result should be explicitly marked low-confidence.
+    pub low_confidence_tagged: bool,
+    /// Confidence interval, when display is enabled and bounds exist.
+    pub interval: Option<ConfidenceIntervalDisplay>,
+    /// Named uncertainty breakdown shown in explain surfaces when enabled.
+    pub uncertainty_breakdown: Vec<(String, u16)>,
+}
+
+impl ConfidenceExplain {
+    /// Builds the display/explain payload from bounded uncertainty markers.
+    pub fn new(
+        config: ConfidenceDisplayConfig,
+        confidence: u16,
+        confidence_interval: Option<(u16, u16, u16)>,
+        uncertainty_breakdown: [(u16, Option<u16>); 4],
+    ) -> Self {
+        let interval = if config.show_confidence_intervals {
+            confidence_interval
+                .map(|(lower, point, upper)| ConfidenceIntervalDisplay::new(point, lower, upper))
+        } else {
+            None
+        };
+
+        let uncertainty_breakdown = if config.show_uncertainty_breakdown {
+            [
+                ("freshness", uncertainty_breakdown[0]),
+                ("contradiction", uncertainty_breakdown[1]),
+                ("missing_evidence", uncertainty_breakdown[2]),
+                ("corroboration", uncertainty_breakdown[3]),
+            ]
+            .into_iter()
+            .map(|(name, (value, override_value))| {
+                (name.to_string(), override_value.unwrap_or(value))
+            })
+            .collect()
+        } else {
+            Vec::new()
+        };
+
+        Self {
+            confidence,
+            passes_threshold: config.allows_confidence(confidence),
+            low_confidence_tagged: config.tags_low_confidence(confidence),
+            interval,
+            uncertainty_breakdown,
         }
     }
 }
@@ -515,6 +598,81 @@ mod tests {
         let score_recency = fuse_scores(high_recency, profile).final_score;
 
         assert!(score_strength > score_recency);
+    }
+
+    #[test]
+    fn confidence_display_config_applies_thresholds_and_tags() {
+        let strict = ConfidenceDisplayConfig::strict();
+        assert!(strict.allows_confidence(500));
+        assert!(!strict.allows_confidence(499));
+        assert!(strict.tags_low_confidence(599));
+        assert!(!strict.tags_low_confidence(600));
+
+        let permissive = ConfidenceDisplayConfig::permissive();
+        assert!(permissive.allows_confidence(0));
+        assert!(!permissive.tags_low_confidence(1));
+    }
+
+    #[test]
+    fn confidence_explain_includes_interval_and_uncertainty_breakdown() {
+        let explain = ConfidenceExplain::new(
+            ConfidenceDisplayConfig::default(),
+            375,
+            Some((300, 375, 450)),
+            [(10, None), (20, None), (30, None), (40, None)],
+        );
+
+        assert!(explain.passes_threshold);
+        assert!(explain.low_confidence_tagged);
+        assert_eq!(
+            explain.interval,
+            Some(ConfidenceIntervalDisplay {
+                point: 375,
+                lower: 300,
+                upper: 450,
+                width: 150,
+            })
+        );
+        assert_eq!(
+            explain.uncertainty_breakdown,
+            vec![
+                ("freshness".to_string(), 10),
+                ("contradiction".to_string(), 20),
+                ("missing_evidence".to_string(), 30),
+                ("corroboration".to_string(), 40),
+            ]
+        );
+    }
+
+    #[test]
+    fn confidence_explain_respects_display_toggles() {
+        let config = ConfidenceDisplayConfig {
+            show_confidence_intervals: false,
+            show_uncertainty_breakdown: false,
+            ..ConfidenceDisplayConfig::strict()
+        };
+        let explain = ConfidenceExplain::new(
+            config,
+            450,
+            Some((300, 450, 600)),
+            [(10, None), (20, None), (30, None), (40, None)],
+        );
+
+        assert!(!explain.passes_threshold);
+        assert!(explain.low_confidence_tagged);
+        assert!(explain.interval.is_none());
+        assert!(explain.uncertainty_breakdown.is_empty());
+    }
+
+    #[test]
+    fn confidence_interval_display_tracks_width() {
+        let interval = ConfidenceIntervalDisplay::new(520, 500, 580);
+        assert_eq!(interval.width, 80);
+        assert!(interval.is_non_degenerate());
+
+        let degenerate = ConfidenceIntervalDisplay::new(520, 520, 520);
+        assert_eq!(degenerate.width, 0);
+        assert!(!degenerate.is_non_degenerate());
     }
 
     #[test]
