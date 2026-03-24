@@ -288,7 +288,7 @@ impl BrainStore {
     }
 
     /// Runs the encode fast path and materializes a durable Tier2 layout that preserves additive
-    /// landmark and era metadata alongside metadata-first storage keys.
+    /// landmark detection facts, era anchors, and metadata-first storage keys.
     pub fn prepare_tier2_layout_from_encode(
         &self,
         namespace: NamespaceId,
@@ -342,6 +342,28 @@ impl BrainStore {
     /// Returns the append-only audit-log storage surface owned by the core crate.
     pub fn audit_log_store(&self) -> &AuditLogStore {
         &self.audit_log_store
+    }
+
+    /// Returns the stable high-level audit categories accepted by the core-owned audit surface.
+    pub const fn audit_event_categories(
+        &self,
+    ) -> &'static [crate::observability::AuditEventCategory] {
+        self.audit_log_store.categories()
+    }
+
+    /// Returns the stable audit event taxonomy accepted by the core-owned audit surface.
+    pub const fn audit_event_kinds(&self) -> &'static [crate::observability::AuditEventKind] {
+        self.audit_log_store.event_kinds()
+    }
+
+    /// Returns the stable exportable audit taxonomy rows accepted by the core-owned audit surface.
+    pub fn audit_taxonomy(&self) -> Vec<crate::store::audit::AuditTaxonomyRow> {
+        self.audit_log_store.taxonomy()
+    }
+
+    /// Builds a bounded append-only audit log with the canonical default row cap.
+    pub fn new_default_audit_log(&self) -> crate::store::audit::AppendOnlyAuditLog {
+        self.audit_log_store.new_default_log()
     }
 
     /// Returns the bounded graph surface owned by the core crate.
@@ -412,6 +434,14 @@ mod tests {
             layout.metadata.landmark.era_id.as_deref(),
             Some("era-projectlaunc-0088")
         );
+        assert_eq!(layout.metadata.landmark.era_started_at_tick, Some(88));
+        assert_eq!(layout.metadata.landmark.detection_score, 803);
+        assert!(layout
+            .metadata
+            .landmark
+            .detection_reason
+            .as_deref()
+            .is_some_and(|reason| reason.contains("crossed landmark thresholds")));
         assert_eq!(layout.prefilter_view().landmark, &layout.metadata.landmark);
         assert_eq!(
             layout.metadata_index_key().landmark,
@@ -434,24 +464,30 @@ mod tests {
         );
 
         assert_eq!(summary.groups_evaluated, 2);
-        assert_eq!(summary.episode_source_sets, 2);
+        assert_eq!(summary.episode_source_sets, 1);
         assert_eq!(summary.derivations_emitted, 2);
-        assert_eq!(summary.derivation_partial_failures, 2);
+        assert_eq!(summary.derivation_partial_failures, 0);
         assert_eq!(summary.derived_artifacts.len(), 2);
-        assert_eq!(summary.derivation_failures.len(), 2);
-        assert_eq!(summary.derived_artifacts[0].source_ids, vec![MemoryId(1)]);
+        assert_eq!(summary.derivation_failures.len(), 0);
+        assert_eq!(
+            summary.derived_artifacts[0].source_ids,
+            vec![MemoryId(1), MemoryId(2)]
+        );
         assert_eq!(
             summary.derived_artifacts[0].continuity_keys,
-            vec!["singleton"]
+            vec![
+                "session_cluster",
+                "session_id",
+                "task_id",
+                "goal_context",
+                "tool_chain_context",
+                "entity_overlap"
+            ]
         );
         assert!(summary.derived_artifacts[0]
             .content
-            .contains("summary(singleton)"));
-        assert_eq!(
-            summary.derivation_failures[0].reason,
-            "single_source_group_kept_evidence_only"
-        );
-        assert!(summary.derivation_failures[0].lineage_preserved);
+            .contains("summary(session_cluster)"));
+        assert!(summary.derivation_failures.is_empty());
     }
 
     #[test]
@@ -510,6 +546,19 @@ mod tests {
         );
 
         assert!(prepared.layout.metadata.landmark.is_landmark);
+        assert_eq!(
+            prepared.layout.prefilter_view().era_started_at_tick(),
+            Some(91)
+        );
+        assert_eq!(
+            prepared.layout.prefilter_view().landmark_detection_score(),
+            815
+        );
+        assert!(prepared
+            .layout
+            .prefilter_view()
+            .landmark_detection_reason()
+            .is_some_and(|reason| reason.contains("crossed landmark thresholds")));
         assert_eq!(
             prepared.layout.metadata.namespace.as_str(),
             "tests/landmarks"
@@ -582,6 +631,48 @@ mod tests {
     }
 
     #[test]
+    fn brain_store_exposes_audit_taxonomy_and_default_log_builder() {
+        let store = BrainStore::default();
+        let log = store.new_default_audit_log();
+        let taxonomy = store.audit_taxonomy();
+
+        assert_eq!(
+            store.audit_event_categories(),
+            store.audit_log_store().categories()
+        );
+        assert_eq!(
+            store.audit_event_kinds(),
+            store.audit_log_store().event_kinds()
+        );
+        assert_eq!(taxonomy, store.audit_log_store().taxonomy());
+        assert_eq!(
+            taxonomy.first().map(|row| row.kind),
+            Some(crate::observability::AuditEventKind::EncodeAccepted)
+        );
+        assert_eq!(
+            taxonomy.last().map(|row| row.kind),
+            Some(crate::observability::AuditEventKind::ArchiveRecorded)
+        );
+        assert!(taxonomy.iter().any(|row| {
+            row.kind == crate::observability::AuditEventKind::MaintenanceReconsolidationApplied
+        }));
+        assert!(taxonomy.iter().any(|row| {
+            row.kind == crate::observability::AuditEventKind::MaintenanceReconsolidationDiscarded
+        }));
+        assert!(taxonomy.iter().any(|row| {
+            row.kind == crate::observability::AuditEventKind::MaintenanceReconsolidationDeferred
+        }));
+        assert!(taxonomy.iter().any(|row| {
+            row.kind == crate::observability::AuditEventKind::MaintenanceReconsolidationBlocked
+        }));
+        assert_eq!(
+            log.capacity(),
+            crate::store::audit::AppendOnlyAuditLog::DEFAULT_CAPACITY
+        );
+        assert_eq!(log.next_sequence(), 1);
+    }
+
+    #[test]
     fn brain_store_exposes_audit_store_component_identity() {
         let store = BrainStore::default();
 
@@ -624,6 +715,7 @@ mod tests {
                 DurableSchemaObject::MemoryTagsTable,
                 DurableSchemaObject::ConflictRecordsTable,
                 DurableSchemaObject::DurableMemoryRecords,
+                DurableSchemaObject::LandmarksTable,
             ]
         );
     }

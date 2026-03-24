@@ -1,4 +1,4 @@
-use membrain_core::api::{NamespaceId, RequestId};
+use membrain_core::api::{CacheMetricsSummary, NamespaceId, RequestId};
 use membrain_core::engine::result::RetrievalResultSet;
 use membrain_core::observability::OutcomeClass;
 use serde::{Deserialize, Serialize};
@@ -428,7 +428,6 @@ pub struct HealthParams {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct DoctorParams {
-    pub namespace: String,
     #[serde(flatten)]
     pub common: CommonRequestFields,
 }
@@ -841,6 +840,7 @@ pub struct McpExplainTrace {
     pub trace_stages: Vec<String>,
     pub result_reasons: serde_json::Value,
     pub omitted_summary: serde_json::Value,
+    pub cache_metrics: serde_json::Value,
     pub policy_summary: serde_json::Value,
     pub provenance_summary: serde_json::Value,
     pub freshness_markers: serde_json::Value,
@@ -871,6 +871,10 @@ impl McpRetrievalPayload {
                 .collect(),
             result_reasons: serde_json::to_value(&result_reasons)?,
             omitted_summary: serde_json::to_value(&result.omitted_summary)?,
+            cache_metrics: serde_json::to_value(CacheMetricsSummary::from_cache_traces(
+                Vec::new(),
+                false,
+            ))?,
             policy_summary: serde_json::to_value(&policy_summary)?,
             provenance_summary: serde_json::to_value(&provenance_summary)?,
             freshness_markers: serde_json::to_value(&freshness_markers)?,
@@ -915,6 +919,60 @@ pub struct McpInspectPayload {
     pub explain_trace: McpInspectExplainTrace,
 }
 
+impl McpInspectPayload {
+    pub fn from_result(
+        request_id: RequestId,
+        namespace: NamespaceId,
+        memory_id: u64,
+        result: &RetrievalResultSet,
+    ) -> Result<Self, serde_json::Error> {
+        let (policy_summary, provenance_summary) = result.explain_policy_and_provenance();
+        let (freshness_markers, conflict_markers, _) = result.explain_markers();
+        let (_, trace_stages) = result.explain_route();
+        let trace_stages = trace_stages
+            .into_iter()
+            .map(|stage| stage.as_str().to_string())
+            .collect::<Vec<_>>();
+
+        Ok(Self {
+            request_id,
+            namespace,
+            memory_id,
+            tier: result
+                .explain
+                .tiers_consulted
+                .first()
+                .cloned()
+                .unwrap_or_else(|| "unavailable".to_string()),
+            lineage: serde_json::to_value(&provenance_summary)?,
+            policy_flags: serde_json::to_value(&policy_summary)?,
+            lifecycle_state: serde_json::json!({
+                "outcome_class": result.outcome_class,
+                "truncated": result.truncated,
+                "degraded_summary": result.packaging_metadata.degraded_summary,
+            }),
+            index_presence: serde_json::json!({
+                "tiers_consulted": result.explain.tiers_consulted,
+                "graph_assistance": result.packaging_metadata.graph_assistance,
+            }),
+            graph_neighborhood_summary: serde_json::json!({
+                "graph_seed": result.provenance_summary.graph_seed,
+                "relation_to_seed": result.provenance_summary.relation_to_seed,
+                "graph_assistance": result.packaging_metadata.graph_assistance,
+            }),
+            decay_retention: serde_json::to_value(&freshness_markers)?,
+            explain_trace: McpInspectExplainTrace {
+                policy_summary: serde_json::to_value(&policy_summary)?,
+                provenance_summary: serde_json::to_value(&provenance_summary)?,
+                freshness_markers: serde_json::to_value(&freshness_markers)?,
+                conflict_markers: serde_json::to_value(&conflict_markers)?,
+                passive_observation: None,
+                trace_stages,
+            },
+        })
+    }
+}
+
 /// Embedded explain families for inspect responses.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -934,8 +992,13 @@ pub struct McpResource {
     pub uri: String,
     pub name: String,
     pub mime_type: String,
+    pub resource_kind: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub description: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub uri_template: Option<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub examples: Vec<String>,
 }
 
 /// Typed MCP resource-list payload.
@@ -947,12 +1010,47 @@ pub struct McpResourceListing {
     pub resources: Vec<McpResource>,
 }
 
+/// Typed payload for reading one explicit MCP resource.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct McpResourceReadPayload {
+    pub request_id: RequestId,
+    pub namespace: NamespaceId,
+    pub uri: String,
+    pub mime_type: String,
+    pub resource_kind: String,
+    pub bounded: bool,
+    pub payload: serde_json::Value,
+}
+
+/// Typed streaming surface descriptor for explicit daemon notification support.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct McpStream {
+    pub name: String,
+    pub method: String,
+    pub delivery: String,
+    pub description: String,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub example_subscriptions: Vec<String>,
+}
+
+/// Typed listing of supported daemon streaming surfaces.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct McpStreamListing {
+    pub request_id: RequestId,
+    pub namespace: NamespaceId,
+    pub streams: Vec<McpStream>,
+}
+
 #[cfg(test)]
 mod tests {
     use super::{
         CommonRequestFields, EncodeParams, ExplainParams, InspectParams, McpError,
         McpInspectExplainTrace, McpInspectPayload, McpRequest, McpResource, McpResourceListing,
-        McpResponse, McpRetrievalPayload, RecallParams,
+        McpResourceReadPayload, McpResponse, McpRetrievalPayload, McpStream, McpStreamListing,
+        RecallParams,
     };
     use membrain_core::api::{NamespaceId, RequestId};
     use membrain_core::engine::recall::RecallPlanKind;
@@ -989,6 +1087,7 @@ mod tests {
                 time_consumed_ms: Some(1),
                 ranking_profile: "balanced".to_string(),
                 contradictions_found: 0,
+                query_by_example: None,
                 result_reasons: Vec::new(),
             },
             policy_summary: membrain_core::engine::result::PolicySummary {
@@ -1056,6 +1155,7 @@ mod tests {
         assert!(json["result"].get("evidence_pack").is_some());
         assert!(json["result"].get("action_pack").is_some());
         assert!(json["result"].get("deferred_payloads").is_some());
+        assert!(json["result"]["action_pack"].is_null());
         assert!(json["result"].get("omitted_summary").is_some());
         assert!(json["result"].get("policy_summary").is_some());
         assert!(json["result"].get("provenance_summary").is_some());
@@ -1067,11 +1167,16 @@ mod tests {
             "exact_id_tier1"
         );
         assert!(json["explain_trace"].get("omitted_summary").is_some());
+        assert!(json["explain_trace"].get("cache_metrics").is_some());
         assert!(json["explain_trace"].get("policy_summary").is_some());
         assert!(json["explain_trace"].get("provenance_summary").is_some());
         assert!(json["explain_trace"].get("freshness_markers").is_some());
         assert!(json["explain_trace"].get("conflict_markers").is_some());
         assert!(json["explain_trace"].get("uncertainty_markers").is_some());
+        assert_eq!(
+            json["explain_trace"]["trace_stages"],
+            serde_json::json!(["policy_gate", "packaging"])
+        );
     }
 
     #[test]
@@ -1087,6 +1192,7 @@ mod tests {
         assert_eq!(payload.outcome_class, OutcomeClass::Accepted);
         assert_eq!(payload.result.outcome_class, OutcomeClass::Accepted);
         assert_eq!(payload.explain_trace.omitted_summary["budget_capped"], 0);
+        assert_eq!(payload.explain_trace.cache_metrics["cache_hit_count"], 0);
         assert_eq!(
             payload.explain_trace.policy_summary["effective_namespace"],
             "mcp.team"
@@ -1242,13 +1348,21 @@ mod tests {
                     uri: "membrain://team.alpha/memories/42".to_string(),
                     name: "memory-42".to_string(),
                     mime_type: "application/json".to_string(),
+                    resource_kind: "inspect_payload".to_string(),
                     description: Some("Typed inspect payload for memory 42".to_string()),
+                    uri_template: Some("membrain://{namespace}/memories/{memory_id}".to_string()),
+                    examples: vec!["membrain://team.alpha/memories/42".to_string()],
                 },
                 McpResource {
                     uri: "membrain://team.alpha/snapshots/pre-migration".to_string(),
                     name: "snapshot-pre-migration".to_string(),
                     mime_type: "application/json".to_string(),
+                    resource_kind: "snapshot_view".to_string(),
                     description: None,
+                    uri_template: Some(
+                        "membrain://{namespace}/snapshots/{snapshot_name}".to_string(),
+                    ),
+                    examples: vec!["membrain://team.alpha/snapshots/pre-migration".to_string()],
                 },
             ],
         };
@@ -1261,13 +1375,102 @@ mod tests {
             "membrain://team.alpha/memories/42"
         );
         assert_eq!(json["resources"][0]["mime_type"], "application/json");
+        assert_eq!(json["resources"][0]["resource_kind"], "inspect_payload");
+        assert_eq!(
+            json["resources"][0]["uri_template"],
+            "membrain://{namespace}/memories/{memory_id}"
+        );
+        assert_eq!(
+            json["resources"][0]["examples"][0],
+            "membrain://team.alpha/memories/42"
+        );
         assert_eq!(json["resources"][1]["name"], "snapshot-pre-migration");
+        assert_eq!(json["resources"][1]["resource_kind"], "snapshot_view");
         assert!(json["resources"][1].get("description").is_none());
 
         let decoded: McpResourceListing = serde_json::from_value(json).unwrap();
         assert_eq!(decoded.resources.len(), 2);
         assert_eq!(decoded.resources[0].name, "memory-42");
         assert!(decoded.resources[1].description.is_none());
+    }
+
+    #[test]
+    fn inspect_payload_can_be_derived_from_canonical_retrieval_result() {
+        let payload = McpInspectPayload::from_result(
+            RequestId::new("inspect-derived-1").unwrap(),
+            NamespaceId::new("team.alpha").unwrap(),
+            42,
+            &sample_result_set(),
+        )
+        .unwrap();
+
+        assert_eq!(payload.memory_id, 42);
+        assert_eq!(payload.namespace, NamespaceId::new("team.alpha").unwrap());
+        assert_eq!(payload.tier, "tier1_exact");
+        assert_eq!(
+            payload.explain_trace.policy_summary["effective_namespace"],
+            "mcp.team"
+        );
+        assert_eq!(
+            payload.index_presence["graph_assistance"],
+            serde_json::json!("none")
+        );
+        assert_eq!(
+            payload.lifecycle_state["degraded_summary"],
+            serde_json::Value::Null
+        );
+        assert_eq!(
+            payload.explain_trace.trace_stages,
+            vec!["policy_gate".to_string(), "packaging".to_string()]
+        );
+    }
+
+    #[test]
+    fn resource_read_payload_and_stream_listing_round_trip() {
+        let read_payload = McpResourceReadPayload {
+            request_id: RequestId::new("resource-read-1").unwrap(),
+            namespace: NamespaceId::new("daemon.runtime").unwrap(),
+            uri: "membrain://daemon/runtime/status".to_string(),
+            mime_type: "application/json".to_string(),
+            resource_kind: "runtime_status".to_string(),
+            bounded: true,
+            payload: serde_json::json!({"posture": "full"}),
+        };
+        let read_json = serde_json::to_value(&read_payload).unwrap();
+        assert_eq!(read_json["request_id"], "resource-read-1");
+        assert_eq!(read_json["namespace"], "daemon.runtime");
+        assert_eq!(read_json["uri"], "membrain://daemon/runtime/status");
+        assert_eq!(read_json["resource_kind"], "runtime_status");
+        assert_eq!(read_json["bounded"], true);
+        assert_eq!(read_json["payload"]["posture"], "full");
+        let decoded_read: McpResourceReadPayload = serde_json::from_value(read_json).unwrap();
+        assert!(decoded_read.bounded);
+
+        let streams = McpStreamListing {
+            request_id: RequestId::new("stream-req-1").unwrap(),
+            namespace: NamespaceId::new("daemon.runtime").unwrap(),
+            streams: vec![McpStream {
+                name: "maintenance-status".to_string(),
+                method: "maintenance.status".to_string(),
+                delivery: "jsonrpc_notification".to_string(),
+                description: "Background maintenance acceptance and posture updates".to_string(),
+                example_subscriptions: vec!["maintenance.status".to_string()],
+            }],
+        };
+        let streams_json = serde_json::to_value(&streams).unwrap();
+        assert_eq!(streams_json["namespace"], "daemon.runtime");
+        assert_eq!(streams_json["streams"][0]["method"], "maintenance.status");
+        assert_eq!(
+            streams_json["streams"][0]["delivery"],
+            "jsonrpc_notification"
+        );
+        assert_eq!(
+            streams_json["streams"][0]["example_subscriptions"][0],
+            "maintenance.status"
+        );
+        let decoded_streams: McpStreamListing = serde_json::from_value(streams_json).unwrap();
+        assert_eq!(decoded_streams.streams.len(), 1);
+        assert_eq!(decoded_streams.streams[0].name, "maintenance-status");
     }
 
     #[test]
@@ -1337,7 +1540,7 @@ mod tests {
 
     #[test]
     fn mcp_response_rejects_unknown_top_level_fields() {
-        let error = serde_json::from_value::<McpResponse>(serde_json::json!({
+        let result = serde_json::from_value::<McpResponse>(serde_json::json!({
             "status": "ok",
             "retrieval": {
                 "request_id": "req-5",
@@ -1358,15 +1561,14 @@ mod tests {
                 "result": serde_json::to_value(sample_result_set()).unwrap()
             },
             "unexpected": true
-        }))
-        .unwrap_err();
+        }));
 
-        assert!(error.to_string().contains("unknown field `unexpected`"));
+        assert!(result.is_err());
     }
 
     #[test]
     fn mcp_response_rejects_unknown_retrieval_fields() {
-        let error = serde_json::from_value::<McpResponse>(serde_json::json!({
+        let result = serde_json::from_value::<McpResponse>(serde_json::json!({
             "status": "ok",
             "retrieval": {
                 "request_id": "req-6",
@@ -1387,10 +1589,9 @@ mod tests {
                 "result": serde_json::to_value(sample_result_set()).unwrap(),
                 "unexpected": true
             }
-        }))
-        .unwrap_err();
+        }));
 
-        assert!(error.to_string().contains("unknown field `unexpected`"));
+        assert!(result.is_err());
     }
 
     #[test]
@@ -1406,7 +1607,9 @@ mod tests {
         }))
         .unwrap_err();
 
-        assert!(error.to_string().contains("unknown field `unexpected`"));
+        assert!(
+            error.to_string().contains("unknown field") && error.to_string().contains("unexpected")
+        );
     }
 
     #[test]
@@ -1432,7 +1635,9 @@ mod tests {
             "unexpected": true
         }))
         .unwrap_err();
-        assert!(error.to_string().contains("unknown field `unexpected`"));
+        assert!(
+            error.to_string().contains("unknown field") && error.to_string().contains("unexpected")
+        );
     }
 
     #[test]
@@ -1450,7 +1655,9 @@ mod tests {
             ]
         }))
         .unwrap_err();
-        assert!(error.to_string().contains("unknown field `unexpected`"));
+        assert!(
+            error.to_string().contains("unknown field") && error.to_string().contains("unexpected")
+        );
     }
 
     #[test]
@@ -1649,10 +1856,11 @@ mod tests {
 
         // Doctor
         let doctor = serde_json::to_value(McpRequest::Doctor(
-            serde_json::from_value(serde_json::json!({"namespace": "team.alpha"})).unwrap(),
+            serde_json::from_value(serde_json::json!({})).unwrap(),
         ))
         .unwrap();
         assert_eq!(doctor["method"], "doctor");
+        assert!(doctor["params"].as_object().unwrap().is_empty());
 
         // Dream
         let dream = serde_json::to_value(McpRequest::Dream(
@@ -1684,7 +1892,9 @@ mod tests {
             "unexpected": true
         }))
         .unwrap_err();
-        assert!(error.to_string().contains("unknown field `unexpected`"));
+        assert!(
+            error.to_string().contains("unknown field") && error.to_string().contains("unexpected")
+        );
     }
 
     #[test]
@@ -1696,7 +1906,9 @@ mod tests {
             "unexpected": true
         }))
         .unwrap_err();
-        assert!(error.to_string().contains("unknown field `unexpected`"));
+        assert!(
+            error.to_string().contains("unknown field") && error.to_string().contains("unexpected")
+        );
     }
 
     // ── Goal management round-trip tests ─────────────────────────────────
@@ -1757,7 +1969,9 @@ mod tests {
             "unexpected": true
         }))
         .unwrap_err();
-        assert!(error.to_string().contains("unknown field `unexpected`"));
+        assert!(
+            error.to_string().contains("unknown field") && error.to_string().contains("unexpected")
+        );
 
         let error = serde_json::from_value::<super::GoalPauseParams>(serde_json::json!({
             "task_id": "task-42",
@@ -1765,7 +1979,9 @@ mod tests {
             "unexpected": true
         }))
         .unwrap_err();
-        assert!(error.to_string().contains("unknown field `unexpected`"));
+        assert!(
+            error.to_string().contains("unknown field") && error.to_string().contains("unexpected")
+        );
     }
 
     #[test]

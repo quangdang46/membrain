@@ -8,6 +8,7 @@ use crate::brain_store::PreparedTier2Layout;
 use crate::engine::contradiction::{ContradictionExplain, ResolutionState};
 use crate::engine::ranking::{RankingExplain, RankingResult, RerankMetadata};
 use crate::engine::recall::{RecallPlan, RecallPlanKind, RecallTraceStage};
+use crate::engine::retrieval_planner::RetrievalPlanTrace;
 use crate::graph::{EntityId, RelationKind};
 use crate::observability::OutcomeClass;
 use crate::observability::{
@@ -260,6 +261,12 @@ pub struct ActionArtifact {
     pub suggestion: String,
     pub supporting_evidence: Vec<MemoryId>,
     pub confidence_score: u16,
+    /// Uncertainty markers that qualify the derived suggestion.
+    pub uncertainty_markers: Vec<String>,
+    /// Policy caveats that materially constrain safe use.
+    pub policy_caveats: Vec<String>,
+    /// Freshness caveats that materially constrain safe use.
+    pub freshness_caveats: Vec<String>,
 }
 
 /// Handle for a payload intentionally deferred past the final bounded cut.
@@ -429,6 +436,23 @@ pub struct ResultReason {
     pub detail: String,
 }
 
+/// Query-by-example explain artifact describing how seed evidence influenced retrieval.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct QueryByExampleExplain {
+    /// Stable machine-readable primary cue name.
+    pub primary_cue: String,
+    /// Ordered seed descriptors requested by the caller.
+    pub requested_seed_descriptors: Vec<String>,
+    /// Ordered seed descriptors materialized from stored evidence.
+    pub materialized_seed_descriptors: Vec<String>,
+    /// Ordered seed descriptors missing from stored evidence.
+    pub missing_seed_descriptors: Vec<String>,
+    /// Candidate count after bounded seed expansion.
+    pub expanded_candidate_count: usize,
+    /// Stable explanation of how the seed set influenced retrieval.
+    pub influence_summary: String,
+}
+
 /// Top-level explain payload for the full retrieval operation.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct RetrievalExplain {
@@ -450,6 +474,8 @@ pub struct RetrievalExplain {
     pub ranking_profile: String,
     /// Number of contradictions encountered.
     pub contradictions_found: usize,
+    /// Query-by-example explain artifact when example seeds participate in retrieval.
+    pub query_by_example: Option<QueryByExampleExplain>,
     /// Why concrete results appeared or alternatives were omitted.
     pub result_reasons: Vec<ResultReason>,
 }
@@ -521,8 +547,60 @@ impl RetrievalExplain {
             time_consumed_ms: None,
             ranking_profile: ranking_profile.to_string(),
             contradictions_found: 0,
+            query_by_example: None,
             result_reasons: Vec::new(),
         }
+    }
+
+    /// Attaches canonical query-by-example explain artifacts derived from the planner trace.
+    pub fn set_query_by_example_trace(&mut self, trace: &RetrievalPlanTrace) {
+        let Some(primary_cue) = trace.query_by_example_primary_cue else {
+            self.query_by_example = None;
+            return;
+        };
+
+        let requested_seed_count = trace.query_by_example_seed_descriptors.len();
+        let materialized_seed_count = trace.query_by_example_materialized_seed_descriptors.len();
+        let missing_seed_count = trace.query_by_example_missing_seed_descriptors.len();
+        let influence_summary = format!(
+            "primary cue {} expanded {} candidate(s) from {} requested seed(s); {} seed(s) materialized and {} seed(s) remained unavailable",
+            primary_cue.as_str(),
+            trace.final_candidates,
+            requested_seed_count,
+            materialized_seed_count,
+            missing_seed_count,
+        );
+
+        self.query_by_example = Some(QueryByExampleExplain {
+            primary_cue: primary_cue.as_str().to_string(),
+            requested_seed_descriptors: trace.query_by_example_seed_descriptors.clone(),
+            materialized_seed_descriptors: trace
+                .query_by_example_materialized_seed_descriptors
+                .clone(),
+            missing_seed_descriptors: trace.query_by_example_missing_seed_descriptors.clone(),
+            expanded_candidate_count: trace.final_candidates,
+            influence_summary: influence_summary.clone(),
+        });
+
+        for descriptor in &trace.query_by_example_materialized_seed_descriptors {
+            self.result_reasons.push(ResultReason {
+                memory_id: None,
+                reason_code: "query_by_example_seed_materialized".to_string(),
+                detail: format!("seed {descriptor} materialized from stored evidence"),
+            });
+        }
+        for descriptor in &trace.query_by_example_missing_seed_descriptors {
+            self.result_reasons.push(ResultReason {
+                memory_id: None,
+                reason_code: "query_by_example_seed_missing".to_string(),
+                detail: format!("seed {descriptor} was requested but not available for expansion"),
+            });
+        }
+        self.result_reasons.push(ResultReason {
+            memory_id: None,
+            reason_code: "query_by_example_candidate_expansion".to_string(),
+            detail: influence_summary,
+        });
     }
 
     /// Appends bounded temporal-landmark explain reasons derived from a prepared Tier2 layout.
@@ -1020,7 +1098,7 @@ impl ResultBuilder {
                 dedup_dropped: 0,
                 budget_capped: usize::from(truncated),
                 duplicate_collapsed: 0,
-                low_confidence_suppressed: filtered_count,
+                low_confidence_suppressed: 0,
                 stale_bypassed: 0,
                 confidence_filtered: filtered_count,
             },
@@ -1138,6 +1216,7 @@ mod tests {
             time_consumed_ms: None,
             ranking_profile: "balanced".to_string(),
             contradictions_found: 0,
+            query_by_example: None,
             result_reasons: vec![ResultReason {
                 memory_id: Some(MemoryId(2)),
                 reason_code: "score_kept".to_string(),
@@ -1254,6 +1333,7 @@ mod tests {
             time_consumed_ms: Some(5),
             ranking_profile: "balanced".to_string(),
             contradictions_found: 0,
+            query_by_example: None,
             result_reasons: vec![ResultReason {
                 memory_id: None,
                 reason_code: "no_match".to_string(),
@@ -1406,6 +1486,7 @@ mod tests {
             time_consumed_ms: Some(9),
             ranking_profile: "balanced".to_string(),
             contradictions_found: 0,
+            query_by_example: None,
             result_reasons: vec![ResultReason {
                 memory_id: Some(MemoryId(44)),
                 reason_code: "contradiction_selected".to_string(),
@@ -1490,6 +1571,7 @@ mod tests {
             time_consumed_ms: Some(9),
             ranking_profile: "balanced".to_string(),
             contradictions_found: 0,
+            query_by_example: None,
             result_reasons: vec![ResultReason {
                 memory_id: Some(MemoryId(44)),
                 reason_code: "contradiction_retained_under_legal_hold".to_string(),
@@ -1550,6 +1632,7 @@ mod tests {
             time_consumed_ms: Some(12),
             ranking_profile: "balanced".to_string(),
             contradictions_found: 0,
+            query_by_example: None,
             result_reasons: vec![ResultReason {
                 memory_id: Some(MemoryId(7)),
                 reason_code: "tier2_exact_match".to_string(),
@@ -1633,6 +1716,7 @@ mod tests {
             time_consumed_ms: Some(9),
             ranking_profile: "balanced".to_string(),
             contradictions_found: 0,
+            query_by_example: None,
             result_reasons: vec![ResultReason {
                 memory_id: Some(MemoryId(12)),
                 reason_code: "contradiction_visible".to_string(),
@@ -1669,6 +1753,7 @@ mod tests {
             time_consumed_ms: None,
             ranking_profile: "balanced".to_string(),
             contradictions_found: 0,
+            query_by_example: None,
             result_reasons: Vec::new(),
         };
 
@@ -1719,6 +1804,7 @@ mod tests {
             time_consumed_ms: None,
             ranking_profile: "balanced".to_string(),
             contradictions_found: 0,
+            query_by_example: None,
             result_reasons: Vec::new(),
         };
 
@@ -1807,6 +1893,7 @@ mod tests {
             time_consumed_ms: Some(3),
             ranking_profile: "balanced".to_string(),
             contradictions_found: 0,
+            query_by_example: None,
             result_reasons: vec![],
         });
 
@@ -1851,6 +1938,7 @@ mod tests {
             time_consumed_ms: Some(250),
             ranking_profile: "balanced".to_string(),
             contradictions_found: 0,
+            query_by_example: None,
             result_reasons: vec![ResultReason {
                 memory_id: None,
                 reason_code: "degraded_tier2_only".to_string(),
@@ -1905,6 +1993,7 @@ mod tests {
             time_consumed_ms: Some(2),
             ranking_profile: "balanced".to_string(),
             contradictions_found: 0,
+            query_by_example: None,
             result_reasons: vec![ResultReason {
                 memory_id: None,
                 reason_code: "policy_redacted".to_string(),
@@ -1954,6 +2043,9 @@ mod tests {
             suggestion: "Consider re-running last successful deploy".to_string(),
             supporting_evidence: vec![MemoryId(10)],
             confidence_score: 750,
+            uncertainty_markers: vec!["low_uncertainty".to_string()],
+            policy_caveats: vec!["policy_allows_redeploy_guidance".to_string()],
+            freshness_caveats: vec!["evidence_recent".to_string()],
         }]);
         let result_set = builder.build(RetrievalExplain {
             recall_plan: RecallPlanKind::Tier2ExactThenTier3Fallback,
@@ -1965,6 +2057,7 @@ mod tests {
             time_consumed_ms: Some(10),
             ranking_profile: "balanced".to_string(),
             contradictions_found: 0,
+            query_by_example: None,
             result_reasons: vec![],
         });
 
@@ -1981,6 +2074,18 @@ mod tests {
         assert_eq!(
             result_set.action_pack.as_ref().unwrap()[0].confidence_score,
             750
+        );
+        assert_eq!(
+            result_set.action_pack.as_ref().unwrap()[0].uncertainty_markers,
+            vec!["low_uncertainty".to_string()]
+        );
+        assert_eq!(
+            result_set.action_pack.as_ref().unwrap()[0].policy_caveats,
+            vec!["policy_allows_redeploy_guidance".to_string()]
+        );
+        assert_eq!(
+            result_set.action_pack.as_ref().unwrap()[0].freshness_caveats,
+            vec!["evidence_recent".to_string()]
         );
         assert_eq!(
             result_set.packaging_metadata.packaging_mode,
@@ -2021,6 +2126,7 @@ mod tests {
             time_consumed_ms: Some(2),
             ranking_profile: "balanced".to_string(),
             contradictions_found: 0,
+            query_by_example: None,
             result_reasons: vec![],
         });
 
@@ -2076,6 +2182,7 @@ mod tests {
             time_consumed_ms: Some(42),
             ranking_profile: "recency_biased".to_string(),
             contradictions_found: 2,
+            query_by_example: None,
             result_reasons: vec![
                 ResultReason {
                     memory_id: Some(MemoryId(7)),
@@ -2152,6 +2259,7 @@ mod tests {
             time_consumed_ms: Some(50),
             ranking_profile: "balanced".to_string(),
             contradictions_found: 0,
+            query_by_example: None,
             result_reasons: vec![],
         });
 
@@ -2252,6 +2360,7 @@ mod tests {
             time_consumed_ms: Some(2),
             ranking_profile: "balanced".to_string(),
             contradictions_found: 0,
+            query_by_example: None,
             result_reasons: vec![
                 ResultReason {
                     memory_id: Some(MemoryId(3)),
@@ -2307,6 +2416,7 @@ mod tests {
             time_consumed_ms: Some(1),
             ranking_profile: "balanced".to_string(),
             contradictions_found: 0,
+            query_by_example: None,
             result_reasons: vec![],
         };
         let result_set = builder.build(explain);
@@ -2350,6 +2460,7 @@ mod tests {
             time_consumed_ms: Some(5),
             ranking_profile: "balanced".to_string(),
             contradictions_found: 0,
+            query_by_example: None,
             result_reasons: vec![],
         };
         let result_set = builder.build(explain);
@@ -2440,6 +2551,7 @@ mod tests {
                 time_consumed_ms: Some(7),
                 ranking_profile: "balanced".to_string(),
                 contradictions_found: 0,
+                query_by_example: None,
                 result_reasons: vec![],
             },
             500,
@@ -2448,7 +2560,7 @@ mod tests {
         assert_eq!(result_set.count(), 1);
         assert_eq!(result_set.evidence_pack[0].result.memory_id, MemoryId(41));
         assert_eq!(result_set.omitted_summary.confidence_filtered, 1);
-        assert_eq!(result_set.omitted_summary.low_confidence_suppressed, 1);
+        assert_eq!(result_set.omitted_summary.low_confidence_suppressed, 0);
         assert!(
             result_set.evidence_pack[0]
                 .result

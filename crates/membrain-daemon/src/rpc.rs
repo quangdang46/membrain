@@ -432,7 +432,10 @@ impl RuntimeMethodRequest {
         match self.method.as_str() {
             "ping" => Ok(RuntimeRequest::Ping),
             "status" => Ok(RuntimeRequest::Status),
-            "doctor" => Ok(RuntimeRequest::Doctor),
+            "doctor" => {
+                reject_unknown_fields(&self.params, &[])?;
+                Ok(RuntimeRequest::Doctor)
+            }
             "encode" => {
                 reject_unknown_fields(&self.params, &["content", "namespace", "memory_type"])?;
                 let content = parse_required_string(&self.params, "content")?;
@@ -654,6 +657,10 @@ impl RuntimeMethodRequest {
                 Ok(RuntimeRequest::ResourceRead {
                     uri: parse_required_string(&self.params, "uri")?,
                 })
+            }
+            "streams.list" => {
+                reject_unknown_fields(&self.params, &[])?;
+                Ok(RuntimeRequest::StreamsList)
             }
             "sleep" => {
                 let millis = self
@@ -893,6 +900,7 @@ pub enum RuntimeRequest {
     ResourceRead {
         uri: String,
     },
+    StreamsList,
     Sleep {
         millis: u64,
     },
@@ -1373,6 +1381,14 @@ mod tests {
                 uri: "membrain://inspect/team.alpha/42".to_string(),
             }
         );
+
+        let streams = RuntimeMethodRequest {
+            jsonrpc: "2.0".to_string(),
+            method: "streams.list".to_string(),
+            params: json!({}),
+            id: Some(json!(15)),
+        };
+        assert_eq!(streams.parse_method().unwrap(), RuntimeRequest::StreamsList);
     }
 
     #[test]
@@ -1472,6 +1488,16 @@ mod tests {
             id: Some(json!(19)),
         };
         let error = resource_read.parse_method().unwrap_err();
+        assert_eq!(error.code, -32602);
+        assert_eq!(error.message, "unknown field unexpected");
+
+        let streams = RuntimeMethodRequest {
+            jsonrpc: "2.0".to_string(),
+            method: "streams.list".to_string(),
+            params: json!({ "unexpected": true }),
+            id: Some(json!(20)),
+        };
+        let error = streams.parse_method().unwrap_err();
         assert_eq!(error.code, -32602);
         assert_eq!(error.message, "unknown field unexpected");
     }
@@ -1860,6 +1886,37 @@ mod tests {
             }
             _ => std::process::abort(),
         }
+    }
+
+    #[test]
+    fn parse_method_share_and_unshare_reject_unknown_fields() {
+        let share = RuntimeMethodRequest {
+            jsonrpc: "2.0".to_string(),
+            method: "share".to_string(),
+            params: json!({
+                "id": 42,
+                "namespace_id": "team.beta",
+                "unexpected": true
+            }),
+            id: Some(json!(39)),
+        };
+        let error = share.parse_method().unwrap_err();
+        assert_eq!(error.code, -32602);
+        assert_eq!(error.message, "unknown field unexpected");
+
+        let unshare = RuntimeMethodRequest {
+            jsonrpc: "2.0".to_string(),
+            method: "unshare".to_string(),
+            params: json!({
+                "id": 42,
+                "namespace": "team.alpha",
+                "unexpected": true
+            }),
+            id: Some(json!(40)),
+        };
+        let error = unshare.parse_method().unwrap_err();
+        assert_eq!(error.code, -32602);
+        assert_eq!(error.message, "unknown field unexpected");
     }
 
     #[test]

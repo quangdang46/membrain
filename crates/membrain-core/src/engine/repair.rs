@@ -725,7 +725,8 @@ mod tests {
             match snap.state {
                 MaintenanceJobState::Completed(ref summary) => {
                     assert_eq!(summary.targets_checked, 10);
-                    assert_eq!(summary.healthy, 10);
+                    assert_eq!(summary.healthy, 9);
+                    assert_eq!(summary.degraded, 1);
                     assert_eq!(summary.results.len(), 10);
                     assert_eq!(summary.verification_artifacts.len(), 10);
                     assert_eq!(summary.operator_reports.len(), 10);
@@ -734,14 +735,16 @@ mod tests {
                         .get(&RepairTarget::GraphConsistency)
                         .unwrap();
                     assert_eq!(graph_report.metrics.durable_inputs_seen, 2);
-                    assert_eq!(graph_report.metrics.rebuilt_edges, 2);
-                    assert_eq!(graph_report.metrics.dropped_edges, 0);
-                    assert!(graph_report.metrics.verification_passed);
+                    assert_eq!(graph_report.metrics.rebuilt_edges, 1);
+                    assert_eq!(graph_report.metrics.dropped_edges, 1);
+                    assert!(!graph_report.metrics.verification_passed);
                     assert!(graph_report
                         .hooks_run
                         .iter()
                         .any(|hook| hook.as_str() == "verify_consistency_snapshot"));
-                    assert!(graph_report.operator_log.contains("failure_injection=none"));
+                    assert!(graph_report
+                        .operator_log
+                        .contains("failure_injection=drop_last_derived_edge"));
                     let semantic_hot_report = summary
                         .operator_reports
                         .iter()

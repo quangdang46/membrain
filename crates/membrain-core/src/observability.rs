@@ -44,6 +44,10 @@ pub enum AuditEventKind {
     MaintenanceConsolidationStarted,
     MaintenanceConsolidationCompleted,
     MaintenanceConsolidationPartial,
+    MaintenanceReconsolidationApplied,
+    MaintenanceReconsolidationDiscarded,
+    MaintenanceReconsolidationDeferred,
+    MaintenanceReconsolidationBlocked,
     IncidentRecorded,
     ArchiveRecorded,
 }
@@ -68,6 +72,10 @@ impl AuditEventKind {
             Self::MaintenanceConsolidationStarted => "maintenance_consolidation_started",
             Self::MaintenanceConsolidationCompleted => "maintenance_consolidation_completed",
             Self::MaintenanceConsolidationPartial => "maintenance_consolidation_partial",
+            Self::MaintenanceReconsolidationApplied => "maintenance_reconsolidation_applied",
+            Self::MaintenanceReconsolidationDiscarded => "maintenance_reconsolidation_discarded",
+            Self::MaintenanceReconsolidationDeferred => "maintenance_reconsolidation_deferred",
+            Self::MaintenanceReconsolidationBlocked => "maintenance_reconsolidation_blocked",
             Self::IncidentRecorded => "incident_recorded",
             Self::ArchiveRecorded => "archive_recorded",
         }
@@ -89,6 +97,10 @@ impl AuditEventKind {
             | Self::MaintenanceConsolidationStarted
             | Self::MaintenanceConsolidationCompleted
             | Self::MaintenanceConsolidationPartial
+            | Self::MaintenanceReconsolidationApplied
+            | Self::MaintenanceReconsolidationDiscarded
+            | Self::MaintenanceReconsolidationDeferred
+            | Self::MaintenanceReconsolidationBlocked
             | Self::IncidentRecorded => AuditEventCategory::Maintenance,
             Self::ArchiveRecorded => AuditEventCategory::Archive,
         }
@@ -676,6 +688,9 @@ fn reason_code_label(reason_code: &str) -> &'static str {
         "score_kept" => "score_kept",
         "no_match" => "no_match",
         "tier2_exact_match" => "tier2_exact_match",
+        "query_by_example_seed_materialized" => "query_by_example_seed_materialized",
+        "query_by_example_seed_missing" => "query_by_example_seed_missing",
+        "query_by_example_candidate_expansion" => "query_by_example_candidate_expansion",
         "temporal_prefilter_metadata_only" => "temporal_prefilter_metadata_only",
         "temporal_payload_deferred" => "temporal_payload_deferred",
         "temporal_landmark_selected" => "temporal_landmark_selected",
@@ -749,11 +764,140 @@ impl CacheLookupOutcome {
     }
 }
 
+/// Machine-readable cache family label for cross-surface observability.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub enum CacheFamilyLabel {
+    Tier1Item,
+    Tier2Query,
+    AnnProbe,
+    Result,
+    Summary,
+    Negative,
+}
+
+impl CacheFamilyLabel {
+    /// Returns the stable machine-readable cache family label.
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Tier1Item => "tier1_item",
+            Self::Tier2Query => "tier2_query",
+            Self::AnnProbe => "ann_probe",
+            Self::Result => "result",
+            Self::Summary => "summary",
+            Self::Negative => "negative",
+        }
+    }
+}
+
+/// Machine-readable cache event label for observability traces.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub enum CacheEventLabel {
+    Hit,
+    Miss,
+    Bypass,
+    Invalidate,
+    Prefetch,
+}
+
+impl CacheEventLabel {
+    /// Returns the stable machine-readable cache event label.
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Hit => "hit",
+            Self::Miss => "miss",
+            Self::Bypass => "bypass",
+            Self::Invalidate => "invalidate",
+            Self::Prefetch => "prefetch",
+        }
+    }
+}
+
+/// Machine-readable cache reason label for misses, bypasses, and invalidations.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub enum CacheReasonLabel {
+    PolicyBoundary,
+    NamespaceMismatch,
+    SnapshotRequired,
+    LegalHold,
+    StaleGeneration,
+    ColdStart,
+}
+
+impl CacheReasonLabel {
+    /// Returns the stable machine-readable cache reason label.
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::PolicyBoundary => "policy_boundary",
+            Self::NamespaceMismatch => "namespace_mismatch",
+            Self::SnapshotRequired => "snapshot_required",
+            Self::LegalHold => "legal_hold",
+            Self::StaleGeneration => "stale_generation",
+            Self::ColdStart => "cold_start",
+        }
+    }
+}
+
+/// Machine-readable warm-source label for cache hits and prefetch reuse.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub enum WarmSourceLabel {
+    Tier1ItemCache,
+    Tier2QueryCache,
+    AnnProbeCache,
+    ResultCache,
+    SummaryCache,
+    PrefetchHints,
+    ColdStartMitigation,
+}
+
+impl WarmSourceLabel {
+    /// Returns the stable machine-readable warm-source label.
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Tier1ItemCache => "tier1_item_cache",
+            Self::Tier2QueryCache => "tier2_query_cache",
+            Self::AnnProbeCache => "ann_probe_cache",
+            Self::ResultCache => "result_cache",
+            Self::SummaryCache => "summary_cache",
+            Self::PrefetchHints => "prefetch_hints",
+            Self::ColdStartMitigation => "cold_start_mitigation",
+        }
+    }
+}
+
+/// Machine-readable generation-validation label for cache traces.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub enum GenerationStatusLabel {
+    Valid,
+    Stale,
+    Unknown,
+}
+
+impl GenerationStatusLabel {
+    /// Returns the stable machine-readable generation-status label.
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Valid => "valid",
+            Self::Stale => "stale",
+            Self::Unknown => "unknown",
+        }
+    }
+}
+
 /// Stable trace artifact for one cache-family evaluation on the request path.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct CacheEvalTrace {
     /// Which cache family was evaluated.
+    pub cache_family: CacheFamilyLabel,
+    /// Which cache event was emitted for this family.
+    pub cache_event: CacheEventLabel,
+    /// Stable request-level outcome for the cache evaluation.
     pub outcome: CacheLookupOutcome,
+    /// Explicit reason for bypass, miss, or invalidation when present.
+    pub cache_reason: Option<CacheReasonLabel>,
+    /// Which warm source provided the cached entry when reused.
+    pub warm_source: Option<WarmSourceLabel>,
+    /// Generation validation status for the cache entry.
+    pub generation_status: GenerationStatusLabel,
     /// Candidate count before this cache evaluation.
     pub candidates_before: usize,
     /// Candidate count after this cache evaluation.
@@ -809,10 +953,11 @@ pub struct MaintenanceQueueReport {
 #[cfg(test)]
 mod tests {
     use super::{
-        AdmissionOutcomeKind, AuditEventCategory, AuditEventKind, CacheLookupOutcome,
-        EncodeFastPathStage, ExplainResultReason, MaintenanceQueueReport, MaintenanceQueueStatus,
+        AdmissionOutcomeKind, AuditEventCategory, AuditEventKind, CacheEvalTrace, CacheEventLabel,
+        CacheFamilyLabel, CacheLookupOutcome, CacheReasonLabel, EncodeFastPathStage,
+        ExplainResultReason, GenerationStatusLabel, MaintenanceQueueReport, MaintenanceQueueStatus,
         ObservabilityModule, OutcomeClass, Tier1LookupLane, Tier1LookupOutcome,
-        Tier2PrefilterOutcome, TraceStage,
+        Tier2PrefilterOutcome, TraceStage, WarmSourceLabel,
     };
     use crate::api::{FieldPresence, NamespaceId};
     use crate::engine::recall::{RecallPlanKind, RecallTraceStage};
@@ -894,6 +1039,26 @@ mod tests {
             AuditEventKind::MaintenanceConsolidationPartial.category(),
             AuditEventCategory::Maintenance
         );
+        assert_eq!(
+            AuditEventKind::MaintenanceReconsolidationApplied.as_str(),
+            "maintenance_reconsolidation_applied"
+        );
+        assert_eq!(
+            AuditEventKind::MaintenanceReconsolidationDiscarded.as_str(),
+            "maintenance_reconsolidation_discarded"
+        );
+        assert_eq!(
+            AuditEventKind::MaintenanceReconsolidationDeferred.as_str(),
+            "maintenance_reconsolidation_deferred"
+        );
+        assert_eq!(
+            AuditEventKind::MaintenanceReconsolidationBlocked.as_str(),
+            "maintenance_reconsolidation_blocked"
+        );
+        assert_eq!(
+            AuditEventKind::MaintenanceReconsolidationBlocked.category(),
+            AuditEventCategory::Maintenance
+        );
         assert_eq!(MaintenanceQueueStatus::Idle.as_str(), "idle");
         assert_eq!(MaintenanceQueueStatus::Running.as_str(), "running");
         assert_eq!(MaintenanceQueueStatus::Partial.as_str(), "partial");
@@ -931,6 +1096,73 @@ mod tests {
         assert_eq!(CacheLookupOutcome::Bypass.as_str(), "bypass");
         assert_eq!(CacheLookupOutcome::StaleWarning.as_str(), "stale_warning");
         assert_eq!(CacheLookupOutcome::Disabled.as_str(), "disabled");
+        assert_eq!(CacheFamilyLabel::Tier1Item.as_str(), "tier1_item");
+        assert_eq!(CacheFamilyLabel::Tier2Query.as_str(), "tier2_query");
+        assert_eq!(CacheFamilyLabel::AnnProbe.as_str(), "ann_probe");
+        assert_eq!(CacheFamilyLabel::Result.as_str(), "result");
+        assert_eq!(CacheFamilyLabel::Summary.as_str(), "summary");
+        assert_eq!(CacheFamilyLabel::Negative.as_str(), "negative");
+        assert_eq!(CacheEventLabel::Hit.as_str(), "hit");
+        assert_eq!(CacheEventLabel::Miss.as_str(), "miss");
+        assert_eq!(CacheEventLabel::Bypass.as_str(), "bypass");
+        assert_eq!(CacheEventLabel::Invalidate.as_str(), "invalidate");
+        assert_eq!(CacheEventLabel::Prefetch.as_str(), "prefetch");
+        assert_eq!(CacheReasonLabel::PolicyBoundary.as_str(), "policy_boundary");
+        assert_eq!(
+            CacheReasonLabel::NamespaceMismatch.as_str(),
+            "namespace_mismatch"
+        );
+        assert_eq!(
+            CacheReasonLabel::SnapshotRequired.as_str(),
+            "snapshot_required"
+        );
+        assert_eq!(CacheReasonLabel::LegalHold.as_str(), "legal_hold");
+        assert_eq!(
+            CacheReasonLabel::StaleGeneration.as_str(),
+            "stale_generation"
+        );
+        assert_eq!(CacheReasonLabel::ColdStart.as_str(), "cold_start");
+        assert_eq!(WarmSourceLabel::Tier1ItemCache.as_str(), "tier1_item_cache");
+        assert_eq!(
+            WarmSourceLabel::Tier2QueryCache.as_str(),
+            "tier2_query_cache"
+        );
+        assert_eq!(WarmSourceLabel::AnnProbeCache.as_str(), "ann_probe_cache");
+        assert_eq!(WarmSourceLabel::ResultCache.as_str(), "result_cache");
+        assert_eq!(WarmSourceLabel::SummaryCache.as_str(), "summary_cache");
+        assert_eq!(WarmSourceLabel::PrefetchHints.as_str(), "prefetch_hints");
+        assert_eq!(
+            WarmSourceLabel::ColdStartMitigation.as_str(),
+            "cold_start_mitigation"
+        );
+        assert_eq!(GenerationStatusLabel::Valid.as_str(), "valid");
+        assert_eq!(GenerationStatusLabel::Stale.as_str(), "stale");
+        assert_eq!(GenerationStatusLabel::Unknown.as_str(), "unknown");
+    }
+
+    #[test]
+    fn cache_eval_trace_preserves_per_family_observability_shape() {
+        let trace = CacheEvalTrace {
+            cache_family: CacheFamilyLabel::Result,
+            cache_event: CacheEventLabel::Hit,
+            outcome: CacheLookupOutcome::Hit,
+            cache_reason: None,
+            warm_source: Some(WarmSourceLabel::ResultCache),
+            generation_status: GenerationStatusLabel::Valid,
+            candidates_before: 6,
+            candidates_after: 3,
+            warm_reuse: true,
+        };
+
+        let value = serde_json::to_value(trace).unwrap();
+        assert_eq!(value["cache_family"], "Result");
+        assert_eq!(value["cache_event"], "Hit");
+        assert_eq!(value["outcome"], "Hit");
+        assert_eq!(value["warm_source"], "ResultCache");
+        assert_eq!(value["generation_status"], "Valid");
+        assert_eq!(value["candidates_before"], 6);
+        assert_eq!(value["candidates_after"], 3);
+        assert_eq!(value["warm_reuse"], true);
     }
 
     #[test]
@@ -952,6 +1184,7 @@ mod tests {
                 time_consumed_ms: Some(12),
                 ranking_profile: "balanced".to_string(),
                 contradictions_found: 0,
+                query_by_example: None,
                 result_reasons: vec![ResultReason {
                     memory_id: None,
                     reason_code: "tier2_exact_match".to_string(),
@@ -1109,6 +1342,7 @@ mod tests {
                     time_consumed_ms: Some(1),
                     ranking_profile: "balanced".to_string(),
                     contradictions_found: 0,
+                    query_by_example: None,
                     result_reasons: Vec::new(),
                 },
                 policy_summary: PolicySummary {
@@ -1184,6 +1418,7 @@ mod tests {
                 time_consumed_ms: Some(3),
                 ranking_profile: "balanced".to_string(),
                 contradictions_found: 0,
+                query_by_example: None,
                 result_reasons: vec![ResultReason {
                     memory_id: Some(crate::types::MemoryId(21)),
                     reason_code: "temporal_payload_deferred".to_string(),
@@ -1267,6 +1502,7 @@ mod tests {
                 time_consumed_ms: Some(3),
                 ranking_profile: "balanced".to_string(),
                 contradictions_found: 0,
+                query_by_example: None,
                 result_reasons: vec![ResultReason {
                     memory_id: Some(crate::types::MemoryId(21)),
                     reason_code: "temporal_landmark_selected".to_string(),
@@ -1369,6 +1605,7 @@ mod tests {
                 time_consumed_ms: Some(3),
                 ranking_profile: "balanced".to_string(),
                 contradictions_found: 2,
+                query_by_example: None,
                 result_reasons: vec![
                     ResultReason {
                         memory_id: Some(crate::types::MemoryId(44)),
@@ -1469,6 +1706,7 @@ mod tests {
                 time_consumed_ms: Some(1),
                 ranking_profile: "balanced".to_string(),
                 contradictions_found: 0,
+                query_by_example: None,
                 result_reasons: Vec::new(),
             },
             policy_summary: PolicySummary {

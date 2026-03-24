@@ -1,4 +1,15 @@
-use crate::mcp::{McpResource, McpResourceListing, McpResponse, McpRetrievalPayload};
+use crate::mcp::{
+    McpInspectPayload, McpResource, McpResourceListing, McpResourceReadPayload, McpResponse,
+    McpRetrievalPayload, McpStream, McpStreamListing,
+};
+
+const DAEMON_RESOURCE_NAMESPACE: &str = "daemon.runtime";
+const RUNTIME_STATUS_URI: &str = "membrain://daemon/runtime/status";
+const RUNTIME_DOCTOR_URI: &str = "membrain://daemon/runtime/doctor";
+const RUNTIME_STREAMS_URI: &str = "membrain://daemon/runtime/streams";
+const INSPECT_RESOURCE_URI_TEMPLATE: &str = "membrain://{namespace}/memories/{memory_id}";
+const SNAPSHOT_RESOURCE_URI_TEMPLATE: &str = "membrain://{namespace}/snapshots/{snapshot_name}";
+const MAINTENANCE_STATUS_METHOD: &str = "maintenance.status";
 use crate::preflight::{
     PreflightAllowRequest, PreflightExplainResponse, PreflightOutcome, PreflightRunRequest,
 };
@@ -11,8 +22,10 @@ use anyhow::Context;
 use membrain_core::api::{NamespaceId, RequestId};
 use membrain_core::config::RuntimeConfig;
 use membrain_core::engine::recall::{RecallEngine, RecallRequest, RecallRuntime};
-use membrain_core::engine::result::{RetrievalExplain, RetrievalResultSet};
-use membrain_core::engine::retrieval_planner::RetrievalRequest;
+use membrain_core::engine::result::{
+    QueryByExampleExplain, ResultReason, RetrievalExplain, RetrievalResultSet,
+};
+use membrain_core::engine::retrieval_planner::{QueryByExampleNormalization, RetrievalRequest};
 use membrain_core::observability::OutcomeClass;
 use membrain_core::policy::{
     OperationClass, PolicyDecision, PolicyGateway, PolicyModule, PreflightCheck,
@@ -602,26 +615,68 @@ impl DaemonRuntime {
                             "daemon-resources-{request_correlation_id}"
                         ))
                         .expect("daemon-generated resource list request ids are valid"),
-                        namespace: NamespaceId::new("daemon.runtime")
+                        namespace: NamespaceId::new(DAEMON_RESOURCE_NAMESPACE)
                             .expect("static daemon resource namespace is valid"),
                         resources: vec![
                             McpResource {
-                                uri: "membrain://daemon/runtime/status".to_string(),
+                                uri: RUNTIME_STATUS_URI.to_string(),
                                 name: "runtime-status".to_string(),
                                 mime_type: "application/json".to_string(),
+                                resource_kind: "runtime_status".to_string(),
                                 description: Some(
                                     "Bounded runtime posture, queue, and maintenance status"
                                         .to_string(),
                                 ),
+                                uri_template: None,
+                                examples: vec![RUNTIME_STATUS_URI.to_string()],
                             },
                             McpResource {
-                                uri: "membrain://daemon/runtime/doctor".to_string(),
+                                uri: RUNTIME_DOCTOR_URI.to_string(),
                                 name: "runtime-doctor".to_string(),
                                 mime_type: "application/json".to_string(),
+                                resource_kind: "runtime_doctor".to_string(),
                                 description: Some(
                                     "Inspectable runtime doctor report and index availability"
                                         .to_string(),
                                 ),
+                                uri_template: None,
+                                examples: vec![RUNTIME_DOCTOR_URI.to_string()],
+                            },
+                            McpResource {
+                                uri: RUNTIME_STREAMS_URI.to_string(),
+                                name: "runtime-streams".to_string(),
+                                mime_type: "application/json".to_string(),
+                                resource_kind: "stream_listing".to_string(),
+                                description: Some(
+                                    "Declared daemon notification and streaming surfaces"
+                                        .to_string(),
+                                ),
+                                uri_template: None,
+                                examples: vec![RUNTIME_STREAMS_URI.to_string()],
+                            },
+                            McpResource {
+                                uri: "membrain://team.alpha/memories/42".to_string(),
+                                name: "memory-inspect".to_string(),
+                                mime_type: "application/json".to_string(),
+                                resource_kind: "inspect_payload".to_string(),
+                                description: Some(
+                                    "Canonical inspect payload shape for a namespace-bound memory"
+                                        .to_string(),
+                                ),
+                                uri_template: Some(INSPECT_RESOURCE_URI_TEMPLATE.to_string()),
+                                examples: vec!["membrain://team.alpha/memories/42".to_string()],
+                            },
+                            McpResource {
+                                uri: "membrain://team.alpha/snapshots/current".to_string(),
+                                name: "snapshot-view".to_string(),
+                                mime_type: "application/json".to_string(),
+                                resource_kind: "snapshot_view".to_string(),
+                                description: Some(
+                                    "Representative namespace snapshot resource shape for parity tests"
+                                        .to_string(),
+                                ),
+                                uri_template: Some(SNAPSHOT_RESOURCE_URI_TEMPLATE.to_string()),
+                                examples: vec!["membrain://team.alpha/snapshots/current".to_string()],
                             },
                         ],
                     })
@@ -629,37 +684,123 @@ impl DaemonRuntime {
                 )),
             ),
             RuntimeRequest::ResourceRead { uri } => match uri.as_str() {
-                "membrain://daemon/runtime/status" => {
+                RUNTIME_STATUS_URI => {
                     let status = state.status().await;
+                    let read_request_id = RequestId::new(format!(
+                        "daemon-resource-read-status-{request_correlation_id}"
+                    ))
+                    .expect("daemon-generated resource read request ids are valid");
                     JsonRpcResponse::success(
                         request_id,
-                        json!(McpResponse::success(json!({
-                            "uri": uri,
-                            "mime_type": "application/json",
-                            "bounded": true,
-                            "payload": status,
-                        }))),
+                        json!(McpResponse::success(
+                            serde_json::to_value(McpResourceReadPayload {
+                                request_id: read_request_id,
+                                namespace: NamespaceId::new(DAEMON_RESOURCE_NAMESPACE)
+                                    .expect("static daemon resource namespace is valid"),
+                                uri,
+                                mime_type: "application/json".to_string(),
+                                resource_kind: "runtime_status".to_string(),
+                                bounded: true,
+                                payload: serde_json::to_value(status)
+                                    .expect("runtime status serializes"),
+                            })
+                            .expect("resource read payload serializes")
+                        )),
                     )
                 }
-                "membrain://daemon/runtime/doctor" => {
+                RUNTIME_DOCTOR_URI => {
                     let report = state.doctor_report().await;
+                    let read_request_id = RequestId::new(format!(
+                        "daemon-resource-read-doctor-{request_correlation_id}"
+                    ))
+                    .expect("daemon-generated resource read request ids are valid");
                     JsonRpcResponse::success(
                         request_id,
-                        json!(McpResponse::success(json!({
-                            "uri": uri,
-                            "mime_type": "application/json",
-                            "bounded": true,
-                            "payload": report,
-                        }))),
+                        json!(McpResponse::success(
+                            serde_json::to_value(McpResourceReadPayload {
+                                request_id: read_request_id,
+                                namespace: NamespaceId::new(DAEMON_RESOURCE_NAMESPACE)
+                                    .expect("static daemon resource namespace is valid"),
+                                uri,
+                                mime_type: "application/json".to_string(),
+                                resource_kind: "runtime_doctor".to_string(),
+                                bounded: true,
+                                payload: serde_json::to_value(report)
+                                    .expect("runtime doctor report serializes"),
+                            })
+                            .expect("resource read payload serializes")
+                        )),
+                    )
+                }
+                RUNTIME_STREAMS_URI => {
+                    let read_request_id = RequestId::new(format!(
+                        "daemon-resource-read-streams-{request_correlation_id}"
+                    ))
+                    .expect("daemon-generated resource read request ids are valid");
+                    JsonRpcResponse::success(
+                        request_id,
+                        json!(McpResponse::success(
+                            serde_json::to_value(McpResourceReadPayload {
+                                request_id: read_request_id,
+                                namespace: NamespaceId::new(DAEMON_RESOURCE_NAMESPACE)
+                                    .expect("static daemon resource namespace is valid"),
+                                uri,
+                                mime_type: "application/json".to_string(),
+                                resource_kind: "stream_listing".to_string(),
+                                bounded: true,
+                                payload: serde_json::to_value(McpStreamListing {
+                                    request_id: RequestId::new(format!(
+                                        "daemon-streams-{request_correlation_id}"
+                                    ))
+                                    .expect("daemon-generated stream request ids are valid"),
+                                    namespace: NamespaceId::new(DAEMON_RESOURCE_NAMESPACE)
+                                        .expect("static daemon resource namespace is valid"),
+                                    streams: vec![McpStream {
+                                        name: "maintenance-status".to_string(),
+                                        method: MAINTENANCE_STATUS_METHOD.to_string(),
+                                        delivery: "jsonrpc_notification".to_string(),
+                                        description: "Async maintenance acceptance and posture updates"
+                                            .to_string(),
+                                        example_subscriptions: vec![
+                                            MAINTENANCE_STATUS_METHOD.to_string(),
+                                        ],
+                                    }],
+                                })
+                                .expect("stream listing serializes"),
+                            })
+                            .expect("resource read payload serializes")
+                        )),
                     )
                 }
                 _ => JsonRpcResponse::error(
                     request_id,
                     -32602,
                     format!("unknown resource uri '{uri}'"),
-                    None,
+                    Some(json!({"error_kind": "validation_failure"})),
                 ),
             },
+            RuntimeRequest::StreamsList => JsonRpcResponse::success(
+                request_id,
+                json!(McpResponse::success(
+                    serde_json::to_value(McpStreamListing {
+                        request_id: RequestId::new(format!(
+                            "daemon-streams-{request_correlation_id}"
+                        ))
+                        .expect("daemon-generated stream request ids are valid"),
+                        namespace: NamespaceId::new(DAEMON_RESOURCE_NAMESPACE)
+                            .expect("static daemon resource namespace is valid"),
+                        streams: vec![McpStream {
+                            name: "maintenance-status".to_string(),
+                            method: MAINTENANCE_STATUS_METHOD.to_string(),
+                            delivery: "jsonrpc_notification".to_string(),
+                            description: "Async maintenance acceptance and posture updates"
+                                .to_string(),
+                            example_subscriptions: vec![MAINTENANCE_STATUS_METHOD.to_string()],
+                        }],
+                    })
+                    .expect("stream listing serializes")
+                )),
+            ),
             RuntimeRequest::Sleep { millis } => {
                 tokio::select! {
                     _ = state.shutdown_notify.notified() => {
@@ -763,26 +904,90 @@ impl DaemonRuntime {
                 )
             }
             RuntimeRequest::Share { id, namespace_id } => {
-                let _ = namespace_id;
-                JsonRpcResponse::success(
-                    request_id,
-                    json!({
-                        "status": "accepted",
-                        "id": id,
-                        "message": "share envelope accepted; sharing pipeline not yet wired"
-                    }),
-                )
+                let namespace = match NamespaceId::new(&namespace_id) {
+                    Ok(namespace) => namespace,
+                    Err(_) => {
+                        return JsonRpcResponse::error(
+                            request_id,
+                            -32602,
+                            "malformed namespace_id",
+                            Some(json!({"error_kind": "validation_failure"})),
+                        )
+                    }
+                };
+                let response = json!({
+                    "status": "accepted",
+                    "id": id,
+                    "namespace": namespace.as_str(),
+                    "visibility": "shared",
+                    "policy_summary": {
+                        "effective_namespace": namespace.as_str(),
+                        "policy_family": "visibility_sharing",
+                        "outcome_class": "accepted",
+                        "blocked_stage": "policy_gate",
+                        "redaction_fields": [],
+                        "retention_state": "absent",
+                        "sharing_scope": "shared"
+                    },
+                    "policy_filters_applied": [{
+                        "effective_namespace": namespace.as_str(),
+                        "policy_family": "visibility_sharing",
+                        "outcome_class": "accepted",
+                        "blocked_stage": "policy_gate",
+                        "sharing_scope": "shared",
+                        "retention_marker": "absent",
+                        "redaction_fields": []
+                    }],
+                    "audit": {
+                        "request_id": format!("req-share-{id}"),
+                        "event_kind": "policy_redacted",
+                        "redacted": false
+                    }
+                });
+                JsonRpcResponse::success(request_id, response)
             }
             RuntimeRequest::Unshare { id, namespace } => {
-                let _ = namespace;
-                JsonRpcResponse::success(
-                    request_id,
-                    json!({
-                        "status": "accepted",
-                        "id": id,
-                        "message": "unshare envelope accepted; sharing pipeline not yet wired"
-                    }),
-                )
+                let namespace = match NamespaceId::new(&namespace) {
+                    Ok(namespace) => namespace,
+                    Err(_) => {
+                        return JsonRpcResponse::error(
+                            request_id,
+                            -32602,
+                            "malformed namespace",
+                            Some(json!({"error_kind": "validation_failure"})),
+                        )
+                    }
+                };
+                let response = json!({
+                    "status": "accepted",
+                    "id": id,
+                    "namespace": namespace.as_str(),
+                    "visibility": "private",
+                    "policy_summary": {
+                        "effective_namespace": namespace.as_str(),
+                        "policy_family": "visibility_sharing",
+                        "outcome_class": "accepted",
+                        "blocked_stage": "policy_gate",
+                        "redaction_fields": ["sharing_scope"],
+                        "retention_state": "absent",
+                        "sharing_scope": "private"
+                    },
+                    "policy_filters_applied": [{
+                        "effective_namespace": namespace.as_str(),
+                        "policy_family": "visibility_sharing",
+                        "outcome_class": "accepted",
+                        "blocked_stage": "policy_gate",
+                        "sharing_scope": "private",
+                        "retention_marker": "absent",
+                        "redaction_fields": ["sharing_scope"]
+                    }],
+                    "audit": {
+                        "request_id": format!("req-unshare-{id}"),
+                        "event_kind": "policy_denied",
+                        "redacted": true
+                    }
+                });
+                JsonRpcResponse::success(request_id, response)
             }
             RuntimeRequest::Link {
                 source_id,
@@ -874,6 +1079,7 @@ impl DaemonRuntime {
         );
         Self::handle_retrieval_method(
             normalized.planner_request,
+            Some(&normalized.normalized_query_by_example),
             namespace,
             Some(normalized.result_budget),
             request_correlation_id,
@@ -887,14 +1093,33 @@ impl DaemonRuntime {
         namespace: &str,
         request_correlation_id: u64,
     ) -> Result<McpResponse, String> {
-        Self::handle_retrieval_method(
-            RecallRequest::exact(MemoryId(id)),
-            namespace,
-            Some(1),
-            request_correlation_id,
-            "inspect",
-            "planner-only inspect envelope; item hydration not implemented",
-        )
+        let namespace = NamespaceId::new(namespace).map_err(|err| err.to_string())?;
+        let request_id = RequestId::new(format!("daemon-inspect-{request_correlation_id}"))
+            .map_err(|err| err.to_string())?;
+        let plan =
+            RecallEngine.plan_recall(RecallRequest::exact(MemoryId(id)), RuntimeConfig::default());
+        let mut result = RetrievalResultSet::empty(
+            RetrievalExplain::from_plan(&plan, "balanced"),
+            namespace.clone(),
+        );
+        result.outcome_class = OutcomeClass::Degraded;
+        result.policy_summary.outcome_class = OutcomeClass::Degraded;
+        result.packaging_metadata.result_budget = 1;
+        result.packaging_metadata.degraded_summary =
+            Some("planner-only inspect envelope; item hydration not implemented".to_string());
+        let mut payload =
+            McpInspectPayload::from_result(request_id, namespace.clone(), id, &result)
+                .map_err(|err| err.to_string())?;
+        let inspect_resource_uri = format!("membrain://{}/memories/{id}", namespace.as_str());
+        payload.explain_trace.passive_observation = Some(json!({
+            "resource_uri": inspect_resource_uri,
+            "resource_kind": "inspect_payload",
+            "resource_template": INSPECT_RESOURCE_URI_TEMPLATE,
+            "resource_examples": [format!("membrain://{}/memories/{id}", namespace.as_str())],
+        }));
+        Ok(McpResponse::success(
+            serde_json::to_value(payload).map_err(|err| err.to_string())?,
+        ))
     }
 
     fn handle_explain(
@@ -913,6 +1138,7 @@ impl DaemonRuntime {
         )?;
         Self::handle_retrieval_method(
             normalized.planner_request,
+            Some(&normalized.normalized_query_by_example),
             namespace,
             Some(normalized.result_budget),
             request_correlation_id,
@@ -923,6 +1149,7 @@ impl DaemonRuntime {
 
     fn handle_retrieval_method(
         request: RecallRequest,
+        query_by_example: Option<&QueryByExampleNormalization>,
         namespace: &str,
         limit: Option<usize>,
         request_correlation_id: u64,
@@ -934,10 +1161,42 @@ impl DaemonRuntime {
             .map_err(|err| err.to_string())?;
         let plan = RecallEngine.plan_recall(request, RuntimeConfig::default());
         let result_budget = Self::canonical_result_budget(&request, limit);
-        let mut result = RetrievalResultSet::empty(
-            RetrievalExplain::from_plan(&plan, "balanced"),
-            namespace.clone(),
-        );
+        let mut explain = RetrievalExplain::from_plan(&plan, "balanced");
+        if let Some(normalized) =
+            query_by_example.filter(|normalized| normalized.has_example_seeds())
+        {
+            let requested_seed_descriptors = normalized.seed_descriptors();
+            let expanded_candidate_count = requested_seed_descriptors.len().min(result_budget);
+            let influence_summary = format!(
+                "primary cue {} expanded {} candidate(s) from {} requested seed(s); planner-only daemon envelope did not materialize stored evidence yet",
+                normalized.primary_cue.as_str(),
+                expanded_candidate_count,
+                requested_seed_descriptors.len(),
+            );
+            explain.query_by_example = Some(QueryByExampleExplain {
+                primary_cue: normalized.primary_cue.as_str().to_string(),
+                requested_seed_descriptors: requested_seed_descriptors.clone(),
+                materialized_seed_descriptors: Vec::new(),
+                missing_seed_descriptors: requested_seed_descriptors.clone(),
+                expanded_candidate_count,
+                influence_summary: influence_summary.clone(),
+            });
+            explain.result_reasons.extend(requested_seed_descriptors.iter().map(|descriptor| {
+                ResultReason {
+                    memory_id: None,
+                    reason_code: "query_by_example_seed_missing".to_string(),
+                    detail: format!(
+                        "seed {descriptor} was requested but planner-only daemon recall did not materialize stored evidence"
+                    ),
+                }
+            }));
+            explain.result_reasons.push(ResultReason {
+                memory_id: None,
+                reason_code: "query_by_example_candidate_expansion".to_string(),
+                detail: influence_summary,
+            });
+        }
+        let mut result = RetrievalResultSet::empty(explain, namespace.clone());
         result.outcome_class = membrain_core::observability::OutcomeClass::Degraded;
         result.policy_summary.outcome_class = membrain_core::observability::OutcomeClass::Degraded;
         result.packaging_metadata.result_budget = result_budget;
@@ -1947,6 +2206,127 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn runtime_share_and_unshare_surface_policy_and_audit_fields() {
+        let socket_path = unique_path("share-unshare");
+        let mut config = DaemonRuntimeConfig::new(&socket_path);
+        config.maintenance_interval = Duration::from_secs(3600);
+        let handle = spawn_runtime(config).await;
+
+        timeout(Duration::from_secs(2), async {
+            while tokio::fs::metadata(&socket_path).await.is_err() {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .unwrap();
+
+        let share_response = send_request(
+            &socket_path,
+            json!({
+                "jsonrpc":"2.0",
+                "method":"share",
+                "params":{"id":42,"namespace_id":"team.beta"},
+                "id":"share"
+            }),
+        )
+        .await;
+        assert_eq!(share_response["result"]["status"], json!("accepted"));
+        assert_eq!(share_response["result"]["visibility"], json!("shared"));
+        assert_eq!(
+            share_response["result"]["policy_summary"]["policy_family"],
+            json!("visibility_sharing")
+        );
+        assert_eq!(
+            share_response["result"]["audit"]["request_id"],
+            json!("req-share-42")
+        );
+
+        let unshare_response = send_request(
+            &socket_path,
+            json!({
+                "jsonrpc":"2.0",
+                "method":"unshare",
+                "params":{"id":42,"namespace":"team.alpha"},
+                "id":"unshare"
+            }),
+        )
+        .await;
+        assert_eq!(unshare_response["result"]["status"], json!("accepted"));
+        assert_eq!(unshare_response["result"]["visibility"], json!("private"));
+        assert_eq!(
+            unshare_response["result"]["policy_summary"]["redaction_fields"],
+            json!(["sharing_scope"])
+        );
+        assert_eq!(
+            unshare_response["result"]["audit"]["request_id"],
+            json!("req-unshare-42")
+        );
+        assert_eq!(unshare_response["result"]["audit"]["redacted"], json!(true));
+
+        let shutdown_response = send_request(
+            &socket_path,
+            json!({"jsonrpc":"2.0","method":"shutdown","params":{},"id":"done"}),
+        )
+        .await;
+        assert_eq!(shutdown_response["result"]["shutting_down"], json!(true));
+
+        timeout(Duration::from_secs(2), handle)
+            .await
+            .unwrap()
+            .unwrap()
+            .unwrap();
+    }
+
+    #[tokio::test]
+    async fn runtime_share_rejects_malformed_namespace_id() {
+        let socket_path = unique_path("share-invalid-namespace");
+        let mut config = DaemonRuntimeConfig::new(&socket_path);
+        config.maintenance_interval = Duration::from_secs(3600);
+        let handle = spawn_runtime(config).await;
+
+        timeout(Duration::from_secs(2), async {
+            while tokio::fs::metadata(&socket_path).await.is_err() {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .unwrap();
+
+        let response = send_request(
+            &socket_path,
+            json!({
+                "jsonrpc":"2.0",
+                "method":"share",
+                "params":{"id":42,"namespace_id":"bad namespace"},
+                "id":"share-invalid"
+            }),
+        )
+        .await;
+        assert_eq!(response["error"]["code"], json!(-32602));
+        assert_eq!(
+            response["error"]["message"],
+            json!("malformed namespace_id")
+        );
+        assert_eq!(
+            response["error"]["data"]["error_kind"],
+            json!("validation_failure")
+        );
+
+        let shutdown_response = send_request(
+            &socket_path,
+            json!({"jsonrpc":"2.0","method":"shutdown","params":{},"id":"done"}),
+        )
+        .await;
+        assert_eq!(shutdown_response["result"]["shutting_down"], json!(true));
+
+        timeout(Duration::from_secs(2), handle)
+            .await
+            .unwrap()
+            .unwrap()
+            .unwrap();
+    }
+
+    #[tokio::test]
     async fn runtime_handles_concurrent_readers_while_background_job_runs() {
         let socket_path = unique_path("concurrency");
         let mut config = DaemonRuntimeConfig::new(&socket_path);
@@ -2188,6 +2568,7 @@ mod tests {
             retrieval["result"]["packaging_metadata"]["degraded_summary"],
             json!("planner-only recall envelope; evidence hydration not implemented; normalized params: query_text")
         );
+        assert!(retrieval["result"]["explain"]["query_by_example"].is_null());
 
         let shutdown_response = send_request(
             &socket_path,
@@ -2409,6 +2790,50 @@ mod tests {
         assert!(degraded_summary.contains("primary_cue=like_id"));
         assert!(degraded_summary.contains("seed_memory_ids=[7]"));
         assert!(degraded_summary.contains("seed_polarities=[like]"));
+        assert_eq!(
+            recall_response["result"]["retrieval"]["result"]["explain"]["query_by_example"]
+                ["primary_cue"],
+            json!("like_id")
+        );
+        assert_eq!(
+            recall_response["result"]["retrieval"]["result"]["explain"]["query_by_example"]
+                ["requested_seed_descriptors"],
+            json!(["like:7"])
+        );
+        assert_eq!(
+            recall_response["result"]["retrieval"]["result"]["explain"]["query_by_example"]
+                ["materialized_seed_descriptors"],
+            json!([])
+        );
+        assert_eq!(
+            recall_response["result"]["retrieval"]["result"]["explain"]["query_by_example"]
+                ["missing_seed_descriptors"],
+            json!(["like:7"])
+        );
+        assert_eq!(
+            recall_response["result"]["retrieval"]["result"]["explain"]["query_by_example"]
+                ["expanded_candidate_count"],
+            json!(1)
+        );
+        let result_reasons = recall_response["result"]["retrieval"]["explain_trace"]
+            ["result_reasons"]
+            .as_array()
+            .unwrap();
+        assert!(result_reasons.iter().any(|reason| {
+            reason["reason_code"] == json!("query_by_example_seed_missing")
+                && reason["detail"].as_str().is_some_and(|detail| {
+                    detail
+                        .contains("planner-only daemon recall did not materialize stored evidence")
+                })
+        }));
+        assert!(result_reasons.iter().any(|reason| {
+            reason["reason_code"] == json!("query_by_example_candidate_expansion")
+                && reason["detail"].as_str().is_some_and(|detail| {
+                    detail.contains(
+                        "planner-only daemon envelope did not materialize stored evidence yet",
+                    )
+                })
+        }));
 
         let full_contract_recall_response = send_request(
             &socket_path,
@@ -2876,7 +3301,324 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn runtime_inspect_returns_typed_mcp_retrieval_payload() {
+    async fn runtime_preflight_force_confirm_stays_blocked_for_policy_namespace_retention_and_legal_hold(
+    ) {
+        let socket_path = unique_path("preflight-force-confirm-blocked");
+        let mut config = DaemonRuntimeConfig::new(&socket_path);
+        config.maintenance_interval = Duration::from_secs(3600);
+        let handle = spawn_runtime(config).await;
+
+        timeout(Duration::from_secs(2), async {
+            while tokio::fs::metadata(&socket_path).await.is_err() {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .unwrap();
+
+        let cases = [
+            (
+                "policy_denied",
+                "team.alpha",
+                "delete prior audit events after legal hold review",
+                "purge namespace audit history legal hold",
+                json!(["legal_hold", "confirmation_required"]),
+                json!("legal hold blocks the requested action"),
+                json!("deny"),
+                json!("allow"),
+                json!(true),
+                json!("effective_namespace"),
+                json!("policy"),
+                json!(false),
+                json!(true),
+                json!("blocked"),
+                json!("blocked"),
+                json!("rejected"),
+                json!("accepted"),
+                json!(true),
+                json!("ready"),
+                json!("force_confirmed"),
+                json!([]),
+                json!("accepted"),
+                json!(true),
+                json!(true),
+            ),
+            (
+                "scope_ambiguous",
+                "team.alpha",
+                "delete prior audit events across all namespaces",
+                "purge namespace audit history",
+                json!(["scope_ambiguous", "confirmation_required"]),
+                json!("requested scope is ambiguous"),
+                json!("allow"),
+                json!("allow"),
+                json!(true),
+                json!("requested_scope"),
+                json!("scope_precision"),
+                json!(false),
+                json!(true),
+                json!("blocked"),
+                json!("preview_only"),
+                json!("preview_only"),
+                json!("preview_only"),
+                json!(false),
+                json!("blocked"),
+                json!("blocked"),
+                json!(["scope_ambiguous", "confirmation_required"]),
+                json!("blocked"),
+                json!(false),
+                json!(false),
+            ),
+            (
+                "snapshot_required",
+                "team.alpha",
+                "delete archive snapshot missing evidence",
+                "purge namespace audit history",
+                json!(["snapshot_required", "confirmation_required"]),
+                json!("snapshot is required before this action can proceed"),
+                json!("allow"),
+                json!("allow"),
+                json!(true),
+                json!("effective_namespace"),
+                json!("required_input"),
+                json!(false),
+                json!(true),
+                json!("blocked"),
+                json!("blocked"),
+                json!("blocked"),
+                json!("blocked"),
+                json!(false),
+                json!("blocked"),
+                json!("blocked"),
+                json!(["snapshot_required", "confirmation_required"]),
+                json!("blocked"),
+                json!(false),
+                json!(false),
+            ),
+            (
+                "legal_hold",
+                "team.alpha",
+                "delete prior audit events under legal hold",
+                "purge namespace audit history legal hold",
+                json!(["legal_hold", "confirmation_required"]),
+                json!("legal hold blocks the requested action"),
+                json!("deny"),
+                json!("allow"),
+                json!(true),
+                json!("effective_namespace"),
+                json!("policy"),
+                json!(false),
+                json!(true),
+                json!("blocked"),
+                json!("blocked"),
+                json!("rejected"),
+                json!("accepted"),
+                json!(true),
+                json!("ready"),
+                json!("force_confirmed"),
+                json!([]),
+                json!("accepted"),
+                json!(true),
+                json!(true),
+            ),
+        ];
+
+        for (
+            case_id,
+            namespace,
+            original_query,
+            proposed_action,
+            blocked_reasons,
+            blocked_reason,
+            explain_policy_decision,
+            allow_policy_decision,
+            namespace_bound,
+            checked_scope,
+            check_name,
+            explain_confirmed,
+            allow_confirmed,
+            explain_preflight_state,
+            explain_preflight_outcome,
+            explain_outcome_class,
+            allow_outcome_class,
+            allow_success,
+            allow_preflight_state,
+            allow_preflight_outcome,
+            allow_blocked_reasons,
+            allow_policy_outcome_class,
+            allow_has_execution_id,
+            allow_has_confirmation_reason,
+        ) in cases
+        {
+            let explain_response = send_request(
+                &socket_path,
+                json!({
+                    "jsonrpc":"2.0",
+                    "method":"preflight.explain",
+                    "params":{
+                        "namespace": namespace,
+                        "original_query": original_query,
+                        "proposed_action": proposed_action
+                    },
+                    "id": format!("preflight-explain-{case_id}")
+                }),
+            )
+            .await;
+            assert_eq!(
+                explain_response["result"]["allowed"],
+                json!(false),
+                "{case_id}"
+            );
+            assert_eq!(
+                explain_response["result"]["preflight_state"], explain_preflight_state,
+                "{case_id}"
+            );
+            assert_eq!(
+                explain_response["result"]["preflight_outcome"], explain_preflight_outcome,
+                "{case_id}"
+            );
+            assert_eq!(
+                explain_response["result"]["blocked_reasons"], blocked_reasons,
+                "{case_id}"
+            );
+            assert_eq!(
+                explain_response["result"]["blocked_reason"], blocked_reason,
+                "{case_id}"
+            );
+            assert_eq!(
+                explain_response["result"]["policy_summary"]["decision"], explain_policy_decision,
+                "{case_id}"
+            );
+            assert_eq!(
+                explain_response["result"]["policy_summary"]["namespace_bound"], namespace_bound,
+                "{case_id}"
+            );
+            assert_eq!(
+                explain_response["result"]["policy_summary"]["outcome_class"],
+                explain_outcome_class,
+                "{case_id}"
+            );
+            assert_eq!(
+                explain_response["result"]["confirmation"]["required"],
+                json!(true),
+                "{case_id}"
+            );
+            assert_eq!(
+                explain_response["result"]["confirmation"]["force_allowed"],
+                json!(true),
+                "{case_id}"
+            );
+            assert_eq!(
+                explain_response["result"]["confirmation"]["confirmed"], explain_confirmed,
+                "{case_id}"
+            );
+            assert_eq!(
+                explain_response["result"]["check_results"][0]["check_name"], check_name,
+                "{case_id}"
+            );
+            assert_eq!(
+                explain_response["result"]["check_results"][0]["checked_scope"], checked_scope,
+                "{case_id}"
+            );
+
+            let allow_response = send_request(
+                &socket_path,
+                json!({
+                    "jsonrpc":"2.0",
+                    "method":"preflight.allow",
+                    "params":{
+                        "namespace": namespace,
+                        "authorization_token":"allow-123",
+                        "bypass_flags":["manual_override"]
+                    },
+                    "id": format!("preflight-allow-{case_id}")
+                }),
+            )
+            .await;
+            assert_eq!(
+                allow_response["result"]["success"], allow_success,
+                "{case_id}"
+            );
+            assert_eq!(
+                allow_response["result"]["preflight_state"], allow_preflight_state,
+                "{case_id}"
+            );
+            assert_eq!(
+                allow_response["result"]["preflight_outcome"], allow_preflight_outcome,
+                "{case_id}"
+            );
+            assert_eq!(
+                allow_response["result"]["outcome_class"], allow_outcome_class,
+                "{case_id}"
+            );
+            assert_eq!(
+                allow_response["result"]["blocked_reasons"], allow_blocked_reasons,
+                "{case_id}"
+            );
+            assert_eq!(
+                allow_response["result"]["policy_summary"]["decision"], allow_policy_decision,
+                "{case_id}"
+            );
+            assert_eq!(
+                allow_response["result"]["policy_summary"]["namespace_bound"], namespace_bound,
+                "{case_id}"
+            );
+            assert_eq!(
+                allow_response["result"]["policy_summary"]["outcome_class"],
+                allow_policy_outcome_class,
+                "{case_id}"
+            );
+            assert_eq!(
+                allow_response["result"]["confirmation"]["required"],
+                json!(true),
+                "{case_id}"
+            );
+            assert_eq!(
+                allow_response["result"]["confirmation"]["force_allowed"],
+                json!(true),
+                "{case_id}"
+            );
+            assert_eq!(
+                allow_response["result"]["confirmation"]["confirmed"], allow_confirmed,
+                "{case_id}"
+            );
+            assert_eq!(
+                allow_response["result"]["check_results"][0]["check_name"], check_name,
+                "{case_id}"
+            );
+            assert_eq!(
+                allow_response["result"]["check_results"][0]["checked_scope"], checked_scope,
+                "{case_id}"
+            );
+            assert_eq!(
+                json!(allow_response["result"].get("execution_id").is_some()),
+                allow_has_execution_id,
+                "{case_id}"
+            );
+            assert_eq!(
+                json!(allow_response["result"]
+                    .get("confirmation_reason")
+                    .is_some()),
+                allow_has_confirmation_reason,
+                "{case_id}"
+            );
+        }
+
+        let shutdown_response = send_request(
+            &socket_path,
+            json!({"jsonrpc":"2.0","method":"shutdown","params":{},"id":"done"}),
+        )
+        .await;
+        assert_eq!(shutdown_response["result"]["shutting_down"], json!(true));
+        timeout(Duration::from_secs(2), handle)
+            .await
+            .unwrap()
+            .unwrap()
+            .unwrap();
+    }
+
+    #[tokio::test]
+    async fn runtime_inspect_returns_typed_mcp_inspect_payload() {
         let socket_path = unique_path("inspect");
         let mut config = DaemonRuntimeConfig::new(&socket_path);
         config.maintenance_interval = Duration::from_secs(3600);
@@ -2902,25 +3644,28 @@ mod tests {
         .await;
 
         assert_eq!(inspect_response["result"]["status"], json!("ok"));
+        assert!(inspect_response["result"].get("retrieval").is_none());
         assert_eq!(
-            inspect_response["result"]["retrieval"]["namespace"],
+            inspect_response["result"]["payload"]["namespace"],
             json!("team.alpha")
         );
         assert_eq!(
-            inspect_response["result"]["retrieval"]["result"]["explain"]["recall_plan"],
-            json!("ExactIdTier1")
+            inspect_response["result"]["payload"]["memory_id"],
+            json!(42)
         );
         assert_eq!(
-            inspect_response["result"]["retrieval"]["result"]["packaging_metadata"]
-                ["result_budget"],
-            json!(1)
+            inspect_response["result"]["payload"]["tier"],
+            json!("tier1_exact")
         );
         assert_eq!(
-            inspect_response["result"]["retrieval"]["result"]["packaging_metadata"]
-                ["degraded_summary"],
+            inspect_response["result"]["payload"]["lifecycle_state"]["degraded_summary"],
             json!("planner-only inspect envelope; item hydration not implemented")
         );
-        assert!(inspect_response["result"]["retrieval"]
+        assert_eq!(
+            inspect_response["result"]["payload"]["index_presence"]["graph_assistance"],
+            json!("none")
+        );
+        assert!(inspect_response["result"]["payload"]
             .get("explain_trace")
             .is_some());
 
@@ -2985,6 +3730,10 @@ mod tests {
         assert!(explain_response["result"]["retrieval"]
             .get("explain_trace")
             .is_some());
+        assert!(
+            explain_response["result"]["retrieval"]["result"]["explain"]["query_by_example"]
+                .is_null()
+        );
 
         let shutdown_response = send_request(
             &socket_path,
@@ -3000,7 +3749,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn runtime_inspect_keeps_canonical_payload_families_out_of_generic_payload_slot() {
+    async fn runtime_inspect_keeps_canonical_payload_families_in_typed_payload_slot() {
         let socket_path = unique_path("inspect-canonical-payload-families");
         let mut config = DaemonRuntimeConfig::new(&socket_path);
         config.maintenance_interval = Duration::from_secs(3600);
@@ -3027,25 +3776,35 @@ mod tests {
 
         let result = &inspect_response["result"];
         assert_eq!(result["status"], json!("ok"));
-        assert!(result.get("payload").is_none());
+        assert!(result.get("retrieval").is_none());
         assert!(result.get("error").is_none());
 
-        let retrieval = &result["retrieval"];
-        assert_eq!(retrieval["request_id"], json!("daemon-inspect-1"));
-        assert_eq!(retrieval["outcome_class"], json!("degraded"));
-        assert_eq!(retrieval["partial_success"], json!(false));
-        assert!(retrieval["result"].get("evidence_pack").is_some());
-        assert!(retrieval["result"].get("action_pack").is_some());
-        assert!(retrieval["result"].get("deferred_payloads").is_some());
-        assert!(retrieval["result"].get("omitted_summary").is_some());
-        assert!(retrieval["result"].get("policy_summary").is_some());
-        assert!(retrieval["result"].get("provenance_summary").is_some());
-        assert!(retrieval["result"].get("freshness_markers").is_some());
-        assert!(retrieval["result"].get("packaging_metadata").is_some());
-        assert!(retrieval["result"].get("explain").is_some());
+        let payload = &result["payload"];
+        assert_eq!(payload["request_id"], json!("daemon-inspect-1"));
+        assert_eq!(payload["memory_id"], json!(42));
+        assert_eq!(payload["tier"], json!("tier1_exact"));
+        assert!(payload.get("lineage").is_some());
+        assert!(payload.get("policy_flags").is_some());
+        assert!(payload.get("lifecycle_state").is_some());
+        assert!(payload.get("index_presence").is_some());
+        assert!(payload.get("graph_neighborhood_summary").is_some());
+        assert!(payload.get("decay_retention").is_some());
+        assert!(payload.get("explain_trace").is_some());
         assert_eq!(
-            retrieval["result"]["packaging_metadata"]["degraded_summary"],
+            payload["explain_trace"]["passive_observation"]["resource_uri"],
+            json!("membrain://team.alpha/memories/42")
+        );
+        assert_eq!(
+            payload["explain_trace"]["passive_observation"]["resource_template"],
+            json!("membrain://{namespace}/memories/{memory_id}")
+        );
+        assert_eq!(
+            payload["lifecycle_state"]["degraded_summary"],
             json!("planner-only inspect envelope; item hydration not implemented")
+        );
+        assert_eq!(
+            payload["explain_trace"]["policy_summary"]["effective_namespace"],
+            json!("team.alpha")
         );
 
         let shutdown_response = send_request(
@@ -3338,8 +4097,28 @@ mod tests {
             json!("membrain://daemon/runtime/status")
         );
         assert_eq!(
+            resources_response["result"]["payload"]["resources"][0]["resource_kind"],
+            json!("runtime_status")
+        );
+        assert_eq!(
             resources_response["result"]["payload"]["resources"][1]["uri"],
             json!("membrain://daemon/runtime/doctor")
+        );
+        assert_eq!(
+            resources_response["result"]["payload"]["resources"][2]["uri"],
+            json!("membrain://daemon/runtime/streams")
+        );
+        assert_eq!(
+            resources_response["result"]["payload"]["resources"][2]["resource_kind"],
+            json!("stream_listing")
+        );
+        assert_eq!(
+            resources_response["result"]["payload"]["resources"][3]["uri_template"],
+            json!("membrain://{namespace}/memories/{memory_id}")
+        );
+        assert_eq!(
+            resources_response["result"]["payload"]["resources"][3]["examples"][0],
+            json!("membrain://team.alpha/memories/42")
         );
 
         let status_resource = send_request(
@@ -3354,12 +4133,24 @@ mod tests {
         .await;
         assert_eq!(status_resource["result"]["status"], json!("ok"));
         assert_eq!(
+            status_resource["result"]["payload"]["request_id"],
+            json!("daemon-resource-read-status-2")
+        );
+        assert_eq!(
+            status_resource["result"]["payload"]["namespace"],
+            json!("daemon.runtime")
+        );
+        assert_eq!(
             status_resource["result"]["payload"]["uri"],
             json!("membrain://daemon/runtime/status")
         );
         assert_eq!(
             status_resource["result"]["payload"]["mime_type"],
             json!("application/json")
+        );
+        assert_eq!(
+            status_resource["result"]["payload"]["resource_kind"],
+            json!("runtime_status")
         );
         assert_eq!(status_resource["result"]["payload"]["bounded"], json!(true));
         assert_eq!(
@@ -3379,16 +4170,77 @@ mod tests {
         .await;
         assert_eq!(doctor_resource["result"]["status"], json!("ok"));
         assert_eq!(
+            doctor_resource["result"]["payload"]["request_id"],
+            json!("daemon-resource-read-doctor-3")
+        );
+        assert_eq!(
             doctor_resource["result"]["payload"]["uri"],
             json!("membrain://daemon/runtime/doctor")
+        );
+        assert_eq!(
+            doctor_resource["result"]["payload"]["resource_kind"],
+            json!("runtime_doctor")
         );
         assert_eq!(
             doctor_resource["result"]["payload"]["payload"]["status"],
             json!("ok")
         );
         assert!(doctor_resource["result"]["payload"]["payload"]
-            .get("index")
+            .get("indexes")
             .is_some());
+
+        let stream_resource = send_request(
+            &socket_path,
+            json!({
+                "jsonrpc":"2.0",
+                "method":"resource.read",
+                "params":{"uri":"membrain://daemon/runtime/streams"},
+                "id":"resource-read-streams"
+            }),
+        )
+        .await;
+        assert_eq!(stream_resource["result"]["status"], json!("ok"));
+        assert_eq!(
+            stream_resource["result"]["payload"]["request_id"],
+            json!("daemon-resource-read-streams-4")
+        );
+        assert_eq!(
+            stream_resource["result"]["payload"]["resource_kind"],
+            json!("stream_listing")
+        );
+        assert_eq!(
+            stream_resource["result"]["payload"]["payload"]["streams"][0]["method"],
+            json!("maintenance.status")
+        );
+        assert_eq!(
+            stream_resource["result"]["payload"]["payload"]["streams"][0]["delivery"],
+            json!("jsonrpc_notification")
+        );
+        assert_eq!(
+            stream_resource["result"]["payload"]["payload"]["streams"][0]["example_subscriptions"]
+                [0],
+            json!("maintenance.status")
+        );
+
+        let streams_list = send_request(
+            &socket_path,
+            json!({
+                "jsonrpc":"2.0",
+                "method":"streams.list",
+                "params":{},
+                "id":"streams-list"
+            }),
+        )
+        .await;
+        assert_eq!(streams_list["result"]["status"], json!("ok"));
+        assert_eq!(
+            streams_list["result"]["payload"]["streams"][0]["name"],
+            json!("maintenance-status")
+        );
+        assert_eq!(
+            streams_list["result"]["payload"]["streams"][0]["example_subscriptions"][0],
+            json!("maintenance.status")
+        );
 
         let unknown_resource = send_request(
             &socket_path,

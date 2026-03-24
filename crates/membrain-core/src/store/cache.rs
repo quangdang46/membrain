@@ -1357,6 +1357,23 @@ impl InvalidationTrigger {
     }
 }
 
+/// Traceable invalidation or repair event for one cache family.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CacheMaintenanceEvent {
+    /// Which cache family emitted the maintenance event.
+    pub family: CacheFamily,
+    /// Machine-readable cache event label.
+    pub event: CacheEvent,
+    /// Explicit reason for invalidation or repair when applicable.
+    pub reason: Option<CacheReason>,
+    /// Warm source when repair repopulates a family.
+    pub warm_source: Option<WarmSource>,
+    /// Generation validation state attached to the event.
+    pub generation_status: GenerationStatus,
+    /// Number of entries or hints affected for this family.
+    pub entries_affected: usize,
+}
+
 /// Outcome of a cache invalidation or repair operation.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct InvalidationOutcome {
@@ -1366,6 +1383,8 @@ pub struct InvalidationOutcome {
     pub families_affected: Vec<CacheFamily>,
     /// Total entries invalidated across all families.
     pub entries_invalidated: usize,
+    /// Per-family events suitable for inspect, explain, and audit surfaces.
+    pub maintenance_events: Vec<CacheMaintenanceEvent>,
 }
 
 // ──────────────────────────────────────────────────────────────────────────────
@@ -1461,12 +1480,24 @@ impl CacheManager {
     ) -> InvalidationOutcome {
         let mut total = 0usize;
         let mut affected = Vec::new();
+        let mut maintenance_events = Vec::new();
         let namespace_scoped = matches!(
             trigger,
             InvalidationTrigger::MemoryMutation
                 | InvalidationTrigger::PolicyChange
                 | InvalidationTrigger::RedactionChange
         );
+        let reason = match trigger {
+            InvalidationTrigger::MemoryMutation => Some(CacheReason::RecordNotPresent),
+            InvalidationTrigger::PolicyChange => Some(CacheReason::PolicyChanged),
+            InvalidationTrigger::RedactionChange => Some(CacheReason::RedactionChanged),
+            InvalidationTrigger::SchemaChange => Some(CacheReason::SchemaChanged),
+            InvalidationTrigger::IndexChange => Some(CacheReason::IndexChanged),
+            InvalidationTrigger::EmbeddingChange => Some(CacheReason::EmbeddingChanged),
+            InvalidationTrigger::RankingChange => Some(CacheReason::RankingChanged),
+            InvalidationTrigger::RepairStarted => Some(CacheReason::RepairIncomplete),
+            InvalidationTrigger::NamespaceChange => Some(CacheReason::NamespaceNarrowed),
+        };
 
         let families: &mut [&mut BoundedCacheStore] = &mut [
             &mut self.tier1_item,
@@ -1489,11 +1520,28 @@ impl CacheManager {
                 count
             };
             if count > 0 {
-                affected.push(store.family());
+                let family = store.family();
+                affected.push(family);
                 total += count;
+                maintenance_events.push(CacheMaintenanceEvent {
+                    family,
+                    event: CacheEvent::Invalidation,
+                    reason,
+                    warm_source: None,
+                    generation_status: GenerationStatus::Unknown,
+                    entries_affected: count,
+                });
             }
         }
 
+        let (prefetch_reason, prefetch_event) = if namespace_scoped {
+            (
+                Some(CacheReason::NamespaceNarrowed),
+                CacheEvent::PrefetchDrop,
+            )
+        } else {
+            (Some(CacheReason::PolicyDenied), CacheEvent::PrefetchDrop)
+        };
         let prefetch_dropped = if namespace_scoped {
             self.prefetch
                 .cancel_namespace(namespace, PrefetchBypassReason::NamespaceNarrowed)
@@ -1505,13 +1553,45 @@ impl CacheManager {
         if prefetch_dropped > 0 {
             affected.push(CacheFamily::PrefetchHints);
             total += prefetch_dropped;
+            maintenance_events.push(CacheMaintenanceEvent {
+                family: CacheFamily::PrefetchHints,
+                event: prefetch_event,
+                reason: prefetch_reason,
+                warm_source: Some(WarmSource::PrefetchHints),
+                generation_status: GenerationStatus::Unknown,
+                entries_affected: prefetch_dropped,
+            });
         }
 
         InvalidationOutcome {
             trigger,
             families_affected: affected,
             entries_invalidated: total,
+            maintenance_events,
         }
+    }
+
+    /// Records per-family repair warmup events after a bounded rebuild repopulates warm state.
+    pub fn repair_warmup(
+        &mut self,
+        families: &[CacheFamily],
+        entries_per_family: usize,
+    ) -> Vec<CacheMaintenanceEvent> {
+        let mut events = Vec::new();
+        for family in families {
+            if *family == CacheFamily::PrefetchHints || entries_per_family == 0 {
+                continue;
+            }
+            events.push(CacheMaintenanceEvent {
+                family: *family,
+                event: CacheEvent::RepairWarmup,
+                reason: None,
+                warm_source: Some(family_to_warm_source(*family)),
+                generation_status: GenerationStatus::Valid,
+                entries_affected: entries_per_family,
+            });
+        }
+        events
     }
 
     /// Clears all cache families and prefetch queue.
@@ -2041,6 +2121,18 @@ mod tests {
         assert!(outcome
             .families_affected
             .contains(&CacheFamily::PrefetchHints));
+        assert!(outcome.maintenance_events.iter().any(|event| {
+            event.family == CacheFamily::Tier1Item
+                && event.event == CacheEvent::Invalidation
+                && event.reason == Some(CacheReason::PolicyChanged)
+                && event.entries_affected == 1
+        }));
+        assert!(outcome.maintenance_events.iter().any(|event| {
+            event.family == CacheFamily::PrefetchHints
+                && event.event == CacheEvent::PrefetchDrop
+                && event.reason == Some(CacheReason::NamespaceNarrowed)
+                && event.warm_source == Some(WarmSource::PrefetchHints)
+        }));
         // team.beta should survive
         assert_eq!(mgr.result.len(), 1);
     }
@@ -2095,6 +2187,16 @@ mod tests {
         assert!(outcome
             .families_affected
             .contains(&CacheFamily::PrefetchHints));
+        assert!(outcome.maintenance_events.iter().any(|event| {
+            event.family == CacheFamily::ResultCache
+                && event.event == CacheEvent::Invalidation
+                && event.reason == Some(CacheReason::NamespaceNarrowed)
+        }));
+        assert!(outcome.maintenance_events.iter().any(|event| {
+            event.family == CacheFamily::PrefetchHints
+                && event.event == CacheEvent::PrefetchDrop
+                && event.entries_affected == 2
+        }));
         assert_eq!(mgr.tier1_item.len(), 0);
         assert_eq!(mgr.result.len(), 0);
         assert_eq!(mgr.summary.len(), 0);
@@ -2161,11 +2263,56 @@ mod tests {
             assert!(outcome
                 .families_affected
                 .contains(&CacheFamily::PrefetchHints));
+            assert!(outcome.maintenance_events.iter().any(|event| {
+                event.family == CacheFamily::Tier1Item
+                    && event.event == CacheEvent::Invalidation
+                    && event.reason
+                        == Some(match trigger {
+                            InvalidationTrigger::SchemaChange => CacheReason::SchemaChanged,
+                            InvalidationTrigger::IndexChange => CacheReason::IndexChanged,
+                            InvalidationTrigger::EmbeddingChange => CacheReason::EmbeddingChanged,
+                            InvalidationTrigger::RankingChange => CacheReason::RankingChanged,
+                            InvalidationTrigger::RepairStarted => CacheReason::RepairIncomplete,
+                            _ => unreachable!("unexpected trigger in regression loop"),
+                        })
+            }));
             assert_eq!(mgr.tier1_item.len(), 0);
             assert_eq!(mgr.result.len(), 0);
             assert_eq!(mgr.summary.len(), 0);
             assert_eq!(mgr.prefetch.queue_depth(), 0);
         }
+    }
+
+    #[test]
+    fn repair_warmup_emits_traceable_per_family_events() {
+        let mut mgr = CacheManager::new(4, 4);
+
+        let events = mgr.repair_warmup(
+            &[
+                CacheFamily::Tier1Item,
+                CacheFamily::ResultCache,
+                CacheFamily::PrefetchHints,
+            ],
+            2,
+        );
+
+        assert_eq!(events.len(), 2);
+        assert!(events.iter().all(|event| {
+            event.event == CacheEvent::RepairWarmup
+                && event.generation_status == GenerationStatus::Valid
+                && event.entries_affected == 2
+        }));
+        assert!(events.iter().any(|event| {
+            event.family == CacheFamily::Tier1Item
+                && event.warm_source == Some(WarmSource::Tier1ItemCache)
+        }));
+        assert!(events.iter().any(|event| {
+            event.family == CacheFamily::ResultCache
+                && event.warm_source == Some(WarmSource::ResultCache)
+        }));
+        assert!(events
+            .iter()
+            .all(|event| event.family != CacheFamily::PrefetchHints));
     }
 
     #[test]
@@ -2311,14 +2458,21 @@ mod tests {
         assert_eq!(req.entity_neighborhood_hit_count, 1);
         assert_eq!(req.summary_cache_hit_count, 1);
         assert_eq!(req.ann_probe_hit_count, 1);
-        assert_eq!(req.family_breakdown(CacheFamily::NegativeCache).hit_count, 1);
+        assert_eq!(
+            req.family_breakdown(CacheFamily::NegativeCache).hit_count,
+            1
+        );
         assert_eq!(req.family_breakdown(CacheFamily::ResultCache).hit_count, 1);
         assert_eq!(
-            req.family_breakdown(CacheFamily::EntityNeighborhood).hit_count,
+            req.family_breakdown(CacheFamily::EntityNeighborhood)
+                .hit_count,
             1
         );
         assert_eq!(req.family_breakdown(CacheFamily::SummaryCache).hit_count, 1);
-        assert_eq!(req.family_breakdown(CacheFamily::AnnProbeCache).hit_count, 1);
+        assert_eq!(
+            req.family_breakdown(CacheFamily::AnnProbeCache).hit_count,
+            1
+        );
     }
 
     #[test]

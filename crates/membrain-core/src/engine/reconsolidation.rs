@@ -1,3 +1,6 @@
+use crate::api::NamespaceId;
+use crate::observability::AuditEventKind;
+use crate::store::audit::AuditLogEntry;
 use crate::types::MemoryId;
 
 /// Policy controlling reconsolidation window behavior and apply bonuses.
@@ -93,6 +96,35 @@ impl RefreshTrigger {
     }
 }
 
+/// Stable maintenance audit classification for one reconsolidation tick evaluation.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ReconsolidationAuditKind {
+    Applied,
+    Discarded,
+    Deferred,
+    Blocked,
+}
+
+impl ReconsolidationAuditKind {
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Applied => "applied",
+            Self::Discarded => "discarded",
+            Self::Deferred => "deferred",
+            Self::Blocked => "blocked",
+        }
+    }
+
+    pub const fn event_kind(self) -> AuditEventKind {
+        match self {
+            Self::Applied => AuditEventKind::MaintenanceReconsolidationApplied,
+            Self::Discarded => AuditEventKind::MaintenanceReconsolidationDiscarded,
+            Self::Deferred => AuditEventKind::MaintenanceReconsolidationDeferred,
+            Self::Blocked => AuditEventKind::MaintenanceReconsolidationBlocked,
+        }
+    }
+}
+
 /// Immutable audit record for one reconsolidation tick evaluation.
 #[derive(Debug, Clone, PartialEq)]
 pub struct ReconsolidationAuditRecord {
@@ -102,16 +134,22 @@ pub struct ReconsolidationAuditRecord {
     pub tick: u64,
     /// Outcome of the tick.
     pub outcome: ReconsolidationOutcome,
+    /// Stable append-only audit taxonomy for this tick.
+    pub audit_kind: ReconsolidationAuditKind,
     /// Strength before the tick (if apply occurred).
     pub strength_before: Option<f32>,
     /// Strength after the tick (if apply occurred).
     pub strength_after: Option<f32>,
+    /// Strength preserved from the pre-reopen authoritative state.
+    pub preserved_strength: Option<f32>,
     /// Refresh triggers emitted (populated only on Applied).
     pub refresh_triggers: Vec<RefreshTrigger>,
-    /// Source of the pending update that was applied (if any).
-    pub applied_update_source: Option<UpdateSource>,
+    /// Source of the pending update observed for this tick (if any).
+    pub update_source: Option<UpdateSource>,
     /// Whether the tick consumed or discarded any pending update.
     pub pending_update_cleared: bool,
+    /// Whether authoritative durable state was mutated during this tick.
+    pub authoritative_state_mutated: bool,
     /// Whether the memory returned to stable state after this tick.
     pub restabilized: bool,
 }
@@ -425,9 +463,11 @@ impl ReconsolidationEngine {
         match (expired, pending) {
             (false, None) => ReconsolidationTickResult {
                 outcome: ReconsolidationOutcome::WindowStillOpen,
+                audit_kind: ReconsolidationAuditKind::Deferred,
                 new_strength: None,
                 refresh_triggers: Vec::new(),
                 pending_update_cleared: false,
+                authoritative_state_mutated: false,
                 restabilized: false,
             },
             (false, Some(update)) => {
@@ -441,40 +481,50 @@ impl ReconsolidationEngine {
                         );
                         ReconsolidationTickResult {
                             outcome: ReconsolidationOutcome::Applied,
+                            audit_kind: ReconsolidationAuditKind::Applied,
                             new_strength: Some(new_strength),
                             refresh_triggers: triggers,
                             pending_update_cleared: true,
+                            authoritative_state_mutated: true,
                             restabilized: true,
                         }
                     }
                     RefreshReadiness::Deferred => ReconsolidationTickResult {
                         outcome: ReconsolidationOutcome::DeferredRefresh,
+                        audit_kind: ReconsolidationAuditKind::Deferred,
                         new_strength: None,
                         refresh_triggers: triggers,
                         pending_update_cleared: false,
+                        authoritative_state_mutated: false,
                         restabilized: false,
                     },
                     RefreshReadiness::Failed => ReconsolidationTickResult {
                         outcome: ReconsolidationOutcome::BlockedRefreshFailure,
+                        audit_kind: ReconsolidationAuditKind::Blocked,
                         new_strength: None,
                         refresh_triggers: triggers,
                         pending_update_cleared: false,
+                        authoritative_state_mutated: false,
                         restabilized: false,
                     },
                 }
             }
             (true, Some(_)) => ReconsolidationTickResult {
                 outcome: ReconsolidationOutcome::DiscardedStale,
+                audit_kind: ReconsolidationAuditKind::Discarded,
                 new_strength: None,
                 refresh_triggers: Vec::new(),
                 pending_update_cleared: true,
+                authoritative_state_mutated: false,
                 restabilized: true,
             },
             (true, None) => ReconsolidationTickResult {
                 outcome: ReconsolidationOutcome::NoPendingUpdate,
+                audit_kind: ReconsolidationAuditKind::Discarded,
                 new_strength: None,
                 refresh_triggers: Vec::new(),
                 pending_update_cleared: false,
+                authoritative_state_mutated: false,
                 restabilized: true,
             },
         }
@@ -487,17 +537,21 @@ impl ReconsolidationEngine {
         tick: u64,
         result: &ReconsolidationTickResult,
         strength_before: Option<f32>,
+        preserved_strength: Option<f32>,
         applied_source: Option<UpdateSource>,
     ) -> ReconsolidationAuditRecord {
         ReconsolidationAuditRecord {
             memory_id,
             tick,
             outcome: result.outcome,
+            audit_kind: result.audit_kind,
             strength_before,
             strength_after: result.new_strength,
+            preserved_strength,
             refresh_triggers: result.refresh_triggers.clone(),
-            applied_update_source: applied_source,
+            update_source: applied_source,
             pending_update_cleared: result.pending_update_cleared,
+            authoritative_state_mutated: result.authoritative_state_mutated,
             restabilized: result.restabilized,
         }
     }
@@ -507,9 +561,11 @@ impl ReconsolidationEngine {
 #[derive(Debug, Clone, PartialEq)]
 pub struct ReconsolidationTickResult {
     pub outcome: ReconsolidationOutcome,
+    pub audit_kind: ReconsolidationAuditKind,
     pub new_strength: Option<f32>,
     pub refresh_triggers: Vec<RefreshTrigger>,
     pub pending_update_cleared: bool,
+    pub authoritative_state_mutated: bool,
     pub restabilized: bool,
 }
 
@@ -521,7 +577,6 @@ impl Default for ReconsolidationEngine {
 
 // ── Maintenance operation ────────────────────────────────────────────────────
 
-use crate::api::NamespaceId;
 use crate::engine::maintenance::{
     DurableStateToken, InterruptedMaintenance, InterruptionReason, MaintenanceOperation,
     MaintenanceProgress, MaintenanceStep,
@@ -535,6 +590,7 @@ pub struct LabileMemory {
     pub pending_update: Option<PendingUpdate>,
     pub current_strength: f32,
     pub pre_reopen_state: PreReopenState,
+    pub refresh_readiness: RefreshReadiness,
 }
 
 /// Operator-visible summary after a reconsolidation run completes.
@@ -556,11 +612,14 @@ pub struct ReconsolidationAuditRecordFlat {
     pub memory_id: MemoryId,
     pub tick: u64,
     pub outcome: &'static str,
+    pub audit_kind: &'static str,
     pub strength_before: Option<u32>,
     pub strength_after: Option<u32>,
+    pub preserved_strength: Option<u32>,
     pub refresh_triggers: Vec<&'static str>,
-    pub applied_update_source: Option<&'static str>,
+    pub update_source: Option<&'static str>,
     pub pending_update_cleared: bool,
+    pub authoritative_state_mutated: bool,
     pub restabilized: bool,
 }
 
@@ -613,6 +672,35 @@ impl ReconsolidationRun {
     pub fn audit_records(&self) -> &[ReconsolidationAuditRecord] {
         &self.audit_records
     }
+
+    /// Exports append-only maintenance audit rows for the collected reconsolidation ticks.
+    pub fn append_only_audit_entries(&self) -> Vec<AuditLogEntry> {
+        self.audit_records
+            .iter()
+            .map(|record| {
+                let detail = format!(
+                    "reconsolidation {} at tick {} (outcome={}, source={}, restabilized={}, authoritative_state_mutated={}, pending_update_cleared={})",
+                    record.audit_kind.as_str(),
+                    record.tick,
+                    record.outcome.as_str(),
+                    record.update_source.map(|source| source.as_str()).unwrap_or("none"),
+                    record.restabilized,
+                    record.authoritative_state_mutated,
+                    record.pending_update_cleared,
+                );
+
+                AuditLogEntry::new(
+                    record.audit_kind.event_kind().category(),
+                    record.audit_kind.event_kind(),
+                    self.namespace.clone(),
+                    "reconsolidation_run",
+                    detail,
+                )
+                .with_memory_id(record.memory_id)
+                .with_related_run(format!("reconsolidation-tick-{}", record.tick))
+            })
+            .collect()
+    }
 }
 
 impl MaintenanceOperation for ReconsolidationRun {
@@ -632,7 +720,7 @@ impl MaintenanceOperation for ReconsolidationRun {
             self.current_tick,
             mem.current_strength,
             &self.policy,
-            RefreshReadiness::Ready,
+            mem.refresh_readiness,
         );
 
         match result.outcome {
@@ -649,6 +737,7 @@ impl MaintenanceOperation for ReconsolidationRun {
             self.current_tick,
             &result,
             Some(mem.current_strength),
+            Some(mem.pre_reopen_state.strength_at_reopen),
             mem.pending_update.as_ref().map(|p| p.submitter),
         );
         self.audit_records.push(audit);
@@ -684,11 +773,14 @@ impl ReconsolidationRun {
                 memory_id: r.memory_id,
                 tick: r.tick,
                 outcome: r.outcome.as_str(),
+                audit_kind: r.audit_kind.as_str(),
                 strength_before: r.strength_before.map(|s| (s * 1000.0) as u32),
                 strength_after: r.strength_after.map(|s| (s * 1000.0) as u32),
+                preserved_strength: r.preserved_strength.map(|s| (s * 1000.0) as u32),
                 refresh_triggers: r.refresh_triggers.iter().map(|t| t.as_str()).collect(),
-                applied_update_source: r.applied_update_source.map(|s| s.as_str()),
+                update_source: r.update_source.map(|s| s.as_str()),
                 pending_update_cleared: r.pending_update_cleared,
+                authoritative_state_mutated: r.authoritative_state_mutated,
                 restabilized: r.restabilized,
             })
             .collect();
@@ -868,6 +960,7 @@ mod tests {
         assert_eq!(result.new_strength, None);
         assert!(result.refresh_triggers.is_empty());
         assert!(!result.pending_update_cleared);
+        assert!(!result.authoritative_state_mutated);
         assert!(!result.restabilized);
     }
 
@@ -903,6 +996,7 @@ mod tests {
             .refresh_triggers
             .contains(&RefreshTrigger::CacheInvalidate));
         assert!(result.pending_update_cleared);
+        assert!(result.authoritative_state_mutated);
         assert!(result.restabilized);
     }
 
@@ -926,6 +1020,7 @@ mod tests {
         assert_eq!(result.new_strength, None);
         assert!(result.refresh_triggers.is_empty());
         assert!(result.pending_update_cleared);
+        assert!(!result.authoritative_state_mutated);
         assert!(result.restabilized);
     }
 
@@ -939,6 +1034,7 @@ mod tests {
         assert_eq!(result.outcome, ReconsolidationOutcome::NoPendingUpdate);
         assert_eq!(result.new_strength, None);
         assert!(!result.pending_update_cleared);
+        assert!(!result.authoritative_state_mutated);
         assert!(result.restabilized);
     }
 
@@ -959,10 +1055,12 @@ mod tests {
             RefreshReadiness::Ready,
         );
         assert_eq!(result.outcome, ReconsolidationOutcome::Applied);
-        assert!(result
-            .refresh_triggers
-            .contains(&RefreshTrigger::CacheInvalidate));
+        assert_eq!(
+            result.refresh_triggers,
+            vec![RefreshTrigger::CacheInvalidate]
+        );
         assert!(result.pending_update_cleared);
+        assert!(result.authoritative_state_mutated);
         assert!(result.restabilized);
     }
 
@@ -984,6 +1082,7 @@ mod tests {
         assert_eq!(result.outcome, ReconsolidationOutcome::Applied);
         assert_eq!(result.new_strength, Some(1.0));
         assert!(result.pending_update_cleared);
+        assert!(result.authoritative_state_mutated);
         assert!(result.restabilized);
     }
 
@@ -1015,6 +1114,7 @@ mod tests {
             .refresh_triggers
             .contains(&RefreshTrigger::CacheInvalidate));
         assert!(!result.pending_update_cleared);
+        assert!(!result.authoritative_state_mutated);
         assert!(!result.restabilized);
     }
 
@@ -1049,6 +1149,7 @@ mod tests {
             .refresh_triggers
             .contains(&RefreshTrigger::CacheInvalidate));
         assert!(!result.pending_update_cleared);
+        assert!(!result.authoritative_state_mutated);
         assert!(!result.restabilized);
     }
 
@@ -1057,9 +1158,11 @@ mod tests {
         let engine = ReconsolidationEngine::new();
         let result = ReconsolidationTickResult {
             outcome: ReconsolidationOutcome::Applied,
+            audit_kind: ReconsolidationAuditKind::Applied,
             new_strength: Some(0.55),
             refresh_triggers: vec![RefreshTrigger::CacheInvalidate],
             pending_update_cleared: true,
+            authoritative_state_mutated: true,
             restabilized: true,
         };
         let audit = engine.audit_tick(
@@ -1067,15 +1170,19 @@ mod tests {
             120,
             &result,
             Some(0.5),
+            Some(0.45),
             Some(UpdateSource::User),
         );
         assert_eq!(audit.memory_id, MemoryId(42));
         assert_eq!(audit.tick, 120);
         assert_eq!(audit.outcome, ReconsolidationOutcome::Applied);
+        assert_eq!(audit.audit_kind, ReconsolidationAuditKind::Applied);
         assert_eq!(audit.strength_before, Some(0.5));
         assert_eq!(audit.strength_after, Some(0.55));
-        assert_eq!(audit.applied_update_source, Some(UpdateSource::User));
+        assert_eq!(audit.preserved_strength, Some(0.45));
+        assert_eq!(audit.update_source, Some(UpdateSource::User));
         assert!(audit.pending_update_cleared);
+        assert!(audit.authoritative_state_mutated);
         assert!(audit.restabilized);
     }
 
@@ -1114,6 +1221,26 @@ mod tests {
         assert_eq!(RefreshTrigger::CacheInvalidate.as_str(), "cache_invalidate");
     }
 
+    #[test]
+    fn reconsolidation_audit_kind_maps_to_append_only_event_kind() {
+        assert_eq!(
+            ReconsolidationAuditKind::Applied.event_kind(),
+            AuditEventKind::MaintenanceReconsolidationApplied
+        );
+        assert_eq!(
+            ReconsolidationAuditKind::Discarded.event_kind(),
+            AuditEventKind::MaintenanceReconsolidationDiscarded
+        );
+        assert_eq!(
+            ReconsolidationAuditKind::Deferred.event_kind(),
+            AuditEventKind::MaintenanceReconsolidationDeferred
+        );
+        assert_eq!(
+            ReconsolidationAuditKind::Blocked.event_kind(),
+            AuditEventKind::MaintenanceReconsolidationBlocked
+        );
+    }
+
     // ── ReconsolidationRun tests ──────────────────────────────────────────
 
     #[test]
@@ -1134,6 +1261,7 @@ mod tests {
                     stability_at_reopen: 3.0,
                     access_count_at_reopen: 4,
                 },
+                refresh_readiness: RefreshReadiness::Ready,
             },
             LabileMemory {
                 memory_id: MemoryId(2),
@@ -1147,6 +1275,7 @@ mod tests {
                     stability_at_reopen: 2.0,
                     access_count_at_reopen: 3,
                 },
+                refresh_readiness: RefreshReadiness::Ready,
             },
             LabileMemory {
                 memory_id: MemoryId(3),
@@ -1160,6 +1289,7 @@ mod tests {
                     stability_at_reopen: 1.5,
                     access_count_at_reopen: 2,
                 },
+                refresh_readiness: RefreshReadiness::Ready,
             },
         ];
 
@@ -1191,7 +1321,9 @@ mod tests {
         let discarded_audit = &summary.audit_records[0];
         assert_eq!(discarded_audit.memory_id, MemoryId(1));
         assert_eq!(discarded_audit.outcome, "discarded_stale");
-        assert_eq!(discarded_audit.applied_update_source, Some("user"));
+        assert_eq!(discarded_audit.audit_kind, "discarded");
+        assert_eq!(discarded_audit.update_source, Some("user"));
+        assert_eq!(discarded_audit.preserved_strength, Some(450));
         assert!(discarded_audit.pending_update_cleared);
         assert!(discarded_audit.restabilized);
 
@@ -1199,6 +1331,7 @@ mod tests {
         let open_audit = &summary.audit_records[2];
         assert_eq!(open_audit.memory_id, MemoryId(3));
         assert_eq!(open_audit.outcome, "window_still_open");
+        assert_eq!(open_audit.audit_kind, "deferred");
         assert!(!open_audit.pending_update_cleared);
         assert!(!open_audit.restabilized);
     }
@@ -1218,6 +1351,7 @@ mod tests {
                     stability_at_reopen: 2.0,
                     access_count_at_reopen: 1,
                 },
+                refresh_readiness: RefreshReadiness::Ready,
             },
             LabileMemory {
                 memory_id: MemoryId(2),
@@ -1231,6 +1365,7 @@ mod tests {
                     stability_at_reopen: 2.0,
                     access_count_at_reopen: 1,
                 },
+                refresh_readiness: RefreshReadiness::Ready,
             },
         ];
 
@@ -1276,6 +1411,7 @@ mod tests {
                     stability_at_reopen: 2.0,
                     access_count_at_reopen: 1,
                 },
+                refresh_readiness: RefreshReadiness::Ready,
             })
             .collect();
 
@@ -1321,6 +1457,7 @@ mod tests {
                     stability_at_reopen: 2.0,
                     access_count_at_reopen: 1,
                 },
+                refresh_readiness: RefreshReadiness::Ready,
             })
             .collect();
 
@@ -1342,6 +1479,10 @@ mod tests {
         assert_eq!(summary.deferred_refresh, 0);
         assert_eq!(summary.blocked_refresh_failure, 0);
         assert!(summary.audit_records.iter().all(|r| r.outcome == "applied"));
+        assert!(summary
+            .audit_records
+            .iter()
+            .all(|r| r.audit_kind == "applied"));
         assert!(summary
             .audit_records
             .iter()
@@ -1390,6 +1531,105 @@ mod tests {
         assert!(!blocked.restabilized);
     }
 
+    #[test]
+    fn reconsolidation_run_tracks_refresh_readiness_and_pre_reopen_strength() {
+        let memories = vec![
+            LabileMemory {
+                memory_id: MemoryId(7),
+                labile_state: LabileState::new(100, 50),
+                pending_update: Some(
+                    PendingUpdate::new(MemoryId(7), 105, UpdateSource::User)
+                        .with_content("apply me".to_string()),
+                ),
+                current_strength: 0.6,
+                pre_reopen_state: PreReopenState {
+                    memory_id: MemoryId(7),
+                    reopen_tick: 100,
+                    strength_at_reopen: 0.55,
+                    stability_at_reopen: 3.0,
+                    access_count_at_reopen: 5,
+                },
+                refresh_readiness: RefreshReadiness::Deferred,
+            },
+            LabileMemory {
+                memory_id: MemoryId(8),
+                labile_state: LabileState::new(100, 50),
+                pending_update: Some(
+                    PendingUpdate::new(MemoryId(8), 105, UpdateSource::Agent)
+                        .with_content("blocked".to_string()),
+                ),
+                current_strength: 0.7,
+                pre_reopen_state: PreReopenState {
+                    memory_id: MemoryId(8),
+                    reopen_tick: 100,
+                    strength_at_reopen: 0.65,
+                    stability_at_reopen: 4.0,
+                    access_count_at_reopen: 6,
+                },
+                refresh_readiness: RefreshReadiness::Failed,
+            },
+            LabileMemory {
+                memory_id: MemoryId(9),
+                labile_state: LabileState::new(100, 10),
+                pending_update: Some(
+                    PendingUpdate::new(MemoryId(9), 105, UpdateSource::System)
+                        .with_content("stale".to_string()),
+                ),
+                current_strength: 0.8,
+                pre_reopen_state: PreReopenState {
+                    memory_id: MemoryId(9),
+                    reopen_tick: 100,
+                    strength_at_reopen: 0.75,
+                    stability_at_reopen: 5.0,
+                    access_count_at_reopen: 7,
+                },
+                refresh_readiness: RefreshReadiness::Ready,
+            },
+        ];
+
+        let run = ReconsolidationRun::new(ns("test"), policy(), memories, 120);
+        let mut handle = MaintenanceJobHandle::new(run, 10);
+        handle.start();
+
+        let summary = loop {
+            let snap = handle.poll();
+            match snap.state {
+                MaintenanceJobState::Completed(s) => break s,
+                MaintenanceJobState::Running { .. } => continue,
+                _other => std::process::abort(),
+            }
+        };
+
+        assert_eq!(summary.memories_evaluated, 3);
+        assert_eq!(summary.applied, 0);
+        assert_eq!(summary.deferred_refresh, 1);
+        assert_eq!(summary.blocked_refresh_failure, 1);
+        assert_eq!(summary.discarded_stale, 1);
+
+        let deferred = &summary.audit_records[0];
+        assert_eq!(deferred.outcome, "deferred_refresh");
+        assert_eq!(deferred.audit_kind, "deferred");
+        assert_eq!(deferred.strength_after, None);
+        assert_eq!(deferred.preserved_strength, Some(550));
+        assert!(!deferred.pending_update_cleared);
+        assert!(!deferred.restabilized);
+
+        let blocked = &summary.audit_records[1];
+        assert_eq!(blocked.outcome, "blocked_refresh_failure");
+        assert_eq!(blocked.audit_kind, "blocked");
+        assert_eq!(blocked.strength_after, None);
+        assert_eq!(blocked.preserved_strength, Some(650));
+        assert!(!blocked.pending_update_cleared);
+        assert!(!blocked.restabilized);
+
+        let stale = &summary.audit_records[2];
+        assert_eq!(stale.outcome, "discarded_stale");
+        assert_eq!(stale.audit_kind, "discarded");
+        assert_eq!(stale.preserved_strength, Some(750));
+        assert!(stale.pending_update_cleared);
+        assert!(stale.restabilized);
+    }
+
     // ── Pre-reopen state tests ───────────────────────────────────────────
 
     #[test]
@@ -1401,6 +1641,123 @@ mod tests {
         assert_eq!(state.strength_at_reopen, 0.7);
         assert_eq!(state.stability_at_reopen, 5.0);
         assert_eq!(state.access_count_at_reopen, 12);
+    }
+
+    #[test]
+    fn append_only_audit_entries_reflect_reconsolidation_tick_taxonomy() {
+        let memories = vec![
+            LabileMemory {
+                memory_id: MemoryId(1),
+                labile_state: LabileState::new(100, 50),
+                pending_update: Some(
+                    PendingUpdate::new(MemoryId(1), 105, UpdateSource::User)
+                        .with_content("apply me".to_string()),
+                ),
+                current_strength: 0.6,
+                pre_reopen_state: PreReopenState {
+                    memory_id: MemoryId(1),
+                    reopen_tick: 100,
+                    strength_at_reopen: 0.55,
+                    stability_at_reopen: 3.0,
+                    access_count_at_reopen: 5,
+                },
+                refresh_readiness: RefreshReadiness::Ready,
+            },
+            LabileMemory {
+                memory_id: MemoryId(2),
+                labile_state: LabileState::new(100, 10),
+                pending_update: Some(
+                    PendingUpdate::new(MemoryId(2), 105, UpdateSource::System)
+                        .with_content("stale".to_string()),
+                ),
+                current_strength: 0.8,
+                pre_reopen_state: PreReopenState {
+                    memory_id: MemoryId(2),
+                    reopen_tick: 100,
+                    strength_at_reopen: 0.75,
+                    stability_at_reopen: 5.0,
+                    access_count_at_reopen: 7,
+                },
+                refresh_readiness: RefreshReadiness::Ready,
+            },
+            LabileMemory {
+                memory_id: MemoryId(3),
+                labile_state: LabileState::new(100, 50),
+                pending_update: Some(
+                    PendingUpdate::new(MemoryId(3), 105, UpdateSource::Agent)
+                        .with_content("wait".to_string()),
+                ),
+                current_strength: 0.7,
+                pre_reopen_state: PreReopenState {
+                    memory_id: MemoryId(3),
+                    reopen_tick: 100,
+                    strength_at_reopen: 0.65,
+                    stability_at_reopen: 4.0,
+                    access_count_at_reopen: 6,
+                },
+                refresh_readiness: RefreshReadiness::Deferred,
+            },
+            LabileMemory {
+                memory_id: MemoryId(4),
+                labile_state: LabileState::new(100, 50),
+                pending_update: Some(
+                    PendingUpdate::new(MemoryId(4), 105, UpdateSource::Agent)
+                        .with_content("blocked".to_string()),
+                ),
+                current_strength: 0.7,
+                pre_reopen_state: PreReopenState {
+                    memory_id: MemoryId(4),
+                    reopen_tick: 100,
+                    strength_at_reopen: 0.65,
+                    stability_at_reopen: 4.0,
+                    access_count_at_reopen: 6,
+                },
+                refresh_readiness: RefreshReadiness::Failed,
+            },
+        ];
+
+        let run = ReconsolidationRun::new(ns("test.recon"), policy(), memories, 120);
+        let mut handle = MaintenanceJobHandle::new(run, 10);
+        handle.start();
+
+        let completed_run = loop {
+            let snap = handle.poll();
+            match snap.state {
+                MaintenanceJobState::Completed(_) => break handle.operation().clone(),
+                MaintenanceJobState::Running { .. } => continue,
+                _other => std::process::abort(),
+            }
+        };
+
+        let entries = completed_run.append_only_audit_entries();
+        assert_eq!(entries.len(), 4);
+        assert_eq!(
+            entries[0].kind,
+            AuditEventKind::MaintenanceReconsolidationApplied
+        );
+        assert_eq!(
+            entries[1].kind,
+            AuditEventKind::MaintenanceReconsolidationDiscarded
+        );
+        assert_eq!(
+            entries[2].kind,
+            AuditEventKind::MaintenanceReconsolidationDeferred
+        );
+        assert_eq!(
+            entries[3].kind,
+            AuditEventKind::MaintenanceReconsolidationBlocked
+        );
+        assert!(entries
+            .iter()
+            .all(|entry| entry.actor_source == "reconsolidation_run"));
+        assert_eq!(entries[0].memory_id, Some(MemoryId(1)));
+        assert_eq!(entries[1].memory_id, Some(MemoryId(2)));
+        assert_eq!(entries[2].memory_id, Some(MemoryId(3)));
+        assert_eq!(entries[3].memory_id, Some(MemoryId(4)));
+        assert!(entries[0].detail.contains("reconsolidation applied"));
+        assert!(entries[1].detail.contains("reconsolidation discarded"));
+        assert!(entries[2].detail.contains("reconsolidation deferred"));
+        assert!(entries[3].detail.contains("reconsolidation blocked"));
     }
 
     #[test]

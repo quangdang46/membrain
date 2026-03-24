@@ -218,6 +218,18 @@ const LANDMARK_MIN_ERA_GAP_TICKS: u64 = 50;
 const PASSIVE_OBSERVATION_SOURCE: &str = "passive_observation";
 const PASSIVE_OBSERVATION_RETENTION_MARKER: &str = "volatile_observation";
 
+fn landmark_detection_score(signals: LandmarkSignals) -> u16 {
+    let arousal = (signals.arousal.clamp(0.0, 1.0) * 400.0).round() as u16;
+    let novelty = (signals.novelty.clamp(0.0, 1.0) * 350.0).round() as u16;
+    let dissimilarity = ((1.0 - signals.recent_similarity.clamp(0.0, 1.0)) * 150.0).round() as u16;
+    let gap = ((signals.ticks_since_last_landmark.min(200) as f32 / 200.0) * 100.0).round() as u16;
+    arousal
+        .saturating_add(novelty)
+        .saturating_add(dissimilarity)
+        .saturating_add(gap)
+        .min(1_000)
+}
+
 /// Final controller decision for a working-memory admission attempt.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct WorkingMemoryAdmission {
@@ -593,16 +605,24 @@ impl EncodeEngine {
         } else {
             era_slug
         };
-        let era_id = format!(
-            "era-{}-{:04}",
-            era_slug,
-            signals.ticks_since_last_landmark.min(9_999)
+        let era_started_at_tick = signals.ticks_since_last_landmark;
+        let era_id = format!("era-{}-{:04}", era_slug, era_started_at_tick.min(9_999));
+        let detection_score = landmark_detection_score(signals);
+        let detection_reason = format!(
+            "arousal={:.2} novelty={:.2} recent_similarity={:.2} gap_ticks={} crossed landmark thresholds",
+            signals.arousal,
+            signals.novelty,
+            signals.recent_similarity,
+            signals.ticks_since_last_landmark
         );
 
         LandmarkMetadata {
             is_landmark: true,
             landmark_label: Some(label),
             era_id: Some(era_id),
+            era_started_at_tick: Some(era_started_at_tick),
+            detection_score,
+            detection_reason: Some(detection_reason),
         }
     }
 

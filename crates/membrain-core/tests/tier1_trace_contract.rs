@@ -6,6 +6,9 @@ use membrain_core::engine::result::{
     FreshnessMarkers, OmissionSummary, PackagingMetadata, PolicySummary, ProvenanceSummary,
     RetrievalExplain, RetrievalResultSet,
 };
+use membrain_core::engine::retrieval_planner::{
+    QueryPath, RetrievalPlanTrace, RetrievalRequest, RetrievalRequestValidationError,
+};
 use membrain_core::observability::{OutcomeClass, Tier1LookupLane, Tier1LookupOutcome, TraceStage};
 use membrain_core::store::hot::Tier1HotMetadataStore;
 use membrain_core::types::{
@@ -27,6 +30,18 @@ fn seed_record(memory_id: u64, session_id: u64, compact_text: &str) -> Tier1HotR
     )
 }
 
+fn temporal_snapshot_trace_request() -> RetrievalRequest {
+    let namespace = NamespaceId::new("team.gamma").unwrap();
+    RetrievalRequest {
+        query_path: QueryPath::Temporal,
+        ..RetrievalRequest::hybrid(namespace, "recent deploys", 8)
+            .with_session(SessionId(33))
+            .with_as_of_tick_range(40, 75)
+            .with_snapshot_name("incident_baseline")
+            .with_budget(77)
+    }
+}
+
 fn recent_tier1_result_set() -> RetrievalResultSet {
     RetrievalResultSet {
         outcome_class: OutcomeClass::Accepted,
@@ -45,6 +60,7 @@ fn recent_tier1_result_set() -> RetrievalResultSet {
             time_consumed_ms: Some(12),
             ranking_profile: "balanced".to_string(),
             contradictions_found: 0,
+            query_by_example: None,
             result_reasons: Vec::new(),
         },
         policy_summary: PolicySummary {
@@ -227,6 +243,7 @@ fn planner_trace_names_fallback_route_and_preserves_candidate_budget_evidence() 
             session_id: Some(SessionId(12)),
             small_lookup: false,
             graph_expansion: false,
+            predictive_preroll: false,
         },
         RuntimeConfig::default(),
     );
@@ -274,6 +291,7 @@ fn tier1_trace_consumer_budget_evidence_stays_explicit_across_routes() {
             session_id: Some(SessionId(12)),
             small_lookup: false,
             graph_expansion: false,
+            predictive_preroll: false,
         },
         config,
     );
@@ -316,6 +334,34 @@ fn tier1_trace_consumer_budget_evidence_stays_explicit_across_routes() {
     );
     assert_eq!(fallback_plan.trace.pre_tier1_candidates, 0);
     assert_eq!(fallback_plan.trace.post_tier1_candidates, 0);
+}
+
+#[test]
+fn retrieval_planner_trace_preserves_temporal_tick_window_and_snapshot_anchor() {
+    let request = temporal_snapshot_trace_request();
+    let trace = RetrievalPlanTrace::new(&request);
+
+    assert!(trace.lexical_query.is_none());
+    assert_eq!(trace.snapshot_name.as_deref(), Some("incident_baseline"));
+    let temporal = trace.temporal_query.expect("temporal query");
+    assert_eq!(temporal.session_filter, Some(SessionId(33)));
+    assert_eq!(temporal.tick_range, Some((40, 75)));
+    assert_eq!(temporal.candidate_budget, 77);
+}
+
+#[test]
+fn exact_id_trace_rejects_query_by_example_seed_mix() {
+    let namespace = NamespaceId::new("team.gamma").unwrap();
+    let request =
+        RetrievalRequest::exact_id(namespace, MemoryId(91)).with_like_memory(MemoryId(17));
+
+    let error = request.normalize_query_by_example().unwrap_err();
+
+    assert_eq!(
+        error,
+        RetrievalRequestValidationError::ExactIdWithExampleCue
+    );
+    assert_eq!(error.as_str(), "exact_id_with_example_cue");
 }
 
 #[test]

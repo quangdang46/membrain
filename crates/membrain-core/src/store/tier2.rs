@@ -123,6 +123,11 @@ impl Tier2DurableItemLayout {
         &self.payload
     }
 
+    /// Returns the explicit durable landmark row stored beside the canonical metadata record.
+    pub fn landmark_record(&self) -> Tier2LandmarkRecord {
+        Tier2LandmarkRecord::from_metadata(&self.metadata)
+    }
+
     /// Returns whether the durable metadata size still matches the detached raw payload body.
     pub fn payload_size_matches_raw_body(&self) -> bool {
         self.metadata.payload_size_bytes == self.payload.raw_size_bytes
@@ -195,6 +200,35 @@ pub struct Tier2PayloadRecord {
     pub raw_size_bytes: usize,
 }
 
+/// Explicit durable landmark row stored additively beside the canonical metadata record.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Tier2LandmarkRecord {
+    pub namespace: NamespaceId,
+    pub memory_id: MemoryId,
+    pub is_landmark: bool,
+    pub landmark_label: Option<String>,
+    pub era_id: Option<String>,
+    pub era_started_at_tick: Option<u64>,
+    pub detection_score: u16,
+    pub detection_reason: Option<String>,
+}
+
+impl Tier2LandmarkRecord {
+    /// Builds the explicit durable landmark row for one metadata record.
+    pub fn from_metadata(metadata: &Tier2MetadataRecord) -> Self {
+        Self {
+            namespace: metadata.namespace.clone(),
+            memory_id: metadata.memory_id,
+            is_landmark: metadata.landmark.is_landmark,
+            landmark_label: metadata.landmark.landmark_label.clone(),
+            era_id: metadata.landmark.era_id.clone(),
+            era_started_at_tick: metadata.landmark.era_started_at_tick,
+            detection_score: metadata.landmark.detection_score,
+            detection_reason: metadata.landmark.detection_reason.clone(),
+        }
+    }
+}
+
 /// Borrowed metadata-only view used by Tier2 prefilter/index planners.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Tier2PrefilterView<'a> {
@@ -223,6 +257,21 @@ impl Tier2PrefilterView<'_> {
     pub fn era_id(&self) -> Option<&str> {
         self.landmark.era_id.as_deref()
     }
+
+    /// Returns the era start tick visible to metadata-first temporal consumers.
+    pub const fn era_started_at_tick(&self) -> Option<u64> {
+        self.landmark.era_started_at_tick
+    }
+
+    /// Returns the bounded landmark detection score preserved in metadata.
+    pub const fn landmark_detection_score(&self) -> u16 {
+        self.landmark.detection_score
+    }
+
+    /// Returns the inspectable detection reason preserved in metadata.
+    pub fn landmark_detection_reason(&self) -> Option<&str> {
+        self.landmark.detection_reason.as_deref()
+    }
 }
 
 /// Borrowed deterministic metadata key used by Tier2 filter/index maintenance surfaces.
@@ -249,5 +298,20 @@ impl Tier2MetadataIndexKey<'_> {
     /// Returns the era identifier preserved on the metadata-only index key.
     pub fn era_id(&self) -> Option<&str> {
         self.landmark.era_id.as_deref()
+    }
+
+    /// Returns the era start tick preserved on the metadata-only index key.
+    pub const fn era_started_at_tick(&self) -> Option<u64> {
+        self.landmark.era_started_at_tick
+    }
+
+    /// Returns the bounded landmark detection score preserved on the metadata-only index key.
+    pub const fn landmark_detection_score(&self) -> u16 {
+        self.landmark.detection_score
+    }
+
+    /// Returns the inspectable detection reason preserved on the metadata-only index key.
+    pub fn landmark_detection_reason(&self) -> Option<&str> {
+        self.landmark.detection_reason.as_deref()
     }
 }

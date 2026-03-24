@@ -259,6 +259,12 @@ fn tier2_metadata_preserves_landmark_and_era_fields_for_durable_recall() {
             is_landmark: true,
             landmark_label: Some("project launch deadline was moved".to_string()),
             era_id: Some("era-projectlaunc-0088".to_string()),
+            era_started_at_tick: Some(88),
+            detection_score: 903,
+            detection_reason: Some(
+                "arousal=0.91 novelty=0.83 recent_similarity=0.31 gap_ticks=88 crossed landmark thresholds"
+                    .to_string(),
+            ),
         },
     );
 
@@ -272,21 +278,49 @@ fn tier2_metadata_preserves_landmark_and_era_fields_for_durable_recall() {
 
     let prefilter = layout.prefilter_view();
     let index_key = layout.metadata_index_key();
+    let landmark_record = layout.landmark_record();
 
     assert!(layout.metadata.landmark.is_landmark);
     assert_eq!(layout.metadata.landmark, envelope.landmark);
     assert_eq!(prefilter.landmark, &envelope.landmark);
     assert_eq!(index_key.landmark, &envelope.landmark);
+    assert_eq!(landmark_record.namespace.as_str(), "team.alpha");
+    assert_eq!(landmark_record.memory_id, MemoryId(77));
+    assert!(landmark_record.is_landmark);
+    assert_eq!(
+        landmark_record.landmark_label.as_deref(),
+        Some("project launch deadline was moved")
+    );
+    assert_eq!(
+        landmark_record.era_id.as_deref(),
+        Some("era-projectlaunc-0088")
+    );
+    assert_eq!(landmark_record.era_started_at_tick, Some(88));
+    assert_eq!(landmark_record.detection_score, 903);
+    assert!(landmark_record
+        .detection_reason
+        .as_deref()
+        .is_some_and(|reason| reason.contains("crossed landmark thresholds")));
     assert_eq!(
         prefilter.landmark_label(),
         Some("project launch deadline was moved")
     );
     assert_eq!(prefilter.era_id(), Some("era-projectlaunc-0088"));
+    assert_eq!(prefilter.era_started_at_tick(), Some(88));
+    assert_eq!(prefilter.landmark_detection_score(), 903);
+    assert!(prefilter
+        .landmark_detection_reason()
+        .is_some_and(|reason| reason.contains("crossed landmark thresholds")));
     assert_eq!(
         index_key.landmark_label(),
         Some("project launch deadline was moved")
     );
     assert_eq!(index_key.era_id(), Some("era-projectlaunc-0088"));
+    assert_eq!(index_key.era_started_at_tick(), Some(88));
+    assert_eq!(index_key.landmark_detection_score(), 903);
+    assert!(index_key
+        .landmark_detection_reason()
+        .is_some_and(|reason| reason.contains("crossed landmark thresholds")));
 }
 
 #[test]
@@ -303,10 +337,19 @@ fn tier2_non_landmarks_remain_explicitly_non_landmarks_in_metadata_views() {
     );
     let prefilter = layout.prefilter_view();
     let index_key = layout.metadata_index_key();
+    let landmark_record = layout.landmark_record();
 
     assert_eq!(layout.metadata.landmark, LandmarkMetadata::non_landmark());
     assert_eq!(prefilter.landmark, &LandmarkMetadata::non_landmark());
     assert_eq!(index_key.landmark, &LandmarkMetadata::non_landmark());
+    assert_eq!(landmark_record.namespace.as_str(), "team.alpha");
+    assert_eq!(landmark_record.memory_id, MemoryId(78));
+    assert!(!landmark_record.is_landmark);
+    assert_eq!(landmark_record.landmark_label, None);
+    assert_eq!(landmark_record.era_id, None);
+    assert_eq!(landmark_record.era_started_at_tick, None);
+    assert_eq!(landmark_record.detection_score, 0);
+    assert_eq!(landmark_record.detection_reason, None);
     assert_eq!(prefilter.landmark_label(), None);
     assert_eq!(prefilter.era_id(), None);
     assert_eq!(index_key.landmark_label(), None);
@@ -393,6 +436,9 @@ fn tier2_landmark_prefilter_trace_stays_metadata_first_for_temporal_recall_consu
             is_landmark: true,
             landmark_label: Some("launch milestone".to_string()),
             era_id: Some("era-launch-milestone-0001".to_string()),
+            era_started_at_tick: Some(1),
+            detection_score: 812,
+            detection_reason: Some("manual landmark fixture".to_string()),
         },
     );
 
@@ -416,12 +462,24 @@ fn tier2_landmark_prefilter_trace_stays_metadata_first_for_temporal_recall_consu
     assert!(prefilter.landmark.is_landmark);
     assert_eq!(prefilter.landmark_label(), Some("launch milestone"));
     assert_eq!(prefilter.era_id(), Some("era-launch-milestone-0001"));
+    assert_eq!(prefilter.era_started_at_tick(), Some(1));
+    assert_eq!(prefilter.landmark_detection_score(), 812);
+    assert_eq!(
+        prefilter.landmark_detection_reason(),
+        Some("manual landmark fixture")
+    );
     assert_eq!(prefilter.payload_locator, layout.metadata.payload_locator);
 
     let key = layout.metadata_index_key();
     assert_eq!(key.landmark, &envelope.landmark);
     assert_eq!(key.landmark_label(), Some("launch milestone"));
     assert_eq!(key.era_id(), Some("era-launch-milestone-0001"));
+    assert_eq!(key.era_started_at_tick(), Some(1));
+    assert_eq!(key.landmark_detection_score(), 812);
+    assert_eq!(
+        key.landmark_detection_reason(),
+        Some("manual landmark fixture")
+    );
 }
 
 #[test]
@@ -439,6 +497,7 @@ fn tier2_store_schema_objects_match_split_durable_layout_contract() {
             DurableSchemaObject::MemoryTagsTable,
             DurableSchemaObject::ConflictRecordsTable,
             DurableSchemaObject::DurableMemoryRecords,
+            DurableSchemaObject::LandmarksTable,
         ]
     );
 }

@@ -6,14 +6,89 @@ use crate::store::AuditLogStoreApi;
 use crate::types::{MemoryId, SessionId};
 use std::collections::VecDeque;
 
+/// Exportable audit taxonomy row pairing a stable category with one event kind.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct AuditTaxonomyRow {
+    pub category: AuditEventCategory,
+    pub kind: AuditEventKind,
+    pub category_name: &'static str,
+    pub kind_name: &'static str,
+}
+
+impl AuditTaxonomyRow {
+    /// Builds one stable taxonomy row for export and regression checks.
+    pub const fn new(kind: AuditEventKind) -> Self {
+        let category = kind.category();
+        Self {
+            category,
+            kind,
+            category_name: category.as_str(),
+            kind_name: kind.as_str(),
+        }
+    }
+}
+
 /// Canonical append-only audit log boundary owned by `membrain-core` storage.
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
 pub struct AuditLogStore;
 
 impl AuditLogStore {
+    /// Returns the stable high-level audit categories accepted by the append-only log.
+    pub const fn categories(&self) -> &'static [AuditEventCategory] {
+        &[
+            AuditEventCategory::Encode,
+            AuditEventCategory::Recall,
+            AuditEventCategory::Policy,
+            AuditEventCategory::Maintenance,
+            AuditEventCategory::Archive,
+        ]
+    }
+
+    /// Returns the stable audit event taxonomy accepted by the append-only log.
+    pub const fn event_kinds(&self) -> &'static [AuditEventKind] {
+        &[
+            AuditEventKind::EncodeAccepted,
+            AuditEventKind::EncodeRejected,
+            AuditEventKind::RecallServed,
+            AuditEventKind::RecallDenied,
+            AuditEventKind::PolicyDenied,
+            AuditEventKind::PolicyRedacted,
+            AuditEventKind::MaintenanceRepairStarted,
+            AuditEventKind::MaintenanceRepairCompleted,
+            AuditEventKind::MaintenanceRepairDegraded,
+            AuditEventKind::MaintenanceRepairRollbackTriggered,
+            AuditEventKind::MaintenanceRepairRollbackCompleted,
+            AuditEventKind::MaintenanceMigrationApplied,
+            AuditEventKind::MaintenanceCompactionApplied,
+            AuditEventKind::MaintenanceConsolidationStarted,
+            AuditEventKind::MaintenanceConsolidationCompleted,
+            AuditEventKind::MaintenanceConsolidationPartial,
+            AuditEventKind::MaintenanceReconsolidationApplied,
+            AuditEventKind::MaintenanceReconsolidationDiscarded,
+            AuditEventKind::MaintenanceReconsolidationDeferred,
+            AuditEventKind::MaintenanceReconsolidationBlocked,
+            AuditEventKind::IncidentRecorded,
+            AuditEventKind::ArchiveRecorded,
+        ]
+    }
+
+    /// Returns the stable exportable taxonomy rows accepted by the append-only log.
+    pub fn taxonomy(&self) -> Vec<AuditTaxonomyRow> {
+        self.event_kinds()
+            .iter()
+            .copied()
+            .map(AuditTaxonomyRow::new)
+            .collect()
+    }
+
     /// Builds a bounded append-only audit log with a hard row cap.
     pub fn new_log(&self, capacity: usize) -> AppendOnlyAuditLog {
         AppendOnlyAuditLog::new(capacity)
+    }
+
+    /// Builds a bounded append-only audit log with the canonical default row cap.
+    pub fn new_default_log(&self) -> AppendOnlyAuditLog {
+        self.new_log(AppendOnlyAuditLog::DEFAULT_CAPACITY)
     }
 
     /// Records contradiction archive or legal-hold policy decisions without dropping the durable row.
@@ -93,7 +168,7 @@ impl AuditLogStoreApi for AuditLogStore {
 }
 
 /// One durable audit-log entry preserved in append order.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
 pub struct AuditLogEntry {
     /// Monotonic sequence assigned at append time.
     pub sequence: u64,
@@ -175,7 +250,7 @@ impl AuditLogEntry {
 }
 
 /// Bounded filter used to inspect one audit-history slice.
-#[derive(Debug, Clone, Default, PartialEq, Eq)]
+#[derive(Debug, Clone, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct AuditLogFilter {
     pub namespace: Option<NamespaceId>,
     pub memory_id: Option<MemoryId>,
@@ -226,7 +301,7 @@ impl AuditLogFilter {
 }
 
 /// Structured bounded export for one audit-history slice.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
 pub struct AuditLogSlice {
     pub rows: Vec<AuditLogEntry>,
     pub total_matches: usize,
@@ -293,6 +368,21 @@ impl AppendOnlyAuditLog {
     /// Returns retained audit rows in append order.
     pub fn entries(&self) -> Vec<AuditLogEntry> {
         self.entries.iter().cloned().collect()
+    }
+
+    /// Returns the next monotonic sequence that will be assigned on append.
+    pub fn next_sequence(&self) -> u64 {
+        self.next_sequence
+    }
+
+    /// Returns the last retained sequence, if any rows are present.
+    pub fn last_sequence(&self) -> Option<u64> {
+        self.entries.back().map(|entry| entry.sequence)
+    }
+
+    /// Returns the canonical row sequence range retained in this log.
+    pub fn retained_sequence_range(&self) -> Option<std::ops::RangeInclusive<u64>> {
+        Some(self.entries.front()?.sequence..=self.entries.back()?.sequence)
     }
 
     /// Returns retained audit rows for the requested category in append order.
@@ -380,7 +470,10 @@ impl AppendOnlyAuditLog {
 
 #[cfg(test)]
 mod tests {
-    use super::{AppendOnlyAuditLog, AuditLogEntry, AuditLogFilter, AuditLogSlice, AuditLogStore};
+    use super::{
+        AppendOnlyAuditLog, AuditLogEntry, AuditLogFilter, AuditLogSlice, AuditLogStore,
+        AuditTaxonomyRow,
+    };
     use crate::api::NamespaceId;
     use crate::engine::contradiction::{
         ContradictionId, ContradictionKind, ContradictionRecord, PreferredAnswerState,
@@ -392,6 +485,72 @@ mod tests {
 
     fn team_alpha() -> NamespaceId {
         NamespaceId::new("team.alpha").expect("team.alpha should be a valid namespace id")
+    }
+
+    #[test]
+    fn audit_store_exposes_canonical_taxonomy_and_default_capacity_log() {
+        let store = AuditLogStore;
+        let categories = store.categories();
+        let kinds = store.event_kinds();
+        let taxonomy = store.taxonomy();
+        let log = store.new_default_log();
+
+        assert_eq!(categories.len(), 5);
+        assert_eq!(categories[0], AuditEventCategory::Encode);
+        assert_eq!(categories[4], AuditEventCategory::Archive);
+        assert!(kinds.contains(&AuditEventKind::EncodeAccepted));
+        assert!(kinds.contains(&AuditEventKind::PolicyDenied));
+        assert!(kinds.contains(&AuditEventKind::MaintenanceConsolidationPartial));
+        assert!(kinds.contains(&AuditEventKind::MaintenanceReconsolidationApplied));
+        assert!(kinds.contains(&AuditEventKind::MaintenanceReconsolidationDiscarded));
+        assert!(kinds.contains(&AuditEventKind::MaintenanceReconsolidationDeferred));
+        assert!(kinds.contains(&AuditEventKind::MaintenanceReconsolidationBlocked));
+        assert!(kinds.contains(&AuditEventKind::ArchiveRecorded));
+        assert_eq!(taxonomy.len(), kinds.len());
+        assert_eq!(
+            taxonomy[0],
+            AuditTaxonomyRow::new(AuditEventKind::EncodeAccepted)
+        );
+        assert_eq!(taxonomy[0].category_name, "encode");
+        assert_eq!(taxonomy[0].kind_name, "encode_accepted");
+        assert_eq!(
+            taxonomy.last(),
+            Some(&AuditTaxonomyRow::new(AuditEventKind::ArchiveRecorded))
+        );
+        assert_eq!(log.capacity(), AppendOnlyAuditLog::DEFAULT_CAPACITY);
+        assert_eq!(log.next_sequence(), 1);
+        assert_eq!(log.last_sequence(), None);
+        assert_eq!(log.retained_sequence_range(), None);
+    }
+
+    #[test]
+    fn audit_taxonomy_rows_remain_category_consistent_and_machine_readable() {
+        let taxonomy = AuditLogStore.taxonomy();
+
+        assert!(taxonomy
+            .iter()
+            .all(|row| row.category == row.kind.category()));
+        assert!(taxonomy
+            .iter()
+            .all(|row| row.category_name == row.category.as_str()));
+        assert!(taxonomy
+            .iter()
+            .all(|row| row.kind_name == row.kind.as_str()));
+        assert!(taxonomy
+            .iter()
+            .any(|row| row.kind_name == "maintenance_migration_applied"));
+        assert!(taxonomy
+            .iter()
+            .any(|row| row.kind_name == "maintenance_reconsolidation_applied"));
+        assert!(taxonomy
+            .iter()
+            .any(|row| row.kind_name == "maintenance_reconsolidation_discarded"));
+        assert!(taxonomy
+            .iter()
+            .any(|row| row.kind_name == "maintenance_reconsolidation_deferred"));
+        assert!(taxonomy
+            .iter()
+            .any(|row| row.kind_name == "maintenance_reconsolidation_blocked"));
     }
 
     #[test]
@@ -423,13 +582,18 @@ mod tests {
         assert_eq!(second.sequence, 2);
         assert_eq!(first.request_id.as_deref(), Some("req-encode-11"));
         assert_eq!(log.len(), 2);
+        assert_eq!(log.next_sequence(), 3);
+        assert_eq!(log.last_sequence(), Some(2));
+        assert_eq!(log.retained_sequence_range(), Some(1..=2));
         assert_eq!(log.entries()[0].kind, AuditEventKind::EncodeAccepted);
         assert_eq!(log.entries()[1].kind, AuditEventKind::PolicyDenied);
     }
 
     #[test]
     fn audit_log_retains_representative_encode_policy_and_maintenance_events() {
-        let mut log = AuditLogStore.new_log(8);
+        let store = AuditLogStore;
+        let taxonomy = store.taxonomy();
+        let mut log = store.new_log(8);
         let namespace = team_alpha();
 
         log.append(
@@ -463,6 +627,15 @@ mod tests {
         assert_eq!(entries[0].category, AuditEventCategory::Encode);
         assert_eq!(entries[1].category, AuditEventCategory::Policy);
         assert_eq!(entries[2].category, AuditEventCategory::Maintenance);
+        assert!(taxonomy
+            .iter()
+            .any(|row| row.kind == entries[0].kind && row.category == entries[0].category));
+        assert!(taxonomy
+            .iter()
+            .any(|row| row.kind == entries[1].kind && row.category == entries[1].category));
+        assert!(taxonomy
+            .iter()
+            .any(|row| row.kind == entries[2].kind && row.category == entries[2].category));
         assert_eq!(entries[0].memory_id, Some(MemoryId(21)));
         assert_eq!(entries[0].session_id, Some(SessionId(5)));
     }
@@ -652,6 +825,9 @@ mod tests {
         assert_eq!(entries[0].kind, AuditEventKind::RecallServed);
         assert_eq!(entries[1].sequence, 3);
         assert_eq!(entries[1].kind, AuditEventKind::ArchiveRecorded);
+        assert_eq!(log.next_sequence(), 4);
+        assert_eq!(log.last_sequence(), Some(3));
+        assert_eq!(log.retained_sequence_range(), Some(2..=3));
     }
 
     #[test]
@@ -800,6 +976,59 @@ mod tests {
     }
 
     #[test]
+    fn audit_log_slice_preserves_export_ready_rows_and_metadata() {
+        let mut log = AppendOnlyAuditLog::new(8);
+        let namespace = team_alpha();
+
+        log.append(
+            AuditLogEntry::new(
+                AuditEventCategory::Encode,
+                AuditEventKind::EncodeAccepted,
+                namespace.clone(),
+                "encode_engine",
+                "encoded durable memory",
+            )
+            .with_memory_id(MemoryId(61))
+            .with_session_id(SessionId(7))
+            .with_request_id("req-encode-61"),
+        );
+        log.append(
+            AuditLogEntry::new(
+                AuditEventCategory::Policy,
+                AuditEventKind::PolicyRedacted,
+                namespace.clone(),
+                "policy_module",
+                "redacted actor fields for export",
+            )
+            .with_memory_id(MemoryId(61))
+            .with_request_id("req-policy-61")
+            .with_related_run("incident-2026-03-23")
+            .with_redaction(),
+        );
+
+        let slice = log.slice(
+            &AuditLogFilter {
+                namespace: Some(namespace),
+                memory_id: Some(MemoryId(61)),
+                ..AuditLogFilter::default()
+            },
+            Some(8),
+        );
+
+        assert_eq!(slice.total_matches, 2);
+        assert!(!slice.truncated);
+        assert_eq!(slice.rows.len(), 2);
+        assert_eq!(slice.rows[0].kind, AuditEventKind::EncodeAccepted);
+        assert_eq!(slice.rows[1].kind, AuditEventKind::PolicyRedacted);
+        assert_eq!(slice.rows[0].request_id.as_deref(), Some("req-encode-61"));
+        assert_eq!(
+            slice.rows[1].related_run.as_deref(),
+            Some("incident-2026-03-23")
+        );
+        assert!(slice.rows[1].redacted);
+    }
+
+    #[test]
     fn audit_log_slice_can_filter_by_request_id_kind_and_redaction() {
         let mut log = AppendOnlyAuditLog::new(8);
         let namespace = team_alpha();
@@ -844,5 +1073,47 @@ mod tests {
         assert_eq!(rows[0].kind, AuditEventKind::PolicyRedacted);
         assert_eq!(rows[0].request_id.as_deref(), Some("req-policy-redacted"));
         assert!(rows[0].redacted);
+    }
+
+    #[test]
+    fn audit_taxonomy_rows_and_filters_serialize_machine_readable_payloads() {
+        let taxonomy = AuditLogStore.taxonomy();
+        let filter = AuditLogFilter {
+            namespace: Some(team_alpha()),
+            memory_id: Some(MemoryId(88)),
+            session_id: Some(SessionId(13)),
+            category: Some(AuditEventCategory::Maintenance),
+            kind: Some(AuditEventKind::MaintenanceRepairRollbackCompleted),
+            request_id: Some("req-repair-88".to_string()),
+            related_run: Some("repair-run-88".to_string()),
+            min_sequence: Some(7),
+            max_sequence: Some(9),
+            redacted: Some(true),
+        };
+
+        let taxonomy_json = serde_json::to_value(&taxonomy).expect("taxonomy should serialize");
+        let filter_json = serde_json::to_value(&filter).expect("filter should serialize");
+
+        assert!(taxonomy_json.as_array().is_some());
+        assert!(taxonomy_json
+            .as_array()
+            .expect("taxonomy should be an array")
+            .iter()
+            .any(|row| {
+                row["category"] == "Maintenance"
+                    && row["kind"] == "MaintenanceRepairRollbackCompleted"
+                    && row["category_name"] == "maintenance"
+                    && row["kind_name"] == "maintenance_repair_rollback_completed"
+            }));
+        assert_eq!(filter_json["namespace"], "team.alpha");
+        assert_eq!(filter_json["memory_id"], 88);
+        assert_eq!(filter_json["session_id"], 13);
+        assert_eq!(filter_json["category"], "Maintenance");
+        assert_eq!(filter_json["kind"], "MaintenanceRepairRollbackCompleted");
+        assert_eq!(filter_json["request_id"], "req-repair-88");
+        assert_eq!(filter_json["related_run"], "repair-run-88");
+        assert_eq!(filter_json["min_sequence"], 7);
+        assert_eq!(filter_json["max_sequence"], 9);
+        assert_eq!(filter_json["redacted"], true);
     }
 }

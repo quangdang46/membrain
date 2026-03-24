@@ -143,6 +143,94 @@ mod tests {
         }
     }
 
+    fn blocked_check(reason_code: &str, checked_scope: &str) -> PreflightCheckView {
+        PreflightCheckView {
+            check_name: reason_code.to_string(),
+            status: "blocked".to_string(),
+            reason_codes: vec![reason_code.to_string()],
+            checked_scope: checked_scope.to_string(),
+        }
+    }
+
+    fn blocked_policy_summary(reason_code: &str) -> PolicySummaryView {
+        PolicySummaryView {
+            decision: if reason_code == "policy_denied" {
+                "deny".to_string()
+            } else {
+                "allow".to_string()
+            },
+            namespace_bound: true,
+            outcome_class: "blocked".to_string(),
+        }
+    }
+
+    fn blocked_explain_fixture(
+        reason_code: &str,
+        blocked_reason: &str,
+        checked_scope: &str,
+    ) -> PreflightExplainResponse {
+        PreflightExplainResponse {
+            allowed: false,
+            preflight_state: "blocked".to_string(),
+            preflight_outcome: "blocked".to_string(),
+            blocked_reasons: vec![reason_code.to_string()],
+            blocked_reason: Some(blocked_reason.to_string()),
+            required_overrides: Vec::new(),
+            policy_context: format!(
+                "force-confirm remains blocked for {reason_code} on {checked_scope}"
+            ),
+            check_results: vec![blocked_check(reason_code, checked_scope)],
+            confirmation: ConfirmationView {
+                required: true,
+                force_allowed: true,
+                confirmed: true,
+                generation_bound: Some(42),
+            },
+            audit: AuditView {
+                request_id: format!("daemon-preflight-explain-{reason_code}"),
+                preview_id: Some(format!("preflight-{reason_code}")),
+                related_run: Some(format!("blocked-run-{reason_code}")),
+                ..sample_audit()
+            },
+            policy_summary: blocked_policy_summary(reason_code),
+            request_id: Some(format!("req-{reason_code}")),
+            preflight_id: Some(format!("preflight-{reason_code}")),
+        }
+    }
+
+    fn blocked_outcome_fixture(
+        reason_code: &str,
+        _blocked_reason: &str,
+        checked_scope: &str,
+    ) -> PreflightOutcome {
+        PreflightOutcome {
+            success: false,
+            preflight_state: "blocked".to_string(),
+            preflight_outcome: "blocked".to_string(),
+            outcome_class: "blocked".to_string(),
+            blocked_reasons: vec![reason_code.to_string()],
+            check_results: vec![blocked_check(reason_code, checked_scope)],
+            confirmation: ConfirmationView {
+                required: true,
+                force_allowed: true,
+                confirmed: true,
+                generation_bound: Some(42),
+            },
+            audit: AuditView {
+                request_id: format!("daemon-preflight-allow-{reason_code}"),
+                preview_id: Some(format!("preflight-{reason_code}")),
+                related_run: Some(format!("blocked-run-{reason_code}")),
+                ..sample_audit()
+            },
+            policy_summary: blocked_policy_summary(reason_code),
+            request_id: Some(format!("req-{reason_code}")),
+            preflight_id: Some(format!("preflight-{reason_code}")),
+            execution_id: None,
+            degraded: false,
+            confirmation_reason: None,
+        }
+    }
+
     #[test]
     fn preflight_run_request_round_trips_with_canonical_fields() {
         let request = PreflightRunRequest {
@@ -471,6 +559,223 @@ mod tests {
         assert_eq!(decoded_outcome.preflight_outcome, "degraded");
         assert_eq!(decoded_outcome.policy_summary.outcome_class, "degraded");
         assert!(decoded_outcome.degraded);
+    }
+
+    #[test]
+    fn force_confirm_blockers_preserve_blocked_serialization_contract() {
+        let cases = [
+            (
+                "policy_denied",
+                "policy denied the requested action",
+                "effective_namespace",
+                json!(true),
+            ),
+            (
+                "scope_ambiguous",
+                "requested scope is ambiguous",
+                "requested_scope",
+                json!(true),
+            ),
+            (
+                "snapshot_required",
+                "snapshot is required before this action can proceed",
+                "effective_namespace",
+                json!(true),
+            ),
+            (
+                "legal_hold",
+                "legal hold blocks the requested action",
+                "effective_namespace",
+                json!(true),
+            ),
+        ];
+
+        for (reason_code, blocked_reason, checked_scope, namespace_bound) in cases {
+            let explain = blocked_explain_fixture(reason_code, blocked_reason, checked_scope);
+            let outcome = blocked_outcome_fixture(reason_code, blocked_reason, checked_scope);
+
+            let explain_value = serde_json::to_value(&explain).unwrap();
+            let outcome_value = serde_json::to_value(&outcome).unwrap();
+
+            assert_eq!(explain_value["allowed"], json!(false), "{reason_code}");
+            assert_eq!(
+                explain_value["preflight_state"],
+                json!("blocked"),
+                "{reason_code}"
+            );
+            assert_eq!(
+                explain_value["preflight_outcome"],
+                json!("blocked"),
+                "{reason_code}"
+            );
+            assert_eq!(
+                explain_value["blocked_reasons"],
+                json!([reason_code]),
+                "{reason_code}"
+            );
+            assert_eq!(
+                explain_value["blocked_reason"],
+                json!(blocked_reason),
+                "{reason_code}"
+            );
+            assert_eq!(
+                explain_value["required_overrides"],
+                json!([]),
+                "{reason_code}"
+            );
+            assert_eq!(
+                explain_value["check_results"][0]["status"],
+                json!("blocked"),
+                "{reason_code}"
+            );
+            assert_eq!(
+                explain_value["check_results"][0]["reason_codes"],
+                json!([reason_code]),
+                "{reason_code}"
+            );
+            assert_eq!(
+                explain_value["check_results"][0]["checked_scope"],
+                json!(checked_scope),
+                "{reason_code}"
+            );
+            assert_eq!(
+                explain_value["confirmation"]["required"],
+                json!(true),
+                "{reason_code}"
+            );
+            assert_eq!(
+                explain_value["confirmation"]["force_allowed"],
+                json!(true),
+                "{reason_code}"
+            );
+            assert_eq!(
+                explain_value["confirmation"]["confirmed"],
+                json!(true),
+                "{reason_code}"
+            );
+            assert_eq!(
+                explain_value["policy_summary"]["decision"],
+                if reason_code == "policy_denied" {
+                    json!("deny")
+                } else {
+                    json!("allow")
+                },
+                "{reason_code}"
+            );
+            assert_eq!(
+                explain_value["policy_summary"]["namespace_bound"], namespace_bound,
+                "{reason_code}"
+            );
+            assert_eq!(
+                explain_value["policy_summary"]["outcome_class"],
+                json!("blocked"),
+                "{reason_code}"
+            );
+
+            assert_eq!(outcome_value["success"], json!(false), "{reason_code}");
+            assert_eq!(
+                outcome_value["preflight_state"],
+                json!("blocked"),
+                "{reason_code}"
+            );
+            assert_eq!(
+                outcome_value["preflight_outcome"],
+                json!("blocked"),
+                "{reason_code}"
+            );
+            assert_eq!(
+                outcome_value["outcome_class"],
+                json!("blocked"),
+                "{reason_code}"
+            );
+            assert_eq!(
+                outcome_value["blocked_reasons"],
+                json!([reason_code]),
+                "{reason_code}"
+            );
+            assert_eq!(
+                outcome_value["check_results"][0]["status"],
+                json!("blocked"),
+                "{reason_code}"
+            );
+            assert_eq!(
+                outcome_value["check_results"][0]["reason_codes"],
+                json!([reason_code]),
+                "{reason_code}"
+            );
+            assert_eq!(
+                outcome_value["check_results"][0]["checked_scope"],
+                json!(checked_scope),
+                "{reason_code}"
+            );
+            assert_eq!(
+                outcome_value["confirmation"]["required"],
+                json!(true),
+                "{reason_code}"
+            );
+            assert_eq!(
+                outcome_value["confirmation"]["force_allowed"],
+                json!(true),
+                "{reason_code}"
+            );
+            assert_eq!(
+                outcome_value["confirmation"]["confirmed"],
+                json!(true),
+                "{reason_code}"
+            );
+            assert_eq!(
+                outcome_value["policy_summary"]["decision"],
+                if reason_code == "policy_denied" {
+                    json!("deny")
+                } else {
+                    json!("allow")
+                },
+                "{reason_code}"
+            );
+            assert_eq!(
+                outcome_value["policy_summary"]["namespace_bound"], namespace_bound,
+                "{reason_code}"
+            );
+            assert_eq!(
+                outcome_value["policy_summary"]["outcome_class"],
+                json!("blocked"),
+                "{reason_code}"
+            );
+            assert!(outcome_value.get("execution_id").is_none(), "{reason_code}");
+            assert!(
+                outcome_value.get("confirmation_reason").is_none(),
+                "{reason_code}"
+            );
+
+            let decoded_explain: PreflightExplainResponse =
+                serde_json::from_value(explain_value).unwrap();
+            let decoded_outcome: PreflightOutcome = serde_json::from_value(outcome_value).unwrap();
+            assert!(!decoded_explain.allowed, "{reason_code}");
+            assert_eq!(
+                decoded_explain.blocked_reasons,
+                vec![reason_code],
+                "{reason_code}"
+            );
+            assert_eq!(
+                decoded_explain.blocked_reason.as_deref(),
+                Some(blocked_reason),
+                "{reason_code}"
+            );
+            assert_eq!(
+                decoded_outcome.preflight_outcome, "blocked",
+                "{reason_code}"
+            );
+            assert_eq!(
+                decoded_outcome.blocked_reasons,
+                vec![reason_code],
+                "{reason_code}"
+            );
+            assert!(decoded_outcome.confirmation.confirmed, "{reason_code}");
+            assert_eq!(
+                decoded_outcome.policy_summary.outcome_class, "blocked",
+                "{reason_code}"
+            );
+        }
     }
 
     #[test]

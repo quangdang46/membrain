@@ -2,7 +2,17 @@ use membrain_core::api::NamespaceId;
 use membrain_core::engine::ranking::{fuse_scores, RankingInput, RankingProfile};
 use membrain_core::engine::recall::{RecallRequest, RecallRuntime, RecallTraceStage};
 use membrain_core::engine::result::{
-    AnsweredFrom, EvidenceRole, PayloadState, ResultBuilder, RetrievalExplain, RetrievalResultSet,
+    AnsweredFrom, EvidenceRole, PayloadState, ResultBuilder, ResultReason, RetrievalExplain,
+    RetrievalResultSet,
+};
+use membrain_core::engine::retrieval_planner::{PrimaryCue, RetrievalPlanTrace, RetrievalRequest};
+use membrain_core::graph::{
+    BoundedExpansionPlanner, CutoffReason, EntityId, EntityKind, ExpansionConstraints, GraphEdge,
+    GraphEntity, RelationKind,
+};
+use membrain_core::observability::{
+    CacheEvalTrace, CacheEventLabel, CacheFamilyLabel, CacheLookupOutcome, CacheReasonLabel,
+    GenerationStatusLabel, WarmSourceLabel,
 };
 use membrain_core::types::{
     CanonicalMemoryType, MemoryId, RawEncodeInput, RawIntakeKind, SessionId,
@@ -164,6 +174,7 @@ fn result_builder_adds_and_ranks_candidates() {
         time_consumed_ms: Some(5),
         ranking_profile: "balanced".to_string(),
         contradictions_found: 0,
+        query_by_example: None,
         result_reasons: vec![membrain_core::engine::result::ResultReason {
             memory_id: Some(MemoryId(2)),
             reason_code: "score_kept".to_string(),
@@ -218,6 +229,7 @@ fn result_builder_truncates_to_budget() {
         time_consumed_ms: Some(3),
         ranking_profile: "balanced".to_string(),
         contradictions_found: 0,
+        query_by_example: None,
         result_reasons: vec![],
     };
 
@@ -240,6 +252,7 @@ fn empty_result_set_has_correct_outcome_class() {
         time_consumed_ms: Some(1),
         ranking_profile: "balanced".to_string(),
         contradictions_found: 0,
+        query_by_example: None,
         result_reasons: vec![membrain_core::engine::result::ResultReason {
             memory_id: None,
             reason_code: "no_match".to_string(),
@@ -252,6 +265,86 @@ fn empty_result_set_has_correct_outcome_class() {
     assert_eq!(result_set.count(), 0);
     assert!(!result_set.truncated);
     assert!(result_set.top().is_none());
+}
+
+#[test]
+fn recall_trace_exposes_query_by_example_seed_selection_details() {
+    let request = RetrievalRequest::hybrid(ns("test"), "  similar outage  ", 4)
+        .with_like_memory(MemoryId(42))
+        .with_unlike_memory(MemoryId(77));
+
+    let normalization = request.normalize_query_by_example().unwrap();
+    let mut trace = RetrievalPlanTrace::new(&request);
+    trace.set_query_by_example_materialization(&normalization, &[MemoryId(42), MemoryId(99)]);
+    trace.set_final_candidates(3);
+
+    assert_eq!(
+        trace.query_by_example_primary_cue,
+        Some(PrimaryCue::QueryText)
+    );
+    assert_eq!(
+        trace.query_by_example_seed_descriptors,
+        vec!["like:42".to_string(), "unlike:77".to_string()]
+    );
+    assert_eq!(
+        trace.query_by_example_materialized_seed_descriptors,
+        vec!["like:42".to_string()]
+    );
+    assert_eq!(
+        trace.query_by_example_missing_seed_descriptors,
+        vec!["unlike:77".to_string()]
+    );
+    assert!(trace.summary().contains(
+        "query_by_example: primary_cue=query_text, requested_seeds=[\"like:42\", \"unlike:77\"], materialized_seeds=[\"like:42\"], missing_seeds=[\"unlike:77\"]"
+    ));
+
+    let mut explain = RetrievalExplain {
+        recall_plan: membrain_core::engine::recall::RecallPlanKind::Tier2ExactThenTier3Fallback,
+        route_reason: "query by example".to_string(),
+        tiers_consulted: vec!["tier2_exact".to_string()],
+        trace_stages: vec![RecallTraceStage::Tier2Exact],
+        tier1_answered_directly: false,
+        candidate_budget: 4,
+        time_consumed_ms: Some(2),
+        ranking_profile: "balanced".to_string(),
+        contradictions_found: 0,
+        query_by_example: None,
+        result_reasons: vec![ResultReason {
+            memory_id: Some(MemoryId(42)),
+            reason_code: "score_kept".to_string(),
+            detail: "seeded candidate survived ranking".to_string(),
+        }],
+    };
+    explain.set_query_by_example_trace(&trace);
+
+    let query_by_example = explain.query_by_example.as_ref().unwrap();
+    assert_eq!(query_by_example.primary_cue, "query_text");
+    assert_eq!(
+        query_by_example.requested_seed_descriptors,
+        vec!["like:42", "unlike:77"]
+    );
+    assert_eq!(
+        query_by_example.materialized_seed_descriptors,
+        vec!["like:42"]
+    );
+    assert_eq!(query_by_example.missing_seed_descriptors, vec!["unlike:77"]);
+    assert_eq!(query_by_example.expanded_candidate_count, 3);
+    assert_eq!(
+        query_by_example.influence_summary,
+        "primary cue query_text expanded 3 candidate(s) from 2 requested seed(s); 1 seed(s) materialized and 1 seed(s) remained unavailable"
+    );
+    assert!(explain.result_reasons.iter().any(|reason| {
+        reason.reason_code == "query_by_example_seed_materialized"
+            && reason.detail == "seed like:42 materialized from stored evidence"
+    }));
+    assert!(explain.result_reasons.iter().any(|reason| {
+        reason.reason_code == "query_by_example_seed_missing"
+            && reason.detail == "seed unlike:77 was requested but not available for expansion"
+    }));
+    assert!(explain.result_reasons.iter().any(|reason| {
+        reason.reason_code == "query_by_example_candidate_expansion"
+            && reason.detail == query_by_example.influence_summary
+    }));
 }
 
 #[test]
@@ -273,4 +366,248 @@ fn payload_state_has_correct_string_representation() {
     assert_eq!(PayloadState::PreviewOnly.as_str(), "preview_only");
     assert_eq!(PayloadState::Deferred.as_str(), "deferred");
     assert_eq!(PayloadState::Redacted.as_str(), "redacted");
+}
+
+#[test]
+fn cache_metrics_preserve_per_family_hit_breakdown() {
+    let summary = membrain_core::api::CacheMetricsSummary::from_cache_traces(
+        vec![
+            CacheEvalTrace {
+                cache_family: CacheFamilyLabel::Tier2Query,
+                cache_event: CacheEventLabel::Hit,
+                outcome: CacheLookupOutcome::Hit,
+                cache_reason: None,
+                warm_source: Some(WarmSourceLabel::Tier2QueryCache),
+                generation_status: GenerationStatusLabel::Valid,
+                candidates_before: 6,
+                candidates_after: 2,
+                warm_reuse: true,
+            },
+            CacheEvalTrace {
+                cache_family: CacheFamilyLabel::Negative,
+                cache_event: CacheEventLabel::Hit,
+                outcome: CacheLookupOutcome::Hit,
+                cache_reason: Some(CacheReasonLabel::ColdStart),
+                warm_source: None,
+                generation_status: GenerationStatusLabel::Unknown,
+                candidates_before: 2,
+                candidates_after: 2,
+                warm_reuse: false,
+            },
+        ],
+        false,
+    );
+
+    assert_eq!(summary.cache_hit_count, 2);
+    assert_eq!(summary.tier2_query_hit_count, 1);
+    assert_eq!(summary.negative_cache_hit_count, 1);
+    assert_eq!(summary.post_tier2_candidates, Some(2));
+}
+
+#[test]
+fn graph_direct_hit_fixture_has_no_associative_expansion() {
+    let planner = BoundedExpansionPlanner::new(ExpansionConstraints {
+        max_depth: 2,
+        max_entities: 4,
+        min_strength: 50,
+        follow_reverse: false,
+    });
+
+    let (neighborhood, explain) = planner.plan_bfs(EntityId(42), |_| Vec::new());
+
+    assert_eq!(neighborhood.seed, EntityId(42));
+    assert!(neighborhood.entities.is_empty());
+    assert!(explain.followed_edges.is_empty());
+    assert!(explain.omitted_neighbors.is_empty());
+    assert!(explain.cutoff_reasons.is_empty());
+}
+
+#[test]
+fn graph_partial_cue_fixture_reports_engram_seeded_expansion_details() {
+    let planner = BoundedExpansionPlanner::new(ExpansionConstraints {
+        max_depth: 2,
+        max_entities: 4,
+        min_strength: 50,
+        follow_reverse: false,
+    });
+
+    let (neighborhood, explain) = planner.plan_bfs_with_additional_seeds(
+        EntityId(7),
+        &[EntityId(99)],
+        |current| match current {
+            EntityId(7) => vec![(
+                GraphEdge {
+                    from: current,
+                    to: EntityId(8),
+                    relation: RelationKind::Mentions,
+                    strength: 100,
+                },
+                GraphEntity {
+                    id: EntityId(8),
+                    kind: EntityKind::Concept,
+                    label: "direct-seed-neighbor".into(),
+                    namespace: ns("graph"),
+                    memory_id: None,
+                },
+            )],
+            EntityId(99) => vec![(
+                GraphEdge {
+                    from: current,
+                    to: EntityId(100),
+                    relation: RelationKind::SharedTopic,
+                    strength: 100,
+                },
+                GraphEntity {
+                    id: EntityId(100),
+                    kind: EntityKind::Memory,
+                    label: "engram-member".into(),
+                    namespace: ns("graph"),
+                    memory_id: Some(MemoryId(100)),
+                },
+            )],
+            _ => Vec::new(),
+        },
+    );
+
+    assert_eq!(neighborhood.entities.len(), 2);
+    assert_eq!(explain.followed_edges.len(), 2);
+    assert!(explain
+        .followed_edges
+        .iter()
+        .any(|edge| edge.via_additional_seed && edge.to == EntityId(100)));
+    assert!(explain.omitted_neighbors.is_empty());
+}
+
+#[test]
+fn graph_capped_associative_fixture_reports_omitted_neighbor() {
+    let planner = BoundedExpansionPlanner::new(ExpansionConstraints {
+        max_depth: 2,
+        max_entities: 1,
+        min_strength: 50,
+        follow_reverse: false,
+    });
+
+    let (_neighborhood, explain) = planner.plan_bfs(EntityId(1), |current| {
+        if current == EntityId(1) {
+            vec![
+                (
+                    GraphEdge {
+                        from: current,
+                        to: EntityId(2),
+                        relation: RelationKind::Mentions,
+                        strength: 100,
+                    },
+                    GraphEntity {
+                        id: EntityId(2),
+                        kind: EntityKind::Concept,
+                        label: "kept".into(),
+                        namespace: ns("graph"),
+                        memory_id: None,
+                    },
+                ),
+                (
+                    GraphEdge {
+                        from: current,
+                        to: EntityId(3),
+                        relation: RelationKind::SharedTopic,
+                        strength: 100,
+                    },
+                    GraphEntity {
+                        id: EntityId(3),
+                        kind: EntityKind::Memory,
+                        label: "omitted".into(),
+                        namespace: ns("graph"),
+                        memory_id: Some(MemoryId(3)),
+                    },
+                ),
+            ]
+        } else {
+            Vec::new()
+        }
+    });
+
+    assert_eq!(explain.followed_edges.len(), 1);
+    assert_eq!(explain.omitted_neighbors.len(), 1);
+    assert_eq!(explain.omitted_neighbors[0].entity_id, EntityId(3));
+    assert_eq!(
+        explain.omitted_neighbors[0].reason,
+        CutoffReason::MaxNodesReached(1)
+    );
+    assert!(explain
+        .cutoff_reasons
+        .contains(&CutoffReason::BudgetExhausted));
+}
+
+#[test]
+fn graph_namespace_gate_fixture_reports_policy_cutoff_without_following_blocked_neighbor() {
+    let planner = BoundedExpansionPlanner::new(ExpansionConstraints {
+        max_depth: 2,
+        max_entities: 4,
+        min_strength: 50,
+        follow_reverse: false,
+    });
+
+    let allowed_namespace = ns("graph");
+    let blocked_namespace = ns("other-graph");
+    let (neighborhood, explain) = planner.plan_bfs_with_policy(
+        EntityId(10),
+        &[],
+        |current| {
+            if current == EntityId(10) {
+                vec![
+                    (
+                        GraphEdge {
+                            from: current,
+                            to: EntityId(11),
+                            relation: RelationKind::Mentions,
+                            strength: 100,
+                        },
+                        GraphEntity {
+                            id: EntityId(11),
+                            kind: EntityKind::Concept,
+                            label: "allowed".into(),
+                            namespace: allowed_namespace.clone(),
+                            memory_id: None,
+                        },
+                    ),
+                    (
+                        GraphEdge {
+                            from: current,
+                            to: EntityId(12),
+                            relation: RelationKind::SharedTopic,
+                            strength: 100,
+                        },
+                        GraphEntity {
+                            id: EntityId(12),
+                            kind: EntityKind::Memory,
+                            label: "blocked".into(),
+                            namespace: blocked_namespace.clone(),
+                            memory_id: Some(MemoryId(12)),
+                        },
+                    ),
+                ]
+            } else {
+                Vec::new()
+            }
+        },
+        |entity| entity.namespace == allowed_namespace,
+    );
+
+    assert_eq!(neighborhood.entities.len(), 1);
+    assert_eq!(neighborhood.entities[0].id, EntityId(11));
+    assert_eq!(explain.followed_edges.len(), 1);
+    assert_eq!(explain.followed_edges[0].to, EntityId(11));
+    assert_eq!(explain.omitted_neighbors.len(), 1);
+    assert_eq!(explain.omitted_neighbors[0].entity_id, EntityId(12));
+    assert_eq!(
+        explain.omitted_neighbors[0].reason,
+        CutoffReason::PolicyNamespaceBlocked
+    );
+    assert!(explain
+        .cutoff_reasons
+        .contains(&CutoffReason::PolicyNamespaceBlocked));
+    assert!(!explain
+        .followed_edges
+        .iter()
+        .any(|edge| edge.to == EntityId(12)));
 }

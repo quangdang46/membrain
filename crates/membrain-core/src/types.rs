@@ -143,6 +143,12 @@ pub struct LandmarkMetadata {
     pub landmark_label: Option<String>,
     /// Era identifier opened by this landmark, when one is created.
     pub era_id: Option<String>,
+    /// Logical tick where the era opened for this landmark.
+    pub era_started_at_tick: Option<u64>,
+    /// Bounded landmark qualification score in 0..=1000.
+    pub detection_score: u16,
+    /// Inspectable reason string describing why the memory became a landmark.
+    pub detection_reason: Option<String>,
 }
 
 impl LandmarkMetadata {
@@ -152,6 +158,9 @@ impl LandmarkMetadata {
             is_landmark: false,
             landmark_label: None,
             era_id: None,
+            era_started_at_tick: None,
+            detection_score: 0,
+            detection_reason: None,
         }
     }
 }
@@ -323,7 +332,8 @@ mod tests {
     #[test]
     fn deleted_snapshot_metadata_keeps_identity_but_flips_active_flag() {
         let namespace = NamespaceId::new("tests.snapshot").unwrap();
-        let metadata = SnapshotMetadata::named(SnapshotId(9), namespace, "pre_repair", 64).deleted();
+        let metadata =
+            SnapshotMetadata::named(SnapshotId(9), namespace, "pre_repair", 64).deleted();
 
         assert_eq!(metadata.snapshot_id, SnapshotId(9));
         assert_eq!(metadata.snapshot_name, "pre_repair");

@@ -18,6 +18,7 @@ pub enum DurableSchemaObject {
     EngramMembershipTable,
     GraphEdgeTable,
     SnapshotMetadataTable,
+    LandmarksTable,
 }
 
 impl DurableSchemaObject {
@@ -36,6 +37,7 @@ impl DurableSchemaObject {
             Self::EngramMembershipTable => "engram_membership_table",
             Self::GraphEdgeTable => "graph_edge_table",
             Self::SnapshotMetadataTable => "snapshot_metadata",
+            Self::LandmarksTable => "landmarks",
         }
     }
 }
@@ -124,6 +126,7 @@ impl MigrationModule {
                 DurableSchemaObject::EngramMembershipTable,
                 DurableSchemaObject::GraphEdgeTable,
                 DurableSchemaObject::SnapshotMetadataTable,
+                DurableSchemaObject::LandmarksTable,
             ],
         }
     }
@@ -184,7 +187,7 @@ mod tests {
 
     #[test]
     fn newer_minor_is_not_compatible_with_current_runtime() {
-        let newer_minor = SchemaVersion::new(0, 2);
+        let newer_minor = SchemaVersion::new(0, 3);
         assert!(!newer_minor.compatible_with(&SchemaVersion::CURRENT));
     }
 

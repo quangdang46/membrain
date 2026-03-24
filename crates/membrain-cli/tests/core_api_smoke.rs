@@ -11,7 +11,9 @@ use membrain_core::engine::maintenance::{
 use membrain_core::engine::ranking::RankingRuntime;
 use membrain_core::engine::recall::{RecallRuntime, RecallTraceStage};
 use membrain_core::engine::repair::{IndexRepairEntrypoint, RepairTarget};
-use membrain_core::engine::retrieval_planner::{PrimaryCue, RetrievalRequest};
+use membrain_core::engine::retrieval_planner::{
+    PrimaryCue, RetrievalRequest, RetrievalRequestValidationError,
+};
 use membrain_core::observability::OutcomeClass;
 use membrain_core::policy::{
     PolicyDecision, PolicyGateway, PolicyModule, SharingAccessDecision, SharingVisibility,
@@ -357,6 +359,20 @@ fn cli_treats_whitespace_only_query_text_as_absent_for_query_by_example() {
     assert_eq!(normalized.seed_descriptors(), vec!["like:21"]);
     assert!(!request.requires_lexical_prefilter());
     assert!(request.requires_semantic_search());
+}
+
+#[test]
+fn cli_rejects_exact_id_plus_query_by_example_mix() {
+    let namespace = NamespaceId::new("cli.team").unwrap();
+    let request =
+        RetrievalRequest::exact_id(namespace, MemoryId(44)).with_unlike_memory(MemoryId(21));
+    let error = request.normalize_query_by_example().unwrap_err();
+
+    assert_eq!(
+        error,
+        RetrievalRequestValidationError::ExactIdWithExampleCue
+    );
+    assert_eq!(error.as_str(), "exact_id_with_example_cue");
 }
 
 #[test]

@@ -3,7 +3,7 @@
 //! Owns the merge/compaction logic that combines related memories,
 //! deduplicates similar entries, and produces consolidated summaries.
 
-use crate::api::NamespaceId;
+use crate::api::{NamespaceId, TaskId};
 use crate::engine::episode::{EpisodeCandidate, EpisodeGroupingModule, EpisodeGroupingReport};
 use crate::engine::maintenance::{
     DurableStateToken, InterruptedMaintenance, InterruptionReason, MaintenanceOperation,
@@ -92,8 +92,11 @@ impl DerivedArtifactKind {
 pub struct DerivedArtifact {
     pub kind: DerivedArtifactKind,
     pub fixture_name: String,
+    pub namespace: NamespaceId,
     pub source_ids: Vec<MemoryId>,
     pub continuity_keys: Vec<String>,
+    pub source_time_range_ms: (u64, u64),
+    pub contradiction_semantics: &'static str,
     pub content: String,
 }
 
@@ -101,7 +104,10 @@ pub struct DerivedArtifact {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct DerivationFailure {
     pub fixture_name: String,
+    pub namespace: NamespaceId,
     pub source_ids: Vec<MemoryId>,
+    pub source_time_range_ms: (u64, u64),
+    pub contradiction_semantics: &'static str,
     pub stage: &'static str,
     pub reason: &'static str,
     pub lineage_preserved: bool,
@@ -247,9 +253,12 @@ impl ConsolidationRun {
     }
 
     fn action_for_group(&self, group: &crate::engine::episode::SourceGroup) -> ConsolidationAction {
+        let source_time_range_ms = (0, group.explain.time_span_ms);
+        let contradiction_semantics = "preserve_unresolved_contradictions";
         let summary = DerivedArtifact {
             kind: DerivedArtifactKind::Summary,
             fixture_name: group.fixture_name.clone(),
+            namespace: self.namespace.clone(),
             source_ids: group.lineage.source_memory_ids.clone(),
             continuity_keys: group
                 .lineage
@@ -257,12 +266,17 @@ impl ConsolidationRun {
                 .iter()
                 .map(|key| (*key).to_string())
                 .collect(),
+            source_time_range_ms,
+            contradiction_semantics,
             content: format!(
-                "summary({}): anchor={} terminal={} members={} continuity={}",
+                "summary({}): namespace={} anchor={} terminal={} members={} timespan_ms={} contradiction_semantics={} continuity={}",
                 group.source_set_kind.as_str(),
+                self.namespace.as_str(),
                 group.explain.anchor_memory_id.0,
                 group.explain.terminal_memory_id.0,
                 group.members.len(),
+                group.explain.time_span_ms,
+                contradiction_semantics,
                 group.lineage.continuity_keys.join(",")
             ),
         };
@@ -271,7 +285,10 @@ impl ConsolidationRun {
         let partial_failure = if group.members.len() == 1 {
             Some(DerivationFailure {
                 fixture_name: group.fixture_name.clone(),
+                namespace: self.namespace.clone(),
                 source_ids: group.lineage.source_memory_ids.clone(),
+                source_time_range_ms,
+                contradiction_semantics,
                 stage: "gist_compaction",
                 reason: "single_source_group_kept_evidence_only",
                 lineage_preserved: true,
@@ -280,6 +297,7 @@ impl ConsolidationRun {
             artifacts.push(DerivedArtifact {
                 kind: DerivedArtifactKind::Gist,
                 fixture_name: group.fixture_name.clone(),
+                namespace: self.namespace.clone(),
                 source_ids: group.lineage.source_memory_ids.clone(),
                 continuity_keys: group
                     .lineage
@@ -287,11 +305,16 @@ impl ConsolidationRun {
                     .iter()
                     .map(|key| (*key).to_string())
                     .collect(),
+                source_time_range_ms,
+                contradiction_semantics,
                 content: format!(
-                    "gist({}): {}→{} via {}",
+                    "gist({}): namespace={} {}→{} timespan_ms={} contradiction_semantics={} via {}",
                     group.source_set_kind.as_str(),
+                    self.namespace.as_str(),
                     group.explain.anchor_memory_id.0,
                     group.explain.terminal_memory_id.0,
+                    group.explain.time_span_ms,
+                    contradiction_semantics,
                     group.explain.matching_fields.join(",")
                 ),
             });
@@ -358,15 +381,31 @@ impl MaintenanceOperation for ConsolidationRun {
         let batch_end = (self.processed + batch_size).min(self.total);
         let start_group = self.processed + 1;
         let candidates: Vec<EpisodeCandidate> = (start_group..=batch_end)
-            .map(|group_index| EpisodeCandidate {
-                memory_id: MemoryId(group_index as u64),
-                timestamp_ms: group_index as u64 * 700_000,
-                session_id: None,
-                task_id: None,
-                entities: Vec::new(),
-                goal_context: None,
-                tool_chain_context: None,
-                failure_retry_flag: false,
+            .map(|group_index| {
+                let session_anchor = ((group_index - 1) / 2) + 1;
+                let memory_id = MemoryId(group_index as u64);
+                EpisodeCandidate {
+                    memory_id,
+                    timestamp_ms: (session_anchor as u64 * 900_000)
+                        + ((group_index as u64 + 1) % 2) * 120_000,
+                    session_id: Some(crate::types::SessionId(session_anchor as u64)),
+                    task_id: Some(TaskId::new(format!(
+                        "consolidation-task-{}",
+                        session_anchor
+                    ))),
+                    entities: vec![crate::graph::EntityId(10 + session_anchor as u64)],
+                    goal_context: Some(if session_anchor % 2 == 0 {
+                        "summarize namespace timeline"
+                    } else {
+                        "capture source-set continuity"
+                    }),
+                    tool_chain_context: Some(if session_anchor % 2 == 0 {
+                        "maintenance.scheduler"
+                    } else {
+                        "maintenance.compactor"
+                    }),
+                    failure_retry_flag: false,
+                }
             })
             .collect();
         let grouping = self
@@ -479,10 +518,22 @@ mod tests {
                 summary.derived_artifacts[0].kind,
                 DerivedArtifactKind::Summary
             );
+            assert_eq!(summary.derived_artifacts[0].namespace, ns("test"));
             assert_eq!(summary.derived_artifacts[0].source_ids, vec![MemoryId(1)]);
+            assert_eq!(summary.derived_artifacts[0].source_time_range_ms, (0, 0));
+            assert_eq!(
+                summary.derived_artifacts[0].contradiction_semantics,
+                "preserve_unresolved_contradictions"
+            );
             assert!(summary.derived_artifacts[0]
                 .content
-                .contains("summary(singleton): anchor=1 terminal=1 members=1"));
+                .contains("summary(singleton): namespace=test anchor=1 terminal=1 members=1 timespan_ms=0 contradiction_semantics=preserve_unresolved_contradictions"));
+            assert_eq!(summary.derivation_failures[0].namespace, ns("test"));
+            assert_eq!(summary.derivation_failures[0].source_time_range_ms, (0, 0));
+            assert_eq!(
+                summary.derivation_failures[0].contradiction_semantics,
+                "preserve_unresolved_contradictions"
+            );
             assert_eq!(summary.derivation_failures[0].stage, "gist_compaction");
             assert!(summary.derivation_failures[0].lineage_preserved);
         }

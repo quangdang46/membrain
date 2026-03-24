@@ -72,6 +72,7 @@ fn cli_recall_json_preserves_route_and_result_fields() {
         .as_bool()
         .is_some());
     assert!(json["result"]["evidence_pack"].is_array());
+    assert!(json["result"]["action_pack"].is_null());
     assert_eq!(json["result"]["packaging_metadata"]["result_budget"], 3);
 }
 
@@ -155,7 +156,12 @@ fn cli_audit_json_preserves_request_and_run_correlation_fields() {
 
     assert!(ok, "stderr: {stderr}");
     let json = parse_json(&stdout);
-    let rows = json.as_array().expect("audit output should be an array");
+    assert_eq!(json["total_matches"], 3);
+    assert_eq!(json["returned_rows"], 1);
+    assert_eq!(json["truncated"], true);
+    let rows = json["rows"]
+        .as_array()
+        .expect("audit output should include rows");
     assert_eq!(rows.len(), 1);
     assert_eq!(rows[0]["request_id"], "req-migration-21");
     assert_eq!(rows[0]["related_run"], "migration-0042");
@@ -168,9 +174,127 @@ fn cli_doctor_json_reports_health_and_repair_state() {
 
     assert!(ok, "stderr: {stderr}");
     let json = parse_json(&stdout);
+    assert_eq!(json["status"], "ok");
     assert_eq!(json["action"], "doctor");
     assert!(json["metrics"].is_object());
     assert!(json["indexes"].is_array());
     assert!(json["repair_reports"].is_array());
     assert!(json["health"].is_object());
+}
+
+#[test]
+fn cli_share_json_reports_visibility_policy_and_audit_fields() {
+    let (ok, stdout, stderr) =
+        run_membrain(&["share", "--id", "42", "--namespace", "team.beta", "--json"]);
+
+    assert!(ok, "stderr: {stderr}");
+    let json = parse_json(&stdout);
+    assert_eq!(json["ok"], true);
+    assert_eq!(json["namespace"], "team.beta");
+    assert_eq!(json["result"]["visibility"], "shared");
+    assert_eq!(
+        json["result"]["policy_summary"]["policy_family"],
+        "visibility_sharing"
+    );
+    assert_eq!(
+        json["result"]["audit_rows"][0]["request_id"],
+        "req-share-42"
+    );
+    assert_eq!(json["result"]["audit_rows"][0]["kind"], "policy_redacted");
+}
+
+#[test]
+fn cli_unshare_json_reports_redaction_and_audit_fields() {
+    let (ok, stdout, stderr) = run_membrain(&[
+        "unshare",
+        "--id",
+        "42",
+        "--namespace",
+        "team.alpha",
+        "--json",
+    ]);
+
+    assert!(ok, "stderr: {stderr}");
+    let json = parse_json(&stdout);
+    assert_eq!(json["ok"], true);
+    assert_eq!(json["namespace"], "team.alpha");
+    assert_eq!(json["result"]["visibility"], "private");
+    assert_eq!(
+        json["result"]["policy_summary"]["redaction_fields"][0],
+        "sharing_scope"
+    );
+    assert_eq!(
+        json["result"]["audit_rows"][0]["request_id"],
+        "req-unshare-42"
+    );
+    assert_eq!(json["result"]["audit_rows"][0]["kind"], "policy_denied");
+    assert_eq!(json["result"]["audit_rows"][0]["redacted"], true);
+}
+
+#[test]
+fn cli_recall_human_output_logs_route_and_result_lines() {
+    let (ok, stdout, stderr) = run_membrain(&[
+        "recall",
+        "capital of France",
+        "--namespace",
+        "test_ns",
+        "--top",
+        "3",
+        "--explain",
+        "full",
+    ]);
+
+    assert!(ok, "stderr: {stderr}");
+    assert!(stderr.is_empty(), "stderr should stay empty: {stderr}");
+    assert!(stdout.contains("Recall 'capital of France' in 'test_ns' → 0 results"));
+    assert!(stdout.contains("route: "));
+    assert!(stdout.contains("tier1: consulted=true, answered_directly=true, deeper=false"));
+}
+
+#[test]
+fn cli_audit_human_output_logs_redaction_and_run_correlation() {
+    let (ok, stdout, stderr) = run_membrain(&[
+        "audit",
+        "--namespace",
+        "team.alpha",
+        "--id",
+        "21",
+        "--recent",
+        "1",
+    ]);
+
+    assert!(ok, "stderr: {stderr}");
+    assert!(stderr.is_empty(), "stderr should stay empty: {stderr}");
+    assert!(stdout.contains("matched=3 returned=1 truncated=true"));
+    assert!(stdout.contains("#3 maintenance maintenance_migration_applied"));
+    assert!(stdout.contains("request_id=Some(\"req-migration-21\")"));
+    assert!(stdout.contains("redacted=false"));
+    assert!(stdout.contains("run=Some(\"migration-0042\")"));
+}
+
+#[test]
+fn cli_share_and_unshare_human_output_logs_visibility_transitions() {
+    let (share_ok, share_stdout, share_stderr) =
+        run_membrain(&["share", "--id", "42", "--namespace", "team.beta"]);
+    assert!(share_ok, "stderr: {share_stderr}");
+    assert!(
+        share_stderr.is_empty(),
+        "stderr should stay empty: {share_stderr}"
+    );
+    assert_eq!(
+        share_stdout.trim(),
+        "Shared memory #42 into 'team.beta' [shared]"
+    );
+
+    let (unshare_ok, unshare_stdout, unshare_stderr) =
+        run_membrain(&["unshare", "--id", "42", "--namespace", "team.alpha"]);
+    assert!(unshare_ok, "stderr: {unshare_stderr}");
+    assert!(
+        unshare_stderr.is_empty(),
+        "stderr should stay empty: {unshare_stderr}"
+    );
+    assert_eq!(
+        unshare_stdout.trim(),
+        "Unshared memory #42 in 'team.alpha' [private]"
+    );
 }

@@ -41,6 +41,7 @@ pub trait Tier2StoreApi {
             DurableSchemaObject::MemoryTagsTable,
             DurableSchemaObject::ConflictRecordsTable,
             DurableSchemaObject::DurableMemoryRecords,
+            DurableSchemaObject::LandmarksTable,
         ]
     }
 }

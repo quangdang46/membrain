@@ -7,6 +7,7 @@ use membrain_core::engine::forgetting::{
     EligibilityFactors, ForgettingAction, ForgettingEngine, ForgettingPolicy,
 };
 use membrain_core::engine::interference::{InterferenceEngine, InterferencePolicy};
+use membrain_core::engine::maintenance::{LogicalClock, TickSequenceFixture};
 use membrain_core::engine::reconsolidation::{
     LabileState, PendingUpdate, ReconsolidationEngine, ReconsolidationOutcome,
     ReconsolidationPolicy, UpdateSource,
@@ -18,6 +19,71 @@ use membrain_core::types::MemoryId;
 
 fn mid(id: u64) -> MemoryId {
     MemoryId(id)
+}
+
+fn policy_bundle() -> (
+    StrengthPolicy,
+    InterferencePolicy,
+    ReconsolidationPolicy,
+    ForgettingPolicy,
+) {
+    (
+        StrengthPolicy::default(),
+        InterferencePolicy::default(),
+        ReconsolidationPolicy::default(),
+        ForgettingPolicy::default(),
+    )
+}
+
+fn replay_reconsolidation_apply_fixture() -> (Vec<u64>, ReconsolidationOutcome, Option<f32>) {
+    let (_, _, recon_policy, _) = policy_bundle();
+    let recon_engine = ReconsolidationEngine::new();
+    let mut ticks = TickSequenceFixture::new(10);
+    let labile = LabileState::new(ticks.current_tick(), 50);
+    let submitted_tick = ticks.advance_by(5);
+    let update = PendingUpdate::new(mid(1), submitted_tick, UpdateSource::User)
+        .with_content("revised".to_string());
+    let current_tick = ticks.advance_by(15);
+    let result = recon_engine.tick(
+        &labile,
+        Some(&update),
+        current_tick,
+        0.6,
+        &recon_policy,
+        membrain_core::engine::reconsolidation::RefreshReadiness::Ready,
+    );
+
+    (
+        ticks.history().to_vec(),
+        result.outcome,
+        result.new_strength,
+    )
+}
+
+// ── Deterministic fixture helpers ────────────────────────────────────────────
+
+#[test]
+fn logical_clock_advances_without_wall_clock_dependencies() {
+    let mut clock = LogicalClock::new(7);
+
+    assert_eq!(clock.current_tick(), 7);
+    assert_eq!(clock.advance_by(5), 12);
+    assert_eq!(clock.advance_to(20), 20);
+    assert_eq!(clock.advance_to(18), 20);
+    assert_eq!(clock.current_tick(), 20);
+}
+
+#[test]
+fn tick_sequence_fixture_records_replayable_history() {
+    let mut fixture = TickSequenceFixture::new(100);
+
+    assert_eq!(fixture.history(), &[100]);
+    fixture.advance_by(4);
+    fixture.advance_to(120);
+    fixture.advance_to(115);
+
+    assert_eq!(fixture.current_tick(), 120);
+    assert_eq!(fixture.history(), &[100, 104, 120, 120]);
 }
 
 // ── Strength → Forgetting integration ────────────────────────────────────────
@@ -121,29 +187,25 @@ fn interference_excludes_duplicates_from_strength_penalties() {
 
 #[test]
 fn reconsolidation_applies_strength_bonus() {
-    let recon_engine = ReconsolidationEngine::new();
-    let policy = ReconsolidationPolicy::default();
+    let (history, outcome, new_strength) = replay_reconsolidation_apply_fixture();
 
-    let labile = LabileState::new(100, 50);
-    let update =
-        PendingUpdate::new(mid(1), 105, UpdateSource::User).with_content("revised".to_string());
-
-    let result = recon_engine.tick(
-        &labile,
-        Some(&update),
-        120,
-        0.5,
-        &policy,
-        membrain_core::engine::reconsolidation::RefreshReadiness::Ready,
-    );
-    assert_eq!(result.outcome, ReconsolidationOutcome::Applied);
-    let new_strength = result.new_strength.unwrap_or_else(|| {
+    assert_eq!(history, vec![10, 15, 30]);
+    assert_eq!(outcome, ReconsolidationOutcome::Applied);
+    let new_strength = new_strength.unwrap_or_else(|| {
         std::process::abort();
     });
-    assert!(new_strength > 0.5);
+    assert!(new_strength > 0.6);
 
     // Strength bonus should be capped
     assert!(new_strength <= 1.0);
+}
+
+#[test]
+fn reconsolidation_apply_fixture_is_replayable() {
+    let first = replay_reconsolidation_apply_fixture();
+    let second = replay_reconsolidation_apply_fixture();
+
+    assert_eq!(first, second);
 }
 
 #[test]
@@ -165,6 +227,90 @@ fn reconsolidation_discards_stale_updates() {
     );
     assert_eq!(result.outcome, ReconsolidationOutcome::DiscardedStale);
     assert_eq!(result.new_strength, None);
+    assert!(result.pending_update_cleared);
+    assert!(result.restabilized);
+}
+
+#[test]
+fn stale_reconsolidation_tick_records_update_source_without_mutation() {
+    let engine = ReconsolidationEngine::new();
+    let policy = ReconsolidationPolicy::default();
+    let labile = LabileState::new(100, 50);
+    let update = PendingUpdate::new(mid(11), 105, UpdateSource::System)
+        .with_content("stale update".to_string());
+
+    let result = engine.tick(
+        &labile,
+        Some(&update),
+        200,
+        0.6,
+        &policy,
+        membrain_core::engine::reconsolidation::RefreshReadiness::Ready,
+    );
+    let audit = engine.audit_tick(
+        mid(11),
+        200,
+        &result,
+        Some(0.6),
+        Some(0.55),
+        Some(UpdateSource::System),
+    );
+
+    assert_eq!(audit.outcome, ReconsolidationOutcome::DiscardedStale);
+    assert_eq!(audit.update_source, Some(UpdateSource::System));
+    assert_eq!(audit.strength_after, None);
+    assert!(audit.pending_update_cleared);
+    assert!(!audit.authoritative_state_mutated);
+    assert!(audit.restabilized);
+}
+
+#[test]
+fn reconsolidation_does_not_mutate_when_refresh_is_deferred_or_failed() {
+    let engine = ReconsolidationEngine::new();
+    let policy = ReconsolidationPolicy::default();
+    let labile = LabileState::new(100, 50);
+    let update =
+        PendingUpdate::new(mid(1), 105, UpdateSource::User).with_content("revised".to_string());
+
+    let deferred = engine.tick(
+        &labile,
+        Some(&update),
+        120,
+        0.5,
+        &policy,
+        membrain_core::engine::reconsolidation::RefreshReadiness::Deferred,
+    );
+    assert_eq!(deferred.outcome, ReconsolidationOutcome::DeferredRefresh);
+    assert_eq!(deferred.new_strength, None);
+    assert!(!deferred.authoritative_state_mutated);
+    assert!(deferred
+        .refresh_triggers
+        .contains(&membrain_core::engine::reconsolidation::RefreshTrigger::EmbeddingRefresh));
+    assert!(deferred
+        .refresh_triggers
+        .contains(&membrain_core::engine::reconsolidation::RefreshTrigger::IndexRefresh));
+    assert!(deferred
+        .refresh_triggers
+        .contains(&membrain_core::engine::reconsolidation::RefreshTrigger::CacheInvalidate));
+    assert!(!deferred.pending_update_cleared);
+    assert!(!deferred.restabilized);
+
+    let failed = engine.tick(
+        &labile,
+        Some(&update),
+        120,
+        0.5,
+        &policy,
+        membrain_core::engine::reconsolidation::RefreshReadiness::Failed,
+    );
+    assert_eq!(
+        failed.outcome,
+        ReconsolidationOutcome::BlockedRefreshFailure
+    );
+    assert_eq!(failed.new_strength, None);
+    assert!(!failed.authoritative_state_mutated);
+    assert!(!failed.pending_update_cleared);
+    assert!(!failed.restabilized);
 }
 
 // ── LTP/LTD lifecycle ────────────────────────────────────────────────────────

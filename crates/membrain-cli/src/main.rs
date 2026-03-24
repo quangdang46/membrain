@@ -1,8 +1,8 @@
 use clap::{Parser, Subcommand};
 use membrain_core::api::{
-    AvailabilityReason, AvailabilitySummary, ConflictMarker, FreshnessMarker, NamespaceId,
-    RemediationStep, RequestId, ResponseContext, TraceOmissionSummary, TracePolicySummary,
-    TraceProvenanceSummary, TraceScoreComponent, TraceStage, UncertaintyMarker,
+    AvailabilityReason, AvailabilitySummary, CacheMetricsSummary, ConflictMarker, FreshnessMarker,
+    NamespaceId, RemediationStep, RequestId, ResponseContext, TraceOmissionSummary,
+    TracePolicySummary, TraceProvenanceSummary, TraceScoreComponent, TraceStage, UncertaintyMarker,
 };
 use membrain_core::engine::maintenance::{
     MaintenanceController, MaintenanceJobHandle, MaintenanceJobState,
@@ -202,6 +202,30 @@ enum Commands {
         #[arg(long, default_value_t = false)]
         json: bool,
     },
+    /// Share a memory into an approved namespace scope
+    Share {
+        /// The memory ID to share
+        #[arg(long)]
+        id: u64,
+        /// Target namespace for approved sharing
+        #[arg(long = "namespace")]
+        namespace_id: String,
+        /// Emit JSON instead of text
+        #[arg(long, default_value_t = false)]
+        json: bool,
+    },
+    /// Tighten a shared memory back to private visibility
+    Unshare {
+        /// The memory ID to unshare
+        #[arg(long)]
+        id: u64,
+        /// Canonical namespace that retains ownership
+        #[arg(long, short = 'n', default_value = "default")]
+        namespace: String,
+        /// Emit JSON instead of text
+        #[arg(long, default_value_t = false)]
+        json: bool,
+    },
     /// Run the local daemon inside the CLI process
     Daemon {
         /// Unix socket path to bind
@@ -310,6 +334,17 @@ struct AuditExport {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+struct ShareOutput {
+    outcome: &'static str,
+    memory_id: u64,
+    namespace: String,
+    visibility: &'static str,
+    policy_summary: TracePolicySummary,
+    policy_filters_applied: Vec<membrain_core::api::PolicyFilterSummary>,
+    audit_rows: Vec<AuditRow>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 struct DoctorIndexRow {
     family: &'static str,
     health: &'static str,
@@ -398,7 +433,11 @@ fn response_trace_for_result_set(result_set: &RetrievalResultSet) -> ResponseTra
         .trace_stages
         .iter()
         .copied()
-        .map(TraceStage::from_recall)
+        .map(membrain_core::api::TraceStage::from_recall)
+        .chain([
+            membrain_core::api::TraceStage::PolicyGate,
+            membrain_core::api::TraceStage::Packaging,
+        ])
         .collect();
     let result_reasons = result_set
         .explain
@@ -515,6 +554,7 @@ fn response_from_result_set(
             result_reasons,
             omitted_summary,
             graph_expansion,
+            CacheMetricsSummary::from_cache_traces(Vec::new(), false),
             score_components,
             policy_summary,
             provenance_summary,
@@ -589,6 +629,7 @@ fn build_retrieval_result_set(
         time_consumed_ms: None,
         ranking_profile: route_family.to_string(),
         contradictions_found: 0,
+        query_by_example: None,
         result_reasons: selected_ids
             .iter()
             .map(|memory_id| membrain_core::engine::result::ResultReason {
@@ -939,9 +980,128 @@ fn parse_audit_kind(value: &str) -> Option<AuditEventKind> {
         }
         "maintenance_migration_applied" => Some(AuditEventKind::MaintenanceMigrationApplied),
         "maintenance_compaction_applied" => Some(AuditEventKind::MaintenanceCompactionApplied),
+        "maintenance_consolidation_started" => {
+            Some(AuditEventKind::MaintenanceConsolidationStarted)
+        }
+        "maintenance_consolidation_completed" => {
+            Some(AuditEventKind::MaintenanceConsolidationCompleted)
+        }
+        "maintenance_consolidation_partial" => {
+            Some(AuditEventKind::MaintenanceConsolidationPartial)
+        }
         "incident_recorded" => Some(AuditEventKind::IncidentRecorded),
         "archive_recorded" => Some(AuditEventKind::ArchiveRecorded),
         _ => None,
+    }
+}
+
+fn sharing_trace_policy_summary(
+    namespace: &NamespaceId,
+    visibility: &'static str,
+    outcome_class: membrain_core::observability::OutcomeClass,
+    redaction_fields: Vec<&'static str>,
+) -> TracePolicySummary {
+    TracePolicySummary {
+        effective_namespace: namespace.as_str().to_string(),
+        policy_family: "visibility_sharing",
+        outcome_class,
+        blocked_stage: "policy_gate",
+        filters: vec![membrain_core::api::PolicyFilterSummary::new(
+            namespace.as_str(),
+            "visibility_sharing",
+            outcome_class,
+            "policy_gate",
+            membrain_core::api::FieldPresence::Present(visibility.to_string()),
+            membrain_core::api::FieldPresence::Absent,
+            redaction_fields
+                .iter()
+                .map(|field| (*field).to_string())
+                .collect(),
+        )],
+        redaction_fields,
+        retention_state: membrain_core::api::FieldPresence::Absent,
+        sharing_scope: membrain_core::api::FieldPresence::Present(visibility),
+    }
+}
+
+fn share_output(memory_id: u64, namespace: &NamespaceId, visibility: &'static str) -> ShareOutput {
+    let policy_summary = sharing_trace_policy_summary(
+        namespace,
+        visibility,
+        membrain_core::observability::OutcomeClass::Accepted,
+        Vec::new(),
+    );
+    let mut audit = sample_audit_log(namespace);
+    audit.append(
+        AuditLogEntry::new(
+            AuditEventCategory::Policy,
+            AuditEventKind::PolicyRedacted,
+            namespace.clone(),
+            "cli_share",
+            format!("visibility set to {visibility}"),
+        )
+        .with_memory_id(MemoryId(memory_id))
+        .with_request_id(format!("req-share-{memory_id}")),
+    );
+    let rows = filter_audit_rows(
+        &audit,
+        namespace,
+        Some(memory_id),
+        None,
+        Some("policy_redacted"),
+        Some(1),
+    )
+    .rows;
+
+    ShareOutput {
+        outcome: "accepted",
+        memory_id,
+        namespace: namespace.as_str().to_string(),
+        visibility,
+        policy_filters_applied: policy_summary.filters.clone(),
+        policy_summary,
+        audit_rows: rows,
+    }
+}
+
+fn unshare_output(memory_id: u64, namespace: &NamespaceId) -> ShareOutput {
+    let policy_summary = sharing_trace_policy_summary(
+        namespace,
+        "private",
+        membrain_core::observability::OutcomeClass::Accepted,
+        vec!["sharing_scope"],
+    );
+    let mut audit = sample_audit_log(namespace);
+    audit.append(
+        AuditLogEntry::new(
+            AuditEventCategory::Policy,
+            AuditEventKind::PolicyDenied,
+            namespace.clone(),
+            "cli_unshare",
+            "tightened visibility back to private",
+        )
+        .with_memory_id(MemoryId(memory_id))
+        .with_request_id(format!("req-unshare-{memory_id}"))
+        .with_redaction(),
+    );
+    let rows = filter_audit_rows(
+        &audit,
+        namespace,
+        Some(memory_id),
+        None,
+        Some("policy_denied"),
+        Some(1),
+    )
+    .rows;
+
+    ShareOutput {
+        outcome: "accepted",
+        memory_id,
+        namespace: namespace.as_str().to_string(),
+        visibility: "private",
+        policy_filters_applied: policy_summary.filters.clone(),
+        policy_summary,
+        audit_rows: rows,
     }
 }
 
@@ -1053,11 +1213,7 @@ fn doctor_report() -> DoctorReport {
             _ => None,
         })
         .collect::<Vec<_>>();
-    let overall_status = if warnings.is_empty() {
-        "healthy"
-    } else {
-        "warn"
-    };
+    let overall_status = if warnings.is_empty() { "ok" } else { "warn" };
     let store = BrainStore::new(RuntimeConfig::default());
     let repair_engine = store.repair_engine();
     let namespace = NamespaceId::new("doctor.system").expect("doctor namespace should be valid");
@@ -1284,6 +1440,31 @@ async fn main() -> anyhow::Result<()> {
                         item.result.entry_lane.as_str(),
                         item.result.compact_text,
                     );
+                }
+                if let Some(action_pack) = result_set.action_pack.as_ref() {
+                    println!("  derived actions: {}", action_pack.len());
+                    for (i, action) in action_pack.iter().enumerate() {
+                        println!(
+                            "    ({}) {} [{}] -> evidence {:?}",
+                            i + 1,
+                            action.action_type,
+                            action.confidence_score,
+                            action.supporting_evidence,
+                        );
+                        println!("       {}", action.suggestion);
+                        if !action.uncertainty_markers.is_empty() {
+                            println!(
+                                "       uncertainty: {}",
+                                action.uncertainty_markers.join(", ")
+                            );
+                        }
+                        if !action.policy_caveats.is_empty() {
+                            println!("       policy: {}", action.policy_caveats.join(", "));
+                        }
+                        if !action.freshness_caveats.is_empty() {
+                            println!("       freshness: {}", action.freshness_caveats.join(", "));
+                        }
+                    }
                 }
             }
         }
@@ -1590,6 +1771,69 @@ async fn main() -> anyhow::Result<()> {
             let export = filter_audit_rows(&log, &ns, *id, *since, op.as_deref(), *recent);
             print_audit_rows(&export, *json)?;
         }
+        Commands::Share {
+            id,
+            namespace_id,
+            json,
+        } => {
+            let ns = NamespaceId::new(namespace_id)?;
+            let output = share_output(*id, &ns, "shared");
+            if *json {
+                let response = ResponseContext::success(
+                    ns.clone(),
+                    RequestId::new(format!("share-{id}"))?,
+                    output,
+                )
+                .with_policy_filters(vec![
+                    membrain_core::api::PolicyFilterSummary::new(
+                        ns.as_str(),
+                        "visibility_sharing",
+                        membrain_core::observability::OutcomeClass::Accepted,
+                        "policy_gate",
+                        membrain_core::api::FieldPresence::Present("shared".to_string()),
+                        membrain_core::api::FieldPresence::Absent,
+                        Vec::new(),
+                    ),
+                ]);
+                println!("{}", serde_json::to_string_pretty(&response)?);
+            } else {
+                println!(
+                    "Shared memory #{} into '{}' [{}]",
+                    id,
+                    ns.as_str(),
+                    output.visibility
+                );
+            }
+        }
+        Commands::Unshare {
+            id,
+            namespace,
+            json,
+        } => {
+            let ns = NamespaceId::new(namespace)?;
+            let output = unshare_output(*id, &ns);
+            if *json {
+                let response = ResponseContext::success(
+                    ns.clone(),
+                    RequestId::new(format!("unshare-{id}"))?,
+                    output,
+                )
+                .with_policy_filters(vec![
+                    membrain_core::api::PolicyFilterSummary::new(
+                        ns.as_str(),
+                        "visibility_sharing",
+                        membrain_core::observability::OutcomeClass::Accepted,
+                        "policy_gate",
+                        membrain_core::api::FieldPresence::Present("private".to_string()),
+                        membrain_core::api::FieldPresence::Absent,
+                        vec!["sharing_scope".to_string()],
+                    ),
+                ]);
+                println!("{}", serde_json::to_string_pretty(&response)?);
+            } else {
+                println!("Unshared memory #{} in '{}' [private]", id, ns.as_str());
+            }
+        }
         Commands::Daemon {
             socket_path,
             request_concurrency,
@@ -1611,10 +1855,11 @@ async fn main() -> anyhow::Result<()> {
 mod tests {
     use super::{
         filter_audit_rows, parse_audit_category, parse_audit_kind, print_audit_rows,
-        sample_audit_log, Cli, Commands,
+        response_trace_for_result_set, sample_audit_log, share_output, unshare_output, Cli,
+        Commands,
     };
     use clap::Parser;
-    use membrain_core::api::NamespaceId;
+    use membrain_core::api::{NamespaceId, TraceStage};
 
     #[test]
     fn audit_rows_preserve_request_id_in_json_export() {
@@ -1721,7 +1966,13 @@ mod tests {
 
     #[test]
     fn why_command_preserves_explain_surface() {
-        let cli = Cli::parse_from(["membrain", "why", "routing details", "--namespace", "team.alpha"]);
+        let cli = Cli::parse_from([
+            "membrain",
+            "why",
+            "routing details",
+            "--namespace",
+            "team.alpha",
+        ]);
 
         match cli.command {
             Commands::Explain {
@@ -1735,12 +1986,114 @@ mod tests {
     }
 
     #[test]
+    fn response_trace_bundle_uses_canonical_explain_route_stages() {
+        let namespace = NamespaceId::new("team.gamma").unwrap();
+        let result_set = super::build_retrieval_result_set(
+            &[],
+            &namespace,
+            3,
+            membrain_core::engine::ranking::RankingProfile::balanced(),
+            "balanced",
+            "small lookup for active session can stay on hot recent window before durable fallback"
+                .to_string(),
+            Vec::new(),
+        );
+
+        let (_, trace_stages, ..) = response_trace_for_result_set(&result_set);
+
+        assert_eq!(
+            trace_stages,
+            vec![
+                TraceStage::Tier1RecentWindow,
+                TraceStage::PolicyGate,
+                TraceStage::Packaging
+            ]
+        );
+    }
+
+    #[test]
     fn legacy_encode_and_explain_aliases_still_parse() {
         let encode = Cli::parse_from(["membrain", "encode", "legacy path"]);
         let explain = Cli::parse_from(["membrain", "explain", "legacy why"]);
 
         assert!(matches!(encode.command, Commands::Encode { .. }));
         assert!(matches!(explain.command, Commands::Explain { .. }));
+    }
+
+    #[test]
+    fn share_and_unshare_commands_parse_canonical_fields() {
+        let share = Cli::parse_from([
+            "membrain",
+            "share",
+            "--id",
+            "42",
+            "--namespace",
+            "team.beta",
+        ]);
+        let unshare = Cli::parse_from([
+            "membrain",
+            "unshare",
+            "--id",
+            "42",
+            "--namespace",
+            "team.alpha",
+        ]);
+
+        match share.command {
+            Commands::Share {
+                id,
+                namespace_id,
+                json,
+            } => {
+                assert_eq!(id, 42);
+                assert_eq!(namespace_id, "team.beta");
+                assert!(!json);
+            }
+            other => panic!("expected share command, got {other:?}"),
+        }
+
+        match unshare.command {
+            Commands::Unshare {
+                id,
+                namespace,
+                json,
+            } => {
+                assert_eq!(id, 42);
+                assert_eq!(namespace, "team.alpha");
+                assert!(!json);
+            }
+            other => panic!("expected unshare command, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn share_and_unshare_outputs_preserve_policy_and_audit_fields() {
+        let shared = share_output(42, &NamespaceId::new("team.beta").unwrap(), "shared");
+        assert_eq!(shared.outcome, "accepted");
+        assert_eq!(shared.memory_id, 42);
+        assert_eq!(shared.visibility, "shared");
+        assert_eq!(shared.policy_summary.policy_family, "visibility_sharing");
+        assert_eq!(shared.policy_summary.sharing_scope.state_name(), "present");
+        assert_eq!(shared.audit_rows.len(), 1);
+        assert_eq!(
+            shared.audit_rows[0].request_id.as_deref(),
+            Some("req-share-42")
+        );
+        assert_eq!(shared.audit_rows[0].kind, "policy_redacted");
+
+        let unshared = unshare_output(42, &NamespaceId::new("team.alpha").unwrap());
+        assert_eq!(unshared.visibility, "private");
+        assert_eq!(
+            unshared.policy_summary.redaction_fields,
+            vec!["sharing_scope"]
+        );
+        assert_eq!(unshared.audit_rows.len(), 1);
+        assert_eq!(
+            unshared.audit_rows[0].request_id.as_deref(),
+            Some("req-unshare-42")
+        );
+        assert_eq!(unshared.audit_rows[0].kind, "policy_denied");
+        assert!(unshared.audit_rows[0].redacted);
     }
 
     #[test]
@@ -1767,6 +2120,10 @@ mod tests {
         assert_eq!(
             parse_audit_kind("policy_redacted"),
             Some(membrain_core::observability::AuditEventKind::PolicyRedacted)
+        );
+        assert_eq!(
+            parse_audit_kind("maintenance_consolidation_partial"),
+            Some(membrain_core::observability::AuditEventKind::MaintenanceConsolidationPartial)
         );
         assert_eq!(parse_audit_category("unknown"), None);
         assert_eq!(parse_audit_kind("unknown"), None);

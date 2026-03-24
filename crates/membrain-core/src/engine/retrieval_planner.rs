@@ -17,6 +17,7 @@
 use crate::api::NamespaceId;
 use crate::index::{CandidateSet, EntityQuery, Fts5Query, TemporalQuery};
 use crate::types::{CanonicalMemoryType, MemoryId, SessionId};
+use std::ops::RangeInclusive;
 
 // ── Planner input ─────────────────────────────────────────────────────────────
 
@@ -129,6 +130,15 @@ pub struct QueryByExampleNormalization {
     pub seeds: Vec<QueryExampleSeed>,
 }
 
+/// Retrieval-side materialization summary for query-by-example seeds.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct QueryByExampleMaterialization {
+    /// Seed descriptors that were actually materialized from stored evidence.
+    pub accepted: Vec<QueryExampleSeed>,
+    /// Seed descriptors requested but not materialized from stored evidence.
+    pub missing: Vec<QueryExampleSeed>,
+}
+
 impl QueryByExampleNormalization {
     /// Returns true when query text remains the canonical primary cue.
     pub const fn uses_query_text_as_primary_cue(&self) -> bool {
@@ -142,10 +152,7 @@ impl QueryByExampleNormalization {
 
     /// Returns ordered machine-readable seed descriptors for explain and smoke surfaces.
     pub fn seed_descriptors(&self) -> Vec<String> {
-        self.seeds
-            .iter()
-            .map(|seed| format!("{}:{}", seed.polarity_name(), seed.memory_id.0))
-            .collect()
+        Self::descriptors_for(&self.seeds)
     }
 
     /// Returns ordered machine-readable seed polarity names for explain and smoke surfaces.
@@ -160,6 +167,33 @@ impl QueryByExampleNormalization {
     pub fn seed_memory_ids(&self) -> Vec<MemoryId> {
         self.seeds.iter().map(|seed| seed.memory_id).collect()
     }
+
+    /// Returns ordered machine-readable descriptors for the provided seed set.
+    pub fn descriptors_for(seeds: &[QueryExampleSeed]) -> Vec<String> {
+        seeds
+            .iter()
+            .map(|seed| format!("{}:{}", seed.polarity_name(), seed.memory_id.0))
+            .collect()
+    }
+
+    /// Materializes requested seeds against the stored evidence set available to retrieval.
+    pub fn materialize_available_seeds(
+        &self,
+        available_memory_ids: &[MemoryId],
+    ) -> QueryByExampleMaterialization {
+        let mut accepted = Vec::new();
+        let mut missing = Vec::new();
+
+        for seed in &self.seeds {
+            if available_memory_ids.contains(&seed.memory_id) {
+                accepted.push(*seed);
+            } else {
+                missing.push(*seed);
+            }
+        }
+
+        QueryByExampleMaterialization { accepted, missing }
+    }
 }
 
 /// Validation failures for canonical retrieval cues.
@@ -169,6 +203,8 @@ pub enum RetrievalRequestValidationError {
     MissingPrimaryCue,
     /// Request reused the same memory as both like and unlike cue.
     DuplicateExampleCue(MemoryId),
+    /// Request combined exact-id retrieval with query-by-example cues.
+    ExactIdWithExampleCue,
 }
 
 impl RetrievalRequestValidationError {
@@ -177,6 +213,7 @@ impl RetrievalRequestValidationError {
         match self {
             Self::MissingPrimaryCue => "missing_primary_cue",
             Self::DuplicateExampleCue(_) => "duplicate_example_cue",
+            Self::ExactIdWithExampleCue => "exact_id_with_example_cue",
         }
     }
 }
@@ -198,6 +235,10 @@ pub struct RetrievalRequest {
     pub exact_memory_id: Option<MemoryId>,
     /// Session scope for temporal filtering.
     pub session_filter: Option<SessionId>,
+    /// Inclusive logical tick range for time-travel filtering.
+    pub as_of_tick_range: Option<RangeInclusive<u64>>,
+    /// Optional snapshot label anchoring historical retrieval.
+    pub snapshot_name: Option<String>,
     /// Memory type filter.
     pub memory_type_filter: Option<CanonicalMemoryType>,
     /// Optional entity-name filter for entity-heavy retrieval.
@@ -225,6 +266,8 @@ impl RetrievalRequest {
             query_path: QueryPath::Hybrid,
             exact_memory_id: None,
             session_filter: None,
+            as_of_tick_range: None,
+            snapshot_name: None,
             memory_type_filter: None,
             entity_name_filter: None,
             entity_type_filter: None,
@@ -245,6 +288,8 @@ impl RetrievalRequest {
             query_path: QueryPath::ExactId,
             exact_memory_id: Some(memory_id),
             session_filter: None,
+            as_of_tick_range: None,
+            snapshot_name: None,
             memory_type_filter: None,
             entity_name_filter: None,
             entity_type_filter: None,
@@ -269,6 +314,8 @@ impl RetrievalRequest {
             query_path: QueryPath::Hybrid,
             exact_memory_id: None,
             session_filter: None,
+            as_of_tick_range: None,
+            snapshot_name: None,
             memory_type_filter: None,
             entity_name_filter: None,
             entity_type_filter: None,
@@ -313,6 +360,12 @@ impl RetrievalRequest {
             }
         }
 
+        if self.exact_memory_id.is_some()
+            && (self.like_memory_id.is_some() || self.unlike_memory_id.is_some())
+        {
+            return Err(RetrievalRequestValidationError::ExactIdWithExampleCue);
+        }
+
         let mut seeds = Vec::new();
         if let Some(memory_id) = self.like_memory_id {
             seeds.push(QueryExampleSeed {
@@ -347,6 +400,18 @@ impl RetrievalRequest {
     /// Adds a session filter.
     pub fn with_session(mut self, session_id: SessionId) -> Self {
         self.session_filter = Some(session_id);
+        self
+    }
+
+    /// Adds an inclusive as-of tick range for temporal recall.
+    pub fn with_as_of_tick_range(mut self, start: u64, end: u64) -> Self {
+        self.as_of_tick_range = Some(start..=end);
+        self
+    }
+
+    /// Adds a named snapshot anchor for time-travel retrieval.
+    pub fn with_snapshot_name(mut self, snapshot_name: impl Into<String>) -> Self {
+        self.snapshot_name = Some(snapshot_name.into());
         self
     }
 
@@ -410,6 +475,9 @@ impl RetrievalRequest {
                 .with_budget(self.candidate_budget);
             if let Some(session_id) = self.session_filter {
                 query = query.with_session(session_id);
+            }
+            if let Some(range) = &self.as_of_tick_range {
+                query = query.with_tick_range(*range.start(), *range.end());
             }
             query
         })
@@ -750,8 +818,18 @@ pub struct RetrievalPlanTrace {
     pub lexical_query: Option<Fts5Query>,
     /// Optional temporal prefilter query prepared from request hints.
     pub temporal_query: Option<TemporalQuery>,
+    /// Optional named snapshot anchor for time-travel retrieval.
+    pub snapshot_name: Option<String>,
     /// Optional entity prefilter query prepared from request hints.
     pub entity_query: Option<EntityQuery>,
+    /// Normalized primary cue when query-by-example participates in the request.
+    pub query_by_example_primary_cue: Option<PrimaryCue>,
+    /// Ordered normalized seed descriptors when query-by-example participates in the request.
+    pub query_by_example_seed_descriptors: Vec<String>,
+    /// Ordered descriptors for seeds actually materialized from stored evidence.
+    pub query_by_example_materialized_seed_descriptors: Vec<String>,
+    /// Ordered descriptors for requested seeds missing from stored evidence.
+    pub query_by_example_missing_seed_descriptors: Vec<String>,
     /// Stage traces in execution order.
     pub stages: Vec<StageTrace>,
     /// Final candidate count.
@@ -769,6 +847,8 @@ pub struct RetrievalPlanTrace {
 impl RetrievalPlanTrace {
     /// Creates a new empty trace.
     pub fn new(request: &RetrievalRequest) -> Self {
+        let query_by_example = request.normalize_query_by_example().ok();
+
         Self {
             query_path: request.query_path,
             namespace: request.namespace.clone(),
@@ -776,7 +856,17 @@ impl RetrievalPlanTrace {
             candidate_budget: request.candidate_budget,
             lexical_query: request.lexical_prefilter_query(),
             temporal_query: request.temporal_prefilter_query(),
+            snapshot_name: request.snapshot_name.clone(),
             entity_query: request.entity_prefilter_query(),
+            query_by_example_primary_cue: query_by_example
+                .as_ref()
+                .map(|normalized| normalized.primary_cue),
+            query_by_example_seed_descriptors: query_by_example
+                .as_ref()
+                .map(QueryByExampleNormalization::seed_descriptors)
+                .unwrap_or_default(),
+            query_by_example_materialized_seed_descriptors: Vec::new(),
+            query_by_example_missing_seed_descriptors: Vec::new(),
             stages: Vec::new(),
             final_candidates: 0,
             tier3_triggered: false,
@@ -790,6 +880,19 @@ impl RetrievalPlanTrace {
     pub fn add_stage(&mut self, trace: StageTrace) {
         self.total_candidates_inspected += trace.candidates_in.max(trace.candidates_out);
         self.stages.push(trace);
+    }
+
+    /// Records which query-by-example seeds were actually materialized from stored evidence.
+    pub fn set_query_by_example_materialization(
+        &mut self,
+        normalization: &QueryByExampleNormalization,
+        available_memory_ids: &[MemoryId],
+    ) {
+        let materialization = normalization.materialize_available_seeds(available_memory_ids);
+        self.query_by_example_materialized_seed_descriptors =
+            QueryByExampleNormalization::descriptors_for(&materialization.accepted);
+        self.query_by_example_missing_seed_descriptors =
+            QueryByExampleNormalization::descriptors_for(&materialization.missing);
     }
 
     /// Marks the final candidate count.
@@ -833,10 +936,22 @@ impl RetrievalPlanTrace {
                 query.session_filter, query.tick_range, query.epoch_filter, query.candidate_budget
             ));
         }
+        if let Some(snapshot_name) = &self.snapshot_name {
+            lines.push(format!("  snapshot_anchor: name={snapshot_name:?}"));
+        }
         if let Some(query) = &self.entity_query {
             lines.push(format!(
                 "  entity_query: name={:?}, type={:?}, budget={}",
                 query.entity_name, query.entity_type, query.candidate_budget
+            ));
+        }
+        if let Some(primary_cue) = self.query_by_example_primary_cue {
+            lines.push(format!(
+                "  query_by_example: primary_cue={}, requested_seeds={:?}, materialized_seeds={:?}, missing_seeds={:?}",
+                primary_cue.as_str(),
+                self.query_by_example_seed_descriptors,
+                self.query_by_example_materialized_seed_descriptors,
+                self.query_by_example_missing_seed_descriptors
             ));
         }
 
@@ -1086,7 +1201,7 @@ mod tests {
     #[test]
     fn normalization_uses_unlike_seed_as_primary_cue_when_query_text_is_absent() {
         let ns = test_namespace();
-        let request = RetrievalRequest::exact_id(ns, MemoryId(44)).with_unlike_memory(MemoryId(17));
+        let request = RetrievalRequest::hybrid(ns, "   ", 5).with_unlike_memory(MemoryId(17));
 
         let normalized = request.normalize_query_by_example().unwrap();
 
@@ -1115,6 +1230,20 @@ mod tests {
     }
 
     #[test]
+    fn normalization_rejects_exact_id_requests_with_query_by_example_cues() {
+        let ns = test_namespace();
+        let request = RetrievalRequest::exact_id(ns, MemoryId(44)).with_like_memory(MemoryId(17));
+
+        let error = request.normalize_query_by_example().unwrap_err();
+
+        assert_eq!(
+            error,
+            RetrievalRequestValidationError::ExactIdWithExampleCue
+        );
+        assert_eq!(error.as_str(), "exact_id_with_example_cue");
+    }
+
+    #[test]
     fn exact_id_request_skips_lexical_and_semantic() {
         let ns = test_namespace();
         let request = RetrievalRequest::exact_id(ns, MemoryId(42));
@@ -1130,6 +1259,8 @@ mod tests {
         let ns = test_namespace();
         let request = RetrievalRequest::hybrid(ns.clone(), "recent deploys", 8)
             .with_session(SessionId(33))
+            .with_as_of_tick_range(40, 75)
+            .with_snapshot_name("pre_migration")
             .with_budget(77);
         let request = RetrievalRequest {
             query_path: QueryPath::Temporal,
@@ -1140,8 +1271,10 @@ mod tests {
 
         assert_eq!(query.namespace, ns);
         assert_eq!(query.session_filter, Some(SessionId(33)));
+        assert_eq!(query.tick_range, Some((40, 75)));
         assert_eq!(query.limit, 8);
         assert_eq!(query.candidate_budget, 77);
+        assert_eq!(request.snapshot_name.as_deref(), Some("pre_migration"));
         assert!(request.entity_prefilter_query().is_none());
     }
 
@@ -1190,7 +1323,10 @@ mod tests {
         let ns = test_namespace();
         let temporal = RetrievalRequest {
             query_path: QueryPath::Temporal,
-            ..RetrievalRequest::hybrid(ns.clone(), "recent deploys", 8).with_session(SessionId(33))
+            ..RetrievalRequest::hybrid(ns.clone(), "recent deploys", 8)
+                .with_session(SessionId(33))
+                .with_as_of_tick_range(40, 75)
+                .with_snapshot_name("incident_baseline")
         };
         let entity = RetrievalRequest {
             query_path: QueryPath::EntityHeavy,
@@ -1204,8 +1340,13 @@ mod tests {
 
         assert!(temporal_trace.lexical_query.is_none());
         assert!(temporal_trace.temporal_query.is_some());
+        assert_eq!(
+            temporal_trace.snapshot_name.as_deref(),
+            Some("incident_baseline")
+        );
         assert!(entity_trace.lexical_query.is_none());
         assert!(entity_trace.entity_query.is_some());
+        assert_eq!(entity_trace.snapshot_name, None);
     }
 
     #[test]
@@ -1236,9 +1377,41 @@ mod tests {
     }
 
     #[test]
+    fn retrieval_plan_trace_captures_query_by_example_primary_cue_and_seed_descriptors() {
+        let ns = test_namespace();
+        let request = RetrievalRequest::hybrid(ns, "  release blocker  ", 6)
+            .with_like_memory(MemoryId(21))
+            .with_unlike_memory(MemoryId(34));
+
+        let mut trace = RetrievalPlanTrace::new(&request);
+        let normalization = request.normalize_query_by_example().unwrap();
+        trace.set_query_by_example_materialization(&normalization, &[MemoryId(21)]);
+
+        assert_eq!(
+            trace.query_by_example_primary_cue,
+            Some(PrimaryCue::QueryText)
+        );
+        assert_eq!(
+            trace.query_by_example_seed_descriptors,
+            vec!["like:21".to_string(), "unlike:34".to_string()]
+        );
+        assert_eq!(
+            trace.query_by_example_materialized_seed_descriptors,
+            vec!["like:21".to_string()]
+        );
+        assert_eq!(
+            trace.query_by_example_missing_seed_descriptors,
+            vec!["unlike:34".to_string()]
+        );
+        assert!(trace.summary().contains(
+            "query_by_example: primary_cue=query_text, requested_seeds=[\"like:21\", \"unlike:34\"], materialized_seeds=[\"like:21\"], missing_seeds=[\"unlike:34\"]"
+        ));
+    }
+
+    #[test]
     fn unlike_only_query_by_example_still_schedules_semantic_search() {
         let ns = test_namespace();
-        let request = RetrievalRequest::exact_id(ns, MemoryId(44)).with_unlike_memory(MemoryId(17));
+        let request = RetrievalRequest::hybrid(ns, "   ", 10).with_unlike_memory(MemoryId(17));
 
         let plan = RetrievalPlan::new(request);
 
@@ -1415,7 +1588,13 @@ mod tests {
     #[test]
     fn retrieval_plan_trace_summary() {
         let ns = test_namespace();
-        let request = RetrievalRequest::hybrid(ns, "test", 10);
+        let request = RetrievalRequest {
+            query_path: QueryPath::Temporal,
+            ..RetrievalRequest::hybrid(ns, "test", 10)
+                .with_session(SessionId(5))
+                .with_as_of_tick_range(12, 34)
+                .with_snapshot_name("pre_patch")
+        };
         let mut trace = RetrievalPlanTrace::new(&request);
 
         trace.add_stage(StageTrace::executed(
@@ -1440,9 +1619,11 @@ mod tests {
         trace.set_tier3_triggered(EscalationReason::Tier2Underfill);
 
         let summary = trace.summary();
-        assert!(summary.contains("hybrid"));
+        assert!(summary.contains("temporal"));
         assert!(summary.contains("lexical_prefilter"));
-        assert!(summary.contains("lexical_query: terms=\"test\""));
+        assert!(summary
+            .contains("temporal_query: session=Some(SessionId(5)), tick_range=Some((12, 34))"));
+        assert!(summary.contains("snapshot_anchor: name=\"pre_patch\""));
         assert!(summary.contains("budget cap 5000"));
         assert!(summary.contains("budget cap 100"));
         assert!(summary.contains("rerank slice"));

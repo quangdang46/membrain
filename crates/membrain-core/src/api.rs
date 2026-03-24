@@ -1,7 +1,7 @@
 use crate::engine::encode::PassiveObservationInspect;
 use crate::engine::result::{EntryLane, OmissionSummary, RetrievalResultSet};
 use crate::graph::RelationKind;
-use crate::observability::OutcomeClass;
+use crate::observability::{CacheEvalTrace, OutcomeClass};
 use crate::policy::{
     PolicyGateway, PolicySummary, SafeguardOutcome as PolicySafeguardOutcome, SharingAccessOutcome,
     SharingAccessRequest, SharingVisibility,
@@ -865,6 +865,9 @@ impl ResultReason {
             "score_kept" => "score_kept",
             "no_match" => "no_match",
             "tier2_exact_match" => "tier2_exact_match",
+            "query_by_example_seed_materialized" => "query_by_example_seed_materialized",
+            "query_by_example_seed_missing" => "query_by_example_seed_missing",
+            "query_by_example_candidate_expansion" => "query_by_example_candidate_expansion",
             "temporal_prefilter_metadata_only" => "temporal_prefilter_metadata_only",
             "temporal_payload_deferred" => "temporal_payload_deferred",
             "temporal_landmark_selected" => "temporal_landmark_selected",
@@ -872,10 +875,16 @@ impl ResultReason {
             "contradiction_selected" => "contradiction_selected",
             "contradiction_visible" => "contradiction_visible",
             "contradiction_retained_under_legal_hold" => "contradiction_retained_under_legal_hold",
+            "graph_cutoff_max_depth" => "graph_cutoff_max_depth",
+            "graph_cutoff_budget" => "graph_cutoff_budget",
+            "graph_cutoff_policy_namespace" => "graph_cutoff_policy_namespace",
             _ => "custom_reason_code",
         };
         let reason_family = match reason_code {
             "score_kept" | "no_match" | "tier2_exact_match" => "selection",
+            "query_by_example_seed_materialized"
+            | "query_by_example_seed_missing"
+            | "query_by_example_candidate_expansion" => "query_by_example",
             "temporal_prefilter_metadata_only"
             | "temporal_payload_deferred"
             | "temporal_landmark_selected"
@@ -883,12 +892,18 @@ impl ResultReason {
             "contradiction_selected"
             | "contradiction_visible"
             | "contradiction_retained_under_legal_hold" => "conflict",
+            "graph_cutoff_max_depth" | "graph_cutoff_budget" | "graph_cutoff_policy_namespace" => {
+                "graph"
+            }
             _ => "custom",
         };
         let route_stage = match reason_code {
             "score_kept"
             | "no_match"
             | "tier2_exact_match"
+            | "query_by_example_seed_materialized"
+            | "query_by_example_seed_missing"
+            | "query_by_example_candidate_expansion"
             | "temporal_prefilter_metadata_only"
             | "temporal_payload_deferred"
             | "temporal_landmark_selected"
@@ -896,6 +911,9 @@ impl ResultReason {
             | "contradiction_selected"
             | "contradiction_visible"
             | "contradiction_retained_under_legal_hold" => TraceStage::Tier2Exact,
+            "graph_cutoff_max_depth" | "graph_cutoff_budget" | "graph_cutoff_policy_namespace" => {
+                TraceStage::GraphExpansion
+            }
             _ => TraceStage::Packaging,
         };
 
@@ -1009,6 +1027,129 @@ impl PassiveObservationInspectSummary {
     }
 }
 
+/// Shared cache metrics envelope for explain and inspect surfaces.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+pub struct CacheMetricsSummary {
+    pub cache_hit_count: usize,
+    pub cache_miss_count: usize,
+    pub cache_bypass_count: usize,
+    pub cache_invalidation_count: usize,
+    pub prefetch_used_count: usize,
+    pub prefetch_dropped_count: usize,
+    pub cold_fallback_count: usize,
+    pub degraded_mode_served: bool,
+    pub pre_cache_candidates: Option<usize>,
+    pub post_tier1_candidates: Option<usize>,
+    pub post_tier2_candidates: Option<usize>,
+    pub post_ann_candidates: Option<usize>,
+    pub prefetch_added_candidates: Option<usize>,
+    pub tier1_item_hit_count: usize,
+    pub tier2_query_hit_count: usize,
+    pub negative_cache_hit_count: usize,
+    pub result_cache_hit_count: usize,
+    pub entity_neighborhood_hit_count: usize,
+    pub summary_cache_hit_count: usize,
+    pub ann_probe_hit_count: usize,
+    pub prefetch_hit_count: usize,
+    pub cache_traces: Vec<CacheEvalTrace>,
+}
+
+impl CacheMetricsSummary {
+    pub fn from_cache_traces(
+        cache_traces: Vec<CacheEvalTrace>,
+        degraded_mode_served: bool,
+    ) -> Self {
+        let mut summary = Self {
+            cache_hit_count: 0,
+            cache_miss_count: 0,
+            cache_bypass_count: 0,
+            cache_invalidation_count: 0,
+            prefetch_used_count: 0,
+            prefetch_dropped_count: 0,
+            cold_fallback_count: 0,
+            degraded_mode_served,
+            pre_cache_candidates: cache_traces.first().map(|trace| trace.candidates_before),
+            post_tier1_candidates: None,
+            post_tier2_candidates: None,
+            post_ann_candidates: None,
+            prefetch_added_candidates: None,
+            tier1_item_hit_count: 0,
+            tier2_query_hit_count: 0,
+            negative_cache_hit_count: 0,
+            result_cache_hit_count: 0,
+            entity_neighborhood_hit_count: 0,
+            summary_cache_hit_count: 0,
+            ann_probe_hit_count: 0,
+            prefetch_hit_count: 0,
+            cache_traces,
+        };
+
+        for trace in &summary.cache_traces {
+            use crate::observability::{CacheEventLabel, CacheFamilyLabel, CacheLookupOutcome};
+
+            match trace.outcome {
+                CacheLookupOutcome::Hit => summary.cache_hit_count += 1,
+                CacheLookupOutcome::Miss => summary.cache_miss_count += 1,
+                CacheLookupOutcome::Bypass | CacheLookupOutcome::StaleWarning => {
+                    summary.cache_bypass_count += 1;
+                }
+                CacheLookupOutcome::Disabled => {
+                    summary.degraded_mode_served = true;
+                }
+            }
+
+            match trace.cache_event {
+                CacheEventLabel::Invalidate => summary.cache_invalidation_count += 1,
+                CacheEventLabel::Prefetch => summary.prefetch_used_count += 1,
+                _ => {}
+            }
+
+            match trace.cache_family {
+                CacheFamilyLabel::Tier1Item => {
+                    summary.post_tier1_candidates = Some(trace.candidates_after);
+                    if matches!(trace.outcome, CacheLookupOutcome::Hit) {
+                        summary.tier1_item_hit_count += 1;
+                    }
+                }
+                CacheFamilyLabel::Tier2Query => {
+                    summary.post_tier2_candidates = Some(trace.candidates_after);
+                    if matches!(trace.outcome, CacheLookupOutcome::Hit) {
+                        summary.tier2_query_hit_count += 1;
+                    }
+                }
+                CacheFamilyLabel::AnnProbe => {
+                    summary.post_ann_candidates = Some(trace.candidates_after);
+                    if matches!(trace.outcome, CacheLookupOutcome::Hit) {
+                        summary.ann_probe_hit_count += 1;
+                    }
+                }
+                CacheFamilyLabel::Result => {
+                    if matches!(trace.outcome, CacheLookupOutcome::Hit) {
+                        summary.result_cache_hit_count += 1;
+                    }
+                }
+                CacheFamilyLabel::Summary => {
+                    if matches!(trace.outcome, CacheLookupOutcome::Hit) {
+                        summary.summary_cache_hit_count += 1;
+                    }
+                }
+                CacheFamilyLabel::Negative => {
+                    if matches!(trace.outcome, CacheLookupOutcome::Hit) {
+                        summary.negative_cache_hit_count += 1;
+                    }
+                }
+            }
+
+            if trace.warm_reuse {
+                summary.prefetch_hit_count +=
+                    usize::from(matches!(trace.cache_event, CacheEventLabel::Prefetch));
+            }
+        }
+
+        summary
+    }
+}
+
 /// Shared freshness marker for explain surfaces.
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
 pub struct FreshnessMarker {
@@ -1038,6 +1179,7 @@ pub struct ExplainTraceSchema {
     pub result_reasons: Vec<ResultReason>,
     pub omitted_summary: TraceOmissionSummary,
     pub graph_expansion: GraphExpansionSummary,
+    pub cache_metrics: CacheMetricsSummary,
     pub score_components: Vec<TraceScoreComponent>,
     pub policy_summary: TracePolicySummary,
     pub provenance_summary: TraceProvenanceSummary,
@@ -1058,6 +1200,7 @@ pub struct ResponseContext<T> {
     pub trace_stages: Vec<TraceStage>,
     pub result_reasons: Vec<ResultReason>,
     pub graph_expansion: Option<GraphExpansionSummary>,
+    pub cache_metrics: Option<CacheMetricsSummary>,
     pub outcome_class: OutcomeClass,
     pub error_kind: Option<ErrorKind>,
     pub retryable: bool,
@@ -1088,6 +1231,7 @@ impl<T> ResponseContext<T> {
             trace_stages: Vec::new(),
             result_reasons: Vec::new(),
             graph_expansion: None,
+            cache_metrics: None,
             outcome_class: OutcomeClass::Accepted,
             error_kind: None,
             retryable: false,
@@ -1115,6 +1259,7 @@ impl<T> ResponseContext<T> {
         result_reasons: Vec<ResultReason>,
         omitted_summary: TraceOmissionSummary,
         graph_expansion: GraphExpansionSummary,
+        cache_metrics: CacheMetricsSummary,
         score_components: Vec<TraceScoreComponent>,
         policy_summary: TracePolicySummary,
         provenance_summary: TraceProvenanceSummary,
@@ -1128,6 +1273,7 @@ impl<T> ResponseContext<T> {
             result_reasons: result_reasons.clone(),
             omitted_summary,
             graph_expansion: graph_expansion.clone(),
+            cache_metrics: cache_metrics.clone(),
             score_components,
             policy_summary: policy_summary.clone(),
             provenance_summary: provenance_summary.clone(),
@@ -1139,6 +1285,7 @@ impl<T> ResponseContext<T> {
         self.trace_stages = trace_stages;
         self.result_reasons = result_reasons;
         self.graph_expansion = Some(graph_expansion);
+        self.cache_metrics = Some(cache_metrics);
         self.policy_summary = Some(policy_summary);
         self.provenance_summary = Some(provenance_summary);
         self.freshness_markers = freshness_markers;
@@ -1173,6 +1320,7 @@ impl<T> ResponseContext<T> {
             trace_stages: Vec::new(),
             result_reasons: Vec::new(),
             graph_expansion: None,
+            cache_metrics: None,
             outcome_class: OutcomeClass::Rejected,
             retryable: error_kind.retryable(),
             error_kind: Some(error_kind),
@@ -1247,23 +1395,27 @@ impl ApiModule {
 #[cfg(test)]
 mod tests {
     use super::{
-        ApiModule, AvailabilityPosture, AvailabilityReason, AvailabilitySummary, ConflictMarker,
-        ContextValidationError, ErrorKind, ExplainTraceSchema, FieldPresence, FreshnessMarker,
-        GraphExpansionSummary, NamespaceId, PassiveObservationInspectSummary, PolicyContext,
-        PolicyFilterSummary, RemediationHint, RemediationStep, RequestContext, RequestId,
-        ResponseContext, ResponseWarning, ResultReason, RouteSummary, TraceOmissionSummary,
-        TracePolicySummary, TraceProvenanceSummary, TraceScoreComponent, TraceStage,
-        UncertaintyMarker,
+        ApiModule, AvailabilityPosture, AvailabilityReason, AvailabilitySummary,
+        CacheMetricsSummary, ConflictMarker, ContextValidationError, ErrorKind, ExplainTraceSchema,
+        FieldPresence, FreshnessMarker, GraphExpansionSummary, NamespaceId,
+        PassiveObservationInspectSummary, PolicyContext, PolicyFilterSummary, RemediationHint,
+        RemediationStep, RequestContext, RequestId, ResponseContext, ResponseWarning, ResultReason,
+        RouteSummary, TraceOmissionSummary, TracePolicySummary, TraceProvenanceSummary,
+        TraceScoreComponent, TraceStage, UncertaintyMarker,
     };
     use crate::engine::ranking::{RankingExplain, RerankMetadata};
     use crate::engine::recall::{RecallPlanKind, RecallTraceStage};
     use crate::engine::result::{
-        AnsweredFrom, ConflictMarkers, DualOutputMode, EntryLane, EvidenceItem, EvidenceRole,
-        FreshnessMarkers, OmissionSummary, PackagingMetadata, PayloadState, PolicySummary,
-        ProvenanceSummary, RetrievalExplain, RetrievalResult, RetrievalResultSet,
+        AnsweredFrom, ConflictMarkers, DeferredPayload, DualOutputMode, EntryLane, EvidenceItem,
+        EvidenceRole, FreshnessMarkers, OmissionSummary, PackagingMetadata, PayloadState,
+        PolicySummary, ProvenanceSummary, RetrievalExplain, RetrievalResult, RetrievalResultSet,
         UncertaintyMarkers,
     };
-    use crate::observability::OutcomeClass;
+    use crate::graph::RelationKind;
+    use crate::observability::{
+        CacheEvalTrace, CacheEventLabel, CacheFamilyLabel, CacheLookupOutcome, CacheReasonLabel,
+        GenerationStatusLabel, OutcomeClass, WarmSourceLabel,
+    };
     use crate::policy::{
         ConfidenceConstraint, ConfirmationState, OperationClass, PolicyDecision, PolicyGateway,
         PolicyModule, PreflightState, ReversibilityKind, SafeguardAudit,
@@ -1744,6 +1896,7 @@ mod tests {
                 time_consumed_ms: Some(7),
                 ranking_profile: "balanced".to_string(),
                 contradictions_found: 0,
+                query_by_example: None,
                 result_reasons: Vec::new(),
             },
             policy_summary: PolicySummary {
@@ -1894,6 +2047,7 @@ mod tests {
                 time_consumed_ms: Some(7),
                 ranking_profile: "balanced".to_string(),
                 contradictions_found: 0,
+                query_by_example: None,
                 result_reasons: Vec::new(),
             },
             policy_summary: PolicySummary {
@@ -1949,6 +2103,198 @@ mod tests {
         assert!(graph.seed_memory_ids.is_empty());
         assert_eq!(graph.graph_seed, FieldPresence::Absent);
         assert!(graph.graph_entry_points.is_empty());
+    }
+
+    #[test]
+    fn graph_expansion_summary_tracks_policy_blocked_omissions_and_cutoffs() {
+        let result_set = RetrievalResultSet {
+            outcome_class: OutcomeClass::Accepted,
+            evidence_pack: vec![EvidenceItem {
+                result: RetrievalResult {
+                    memory_id: crate::types::MemoryId(41),
+                    namespace: NamespaceId::new("team.graph").unwrap(),
+                    session_id: crate::types::SessionId(9),
+                    memory_type: CanonicalMemoryType::Event,
+                    compact_text: "seeded graph neighbor".into(),
+                    role: EvidenceRole::Supporting,
+                    entry_lane: EntryLane::Graph,
+                    payload_state: PayloadState::Inline,
+                    score: 640,
+                    score_summary: crate::engine::result::ScoreSummary {
+                        final_score: 640,
+                        total_weighted_score: 640,
+                        signal_breakdown: Vec::new(),
+                        profile: "balanced".to_string(),
+                    },
+                    ranking_explain: RankingExplain {
+                        final_score: 640,
+                        total_weighted_score: 640,
+                        signal_breakdown: Vec::new(),
+                        profile: "balanced".to_string(),
+                        has_conflict: false,
+                        contradiction_details: Vec::new(),
+                    },
+                    contradiction_explains: Vec::new(),
+                    conflict_markers: ConflictMarkers {
+                        conflict_state: crate::engine::contradiction::ResolutionState::None,
+                        conflict_record_ids: Vec::new(),
+                        belief_chain_id: None,
+                        superseded_by: None,
+                        contradiction_lineage_pairs: Vec::new(),
+                        resolution_reasons: Vec::new(),
+                        audit_visible_count: 0,
+                        omitted_conflict_siblings: 0,
+                    },
+                    uncertainty_markers: UncertaintyMarkers {
+                        confidence: 700,
+                        uncertainty_score: 120,
+                        freshness_uncertainty: None,
+                        contradiction_uncertainty: None,
+                        missing_evidence_uncertainty: None,
+                        corroboration_uncertainty: None,
+                        confidence_interval: None,
+                    },
+                    answered_from: AnsweredFrom::Tier2Indexed,
+                    rerank_metadata: RerankMetadata::float32_only(1, 1),
+                },
+                provenance_summary: ProvenanceSummary {
+                    source_kind: "retrieval_pipeline".to_string(),
+                    source_reference: "graph_expansion".to_string(),
+                    source_agent: "core_engine".to_string(),
+                    original_namespace: NamespaceId::new("team.graph").unwrap(),
+                    derived_from: None,
+                    lineage_ancestors: Vec::new(),
+                    relation_to_seed: Some(RelationKind::SharedTopic),
+                    graph_seed: Some(crate::graph::EntityId(900)),
+                },
+                freshness_markers: FreshnessMarkers {
+                    oldest_item_days: 1,
+                    newest_item_days: 0,
+                    volatile_items_included: false,
+                    stale_warning: false,
+                    as_of_tick: Some(77),
+                },
+                omitted_fields: Vec::new(),
+            }],
+            action_pack: None,
+            deferred_payloads: vec![DeferredPayload {
+                memory_id: crate::types::MemoryId(52),
+                payload_state: PayloadState::Deferred,
+                reason: "graph_omitted_neighbor: policy_namespace_blocked".to_string(),
+                hydration_path: "graph://team.graph/omitted/52".to_string(),
+            }],
+            explain: RetrievalExplain {
+                recall_plan: RecallPlanKind::Tier2ExactThenGraphExpansion,
+                route_reason:
+                    "request uses bounded graph expansion from the Tier2-authorized seed shortlist"
+                        .to_string(),
+                tiers_consulted: vec!["tier2_exact".to_string(), "graph_expansion".to_string()],
+                trace_stages: vec![
+                    RecallTraceStage::Tier2Exact,
+                    RecallTraceStage::GraphExpansion,
+                ],
+                tier1_answered_directly: false,
+                candidate_budget: 6,
+                time_consumed_ms: Some(5),
+                ranking_profile: "balanced".to_string(),
+                contradictions_found: 0,
+                query_by_example: None,
+                result_reasons: vec![
+                    crate::engine::result::ResultReason {
+                        memory_id: Some(crate::types::MemoryId(52)),
+                        reason_code: "graph_cutoff_policy_namespace".to_string(),
+                        detail: "namespace gate blocked cross-namespace graph neighbor".to_string(),
+                    },
+                    crate::engine::result::ResultReason {
+                        memory_id: None,
+                        reason_code: "graph_cutoff_budget".to_string(),
+                        detail: "bounded graph planner stopped after policy-filtered omission"
+                            .to_string(),
+                    },
+                ],
+            },
+            policy_summary: PolicySummary {
+                namespace_applied: NamespaceId::new("team.graph").unwrap(),
+                outcome_class: OutcomeClass::Accepted,
+                redactions_applied: false,
+                restrictions_active: vec!["namespace_gate".to_string()],
+                filters: Vec::new(),
+            },
+            provenance_summary: ProvenanceSummary {
+                source_kind: "retrieval_pipeline".to_string(),
+                source_reference: "graph_expansion".to_string(),
+                source_agent: "core_engine".to_string(),
+                original_namespace: NamespaceId::new("team.graph").unwrap(),
+                derived_from: None,
+                lineage_ancestors: Vec::new(),
+                relation_to_seed: Some(RelationKind::SharedTopic),
+                graph_seed: Some(crate::graph::EntityId(900)),
+            },
+            omitted_summary: OmissionSummary {
+                policy_redacted: 0,
+                threshold_dropped: 0,
+                dedup_dropped: 0,
+                budget_capped: 0,
+                duplicate_collapsed: 0,
+                low_confidence_suppressed: 0,
+                stale_bypassed: 0,
+                confidence_filtered: 0,
+            },
+            freshness_markers: FreshnessMarkers {
+                oldest_item_days: 1,
+                newest_item_days: 0,
+                volatile_items_included: false,
+                stale_warning: false,
+                as_of_tick: Some(77),
+            },
+            packaging_metadata: PackagingMetadata {
+                result_budget: 3,
+                token_budget: None,
+                graph_assistance: "graph_expanded_supporting_neighbors".to_string(),
+                degraded_summary: None,
+                packaging_mode: "evidence_only".to_string(),
+                rerank_metadata: None,
+            },
+            output_mode: DualOutputMode::Balanced,
+            truncated: false,
+            total_candidates: 2,
+        };
+
+        let graph = GraphExpansionSummary::from_result_set(&result_set);
+        let omission = TraceOmissionSummary::from_result_set(&result_set);
+        let mapped_reasons = result_set
+            .explain
+            .result_reasons
+            .iter()
+            .map(ResultReason::from_result_reason)
+            .collect::<Vec<_>>();
+
+        assert_eq!(
+            graph.graph_assistance,
+            "graph_expanded_supporting_neighbors"
+        );
+        assert_eq!(graph.seed_memory_ids, vec![41]);
+        assert_eq!(graph.graph_seed, FieldPresence::Present(900));
+        assert_eq!(graph.graph_entry_points, vec![900]);
+        assert_eq!(graph.followed_relations, vec!["shared_topic"]);
+        assert_eq!(graph.supporting_memory_ids, vec![41]);
+        assert_eq!(graph.omitted_neighbor_ids, vec![52]);
+        assert_eq!(graph.omitted_neighbor_count, 1);
+        assert_eq!(
+            graph.cutoff_reasons,
+            vec!["policy_namespace_blocked", "budget_exhausted"]
+        );
+        assert_eq!(omission.graph_omitted_neighbors, 1);
+        assert_eq!(mapped_reasons.len(), 2);
+        assert_eq!(
+            mapped_reasons[0].reason_code,
+            "graph_cutoff_policy_namespace"
+        );
+        assert_eq!(mapped_reasons[0].reason_family, "graph");
+        assert_eq!(mapped_reasons[0].route_stage, TraceStage::GraphExpansion);
+        assert_eq!(mapped_reasons[1].reason_code, "graph_cutoff_budget");
+        assert_eq!(mapped_reasons[1].reason_family, "graph");
+        assert_eq!(mapped_reasons[1].route_stage, TraceStage::GraphExpansion);
     }
 
     #[test]
@@ -2025,6 +2371,7 @@ mod tests {
                 omitted_neighbor_count: 0,
                 cutoff_reasons: Vec::new(),
             },
+            CacheMetricsSummary::from_cache_traces(Vec::new(), false),
             vec![
                 TraceScoreComponent {
                     signal_family: "relevance",
@@ -2099,6 +2446,14 @@ mod tests {
             response.result_reasons[0].route_stage.as_str(),
             "tier2_exact"
         );
+        assert_eq!(response.cache_metrics.as_ref().unwrap().cache_hit_count, 0);
+        assert!(response
+            .explain_trace
+            .as_ref()
+            .unwrap()
+            .cache_metrics
+            .cache_traces
+            .is_empty());
         assert!(!response.result_reasons[0].policy_filter_applied);
         assert_eq!(
             response.route_summary.as_ref().unwrap().candidate_budget,
@@ -2278,6 +2633,7 @@ mod tests {
                     omitted_neighbor_count: 0,
                     cutoff_reasons: Vec::new(),
                 },
+                cache_metrics: CacheMetricsSummary::from_cache_traces(Vec::new(), false),
                 score_components: vec![
                     TraceScoreComponent {
                         signal_family: "relevance",
@@ -2305,6 +2661,225 @@ mod tests {
                 .write_decision,
             "capture"
         );
+    }
+
+    #[test]
+    fn cache_metrics_serialization_preserves_multi_family_trace_detail() {
+        let cache_metrics = CacheMetricsSummary::from_cache_traces(
+            vec![
+                CacheEvalTrace {
+                    cache_family: CacheFamilyLabel::Tier1Item,
+                    cache_event: CacheEventLabel::Hit,
+                    outcome: CacheLookupOutcome::Hit,
+                    cache_reason: None,
+                    warm_source: Some(WarmSourceLabel::Tier1ItemCache),
+                    generation_status: GenerationStatusLabel::Valid,
+                    candidates_before: 8,
+                    candidates_after: 3,
+                    warm_reuse: true,
+                },
+                CacheEvalTrace {
+                    cache_family: CacheFamilyLabel::Summary,
+                    cache_event: CacheEventLabel::Bypass,
+                    outcome: CacheLookupOutcome::Bypass,
+                    cache_reason: Some(CacheReasonLabel::PolicyBoundary),
+                    warm_source: None,
+                    generation_status: GenerationStatusLabel::Unknown,
+                    candidates_before: 3,
+                    candidates_after: 3,
+                    warm_reuse: false,
+                },
+                CacheEvalTrace {
+                    cache_family: CacheFamilyLabel::AnnProbe,
+                    cache_event: CacheEventLabel::Miss,
+                    outcome: CacheLookupOutcome::Miss,
+                    cache_reason: Some(CacheReasonLabel::StaleGeneration),
+                    warm_source: None,
+                    generation_status: GenerationStatusLabel::Stale,
+                    candidates_before: 3,
+                    candidates_after: 1,
+                    warm_reuse: false,
+                },
+            ],
+            false,
+        );
+        let response = ResponseContext::success(
+            NamespaceId::new("team.cache").unwrap(),
+            RequestId::new("req-cache-multi-family").unwrap(),
+            7u8,
+        )
+        .with_trace_schema(
+            RouteSummary {
+                route_family: "tiered_recall",
+                route_reason: "bounded multi-family cache proof",
+                tier1_consulted_first: true,
+                tier1_answered_directly: false,
+                routes_to_deeper_tiers: true,
+                candidate_budget: Some(8),
+                pre_route_candidate_count: Some(8),
+                post_route_candidate_count: Some(1),
+                fallback_reason: Some("cache_probe_continued"),
+            },
+            vec![
+                TraceStage::Tier1RecentWindow,
+                TraceStage::Tier2Exact,
+                TraceStage::Packaging,
+            ],
+            vec![ResultReason {
+                memory_id: None,
+                reason_code: "tier2_exact_match".to_string(),
+                reason_family: "selection".to_string(),
+                route_stage: TraceStage::Tier2Exact,
+                policy_filter_applied: false,
+                detail: "candidate survived bounded ranking after cache evaluation".to_string(),
+            }],
+            TraceOmissionSummary {
+                policy_redacted: 0,
+                threshold_dropped: 0,
+                dedup_dropped: 0,
+                budget_capped: 0,
+                duplicate_collapsed: 0,
+                low_confidence_suppressed: 0,
+                stale_bypassed: 0,
+                confidence_filtered: 0,
+                graph_omitted_neighbors: 0,
+            },
+            GraphExpansionSummary {
+                graph_assistance: "none",
+                seed_memory_ids: Vec::new(),
+                graph_seed: FieldPresence::Absent,
+                graph_entry_points: Vec::new(),
+                followed_relations: Vec::new(),
+                supporting_memory_ids: Vec::new(),
+                omitted_neighbor_ids: Vec::new(),
+                omitted_neighbor_count: 0,
+                cutoff_reasons: Vec::new(),
+            },
+            cache_metrics.clone(),
+            vec![TraceScoreComponent {
+                signal_family: "relevance",
+                raw_value: 820,
+                weight: 40,
+            }],
+            TracePolicySummary {
+                effective_namespace: "team.cache".into(),
+                policy_family: "namespace",
+                outcome_class: OutcomeClass::Accepted,
+                blocked_stage: "not_blocked",
+                redaction_fields: Vec::new(),
+                retention_state: FieldPresence::Absent,
+                sharing_scope: FieldPresence::Present("same_namespace"),
+                filters: Vec::new(),
+            },
+            TraceProvenanceSummary {
+                source_kind: "memory".to_string(),
+                source_reference: "result_set".to_string(),
+                lineage_ancestors: Vec::new(),
+                relation_to_seed: FieldPresence::Absent,
+                graph_seed: FieldPresence::Absent,
+            },
+            vec![FreshnessMarker {
+                code: "fresh",
+                detail: "cache-backed result remained fresh enough for packaging",
+            }],
+            Vec::new(),
+            vec![UncertaintyMarker {
+                code: "low_uncertainty",
+                detail: "bounded evidence had low uncertainty",
+            }],
+        );
+
+        assert_eq!(
+            response.cache_metrics.as_ref().unwrap().cache_traces.len(),
+            3
+        );
+        assert_eq!(response.cache_metrics.as_ref().unwrap().cache_hit_count, 1);
+        assert_eq!(response.cache_metrics.as_ref().unwrap().cache_miss_count, 1);
+        assert_eq!(
+            response.cache_metrics.as_ref().unwrap().cache_bypass_count,
+            1
+        );
+        assert_eq!(
+            response
+                .cache_metrics
+                .as_ref()
+                .unwrap()
+                .tier1_item_hit_count,
+            1
+        );
+        assert_eq!(
+            response
+                .cache_metrics
+                .as_ref()
+                .unwrap()
+                .tier2_query_hit_count,
+            0
+        );
+        assert_eq!(
+            response
+                .cache_metrics
+                .as_ref()
+                .unwrap()
+                .summary_cache_hit_count,
+            0
+        );
+        assert_eq!(
+            response.cache_metrics.as_ref().unwrap().ann_probe_hit_count,
+            0
+        );
+        assert_eq!(
+            response
+                .cache_metrics
+                .as_ref()
+                .unwrap()
+                .pre_cache_candidates,
+            Some(8)
+        );
+        assert_eq!(
+            response
+                .cache_metrics
+                .as_ref()
+                .unwrap()
+                .post_tier1_candidates,
+            Some(3)
+        );
+        assert_eq!(
+            response.cache_metrics.as_ref().unwrap().post_ann_candidates,
+            Some(1)
+        );
+        assert_eq!(
+            response
+                .explain_trace
+                .as_ref()
+                .unwrap()
+                .cache_metrics
+                .cache_traces
+                .len(),
+            3
+        );
+
+        let value = serde_json::to_value(&response).unwrap();
+        let cache_metrics_json = &value["cache_metrics"];
+        let cache_traces = cache_metrics_json["cache_traces"].as_array().unwrap();
+        assert_eq!(cache_traces.len(), 3);
+        assert_eq!(cache_traces[0]["cache_family"], "Tier1Item");
+        assert_eq!(cache_traces[0]["cache_event"], "Hit");
+        assert_eq!(cache_traces[0]["outcome"], "Hit");
+        assert_eq!(cache_traces[0]["warm_source"], "Tier1ItemCache");
+        assert_eq!(cache_traces[1]["cache_family"], "Summary");
+        assert_eq!(cache_traces[1]["cache_event"], "Bypass");
+        assert_eq!(cache_traces[1]["cache_reason"], "PolicyBoundary");
+        assert_eq!(cache_traces[2]["cache_family"], "AnnProbe");
+        assert_eq!(cache_traces[2]["cache_event"], "Miss");
+        assert_eq!(cache_traces[2]["cache_reason"], "StaleGeneration");
+        assert_eq!(cache_traces[2]["generation_status"], "Stale");
+        assert_eq!(cache_metrics_json["cache_hit_count"], 1);
+        assert_eq!(cache_metrics_json["cache_miss_count"], 1);
+        assert_eq!(cache_metrics_json["cache_bypass_count"], 1);
+        assert_eq!(cache_metrics_json["tier1_item_hit_count"], 1);
+        assert_eq!(cache_metrics_json["tier2_query_hit_count"], 0);
+        assert_eq!(cache_metrics_json["summary_cache_hit_count"], 0);
+        assert_eq!(cache_metrics_json["ann_probe_hit_count"], 0);
     }
 
     #[test]
@@ -2357,6 +2932,7 @@ mod tests {
                 omitted_neighbor_count: 0,
                 cutoff_reasons: Vec::new(),
             },
+            CacheMetricsSummary::from_cache_traces(Vec::new(), false),
             vec![TraceScoreComponent {
                 signal_family: "relevance",
                 raw_value: 820,
@@ -2461,6 +3037,20 @@ mod tests {
                 .and_then(Value::as_object)
                 .unwrap()["omitted_summary"]["budget_capped"],
             1
+        );
+        assert_eq!(
+            value
+                .get("explain_trace")
+                .and_then(Value::as_object)
+                .unwrap()["cache_metrics"]["cache_hit_count"],
+            0
+        );
+        assert_eq!(
+            value
+                .get("cache_metrics")
+                .and_then(Value::as_object)
+                .unwrap()["cache_miss_count"],
+            0
         );
         assert_eq!(
             value.get("safeguard").and_then(Value::as_object).unwrap()["blocked_reasons"][0],

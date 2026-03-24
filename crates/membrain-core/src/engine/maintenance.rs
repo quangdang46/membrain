@@ -23,6 +23,97 @@ impl MaintenanceProgress {
     }
 }
 
+/// Deterministic logical clock used by lifecycle and timeout fixtures.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct LogicalClock {
+    current_tick: u64,
+}
+
+impl LogicalClock {
+    /// Builds a logical clock anchored at the given starting tick.
+    pub const fn new(current_tick: u64) -> Self {
+        Self { current_tick }
+    }
+
+    /// Returns the current logical tick.
+    pub const fn current_tick(&self) -> u64 {
+        self.current_tick
+    }
+
+    /// Advances the clock by a bounded number of ticks.
+    pub fn advance_by(&mut self, delta: u64) -> u64 {
+        self.current_tick = self.current_tick.saturating_add(delta);
+        self.current_tick
+    }
+
+    /// Advances the clock to an explicit tick without allowing backwards motion.
+    pub fn advance_to(&mut self, tick: u64) -> u64 {
+        self.current_tick = self.current_tick.max(tick);
+        self.current_tick
+    }
+}
+
+/// Replayable artifact that names the deterministic tick scenario and its history.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TickScenarioArtifact {
+    /// Stable scenario name emitted by the fixture owner.
+    pub scenario_name: &'static str,
+    /// Starting logical tick for the scenario.
+    pub start_tick: u64,
+    /// Exact replayable tick sequence captured by the fixture.
+    pub tick_history: Vec<u64>,
+}
+
+/// Replayable fixture that records the exact logical tick sequence for a scenario.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TickSequenceFixture {
+    clock: LogicalClock,
+    history: Vec<u64>,
+}
+
+impl TickSequenceFixture {
+    /// Builds a fixture anchored at the given starting tick.
+    pub fn new(start_tick: u64) -> Self {
+        Self {
+            clock: LogicalClock::new(start_tick),
+            history: vec![start_tick],
+        }
+    }
+
+    /// Returns the current logical tick.
+    pub const fn current_tick(&self) -> u64 {
+        self.clock.current_tick()
+    }
+
+    /// Returns the replayable tick history captured so far.
+    pub fn history(&self) -> &[u64] {
+        &self.history
+    }
+
+    /// Returns a named replay artifact for later deterministic assertions.
+    pub fn artifact(&self, scenario_name: &'static str) -> TickScenarioArtifact {
+        TickScenarioArtifact {
+            scenario_name,
+            start_tick: self.history.first().copied().unwrap_or(0),
+            tick_history: self.history.clone(),
+        }
+    }
+
+    /// Advances by a bounded number of ticks and records the new position.
+    pub fn advance_by(&mut self, delta: u64) -> u64 {
+        let tick = self.clock.advance_by(delta);
+        self.history.push(tick);
+        tick
+    }
+
+    /// Advances to an explicit tick and records the new position.
+    pub fn advance_to(&mut self, tick: u64) -> u64 {
+        let tick = self.clock.advance_to(tick);
+        self.history.push(tick);
+        tick
+    }
+}
+
 /// Stable interruption reasons shared by cancellable maintenance work.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum InterruptionReason {

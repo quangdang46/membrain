@@ -6,9 +6,9 @@ use membrain_core::engine::consolidation::{
     ConsolidationEngine, ConsolidationPolicy, DerivedArtifactKind,
 };
 use membrain_core::engine::maintenance::{
-    DurableStateToken, InterruptedMaintenance, InterruptionReason, MaintenanceController,
-    MaintenanceJobHandle, MaintenanceJobState, MaintenanceOperation, MaintenanceProgress,
-    MaintenanceStep,
+    DurableStateToken, InterruptedMaintenance, InterruptionReason, LogicalClock,
+    MaintenanceController, MaintenanceJobHandle, MaintenanceJobState, MaintenanceOperation,
+    MaintenanceProgress, MaintenanceStep, TickScenarioArtifact, TickSequenceFixture,
 };
 use membrain_core::engine::repair::{
     IndexRepairEntrypoint, RepairEngine, RepairStatus, RepairTarget,
@@ -23,6 +23,7 @@ struct ScriptedMaintenance {
     next_step: usize,
     preserved: DurableStateToken,
     interruptions: Rc<RefCell<Vec<InterruptionReason>>>,
+    tick_fixture: TickSequenceFixture,
 }
 
 impl ScriptedMaintenance {
@@ -40,7 +41,16 @@ impl ScriptedMaintenance {
             next_step: 0,
             preserved,
             interruptions,
+            tick_fixture: TickSequenceFixture::new(0),
         }
+    }
+
+    fn tick_history(&self) -> &[u64] {
+        self.tick_fixture.history()
+    }
+
+    fn tick_artifact(&self, scenario_name: &'static str) -> TickScenarioArtifact {
+        self.tick_fixture.artifact(scenario_name)
     }
 }
 
@@ -48,6 +58,7 @@ impl MaintenanceOperation for ScriptedMaintenance {
     type Summary = &'static str;
 
     fn poll_step(&mut self) -> MaintenanceStep<Self::Summary> {
+        self.tick_fixture.advance_by(1);
         let step = self.steps[self.next_step].clone();
         self.next_step += 1;
         step
@@ -60,6 +71,17 @@ impl MaintenanceOperation for ScriptedMaintenance {
             preserved_durable_state: self.preserved,
         }
     }
+}
+
+#[test]
+fn maintenance_logical_clock_advances_without_wall_clock_dependencies() {
+    let mut clock = LogicalClock::new(3);
+
+    assert_eq!(clock.current_tick(), 3);
+    assert_eq!(clock.advance_by(2), 5);
+    assert_eq!(clock.advance_to(9), 9);
+    assert_eq!(clock.advance_to(4), 9);
+    assert_eq!(clock.current_tick(), 9);
 }
 
 #[test]
@@ -228,6 +250,76 @@ fn cancel_after_explicit_start_preserves_prior_durable_state_without_polling_wor
 }
 
 #[test]
+fn scripted_maintenance_records_replayable_tick_history() {
+    let operation = ScriptedMaintenance::new(
+        vec![
+            MaintenanceStep::Pending(MaintenanceProgress::new(1, 2)),
+            MaintenanceStep::Completed("done"),
+        ],
+        DurableStateToken(90),
+    );
+    let mut handle = MaintenanceJobHandle::new(operation, 3);
+
+    handle.start();
+    let first = handle.poll();
+    let second = handle.poll();
+
+    assert_eq!(first.polls_used, 1);
+    assert_eq!(second.polls_used, 2);
+    assert_eq!(handle.operation().tick_history(), &[0, 1, 2]);
+}
+
+#[test]
+fn scripted_maintenance_exposes_named_tick_artifacts_for_replayable_failure_reports() {
+    let operation = ScriptedMaintenance::new(
+        vec![
+            MaintenanceStep::Pending(MaintenanceProgress::new(1, 3)),
+            MaintenanceStep::Pending(MaintenanceProgress::new(2, 3)),
+        ],
+        DurableStateToken(91),
+    );
+    let mut handle = MaintenanceJobHandle::new(operation, 2);
+
+    handle.start();
+    let running = handle.poll();
+    assert_eq!(running.polls_used, 1);
+
+    let timeout = handle.poll();
+    assert_eq!(timeout.polls_used, 2);
+
+    let timed_out = handle.poll();
+    assert_eq!(
+        timed_out.state,
+        MaintenanceJobState::TimedOut(InterruptedMaintenance {
+            reason: InterruptionReason::TimedOut,
+            preserved_durable_state: DurableStateToken(91),
+        })
+    );
+
+    let artifact = handle
+        .operation()
+        .tick_artifact("timeout_during_rebuild_verification");
+    assert_eq!(
+        artifact.scenario_name,
+        "timeout_during_rebuild_verification"
+    );
+    assert_eq!(artifact.start_tick, 0);
+    assert_eq!(artifact.tick_history, vec![0, 1, 2]);
+}
+
+#[test]
+fn tick_sequence_fixture_artifact_preserves_start_tick_after_explicit_jump() {
+    let mut fixture = TickSequenceFixture::new(40);
+    fixture.advance_to(45);
+    fixture.advance_by(3);
+
+    let artifact = fixture.artifact("repair_resume_checkpoint");
+    assert_eq!(artifact.scenario_name, "repair_resume_checkpoint");
+    assert_eq!(artifact.start_tick, 40);
+    assert_eq!(artifact.tick_history, vec![40, 45, 48]);
+}
+
+#[test]
 fn snapshot_reports_state_transitions_without_consuming_extra_work() {
     let operation = ScriptedMaintenance::new(
         vec![MaintenanceStep::Pending(MaintenanceProgress::new(1, 2))],
@@ -366,7 +458,7 @@ fn consolidation_runs_emit_lineage_preserving_artifacts_through_maintenance_hand
     let namespace = NamespaceId::new("test.consolidation").unwrap();
     let engine = ConsolidationEngine;
     let run = engine.create_run(
-        namespace,
+        namespace.clone(),
         ConsolidationPolicy {
             minimum_candidates: 1,
             batch_size: 3,
@@ -383,27 +475,58 @@ fn consolidation_runs_emit_lineage_preserving_artifacts_through_maintenance_hand
     };
 
     assert_eq!(summary.groups_evaluated, 3);
-    assert_eq!(summary.episode_source_sets, 3);
+    assert_eq!(summary.episode_source_sets, 2);
     assert_eq!(summary.derivations_emitted, 3);
-    assert_eq!(summary.derivation_partial_failures, 3);
+    assert_eq!(summary.derivation_partial_failures, 1);
     assert_eq!(summary.derived_artifacts.len(), 3);
-    assert_eq!(summary.derivation_failures.len(), 3);
+    assert_eq!(summary.derivation_failures.len(), 1);
     assert_eq!(
         summary.derived_artifacts[0].kind,
         DerivedArtifactKind::Summary
     );
-    assert_eq!(summary.derived_artifacts[0].source_ids, vec![MemoryId(1)]);
-    assert_eq!(summary.derived_artifacts[1].source_ids, vec![MemoryId(2)]);
+    assert_eq!(summary.derived_artifacts[0].namespace, namespace);
+    assert_eq!(
+        summary.derived_artifacts[0].source_ids,
+        vec![MemoryId(1), MemoryId(2)]
+    );
+    assert_eq!(
+        summary.derived_artifacts[0].source_time_range_ms,
+        (0, 120_000)
+    );
+    assert_eq!(
+        summary.derived_artifacts[0].contradiction_semantics,
+        "preserve_unresolved_contradictions"
+    );
+    assert_eq!(
+        summary.derived_artifacts[0].continuity_keys,
+        vec![
+            "session_cluster",
+            "session_id",
+            "task_id",
+            "goal_context",
+            "tool_chain_context",
+            "entity_overlap"
+        ]
+    );
+    assert_eq!(summary.derived_artifacts[1].kind, DerivedArtifactKind::Gist);
+    assert_eq!(summary.derived_artifacts[1].namespace, namespace);
+    assert_eq!(
+        summary.derived_artifacts[1].source_ids,
+        vec![MemoryId(1), MemoryId(2)]
+    );
+    assert_eq!(
+        summary.derived_artifacts[1].source_time_range_ms,
+        (0, 120_000)
+    );
+    assert_eq!(summary.derived_artifacts[2].source_ids, vec![MemoryId(3)]);
+    assert_eq!(summary.derivation_failures[0].source_ids, vec![MemoryId(3)]);
     assert_eq!(summary.derivation_failures[0].stage, "gist_compaction");
     assert_eq!(
         summary.derivation_failures[0].reason,
         "single_source_group_kept_evidence_only"
     );
-    assert!(summary
-        .derivation_failures
-        .iter()
-        .all(|failure| failure.lineage_preserved));
-    assert_eq!(summary.grouping_logs.len(), 3);
+    assert!(summary.derivation_failures[0].lineage_preserved);
+    assert_eq!(summary.grouping_logs.len(), 2);
     assert_eq!(summary.queue_report.queue_family, "consolidation");
     assert_eq!(
         summary.queue_report.queue_status,
@@ -414,7 +537,7 @@ fn consolidation_runs_emit_lineage_preserving_artifacts_through_maintenance_hand
     assert_eq!(summary.queue_report.jobs_processed, 1);
     assert_eq!(summary.queue_report.affected_item_count, 3);
     assert_eq!(summary.queue_report.retry_attempts, 0);
-    assert_eq!(summary.queue_report.duration_ms, 21);
+    assert_eq!(summary.queue_report.duration_ms, 14);
     assert!(summary.queue_report.partial_run);
 
     assert_eq!(handle.snapshot().polls_used, 1);
@@ -776,8 +899,8 @@ fn repair_run_full_scan_reports_doctor_health_surfaces_without_rebuilds() {
     let (snapshot, summary) = completed;
 
     assert_eq!(summary.targets_checked, 10);
-    assert_eq!(summary.healthy, 10);
-    assert_eq!(summary.degraded, 0);
+    assert_eq!(summary.healthy, 9);
+    assert_eq!(summary.degraded, 1);
     assert_eq!(summary.corrupt, 0);
     assert_eq!(summary.rebuilt, 0);
     assert_eq!(summary.results.len(), 10);
@@ -797,14 +920,24 @@ fn repair_run_full_scan_reports_doctor_health_surfaces_without_rebuilds() {
         RepairTarget::EngramIndex,
         RepairTarget::ContradictionConsistency,
     ] {
+        let expected_status = if target == RepairTarget::GraphConsistency {
+            RepairStatus::Degraded
+        } else {
+            RepairStatus::Healthy
+        };
+        let expected_detail = if target == RepairTarget::GraphConsistency {
+            "graph_failure_injection_detected_during_verification"
+        } else {
+            "verified_against_durable_truth"
+        };
         let result = summary
             .results
             .iter()
             .find(|result| result.target == target)
             .unwrap_or_else(|| panic!("missing result for {}", target.as_str()));
-        assert_eq!(result.status, RepairStatus::Healthy);
+        assert_eq!(result.status, expected_status);
         assert!(result.verification_passed);
-        assert_eq!(result.detail, "verified_against_durable_truth");
+        assert_eq!(result.detail, expected_detail);
         assert!(result.rebuild_entrypoint.is_none());
         assert!(result.rebuilt_outputs.is_empty());
 
@@ -813,7 +946,7 @@ fn repair_run_full_scan_reports_doctor_health_surfaces_without_rebuilds() {
             .iter()
             .find(|report| report.target == target)
             .unwrap_or_else(|| panic!("missing operator report for {}", target.as_str()));
-        assert_eq!(report.status, RepairStatus::Healthy);
+        assert_eq!(report.status, expected_status);
         assert!(report.verification_passed);
         assert!(report.rebuild_entrypoint.is_none());
         assert!(report.rebuilt_outputs.is_empty());

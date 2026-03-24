@@ -161,12 +161,28 @@ pub enum CutoffReason {
     PolicyNamespaceBlocked,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct FollowedEdgeSummary {
+    pub from: EntityId,
+    pub to: EntityId,
+    pub relation: RelationKind,
+    pub via_additional_seed: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct OmittedNeighborSummary {
+    pub entity_id: EntityId,
+    pub reason: CutoffReason,
+}
+
 /// A traceable report showing why a graph expansion stopped.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct GraphExplain {
     pub seeds: Vec<EntityId>,
     pub expanded_nodes: usize,
     pub edges_followed: usize,
+    pub followed_edges: Vec<FollowedEdgeSummary>,
+    pub omitted_neighbors: Vec<OmittedNeighborSummary>,
     pub cutoff_reasons: Vec<CutoffReason>,
 }
 
@@ -373,25 +389,54 @@ impl EngramStore {
             Self::new(self.similarity_threshold).with_lookup_cap(self.similar_lookup_cap);
         rebuilt.next_engram_id = self.next_engram_id;
         rebuilt.memory_embeddings = self.memory_embeddings.clone();
-        rebuilt.memory_to_engram = self.memory_to_engram.clone();
-
-        for (engram_id, cluster) in &self.clusters {
-            rebuilt.clusters.insert(
-                *engram_id,
-                EngramCluster {
-                    id: *engram_id,
-                    centroid: Vec::new(),
-                    member_count: 0,
-                    last_activated: cluster.last_activated,
-                    formation: cluster.formation.clone(),
-                },
-            );
-        }
 
         for (engram_id, members) in &self.members_by_engram {
             rebuilt
                 .members_by_engram
                 .insert(*engram_id, members.clone());
+            for member in members {
+                rebuilt
+                    .memory_to_engram
+                    .insert(member.memory_id, *engram_id);
+            }
+        }
+
+        let mut cluster_ids = self.clusters.keys().copied().collect::<Vec<_>>();
+        for engram_id in self.members_by_engram.keys().copied() {
+            if !cluster_ids.contains(&engram_id) {
+                cluster_ids.push(engram_id);
+            }
+        }
+
+        for engram_id in cluster_ids {
+            let formation = self
+                .clusters
+                .get(&engram_id)
+                .map(|cluster| cluster.formation.clone())
+                .or_else(|| self.derived_formation_for_engram(engram_id));
+            let last_activated = self
+                .clusters
+                .get(&engram_id)
+                .map(|cluster| cluster.last_activated)
+                .or_else(|| {
+                    self.members_by_engram.get(&engram_id).and_then(|members| {
+                        members.iter().map(|member| member.joined_at_tick).max()
+                    })
+                })
+                .unwrap_or(0);
+
+            if let Some(formation) = formation {
+                rebuilt.clusters.insert(
+                    engram_id,
+                    EngramCluster {
+                        id: engram_id,
+                        centroid: Vec::new(),
+                        member_count: 0,
+                        last_activated,
+                        formation,
+                    },
+                );
+            }
         }
 
         let refresh_order = rebuilt.clusters.keys().copied().collect::<Vec<_>>();
@@ -405,6 +450,20 @@ impl EngramStore {
         }
 
         rebuilt
+    }
+
+    fn derived_formation_for_engram(&self, engram_id: EngramId) -> Option<EngramFormation> {
+        let seed_member = self
+            .members_by_engram
+            .get(&engram_id)?
+            .iter()
+            .min_by_key(|member| (member.joined_at_tick, member.memory_id.0))?;
+
+        Some(EngramFormation {
+            formed_at_tick: seed_member.joined_at_tick,
+            seed_memory_id: seed_member.memory_id,
+            embedding_generation: "embed.rebuilt",
+        })
     }
 
     pub fn lookup_for_memory(&self, memory_id: MemoryId) -> Option<EngramId> {
@@ -470,6 +529,12 @@ pub struct BoundedExpansionPlanner {
     pub constraints: ExpansionConstraints,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ExpansionTraversal {
+    BreadthFirst,
+    DepthFirst,
+}
+
 impl BoundedExpansionPlanner {
     pub fn new(constraints: ExpansionConstraints) -> Self {
         Self { constraints }
@@ -496,7 +561,27 @@ impl BoundedExpansionPlanner {
     where
         F: FnMut(EntityId) -> Vec<(GraphEdge, GraphEntity)>,
     {
-        self.plan_bfs_with_additional_seeds(seed, &[], fetch_neighbors)
+        self.plan_with_policy(
+            seed,
+            &[],
+            fetch_neighbors,
+            |_| true,
+            ExpansionTraversal::BreadthFirst,
+        )
+    }
+
+    /// Run a bounded petgraph DFS from a local subgraph.
+    pub fn plan_dfs<F>(&self, seed: EntityId, fetch_neighbors: F) -> (Neighborhood, GraphExplain)
+    where
+        F: FnMut(EntityId) -> Vec<(GraphEdge, GraphEntity)>,
+    {
+        self.plan_with_policy(
+            seed,
+            &[],
+            fetch_neighbors,
+            |_| true,
+            ExpansionTraversal::DepthFirst,
+        )
     }
 
     /// Run a bounded petgraph BFS from a primary seed plus additional bounded seeds
@@ -505,19 +590,61 @@ impl BoundedExpansionPlanner {
         &self,
         seed: EntityId,
         additional_seeds: &[EntityId],
-        mut fetch_neighbors: F,
+        fetch_neighbors: F,
     ) -> (Neighborhood, GraphExplain)
     where
         F: FnMut(EntityId) -> Vec<(GraphEdge, GraphEntity)>,
     {
-        let mut queue = VecDeque::new();
-        queue.push_back((seed, 0));
+        self.plan_with_policy(
+            seed,
+            additional_seeds,
+            fetch_neighbors,
+            |_| true,
+            ExpansionTraversal::BreadthFirst,
+        )
+    }
+
+    /// Run a bounded petgraph BFS with an explicit entity policy filter.
+    pub fn plan_bfs_with_policy<F, P>(
+        &self,
+        seed: EntityId,
+        additional_seeds: &[EntityId],
+        fetch_neighbors: F,
+        allow_entity: P,
+    ) -> (Neighborhood, GraphExplain)
+    where
+        F: FnMut(EntityId) -> Vec<(GraphEdge, GraphEntity)>,
+        P: FnMut(&GraphEntity) -> bool,
+    {
+        self.plan_with_policy(
+            seed,
+            additional_seeds,
+            fetch_neighbors,
+            allow_entity,
+            ExpansionTraversal::BreadthFirst,
+        )
+    }
+
+    fn plan_with_policy<F, P>(
+        &self,
+        seed: EntityId,
+        additional_seeds: &[EntityId],
+        mut fetch_neighbors: F,
+        mut allow_entity: P,
+        traversal: ExpansionTraversal,
+    ) -> (Neighborhood, GraphExplain)
+    where
+        F: FnMut(EntityId) -> Vec<(GraphEdge, GraphEntity)>,
+        P: FnMut(&GraphEntity) -> bool,
+    {
+        let mut frontier = VecDeque::new();
+        frontier.push_back((seed, 0));
 
         let mut visited = HashSet::new();
         visited.insert(seed);
         for extra_seed in additional_seeds {
             if visited.insert(*extra_seed) {
-                queue.push_back((*extra_seed, 0));
+                frontier.push_back((*extra_seed, 0));
             }
         }
 
@@ -529,16 +656,22 @@ impl BoundedExpansionPlanner {
             depth_reached: 0,
         };
 
+        let explain_seeds: Vec<EntityId> = std::iter::once(seed)
+            .chain(additional_seeds.iter().copied())
+            .collect();
         let mut explain = GraphExplain {
-            seeds: std::iter::once(seed)
-                .chain(additional_seeds.iter().copied())
-                .collect(),
+            seeds: explain_seeds.clone(),
             expanded_nodes: 0,
             edges_followed: 0,
+            followed_edges: Vec::new(),
+            omitted_neighbors: Vec::new(),
             cutoff_reasons: Vec::new(),
         };
 
-        while let Some((current, depth)) = queue.pop_front() {
+        while let Some((current, depth)) = match traversal {
+            ExpansionTraversal::BreadthFirst => frontier.pop_front(),
+            ExpansionTraversal::DepthFirst => frontier.pop_back(),
+        } {
             if depth > neighborhood.depth_reached {
                 neighborhood.depth_reached = depth;
             }
@@ -567,23 +700,43 @@ impl BoundedExpansionPlanner {
                     continue;
                 }
 
+                if !allow_entity(&entity) {
+                    let reason = CutoffReason::PolicyNamespaceBlocked;
+                    explain.omitted_neighbors.push(OmittedNeighborSummary {
+                        entity_id: entity.id,
+                        reason: reason.clone(),
+                    });
+                    Self::record_cutoff(&mut explain, reason);
+                    neighborhood.truncated = true;
+                    continue;
+                }
+
                 if neighborhood.entities.len() >= self.constraints.max_entities {
-                    Self::record_cutoff(
-                        &mut explain,
-                        CutoffReason::MaxNodesReached(self.constraints.max_entities),
-                    );
+                    let reason = CutoffReason::MaxNodesReached(self.constraints.max_entities);
+                    explain.omitted_neighbors.push(OmittedNeighborSummary {
+                        entity_id: entity.id,
+                        reason: reason.clone(),
+                    });
+                    Self::record_cutoff(&mut explain, reason);
                     Self::record_cutoff(&mut explain, CutoffReason::BudgetExhausted);
                     neighborhood.truncated = true;
                     break;
                 }
 
                 if !visited.contains(&entity.id) {
+                    let followed_edge = FollowedEdgeSummary {
+                        from: edge.from,
+                        to: edge.to,
+                        relation: edge.relation,
+                        via_additional_seed: additional_seeds.contains(&current),
+                    };
                     visited.insert(entity.id);
                     neighborhood.edges.push(edge);
                     neighborhood.entities.push(entity.clone());
                     explain.edges_followed += 1;
+                    explain.followed_edges.push(followed_edge);
 
-                    queue.push_back((entity.id, depth + 1));
+                    frontier.push_back((entity.id, depth + 1));
                 }
             }
         }
@@ -1066,6 +1219,37 @@ mod tests {
     }
 
     #[test]
+    fn rebuild_recovers_missing_cluster_row_from_authoritative_memberships() {
+        let mut store = EngramStore::new(0.95).with_lookup_cap(3);
+        let assignment = store.assign_memory(MemoryId(20), vec![1.0, 0.0], 300, "embed.v1");
+        store.assign_memory(MemoryId(21), vec![0.98, 0.02], 301, "embed.v1");
+
+        let mut divergent = store.clone();
+        divergent.clusters.remove(&assignment.engram_id);
+
+        let rebuilt = divergent.rebuild_from_memberships();
+        let rebuilt_cluster = rebuilt.cluster(assignment.engram_id).unwrap();
+
+        assert_eq!(rebuilt_cluster.member_count, 2);
+        assert_eq!(rebuilt_cluster.centroid, vec![0.99, 0.01]);
+        assert_eq!(rebuilt_cluster.last_activated, 301);
+        assert_eq!(rebuilt_cluster.formation.formed_at_tick, 300);
+        assert_eq!(rebuilt_cluster.formation.seed_memory_id, MemoryId(20));
+        assert_eq!(
+            rebuilt_cluster.formation.embedding_generation,
+            "embed.rebuilt"
+        );
+        assert_eq!(
+            rebuilt.lookup_for_memory(MemoryId(20)),
+            Some(assignment.engram_id)
+        );
+        assert_eq!(
+            rebuilt.lookup_for_memory(MemoryId(21)),
+            Some(assignment.engram_id)
+        );
+    }
+
+    #[test]
     fn similar_engram_lookup_stays_capped_to_top_three() {
         let mut store = EngramStore::new(0.999).with_lookup_cap(3);
         store.assign_memory(MemoryId(1), vec![1.0, 0.0], 10, "embed.v1");
@@ -1192,6 +1376,11 @@ mod tests {
         assert_eq!(ex.edges_followed, 2);
         assert_eq!(nb.entities.len(), 2);
         assert!(!nb.truncated);
+        assert_eq!(ex.followed_edges.len(), 2);
+        assert_eq!(ex.followed_edges[0].from, EntityId(1));
+        assert!(!ex.followed_edges[0].via_additional_seed);
+        assert_eq!(ex.followed_edges[1].from, EntityId(9));
+        assert!(ex.followed_edges[1].via_additional_seed);
     }
 
     #[test]
@@ -1344,6 +1533,224 @@ mod tests {
         assert!(ex
             .cutoff_reasons
             .contains(&CutoffReason::MaxNodesReached(1)));
+        assert!(ex.cutoff_reasons.contains(&CutoffReason::BudgetExhausted));
+    }
+
+    #[test]
+    fn bfs_reports_policy_namespace_cutoff_for_blocked_neighbors() {
+        let planner = BoundedExpansionPlanner::new(ExpansionConstraints {
+            max_depth: 2,
+            max_entities: 4,
+            min_strength: 50,
+            follow_reverse: false,
+        });
+
+        let seed = EntityId(1);
+        let allowed_namespace = NamespaceId::new("ns.allowed").unwrap();
+        let blocked_namespace = NamespaceId::new("ns.blocked").unwrap();
+        let (nb, ex) = planner.plan_bfs_with_policy(
+            seed,
+            &[],
+            |current| {
+                if current == seed {
+                    vec![
+                        (
+                            GraphEdge {
+                                from: current,
+                                to: EntityId(2),
+                                relation: RelationKind::Mentions,
+                                strength: 100,
+                            },
+                            GraphEntity {
+                                id: EntityId(2),
+                                kind: EntityKind::Concept,
+                                label: "allowed".into(),
+                                namespace: allowed_namespace.clone(),
+                                memory_id: None,
+                            },
+                        ),
+                        (
+                            GraphEdge {
+                                from: current,
+                                to: EntityId(3),
+                                relation: RelationKind::SharedTopic,
+                                strength: 100,
+                            },
+                            GraphEntity {
+                                id: EntityId(3),
+                                kind: EntityKind::Memory,
+                                label: "blocked".into(),
+                                namespace: blocked_namespace.clone(),
+                                memory_id: Some(MemoryId(3)),
+                            },
+                        ),
+                    ]
+                } else {
+                    Vec::new()
+                }
+            },
+            |entity| entity.namespace == allowed_namespace,
+        );
+
+        assert_eq!(nb.entities.len(), 1);
+        assert_eq!(nb.entities[0].id, EntityId(2));
+        assert_eq!(ex.edges_followed, 1);
+        assert!(nb.truncated);
+        assert!(ex
+            .cutoff_reasons
+            .contains(&CutoffReason::PolicyNamespaceBlocked));
+        assert_eq!(ex.omitted_neighbors.len(), 1);
+        assert_eq!(ex.omitted_neighbors[0].entity_id, EntityId(3));
+        assert_eq!(
+            ex.omitted_neighbors[0].reason,
+            CutoffReason::PolicyNamespaceBlocked
+        );
+    }
+
+    #[test]
+    fn bfs_honors_depth_cap_for_engram_seeded_second_hop_expansion() {
+        let planner = BoundedExpansionPlanner::new(ExpansionConstraints {
+            max_depth: 1,
+            max_entities: 6,
+            min_strength: 50,
+            follow_reverse: false,
+        });
+
+        let seed = EntityId(1);
+        let additional_seeds = [EntityId(9)];
+        let (nb, ex) =
+            planner.plan_bfs_with_additional_seeds(
+                seed,
+                &additional_seeds,
+                |current| match current {
+                    EntityId(1) => vec![(
+                        GraphEdge {
+                            from: current,
+                            to: EntityId(2),
+                            relation: RelationKind::Mentions,
+                            strength: 100,
+                        },
+                        GraphEntity {
+                            id: EntityId(2),
+                            kind: EntityKind::Concept,
+                            label: "primary-hop".into(),
+                            namespace: NamespaceId::new("ns").unwrap(),
+                            memory_id: None,
+                        },
+                    )],
+                    EntityId(9) => vec![(
+                        GraphEdge {
+                            from: current,
+                            to: EntityId(10),
+                            relation: RelationKind::SharedTopic,
+                            strength: 100,
+                        },
+                        GraphEntity {
+                            id: EntityId(10),
+                            kind: EntityKind::Memory,
+                            label: "engram-hop".into(),
+                            namespace: NamespaceId::new("ns").unwrap(),
+                            memory_id: Some(MemoryId(10)),
+                        },
+                    )],
+                    EntityId(10) => vec![(
+                        GraphEdge {
+                            from: current,
+                            to: EntityId(11),
+                            relation: RelationKind::SharedTopic,
+                            strength: 100,
+                        },
+                        GraphEntity {
+                            id: EntityId(11),
+                            kind: EntityKind::Concept,
+                            label: "too-deep".into(),
+                            namespace: NamespaceId::new("ns").unwrap(),
+                            memory_id: None,
+                        },
+                    )],
+                    _ => Vec::new(),
+                },
+            );
+
+        assert_eq!(ex.seeds, vec![EntityId(1), EntityId(9)]);
+        assert_eq!(nb.entities.len(), 2);
+        assert_eq!(nb.depth_reached, 1);
+        assert!(nb.truncated);
+        assert!(!nb.entities.iter().any(|entity| entity.id == EntityId(11)));
+        assert!(ex
+            .cutoff_reasons
+            .contains(&CutoffReason::MaxDepthReached(1)));
+    }
+
+    #[test]
+    fn dfs_prefers_last_pushed_branch_within_same_budget() {
+        let planner = BoundedExpansionPlanner::new(ExpansionConstraints {
+            max_depth: 2,
+            max_entities: 2,
+            min_strength: 50,
+            follow_reverse: false,
+        });
+
+        let seed = EntityId(1);
+        let (nb, ex) = planner.plan_dfs(seed, |current| match current {
+            EntityId(1) => vec![
+                (
+                    GraphEdge {
+                        from: current,
+                        to: EntityId(2),
+                        relation: RelationKind::Mentions,
+                        strength: 100,
+                    },
+                    GraphEntity {
+                        id: EntityId(2),
+                        kind: EntityKind::Concept,
+                        label: "first-branch".into(),
+                        namespace: NamespaceId::new("ns").unwrap(),
+                        memory_id: None,
+                    },
+                ),
+                (
+                    GraphEdge {
+                        from: current,
+                        to: EntityId(3),
+                        relation: RelationKind::Mentions,
+                        strength: 100,
+                    },
+                    GraphEntity {
+                        id: EntityId(3),
+                        kind: EntityKind::Concept,
+                        label: "second-branch".into(),
+                        namespace: NamespaceId::new("ns").unwrap(),
+                        memory_id: None,
+                    },
+                ),
+            ],
+            EntityId(3) => vec![(
+                GraphEdge {
+                    from: current,
+                    to: EntityId(4),
+                    relation: RelationKind::SharedTopic,
+                    strength: 100,
+                },
+                GraphEntity {
+                    id: EntityId(4),
+                    kind: EntityKind::Memory,
+                    label: "deep-second-branch".into(),
+                    namespace: NamespaceId::new("ns").unwrap(),
+                    memory_id: Some(MemoryId(4)),
+                },
+            )],
+            _ => Vec::new(),
+        });
+
+        assert_eq!(nb.entities.len(), 2);
+        assert_eq!(nb.entities[0].id, EntityId(2));
+        assert_eq!(nb.entities[1].id, EntityId(3));
+        assert!(nb.truncated);
+        assert_eq!(ex.expanded_nodes, 2);
+        assert!(ex
+            .cutoff_reasons
+            .contains(&CutoffReason::MaxNodesReached(2)));
         assert!(ex.cutoff_reasons.contains(&CutoffReason::BudgetExhausted));
     }
 

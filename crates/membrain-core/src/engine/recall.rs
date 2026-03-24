@@ -170,6 +170,14 @@ impl RecallEngine {
         RecallTraceStage::Tier3Fallback,
     ];
 
+    const fn trace_preroll(request: RecallRequest) -> (bool, &'static str) {
+        if request.predictive_preroll {
+            (true, "predictive_preroll_enabled")
+        } else {
+            (false, "request_not_opted_in")
+        }
+    }
+
     pub const fn predictive_preroll_decision(
         &self,
         classification: &IntentClassification,
@@ -235,11 +243,15 @@ impl RecallRuntime for RecallEngine {
                     candidate_budget: tier1_candidate_budget,
                     pre_tier1_candidates: 1,
                     post_tier1_candidates: 1,
+                    predictive_preroll_triggered: false,
+                    predictive_preroll_skip_reason: "exact_id_direct_lookup",
                 },
             };
         }
 
         if let Some(session_id) = request.session_id.filter(|_| request.small_lookup) {
+            let (predictive_preroll_triggered, predictive_preroll_skip_reason) =
+                Self::trace_preroll(request);
             return RecallPlan {
                 kind: RecallPlanKind::RecentTier1ThenTier2Exact,
                 exact_memory_id: None,
@@ -259,6 +271,8 @@ impl RecallRuntime for RecallEngine {
                     candidate_budget: tier1_candidate_budget,
                     pre_tier1_candidates: tier1_candidate_budget,
                     post_tier1_candidates: tier1_candidate_budget,
+                    predictive_preroll_triggered,
+                    predictive_preroll_skip_reason,
                 },
             };
         }
@@ -284,10 +298,14 @@ impl RecallRuntime for RecallEngine {
                     candidate_budget: tier1_candidate_budget,
                     pre_tier1_candidates: 0,
                     post_tier1_candidates: config.graph_max_nodes.min(config.tier2_candidate_budget),
+                    predictive_preroll_triggered: false,
+                    predictive_preroll_skip_reason: "graph_expansion_not_predictive",
                 },
             };
         }
 
+        let (predictive_preroll_triggered, predictive_preroll_skip_reason) =
+            Self::trace_preroll(request);
         RecallPlan {
             kind: RecallPlanKind::Tier2ExactThenTier3Fallback,
             exact_memory_id: None,
@@ -308,6 +326,8 @@ impl RecallRuntime for RecallEngine {
                 candidate_budget: tier1_candidate_budget,
                 pre_tier1_candidates: 0,
                 post_tier1_candidates: 0,
+                predictive_preroll_triggered,
+                predictive_preroll_skip_reason,
             },
         }
     }
@@ -400,6 +420,7 @@ mod tests {
                 session_id: Some(SessionId(9)),
                 small_lookup: false,
                 graph_expansion: false,
+                predictive_preroll: false,
             },
             RuntimeConfig::default(),
         );
@@ -409,6 +430,7 @@ mod tests {
                 session_id: None,
                 small_lookup: true,
                 graph_expansion: false,
+                predictive_preroll: false,
             },
             RuntimeConfig::default(),
         );
@@ -452,6 +474,7 @@ mod tests {
                 session_id: Some(SessionId(11)),
                 small_lookup: false,
                 graph_expansion: false,
+                predictive_preroll: false,
             },
             RuntimeConfig::default(),
         );
@@ -495,6 +518,7 @@ mod tests {
                 session_id: Some(SessionId(13)),
                 small_lookup: false,
                 graph_expansion: true,
+                predictive_preroll: false,
             },
             config,
         );
@@ -530,5 +554,70 @@ mod tests {
         assert!(request.graph_expansion);
         assert_eq!(request.session_id, Some(SessionId(21)));
         assert!(request.small_lookup);
+    }
+
+    #[test]
+    fn predictive_preroll_trace_reflects_recent_lookup_opt_in() {
+        let engine = RecallEngine;
+
+        let opted_in = engine.plan_recall(
+            RecallRequest {
+                predictive_preroll: true,
+                ..RecallRequest::small_session_lookup(SessionId(31))
+            },
+            RuntimeConfig::default(),
+        );
+        let defaulted = engine.plan_recall(
+            RecallRequest::small_session_lookup(SessionId(32)),
+            RuntimeConfig::default(),
+        );
+
+        assert!(opted_in.trace.predictive_preroll_triggered);
+        assert_eq!(
+            opted_in.trace.predictive_preroll_skip_reason,
+            "predictive_preroll_enabled"
+        );
+        assert!(!defaulted.trace.predictive_preroll_triggered);
+        assert_eq!(
+            defaulted.trace.predictive_preroll_skip_reason,
+            "request_not_opted_in"
+        );
+    }
+
+    #[test]
+    fn predictive_preroll_trace_reflects_fallback_opt_in_but_not_graph_routes() {
+        let engine = RecallEngine;
+
+        let fallback = engine.plan_recall(
+            RecallRequest {
+                exact_memory_id: None,
+                session_id: Some(SessionId(41)),
+                small_lookup: false,
+                graph_expansion: false,
+                predictive_preroll: true,
+            },
+            RuntimeConfig::default(),
+        );
+        let graph = engine.plan_recall(
+            RecallRequest {
+                exact_memory_id: None,
+                session_id: Some(SessionId(42)),
+                small_lookup: false,
+                graph_expansion: true,
+                predictive_preroll: true,
+            },
+            RuntimeConfig::default(),
+        );
+
+        assert!(fallback.trace.predictive_preroll_triggered);
+        assert_eq!(
+            fallback.trace.predictive_preroll_skip_reason,
+            "predictive_preroll_enabled"
+        );
+        assert!(!graph.trace.predictive_preroll_triggered);
+        assert_eq!(
+            graph.trace.predictive_preroll_skip_reason,
+            "graph_expansion_not_predictive"
+        );
     }
 }

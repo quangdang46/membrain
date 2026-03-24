@@ -229,6 +229,14 @@ fn qualified_landmark_signals_stay_visible_in_fast_path_trace_for_temporal_consu
         Some("era-quarterclose-0144")
     );
     assert_eq!(prepared.normalized.landmark, prepared.trace.landmark);
+    assert_eq!(prepared.normalized.landmark.era_started_at_tick, Some(144));
+    assert!(prepared.normalized.landmark.detection_score >= 800);
+    assert!(prepared
+        .normalized
+        .landmark
+        .detection_reason
+        .as_deref()
+        .is_some_and(|reason| reason.contains("crossed landmark thresholds")));
     assert_eq!(
         prepared.classification.route_family,
         FastPathRouteFamily::Event
@@ -256,6 +264,8 @@ fn landmark_era_slug_falls_back_when_text_has_no_ascii_alphanumerics() {
         Some("era-landmark-0088")
     );
     assert_eq!(prepared.trace.landmark, prepared.normalized.landmark);
+    assert_eq!(prepared.normalized.landmark.era_started_at_tick, Some(88));
+    assert!(prepared.normalized.landmark.detection_score >= 850);
 }
 
 #[test]
