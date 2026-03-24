@@ -169,6 +169,82 @@ fn cli_audit_json_preserves_request_and_run_correlation_fields() {
 }
 
 #[test]
+fn cli_audit_json_can_filter_by_session_id() {
+    let (ok, stdout, stderr) = run_membrain(&[
+        "audit",
+        "--namespace",
+        "team.alpha",
+        "--session",
+        "5",
+        "--json",
+    ]);
+
+    assert!(ok, "stderr: {stderr}");
+    let json = parse_json(&stdout);
+    assert_eq!(json["total_matches"], 1);
+    assert_eq!(json["returned_rows"], 1);
+    assert_eq!(json["truncated"], false);
+    let rows = json["rows"]
+        .as_array()
+        .expect("audit output should include rows");
+    assert_eq!(rows.len(), 1);
+    assert_eq!(rows[0]["session_id"], 5);
+    assert_eq!(rows[0]["kind"], "encode_accepted");
+}
+
+#[test]
+fn cli_audit_json_can_filter_by_event_family() {
+    let (ok, stdout, stderr) = run_membrain(&[
+        "audit",
+        "--namespace",
+        "team.alpha",
+        "--id",
+        "21",
+        "--op",
+        "policy",
+        "--json",
+    ]);
+
+    assert!(ok, "stderr: {stderr}");
+    let json = parse_json(&stdout);
+    assert_eq!(json["total_matches"], 1);
+    assert_eq!(json["returned_rows"], 1);
+    assert_eq!(json["truncated"], false);
+    let rows = json["rows"]
+        .as_array()
+        .expect("audit output should include rows");
+    assert_eq!(rows.len(), 1);
+    assert_eq!(rows[0]["kind"], "policy_redacted");
+    assert_eq!(rows[0]["request_id"], "req-policy-21");
+}
+
+#[test]
+fn cli_audit_json_can_filter_by_min_sequence() {
+    let (ok, stdout, stderr) = run_membrain(&[
+        "audit",
+        "--namespace",
+        "team.alpha",
+        "--id",
+        "21",
+        "--since",
+        "2",
+        "--json",
+    ]);
+
+    assert!(ok, "stderr: {stderr}");
+    let json = parse_json(&stdout);
+    assert_eq!(json["total_matches"], 2);
+    assert_eq!(json["returned_rows"], 2);
+    assert_eq!(json["truncated"], false);
+    let rows = json["rows"]
+        .as_array()
+        .expect("audit output should include rows");
+    assert_eq!(rows.len(), 2);
+    assert_eq!(rows[0]["kind"], "policy_redacted");
+    assert_eq!(rows[1]["kind"], "maintenance_migration_applied");
+}
+
+#[test]
 fn cli_doctor_json_reports_health_and_repair_state() {
     let (ok, stdout, stderr) = run_membrain(&["doctor"]);
 
@@ -200,7 +276,7 @@ fn cli_share_json_reports_visibility_policy_and_audit_fields() {
         json["result"]["audit_rows"][0]["request_id"],
         "req-share-42"
     );
-    assert_eq!(json["result"]["audit_rows"][0]["kind"], "policy_redacted");
+    assert_eq!(json["result"]["audit_rows"][0]["kind"], "approved_sharing");
 }
 
 #[test]
@@ -227,7 +303,7 @@ fn cli_unshare_json_reports_redaction_and_audit_fields() {
         json["result"]["audit_rows"][0]["request_id"],
         "req-unshare-42"
     );
-    assert_eq!(json["result"]["audit_rows"][0]["kind"], "policy_denied");
+    assert_eq!(json["result"]["audit_rows"][0]["kind"], "policy_redacted");
     assert_eq!(json["result"]["audit_rows"][0]["redacted"], true);
 }
 

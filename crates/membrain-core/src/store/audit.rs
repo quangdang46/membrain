@@ -53,6 +53,7 @@ impl AuditLogStore {
             AuditEventKind::RecallDenied,
             AuditEventKind::PolicyDenied,
             AuditEventKind::PolicyRedacted,
+            AuditEventKind::ApprovedSharing,
             AuditEventKind::MaintenanceRepairStarted,
             AuditEventKind::MaintenanceRepairCompleted,
             AuditEventKind::MaintenanceRepairDegraded,
@@ -412,6 +413,15 @@ impl AppendOnlyAuditLog {
             .collect()
     }
 
+    /// Returns retained audit rows for one session in append order.
+    pub fn entries_for_session(&self, session_id: SessionId) -> Vec<AuditLogEntry> {
+        self.entries
+            .iter()
+            .filter(|entry| entry.session_id == Some(session_id))
+            .cloned()
+            .collect()
+    }
+
     /// Returns retained audit rows for one request correlation handle in append order.
     pub fn entries_for_request_id(&self, request_id: &str) -> Vec<AuditLogEntry> {
         self.entries
@@ -500,6 +510,7 @@ mod tests {
         assert_eq!(categories[4], AuditEventCategory::Archive);
         assert!(kinds.contains(&AuditEventKind::EncodeAccepted));
         assert!(kinds.contains(&AuditEventKind::PolicyDenied));
+        assert!(kinds.contains(&AuditEventKind::ApprovedSharing));
         assert!(kinds.contains(&AuditEventKind::MaintenanceConsolidationPartial));
         assert!(kinds.contains(&AuditEventKind::MaintenanceReconsolidationApplied));
         assert!(kinds.contains(&AuditEventKind::MaintenanceReconsolidationDiscarded));
@@ -536,6 +547,9 @@ mod tests {
         assert!(taxonomy
             .iter()
             .all(|row| row.kind_name == row.kind.as_str()));
+        assert!(taxonomy
+            .iter()
+            .any(|row| row.kind_name == "approved_sharing"));
         assert!(taxonomy
             .iter()
             .any(|row| row.kind_name == "maintenance_migration_applied"));
@@ -722,6 +736,7 @@ mod tests {
                 "redacted actor for external view",
             )
             .with_memory_id(MemoryId(41))
+            .with_session_id(SessionId(12))
             .with_request_id("req-policy-41")
             .with_related_run("incident-2026-03-20")
             .with_redaction(),
@@ -746,15 +761,18 @@ mod tests {
         ));
 
         let memory_entries = log.entries_for_memory(MemoryId(41));
+        let session_entries = log.entries_for_session(SessionId(12));
         let request_entries = log.entries_for_request_id("req-policy-41");
         let incident_entries = log.entries_for_related_run("incident-2026-03-20");
         let migration_entries = log.entries_for_kind(AuditEventKind::MaintenanceMigrationApplied);
         let migration_run_entries = log.entries_for_related_run("migration-0042");
 
         assert_eq!(memory_entries.len(), 2);
+        assert_eq!(session_entries.len(), 1);
         assert_eq!(request_entries.len(), 1);
         assert_eq!(incident_entries.len(), 1);
         assert!(memory_entries[0].redacted);
+        assert_eq!(session_entries[0], memory_entries[0]);
         assert_eq!(
             memory_entries[0].request_id.as_deref(),
             Some("req-policy-41")

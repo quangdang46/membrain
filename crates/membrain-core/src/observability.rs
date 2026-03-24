@@ -36,6 +36,7 @@ pub enum AuditEventKind {
     RecallDenied,
     PolicyDenied,
     PolicyRedacted,
+    ApprovedSharing,
     MaintenanceRepairStarted,
     MaintenanceRepairCompleted,
     MaintenanceRepairDegraded,
@@ -64,6 +65,7 @@ impl AuditEventKind {
             Self::RecallDenied => "recall_denied",
             Self::PolicyDenied => "policy_denied",
             Self::PolicyRedacted => "policy_redacted",
+            Self::ApprovedSharing => "approved_sharing",
             Self::MaintenanceRepairStarted => "maintenance_repair_started",
             Self::MaintenanceRepairCompleted => "maintenance_repair_completed",
             Self::MaintenanceRepairDegraded => "maintenance_repair_degraded",
@@ -88,7 +90,9 @@ impl AuditEventKind {
         match self {
             Self::EncodeAccepted | Self::EncodeRejected => AuditEventCategory::Encode,
             Self::RecallServed | Self::RecallDenied => AuditEventCategory::Recall,
-            Self::PolicyDenied | Self::PolicyRedacted => AuditEventCategory::Policy,
+            Self::PolicyDenied | Self::PolicyRedacted | Self::ApprovedSharing => {
+                AuditEventCategory::Policy
+            }
             Self::MaintenanceRepairStarted
             | Self::MaintenanceRepairCompleted
             | Self::MaintenanceRepairDegraded
@@ -1048,6 +1052,14 @@ mod tests {
             AuditEventCategory::Maintenance
         );
         assert_eq!(
+            AuditEventKind::MaintenanceCompactionApplied.as_str(),
+            "maintenance_compaction_applied"
+        );
+        assert_eq!(
+            AuditEventKind::MaintenanceCompactionApplied.category(),
+            AuditEventCategory::Maintenance
+        );
+        assert_eq!(
             AuditEventKind::MaintenanceReconsolidationApplied.as_str(),
             "maintenance_reconsolidation_applied"
         );
@@ -1065,6 +1077,19 @@ mod tests {
         );
         assert_eq!(
             AuditEventKind::MaintenanceReconsolidationBlocked.category(),
+            AuditEventCategory::Maintenance
+        );
+        assert_eq!(AuditEventKind::ApprovedSharing.as_str(), "approved_sharing");
+        assert_eq!(
+            AuditEventKind::ApprovedSharing.category(),
+            AuditEventCategory::Policy
+        );
+        assert_eq!(
+            AuditEventKind::IncidentRecorded.as_str(),
+            "incident_recorded"
+        );
+        assert_eq!(
+            AuditEventKind::IncidentRecorded.category(),
             AuditEventCategory::Maintenance
         );
         assert_eq!(MaintenanceQueueStatus::Idle.as_str(), "idle");

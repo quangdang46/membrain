@@ -189,6 +189,9 @@ enum Commands {
         /// Optional memory id filter
         #[arg(long)]
         id: Option<u64>,
+        /// Optional session id filter
+        #[arg(long)]
+        session: Option<u64>,
         /// Optional minimum sequence filter
         #[arg(long)]
         since: Option<u64>,
@@ -969,6 +972,7 @@ fn parse_audit_kind(value: &str) -> Option<AuditEventKind> {
         "recall_denied" => Some(AuditEventKind::RecallDenied),
         "policy_denied" => Some(AuditEventKind::PolicyDenied),
         "policy_redacted" => Some(AuditEventKind::PolicyRedacted),
+        "approved_sharing" => Some(AuditEventKind::ApprovedSharing),
         "maintenance_repair_started" => Some(AuditEventKind::MaintenanceRepairStarted),
         "maintenance_repair_completed" => Some(AuditEventKind::MaintenanceRepairCompleted),
         "maintenance_repair_degraded" => Some(AuditEventKind::MaintenanceRepairDegraded),
@@ -1047,7 +1051,7 @@ fn share_output(memory_id: u64, namespace: &NamespaceId, visibility: &'static st
     audit.append(
         AuditLogEntry::new(
             AuditEventCategory::Policy,
-            AuditEventKind::PolicyRedacted,
+            AuditEventKind::ApprovedSharing,
             namespace.clone(),
             "cli_share",
             format!("visibility set to {visibility}"),
@@ -1060,7 +1064,8 @@ fn share_output(memory_id: u64, namespace: &NamespaceId, visibility: &'static st
         namespace,
         Some(memory_id),
         None,
-        Some("policy_redacted"),
+        None,
+        Some("approved_sharing"),
         Some(1),
     )
     .expect("known audit op should produce filtered rows")
@@ -1088,7 +1093,7 @@ fn unshare_output(memory_id: u64, namespace: &NamespaceId) -> ShareOutput {
     audit.append(
         AuditLogEntry::new(
             AuditEventCategory::Policy,
-            AuditEventKind::PolicyDenied,
+            AuditEventKind::PolicyRedacted,
             namespace.clone(),
             "cli_unshare",
             "tightened visibility back to private",
@@ -1102,7 +1107,8 @@ fn unshare_output(memory_id: u64, namespace: &NamespaceId) -> ShareOutput {
         namespace,
         Some(memory_id),
         None,
-        Some("policy_denied"),
+        None,
+        Some("policy_redacted"),
         Some(1),
     )
     .expect("known audit op should produce filtered rows")
@@ -1123,6 +1129,7 @@ fn filter_audit_rows(
     log: &AppendOnlyAuditLog,
     namespace: &NamespaceId,
     memory_id: Option<u64>,
+    session_id: Option<u64>,
     since: Option<u64>,
     op: Option<&str>,
     recent: Option<usize>,
@@ -1139,6 +1146,7 @@ fn filter_audit_rows(
     let filter = AuditLogFilter {
         namespace: Some(namespace.clone()),
         memory_id: memory_id.map(MemoryId),
+        session_id: session_id.map(SessionId),
         category,
         kind,
         min_sequence: since,
@@ -1783,6 +1791,7 @@ async fn main() -> anyhow::Result<()> {
         Commands::Audit {
             namespace,
             id,
+            session,
             since,
             op,
             recent,
@@ -1790,7 +1799,8 @@ async fn main() -> anyhow::Result<()> {
         } => {
             let ns = NamespaceId::new(namespace)?;
             let log = sample_audit_log(&ns);
-            let export = filter_audit_rows(&log, &ns, *id, *since, op.as_deref(), *recent)?;
+            let export =
+                filter_audit_rows(&log, &ns, *id, *session, *since, op.as_deref(), *recent)?;
             print_audit_rows(&export, *json)?;
         }
         Commands::Share {
@@ -1887,7 +1897,7 @@ mod tests {
     fn audit_rows_preserve_request_id_in_json_export() {
         let namespace = NamespaceId::new("team.alpha").expect("valid namespace");
         let log = sample_audit_log(&namespace);
-        let export = filter_audit_rows(&log, &namespace, Some(21), None, None, None)
+        let export = filter_audit_rows(&log, &namespace, Some(21), None, None, None, None)
             .expect("valid audit export");
 
         assert_eq!(export.total_matches, 3);
@@ -2102,7 +2112,7 @@ mod tests {
             shared.audit_rows[0].request_id.as_deref(),
             Some("req-share-42")
         );
-        assert_eq!(shared.audit_rows[0].kind, "policy_redacted");
+        assert_eq!(shared.audit_rows[0].kind, "approved_sharing");
 
         let unshared = unshare_output(42, &NamespaceId::new("team.alpha").unwrap());
         assert_eq!(unshared.visibility, "private");
@@ -2115,7 +2125,7 @@ mod tests {
             unshared.audit_rows[0].request_id.as_deref(),
             Some("req-unshare-42")
         );
-        assert_eq!(unshared.audit_rows[0].kind, "policy_denied");
+        assert_eq!(unshared.audit_rows[0].kind, "policy_redacted");
         assert!(unshared.audit_rows[0].redacted);
     }
 
@@ -2123,7 +2133,7 @@ mod tests {
     fn audit_export_reports_truncation_for_recent_limit() {
         let namespace = NamespaceId::new("team.alpha").expect("valid namespace");
         let log = sample_audit_log(&namespace);
-        let export = filter_audit_rows(&log, &namespace, Some(21), None, None, Some(1))
+        let export = filter_audit_rows(&log, &namespace, Some(21), None, None, None, Some(1))
             .expect("valid audit export");
 
         assert_eq!(export.total_matches, 3);
@@ -2170,6 +2180,20 @@ mod tests {
     }
 
     #[test]
+    fn audit_export_can_filter_by_session_id() {
+        let namespace = NamespaceId::new("team.alpha").expect("valid namespace");
+        let log = sample_audit_log(&namespace);
+        let export = filter_audit_rows(&log, &namespace, None, Some(5), None, None, None)
+            .expect("valid audit export");
+
+        assert_eq!(export.total_matches, 1);
+        assert_eq!(export.returned_rows, 1);
+        assert!(!export.truncated);
+        assert_eq!(export.rows[0].session_id, Some(5));
+        assert_eq!(export.rows[0].kind, "encode_accepted");
+    }
+
+    #[test]
     fn audit_filter_rejects_unknown_op_values() {
         let namespace = NamespaceId::new("team.alpha").expect("valid namespace");
         let log = sample_audit_log(&namespace);
@@ -2177,6 +2201,7 @@ mod tests {
             &log,
             &namespace,
             Some(21),
+            None,
             None,
             Some("not_a_real_op"),
             None,
@@ -2193,7 +2218,7 @@ mod tests {
     fn text_export_includes_request_id_field() {
         let namespace = NamespaceId::new("team.alpha").expect("valid namespace");
         let log = sample_audit_log(&namespace);
-        let export = filter_audit_rows(&log, &namespace, Some(21), None, None, Some(1))
+        let export = filter_audit_rows(&log, &namespace, Some(21), None, None, None, Some(1))
             .expect("valid audit export");
 
         let rendered = export
@@ -2228,7 +2253,7 @@ mod tests {
     fn audit_text_export_distinguishes_empty_slice_from_no_matches() {
         let namespace = NamespaceId::new("team.alpha").expect("valid namespace");
         let log = sample_audit_log(&namespace);
-        let export = filter_audit_rows(&log, &namespace, Some(21), None, None, Some(0))
+        let export = filter_audit_rows(&log, &namespace, Some(21), None, None, None, Some(0))
             .expect("valid audit export");
 
         assert_eq!(export.total_matches, 3);

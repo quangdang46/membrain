@@ -883,6 +883,14 @@ impl MaintenanceOperation for ReconsolidationRun {
 }
 
 impl ReconsolidationRun {
+    fn quantize_millis_u32(value: f32) -> u32 {
+        (value * 1000.0).round() as u32
+    }
+
+    fn quantize_millis_i32(value: f32) -> i32 {
+        (value * 1000.0).round() as i32
+    }
+
     fn summary(&self) -> ReconsolidationRunSummary {
         let audit_flat = self
             .audit_records
@@ -892,9 +900,9 @@ impl ReconsolidationRun {
                 tick: r.tick,
                 outcome: r.outcome.as_str(),
                 audit_kind: r.audit_kind.as_str(),
-                strength_before: r.strength_before.map(|s| (s * 1000.0) as u32),
-                strength_after: r.strength_after.map(|s| (s * 1000.0) as u32),
-                preserved_strength: r.preserved_strength.map(|s| (s * 1000.0) as u32),
+                strength_before: r.strength_before.map(Self::quantize_millis_u32),
+                strength_after: r.strength_after.map(Self::quantize_millis_u32),
+                preserved_strength: r.preserved_strength.map(Self::quantize_millis_u32),
                 applied_content: r
                     .applied_update_state
                     .as_ref()
@@ -903,12 +911,12 @@ impl ReconsolidationRun {
                     .applied_update_state
                     .as_ref()
                     .and_then(|state| state.emotional_arousal)
-                    .map(|value| (value * 1000.0) as u32),
+                    .map(Self::quantize_millis_u32),
                 applied_emotional_valence: r
                     .applied_update_state
                     .as_ref()
                     .and_then(|state| state.emotional_valence)
-                    .map(|value| (value * 1000.0) as i32),
+                    .map(Self::quantize_millis_i32),
                 refresh_triggers: r.refresh_triggers.iter().map(|t| t.as_str()).collect(),
                 executed_refresh_triggers: r
                     .executed_refresh_triggers
@@ -1137,6 +1145,53 @@ mod tests {
         assert!(result
             .refresh_triggers
             .contains(&RefreshTrigger::CacheInvalidate));
+        assert_eq!(result.executed_refresh_triggers, result.refresh_triggers);
+        assert!(result.deferred_refresh_triggers.is_empty());
+        assert!(result.pending_update_cleared);
+        assert!(result.authoritative_state_mutated);
+        assert!(result.restabilized);
+    }
+
+    #[test]
+    fn tick_respects_refresh_execution_budget() {
+        let engine = ReconsolidationEngine::new();
+        let policy = ReconsolidationPolicy {
+            refresh_execution_budget: 1,
+            ..policy()
+        };
+        let state = LabileState::new(100, 50);
+        let update = PendingUpdate::new(MemoryId(1), 105, UpdateSource::User)
+            .with_content("revised content".to_string());
+
+        let result = engine.tick(
+            &state,
+            Some(&update),
+            120,
+            0.5,
+            &policy,
+            RefreshReadiness::Ready,
+        );
+
+        assert_eq!(result.outcome, ReconsolidationOutcome::Applied);
+        assert_eq!(
+            result.refresh_triggers,
+            vec![
+                RefreshTrigger::EmbeddingRefresh,
+                RefreshTrigger::IndexRefresh,
+                RefreshTrigger::CacheInvalidate,
+            ]
+        );
+        assert_eq!(
+            result.executed_refresh_triggers,
+            vec![RefreshTrigger::EmbeddingRefresh]
+        );
+        assert_eq!(
+            result.deferred_refresh_triggers,
+            vec![
+                RefreshTrigger::IndexRefresh,
+                RefreshTrigger::CacheInvalidate
+            ]
+        );
         assert!(result.pending_update_cleared);
         assert!(result.authoritative_state_mutated);
         assert!(result.restabilized);
@@ -1805,6 +1860,48 @@ mod tests {
         assert_eq!(state.strength_at_reopen, 0.7);
         assert_eq!(state.stability_at_reopen, 5.0);
         assert_eq!(state.access_count_at_reopen, 12);
+    }
+
+    #[test]
+    fn reconsolidation_summary_rounds_quantized_audit_fields() {
+        let memories = vec![LabileMemory {
+            memory_id: MemoryId(10),
+            labile_state: LabileState::new(100, 50),
+            pending_update: Some(
+                PendingUpdate::new(MemoryId(10), 105, UpdateSource::User)
+                    .with_content("rounded apply".to_string())
+                    .with_emotional(0.1236, -0.1236),
+            ),
+            current_strength: 0.6006,
+            pre_reopen_state: PreReopenState {
+                memory_id: MemoryId(10),
+                reopen_tick: 100,
+                strength_at_reopen: 0.5556,
+                stability_at_reopen: 3.0,
+                access_count_at_reopen: 5,
+            },
+            refresh_readiness: RefreshReadiness::Ready,
+        }];
+
+        let run = ReconsolidationRun::new(ns("test.rounding"), policy(), memories, 120);
+        let mut handle = MaintenanceJobHandle::new(run, 10);
+        handle.start();
+
+        let summary = loop {
+            let snap = handle.poll();
+            match snap.state {
+                MaintenanceJobState::Completed(s) => break s,
+                MaintenanceJobState::Running { .. } => continue,
+                _other => std::process::abort(),
+            }
+        };
+
+        let applied = &summary.audit_records[0];
+        assert_eq!(applied.strength_before, Some(601));
+        assert_eq!(applied.preserved_strength, Some(556));
+        assert_eq!(applied.strength_after, Some(651));
+        assert_eq!(applied.applied_emotional_arousal, Some(124));
+        assert_eq!(applied.applied_emotional_valence, Some(-124));
     }
 
     #[test]
