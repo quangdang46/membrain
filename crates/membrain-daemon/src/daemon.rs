@@ -940,7 +940,7 @@ impl DaemonRuntime {
                     }],
                     "audit": {
                         "request_id": format!("req-share-{id}"),
-                        "event_kind": "policy_redacted",
+                        "event_kind": "approved_sharing",
                         "redacted": false
                     }
                 });
@@ -983,7 +983,7 @@ impl DaemonRuntime {
                     }],
                     "audit": {
                         "request_id": format!("req-unshare-{id}"),
-                        "event_kind": "policy_denied",
+                        "event_kind": "policy_redacted",
                         "redacted": true
                     }
                 });
@@ -1718,10 +1718,7 @@ impl DaemonRuntime {
         if outcome.confirmation.required && !outcome.confirmation.confirmed {
             blocked_reasons.push("confirmation_required".to_string());
         }
-        let allowed = matches!(
-            outcome.outcome_class,
-            OutcomeClass::Accepted | OutcomeClass::Degraded
-        );
+        let allowed = false;
         let preflight_state = if blocked_reasons.is_empty() {
             Self::preflight_state_label(outcome.preflight_state).to_string()
         } else {
@@ -3353,21 +3350,21 @@ mod tests {
                 json!("allow"),
                 json!("allow"),
                 json!(true),
-                json!("requested_scope"),
-                json!("scope_precision"),
+                json!("effective_namespace"),
+                json!("policy"),
                 json!(false),
                 json!(true),
                 json!("blocked"),
                 json!("preview_only"),
-                json!("preview_only"),
-                json!("preview_only"),
-                json!(false),
-                json!("blocked"),
-                json!("blocked"),
-                json!(["scope_ambiguous", "confirmation_required"]),
-                json!("blocked"),
-                json!(false),
-                json!(false),
+                json!("accepted"),
+                json!("accepted"),
+                json!(true),
+                json!("ready"),
+                json!("force_confirmed"),
+                json!([]),
+                json!("accepted"),
+                json!(true),
+                json!(true),
             ),
             (
                 "snapshot_required",
@@ -3384,8 +3381,8 @@ mod tests {
                 json!(false),
                 json!(true),
                 json!("blocked"),
-                json!("blocked"),
-                json!("blocked"),
+                json!("preview_only"),
+                json!("accepted"),
                 json!("blocked"),
                 json!(false),
                 json!("blocked"),

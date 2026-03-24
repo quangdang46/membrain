@@ -253,7 +253,10 @@ impl ConsolidationRun {
     }
 
     fn action_for_group(&self, group: &crate::engine::episode::SourceGroup) -> ConsolidationAction {
-        let source_time_range_ms = (0, group.explain.time_span_ms);
+        let source_time_range_ms = (
+            group.explain.start_timestamp_ms,
+            group.explain.end_timestamp_ms,
+        );
         let contradiction_semantics = "preserve_unresolved_contradictions";
         let summary = DerivedArtifact {
             kind: DerivedArtifactKind::Summary,
@@ -520,7 +523,10 @@ mod tests {
             );
             assert_eq!(summary.derived_artifacts[0].namespace, ns("test"));
             assert_eq!(summary.derived_artifacts[0].source_ids, vec![MemoryId(1)]);
-            assert_eq!(summary.derived_artifacts[0].source_time_range_ms, (0, 0));
+            assert_eq!(
+                summary.derived_artifacts[0].source_time_range_ms,
+                (900_000, 900_000)
+            );
             assert_eq!(
                 summary.derived_artifacts[0].contradiction_semantics,
                 "preserve_unresolved_contradictions"
@@ -529,7 +535,10 @@ mod tests {
                 .content
                 .contains("summary(singleton): namespace=test anchor=1 terminal=1 members=1 timespan_ms=0 contradiction_semantics=preserve_unresolved_contradictions"));
             assert_eq!(summary.derivation_failures[0].namespace, ns("test"));
-            assert_eq!(summary.derivation_failures[0].source_time_range_ms, (0, 0));
+            assert_eq!(
+                summary.derivation_failures[0].source_time_range_ms,
+                (900_000, 900_000)
+            );
             assert_eq!(
                 summary.derivation_failures[0].contradiction_semantics,
                 "preserve_unresolved_contradictions"

@@ -254,6 +254,7 @@ async fn preflight_run_and_explain_keep_degraded_serialization_parity() {
         json!("preview_only")
     );
     assert_eq!(explain_response["result"]["blocked_reasons"], json!([]));
+    assert_eq!(explain_response["result"]["allowed"], json!(false));
     assert!(explain_response["result"].get("blocked_reason").is_none());
     let explain_checks = explain_response["result"]["check_results"]
         .as_array()

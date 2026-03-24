@@ -1100,16 +1100,16 @@ mod tests {
             .expect("taxonomy should be an array")
             .iter()
             .any(|row| {
-                row["category"] == "Maintenance"
-                    && row["kind"] == "MaintenanceRepairRollbackCompleted"
+                row["category"] == "maintenance"
+                    && row["kind"] == "maintenance_repair_rollback_completed"
                     && row["category_name"] == "maintenance"
                     && row["kind_name"] == "maintenance_repair_rollback_completed"
             }));
         assert_eq!(filter_json["namespace"], "team.alpha");
         assert_eq!(filter_json["memory_id"], 88);
         assert_eq!(filter_json["session_id"], 13);
-        assert_eq!(filter_json["category"], "Maintenance");
-        assert_eq!(filter_json["kind"], "MaintenanceRepairRollbackCompleted");
+        assert_eq!(filter_json["category"], "maintenance");
+        assert_eq!(filter_json["kind"], "maintenance_repair_rollback_completed");
         assert_eq!(filter_json["request_id"], "req-repair-88");
         assert_eq!(filter_json["related_run"], "repair-run-88");
         assert_eq!(filter_json["min_sequence"], 7);

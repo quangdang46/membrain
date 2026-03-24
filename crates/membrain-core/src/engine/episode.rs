@@ -82,6 +82,8 @@ impl SourceSetKind {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct EpisodeFormationExplain {
     pub primary_reason: &'static str,
+    pub start_timestamp_ms: u64,
+    pub end_timestamp_ms: u64,
     pub time_span_ms: u64,
     pub matching_fields: Vec<&'static str>,
     pub anchor_memory_id: MemoryId,
@@ -276,6 +278,8 @@ impl EpisodeGroupingModule {
             },
             explain: EpisodeFormationExplain {
                 primary_reason,
+                start_timestamp_ms: first.timestamp_ms,
+                end_timestamp_ms: last.timestamp_ms,
                 time_span_ms,
                 matching_fields,
                 anchor_memory_id: first.memory_id,
@@ -378,6 +382,8 @@ mod tests {
         assert_eq!(groups[0].members.len(), 1);
         assert_eq!(groups[0].source_set_kind, SourceSetKind::Singleton);
         assert_eq!(groups[0].explain.primary_reason, "singleton");
+        assert_eq!(groups[0].explain.start_timestamp_ms, 1000);
+        assert_eq!(groups[0].explain.end_timestamp_ms, 1000);
         assert_eq!(groups[0].explain.time_span_ms, 0);
         assert_eq!(groups[0].explain.anchor_memory_id, MemoryId(1));
         assert_eq!(groups[0].explain.terminal_memory_id, MemoryId(1));

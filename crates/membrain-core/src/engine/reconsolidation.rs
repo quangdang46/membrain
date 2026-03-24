@@ -16,6 +16,8 @@ pub struct ReconsolidationPolicy {
     pub reconsolidation_bonus: f32,
     /// Maximum strength cap applied after reconsolidation bonus.
     pub max_strength: f32,
+    /// Maximum derived-state refresh triggers that may execute in one bounded tick.
+    pub refresh_execution_budget: usize,
 }
 
 impl Default for ReconsolidationPolicy {
@@ -26,6 +28,7 @@ impl Default for ReconsolidationPolicy {
             labile_access_count_min: 1,
             reconsolidation_bonus: 0.05,
             max_strength: 1.0,
+            refresh_execution_budget: 3,
         }
     }
 }
@@ -125,6 +128,15 @@ impl ReconsolidationAuditKind {
     }
 }
 
+/// Concrete in-memory mutation proposed by a successful reconsolidation apply.
+#[derive(Debug, Clone, PartialEq)]
+pub struct AppliedUpdateState {
+    pub content: Option<String>,
+    pub emotional_arousal: Option<f32>,
+    pub emotional_valence: Option<f32>,
+    pub strength_after: f32,
+}
+
 /// Immutable audit record for one reconsolidation tick evaluation.
 #[derive(Debug, Clone, PartialEq)]
 pub struct ReconsolidationAuditRecord {
@@ -142,8 +154,14 @@ pub struct ReconsolidationAuditRecord {
     pub strength_after: Option<f32>,
     /// Strength preserved from the pre-reopen authoritative state.
     pub preserved_strength: Option<f32>,
-    /// Refresh triggers emitted (populated only on Applied).
+    /// Concrete authoritative-state mutation proposed by an applied update.
+    pub applied_update_state: Option<AppliedUpdateState>,
+    /// Refresh triggers emitted for this tick.
     pub refresh_triggers: Vec<RefreshTrigger>,
+    /// Refresh triggers executed within this bounded tick.
+    pub executed_refresh_triggers: Vec<RefreshTrigger>,
+    /// Refresh triggers left deferred after this bounded tick.
+    pub deferred_refresh_triggers: Vec<RefreshTrigger>,
     /// Source of the pending update observed for this tick (if any).
     pub update_source: Option<UpdateSource>,
     /// Whether the tick consumed or discarded any pending update.
@@ -440,6 +458,16 @@ impl ReconsolidationEngine {
         triggers
     }
 
+    fn bounded_refresh_execution(
+        &self,
+        triggers: &[RefreshTrigger],
+        policy: &ReconsolidationPolicy,
+    ) -> (Vec<RefreshTrigger>, Vec<RefreshTrigger>) {
+        let executed_count = triggers.len().min(policy.refresh_execution_budget);
+        let (executed, deferred) = triggers.split_at(executed_count);
+        (executed.to_vec(), deferred.to_vec())
+    }
+
     /// Core tick: evaluates a labile memory at the current tick and decides
     /// whether to apply, discard, wait, or defer until refresh hooks are ready.
     ///
@@ -465,7 +493,10 @@ impl ReconsolidationEngine {
                 outcome: ReconsolidationOutcome::WindowStillOpen,
                 audit_kind: ReconsolidationAuditKind::Deferred,
                 new_strength: None,
+                applied_update_state: None,
                 refresh_triggers: Vec::new(),
+                executed_refresh_triggers: Vec::new(),
+                deferred_refresh_triggers: Vec::new(),
                 pending_update_cleared: false,
                 authoritative_state_mutated: false,
                 restabilized: false,
@@ -479,11 +510,22 @@ impl ReconsolidationEngine {
                             policy.reconsolidation_bonus,
                             policy.max_strength,
                         );
+                        let (executed_refresh_triggers, deferred_refresh_triggers) =
+                            self.bounded_refresh_execution(&triggers, policy);
+                        let applied_update_state = AppliedUpdateState {
+                            content: update.new_content.clone(),
+                            emotional_arousal: update.new_emotional_arousal,
+                            emotional_valence: update.new_emotional_valence,
+                            strength_after: new_strength,
+                        };
                         ReconsolidationTickResult {
                             outcome: ReconsolidationOutcome::Applied,
                             audit_kind: ReconsolidationAuditKind::Applied,
                             new_strength: Some(new_strength),
+                            applied_update_state: Some(applied_update_state),
                             refresh_triggers: triggers,
+                            executed_refresh_triggers,
+                            deferred_refresh_triggers,
                             pending_update_cleared: true,
                             authoritative_state_mutated: true,
                             restabilized: true,
@@ -493,7 +535,10 @@ impl ReconsolidationEngine {
                         outcome: ReconsolidationOutcome::DeferredRefresh,
                         audit_kind: ReconsolidationAuditKind::Deferred,
                         new_strength: None,
-                        refresh_triggers: triggers,
+                        applied_update_state: None,
+                        refresh_triggers: triggers.clone(),
+                        executed_refresh_triggers: Vec::new(),
+                        deferred_refresh_triggers: triggers,
                         pending_update_cleared: false,
                         authoritative_state_mutated: false,
                         restabilized: false,
@@ -502,7 +547,10 @@ impl ReconsolidationEngine {
                         outcome: ReconsolidationOutcome::BlockedRefreshFailure,
                         audit_kind: ReconsolidationAuditKind::Blocked,
                         new_strength: None,
-                        refresh_triggers: triggers,
+                        applied_update_state: None,
+                        refresh_triggers: triggers.clone(),
+                        executed_refresh_triggers: Vec::new(),
+                        deferred_refresh_triggers: triggers,
                         pending_update_cleared: false,
                         authoritative_state_mutated: false,
                         restabilized: false,
@@ -513,7 +561,10 @@ impl ReconsolidationEngine {
                 outcome: ReconsolidationOutcome::DiscardedStale,
                 audit_kind: ReconsolidationAuditKind::Discarded,
                 new_strength: None,
+                applied_update_state: None,
                 refresh_triggers: Vec::new(),
+                executed_refresh_triggers: Vec::new(),
+                deferred_refresh_triggers: Vec::new(),
                 pending_update_cleared: true,
                 authoritative_state_mutated: false,
                 restabilized: true,
@@ -522,7 +573,10 @@ impl ReconsolidationEngine {
                 outcome: ReconsolidationOutcome::NoPendingUpdate,
                 audit_kind: ReconsolidationAuditKind::Discarded,
                 new_strength: None,
+                applied_update_state: None,
                 refresh_triggers: Vec::new(),
+                executed_refresh_triggers: Vec::new(),
+                deferred_refresh_triggers: Vec::new(),
                 pending_update_cleared: false,
                 authoritative_state_mutated: false,
                 restabilized: true,
@@ -548,7 +602,10 @@ impl ReconsolidationEngine {
             strength_before,
             strength_after: result.new_strength,
             preserved_strength,
+            applied_update_state: result.applied_update_state.clone(),
             refresh_triggers: result.refresh_triggers.clone(),
+            executed_refresh_triggers: result.executed_refresh_triggers.clone(),
+            deferred_refresh_triggers: result.deferred_refresh_triggers.clone(),
             update_source: applied_source,
             pending_update_cleared: result.pending_update_cleared,
             authoritative_state_mutated: result.authoritative_state_mutated,
@@ -563,7 +620,10 @@ pub struct ReconsolidationTickResult {
     pub outcome: ReconsolidationOutcome,
     pub audit_kind: ReconsolidationAuditKind,
     pub new_strength: Option<f32>,
+    pub applied_update_state: Option<AppliedUpdateState>,
     pub refresh_triggers: Vec<RefreshTrigger>,
+    pub executed_refresh_triggers: Vec<RefreshTrigger>,
+    pub deferred_refresh_triggers: Vec<RefreshTrigger>,
     pub pending_update_cleared: bool,
     pub authoritative_state_mutated: bool,
     pub restabilized: bool,
@@ -616,7 +676,12 @@ pub struct ReconsolidationAuditRecordFlat {
     pub strength_before: Option<u32>,
     pub strength_after: Option<u32>,
     pub preserved_strength: Option<u32>,
+    pub applied_content: Option<String>,
+    pub applied_emotional_arousal: Option<u32>,
+    pub applied_emotional_valence: Option<i32>,
     pub refresh_triggers: Vec<&'static str>,
+    pub executed_refresh_triggers: Vec<&'static str>,
+    pub deferred_refresh_triggers: Vec<&'static str>,
     pub update_source: Option<&'static str>,
     pub pending_update_cleared: bool,
     pub authoritative_state_mutated: bool,
@@ -678,12 +743,65 @@ impl ReconsolidationRun {
         self.audit_records
             .iter()
             .map(|record| {
+                let refresh_triggers = if record.refresh_triggers.is_empty() {
+                    "none".to_string()
+                } else {
+                    record
+                        .refresh_triggers
+                        .iter()
+                        .map(|trigger| trigger.as_str())
+                        .collect::<Vec<_>>()
+                        .join(",")
+                };
+                let executed_refresh_triggers = if record.executed_refresh_triggers.is_empty() {
+                    "none".to_string()
+                } else {
+                    record
+                        .executed_refresh_triggers
+                        .iter()
+                        .map(|trigger| trigger.as_str())
+                        .collect::<Vec<_>>()
+                        .join(",")
+                };
+                let deferred_refresh_triggers = if record.deferred_refresh_triggers.is_empty() {
+                    "none".to_string()
+                } else {
+                    record
+                        .deferred_refresh_triggers
+                        .iter()
+                        .map(|trigger| trigger.as_str())
+                        .collect::<Vec<_>>()
+                        .join(",")
+                };
+                let applied_content = record
+                    .applied_update_state
+                    .as_ref()
+                    .and_then(|state| state.content.as_deref())
+                    .unwrap_or("none");
+                let applied_emotional_arousal = record
+                    .applied_update_state
+                    .as_ref()
+                    .and_then(|state| state.emotional_arousal)
+                    .map(|value| format!("{value:.3}"))
+                    .unwrap_or_else(|| "none".to_string());
+                let applied_emotional_valence = record
+                    .applied_update_state
+                    .as_ref()
+                    .and_then(|state| state.emotional_valence)
+                    .map(|value| format!("{value:.3}"))
+                    .unwrap_or_else(|| "none".to_string());
                 let detail = format!(
-                    "reconsolidation {} at tick {} (outcome={}, source={}, restabilized={}, authoritative_state_mutated={}, pending_update_cleared={})",
+                    "reconsolidation {} at tick {} (outcome={}, source={}, refresh_triggers={}, executed_refresh_triggers={}, deferred_refresh_triggers={}, applied_content={}, applied_emotional_arousal={}, applied_emotional_valence={}, restabilized={}, authoritative_state_mutated={}, pending_update_cleared={})",
                     record.audit_kind.as_str(),
                     record.tick,
                     record.outcome.as_str(),
                     record.update_source.map(|source| source.as_str()).unwrap_or("none"),
+                    refresh_triggers,
+                    executed_refresh_triggers,
+                    deferred_refresh_triggers,
+                    applied_content,
+                    applied_emotional_arousal,
+                    applied_emotional_valence,
                     record.restabilized,
                     record.authoritative_state_mutated,
                     record.pending_update_cleared,
@@ -777,7 +895,31 @@ impl ReconsolidationRun {
                 strength_before: r.strength_before.map(|s| (s * 1000.0) as u32),
                 strength_after: r.strength_after.map(|s| (s * 1000.0) as u32),
                 preserved_strength: r.preserved_strength.map(|s| (s * 1000.0) as u32),
+                applied_content: r
+                    .applied_update_state
+                    .as_ref()
+                    .and_then(|state| state.content.clone()),
+                applied_emotional_arousal: r
+                    .applied_update_state
+                    .as_ref()
+                    .and_then(|state| state.emotional_arousal)
+                    .map(|value| (value * 1000.0) as u32),
+                applied_emotional_valence: r
+                    .applied_update_state
+                    .as_ref()
+                    .and_then(|state| state.emotional_valence)
+                    .map(|value| (value * 1000.0) as i32),
                 refresh_triggers: r.refresh_triggers.iter().map(|t| t.as_str()).collect(),
+                executed_refresh_triggers: r
+                    .executed_refresh_triggers
+                    .iter()
+                    .map(|t| t.as_str())
+                    .collect(),
+                deferred_refresh_triggers: r
+                    .deferred_refresh_triggers
+                    .iter()
+                    .map(|t| t.as_str())
+                    .collect(),
                 update_source: r.update_source.map(|s| s.as_str()),
                 pending_update_cleared: r.pending_update_cleared,
                 authoritative_state_mutated: r.authoritative_state_mutated,
@@ -1160,7 +1302,15 @@ mod tests {
             outcome: ReconsolidationOutcome::Applied,
             audit_kind: ReconsolidationAuditKind::Applied,
             new_strength: Some(0.55),
+            applied_update_state: Some(AppliedUpdateState {
+                content: Some("revised".to_string()),
+                emotional_arousal: None,
+                emotional_valence: None,
+                strength_after: 0.55,
+            }),
             refresh_triggers: vec![RefreshTrigger::CacheInvalidate],
+            executed_refresh_triggers: vec![RefreshTrigger::CacheInvalidate],
+            deferred_refresh_triggers: Vec::new(),
             pending_update_cleared: true,
             authoritative_state_mutated: true,
             restabilized: true,
@@ -1180,6 +1330,20 @@ mod tests {
         assert_eq!(audit.strength_before, Some(0.5));
         assert_eq!(audit.strength_after, Some(0.55));
         assert_eq!(audit.preserved_strength, Some(0.45));
+        assert_eq!(
+            audit.applied_update_state,
+            Some(AppliedUpdateState {
+                content: Some("revised".to_string()),
+                emotional_arousal: None,
+                emotional_valence: None,
+                strength_after: 0.55,
+            })
+        );
+        assert_eq!(
+            audit.executed_refresh_triggers,
+            vec![RefreshTrigger::CacheInvalidate]
+        );
+        assert!(audit.deferred_refresh_triggers.is_empty());
         assert_eq!(audit.update_source, Some(UpdateSource::User));
         assert!(audit.pending_update_cleared);
         assert!(audit.authoritative_state_mutated);
@@ -1755,9 +1919,19 @@ mod tests {
         assert_eq!(entries[2].memory_id, Some(MemoryId(3)));
         assert_eq!(entries[3].memory_id, Some(MemoryId(4)));
         assert!(entries[0].detail.contains("reconsolidation applied"));
+        assert!(entries[0]
+            .detail
+            .contains("refresh_triggers=embedding_refresh,index_refresh,cache_invalidate"));
         assert!(entries[1].detail.contains("reconsolidation discarded"));
+        assert!(entries[1].detail.contains("refresh_triggers=none"));
         assert!(entries[2].detail.contains("reconsolidation deferred"));
+        assert!(entries[2]
+            .detail
+            .contains("refresh_triggers=embedding_refresh,index_refresh,cache_invalidate"));
         assert!(entries[3].detail.contains("reconsolidation blocked"));
+        assert!(entries[3]
+            .detail
+            .contains("refresh_triggers=embedding_refresh,index_refresh,cache_invalidate"));
     }
 
     #[test]

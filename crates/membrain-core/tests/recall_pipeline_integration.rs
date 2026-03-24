@@ -262,6 +262,14 @@ fn empty_result_set_has_correct_outcome_class() {
 
     let result_set = RetrievalResultSet::empty(explain, ns("test"));
 
+    assert_eq!(
+        result_set.outcome_class,
+        membrain_core::observability::OutcomeClass::Preview
+    );
+    assert_eq!(
+        result_set.policy_summary.outcome_class,
+        membrain_core::observability::OutcomeClass::Preview
+    );
     assert_eq!(result_set.count(), 0);
     assert!(!result_set.truncated);
     assert!(result_set.top().is_none());

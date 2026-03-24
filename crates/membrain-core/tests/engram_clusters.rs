@@ -76,3 +76,25 @@ fn rebuild_preserves_lookup_cap_and_next_cluster_identity() {
     assert_ne!(created_after_rebuild.engram_id, first.engram_id);
     assert_ne!(created_after_rebuild.engram_id, second.engram_id);
 }
+
+#[test]
+fn reassigning_a_memory_cleans_up_stale_membership_rows() {
+    let mut store = EngramStore::new(0.999).with_lookup_cap(3);
+    let first = store.assign_memory(MemoryId(1), vec![1.0, 0.0], 10, "embed.v1");
+    let second = store.assign_memory(MemoryId(2), vec![0.0, 1.0], 11, "embed.v1");
+
+    let reassigned = store.assign_memory(MemoryId(1), vec![0.0, 1.0], 12, "embed.v1");
+
+    assert_eq!(reassigned.engram_id, second.engram_id);
+    assert_eq!(store.lookup_for_memory(MemoryId(1)), Some(second.engram_id));
+    assert!(store.members(first.engram_id).is_empty());
+    assert_eq!(store.members(second.engram_id).len(), 2);
+    assert_eq!(
+        store
+            .members(second.engram_id)
+            .iter()
+            .filter(|member| member.memory_id == MemoryId(1))
+            .count(),
+        1
+    );
+}

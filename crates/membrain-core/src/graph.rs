@@ -315,7 +315,17 @@ impl EngramStore {
             .unwrap_or(0.0);
 
         self.memory_embeddings.insert(memory_id, embedding);
-        self.memory_to_engram.insert(memory_id, engram_id);
+        let previous_engram = self.memory_to_engram.insert(memory_id, engram_id);
+        if let Some(previous_engram) = previous_engram.filter(|previous| *previous != engram_id) {
+            if let Some(members) = self.members_by_engram.get_mut(&previous_engram) {
+                members.retain(|member| member.memory_id != memory_id);
+            }
+            self.refresh_cluster(previous_engram, formed_at_tick);
+        }
+        self.members_by_engram
+            .entry(engram_id)
+            .or_default()
+            .retain(|member| member.memory_id != memory_id);
         self.members_by_engram
             .entry(engram_id)
             .or_default()

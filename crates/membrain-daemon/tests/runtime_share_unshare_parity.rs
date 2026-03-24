@@ -102,6 +102,10 @@ async fn runtime_share_and_unshare_preserve_sharing_scope_contract() {
         share_response["result"]["audit"]["request_id"],
         json!("req-share-42")
     );
+    assert_eq!(
+        share_response["result"]["audit"]["event_kind"],
+        json!("approved_sharing")
+    );
     assert_eq!(share_response["result"]["audit"]["redacted"], json!(false));
 
     let unshare_response = send_request(
@@ -135,6 +139,10 @@ async fn runtime_share_and_unshare_preserve_sharing_scope_contract() {
     assert_eq!(
         unshare_response["result"]["audit"]["request_id"],
         json!("req-unshare-42")
+    );
+    assert_eq!(
+        unshare_response["result"]["audit"]["event_kind"],
+        json!("policy_redacted")
     );
     assert_eq!(unshare_response["result"]["audit"]["redacted"], json!(true));
 

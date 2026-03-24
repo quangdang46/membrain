@@ -4,6 +4,7 @@ use crate::types::{CanonicalMemoryType, FastPathRouteFamily, LandmarkMetadata, L
 
 /// High-level audit event families preserved in append-only storage.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
 pub enum AuditEventCategory {
     Encode,
     Recall,
@@ -27,6 +28,7 @@ impl AuditEventCategory {
 
 /// Stable audit event taxonomy for append-only log rows.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
 pub enum AuditEventKind {
     EncodeAccepted,
     EncodeRejected,
@@ -743,6 +745,7 @@ fn uncertainty_marker(markers: &crate::engine::result::UncertaintyMarkers) -> Un
 
 /// Machine-readable cache lookup outcome for the observability trace stream.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
 pub enum CacheLookupOutcome {
     Hit,
     Miss,
@@ -766,6 +769,7 @@ impl CacheLookupOutcome {
 
 /// Machine-readable cache family label for cross-surface observability.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
 pub enum CacheFamilyLabel {
     Tier1Item,
     Tier2Query,
@@ -791,6 +795,7 @@ impl CacheFamilyLabel {
 
 /// Machine-readable cache event label for observability traces.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
 pub enum CacheEventLabel {
     Hit,
     Miss,
@@ -814,6 +819,7 @@ impl CacheEventLabel {
 
 /// Machine-readable cache reason label for misses, bypasses, and invalidations.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
 pub enum CacheReasonLabel {
     PolicyBoundary,
     NamespaceMismatch,
@@ -839,6 +845,7 @@ impl CacheReasonLabel {
 
 /// Machine-readable warm-source label for cache hits and prefetch reuse.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
 pub enum WarmSourceLabel {
     Tier1ItemCache,
     Tier2QueryCache,
@@ -866,6 +873,7 @@ impl WarmSourceLabel {
 
 /// Machine-readable generation-validation label for cache traces.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
 pub enum GenerationStatusLabel {
     Valid,
     Stale,
@@ -1155,11 +1163,11 @@ mod tests {
         };
 
         let value = serde_json::to_value(trace).unwrap();
-        assert_eq!(value["cache_family"], "Result");
-        assert_eq!(value["cache_event"], "Hit");
-        assert_eq!(value["outcome"], "Hit");
-        assert_eq!(value["warm_source"], "ResultCache");
-        assert_eq!(value["generation_status"], "Valid");
+        assert_eq!(value["cache_family"], "result");
+        assert_eq!(value["cache_event"], "hit");
+        assert_eq!(value["outcome"], "hit");
+        assert_eq!(value["warm_source"], "result_cache");
+        assert_eq!(value["generation_status"], "valid");
         assert_eq!(value["candidates_before"], 6);
         assert_eq!(value["candidates_after"], 3);
         assert_eq!(value["warm_reuse"], true);

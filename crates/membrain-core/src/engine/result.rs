@@ -345,14 +345,14 @@ impl RetrievalResultSet {
     /// Builds an empty result set (no matches found).
     pub fn empty(explain: RetrievalExplain, namespace: NamespaceId) -> Self {
         Self {
-            outcome_class: OutcomeClass::Accepted,
+            outcome_class: OutcomeClass::Preview,
             evidence_pack: Vec::new(),
             action_pack: None,
             deferred_payloads: Vec::new(),
             explain,
             policy_summary: PolicySummary {
                 namespace_applied: namespace.clone(),
-                outcome_class: OutcomeClass::Accepted,
+                outcome_class: OutcomeClass::Preview,
                 redactions_applied: false,
                 restrictions_active: Vec::new(),
                 filters: Vec::new(),

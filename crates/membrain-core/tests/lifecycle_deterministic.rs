@@ -7,10 +7,14 @@ use membrain_core::engine::forgetting::{
     EligibilityFactors, ForgettingAction, ForgettingEngine, ForgettingPolicy,
 };
 use membrain_core::engine::interference::{InterferenceEngine, InterferencePolicy};
-use membrain_core::engine::maintenance::{LogicalClock, TickSequenceFixture};
+use membrain_core::engine::maintenance::{
+    LogicalClock, MaintenanceController, MaintenanceJobHandle, MaintenanceJobState,
+    TickSequenceFixture,
+};
 use membrain_core::engine::reconsolidation::{
-    LabileState, PendingUpdate, ReconsolidationEngine, ReconsolidationOutcome,
-    ReconsolidationPolicy, UpdateSource,
+    LabileMemory, LabileState, PendingUpdate, PreReopenState, ReconsolidationEngine,
+    ReconsolidationOutcome, ReconsolidationPolicy, ReconsolidationRun, RefreshReadiness,
+    UpdateSource,
 };
 use membrain_core::engine::strength::{
     DecayDecision, StrengthEngine, StrengthPolicy, StrengthState,
@@ -278,7 +282,7 @@ fn reconsolidation_does_not_mutate_when_refresh_is_deferred_or_failed() {
         120,
         0.5,
         &policy,
-        membrain_core::engine::reconsolidation::RefreshReadiness::Deferred,
+        RefreshReadiness::Deferred,
     );
     assert_eq!(deferred.outcome, ReconsolidationOutcome::DeferredRefresh);
     assert_eq!(deferred.new_strength, None);
@@ -301,7 +305,7 @@ fn reconsolidation_does_not_mutate_when_refresh_is_deferred_or_failed() {
         120,
         0.5,
         &policy,
-        membrain_core::engine::reconsolidation::RefreshReadiness::Failed,
+        RefreshReadiness::Failed,
     );
     assert_eq!(
         failed.outcome,
@@ -309,8 +313,102 @@ fn reconsolidation_does_not_mutate_when_refresh_is_deferred_or_failed() {
     );
     assert_eq!(failed.new_strength, None);
     assert!(!failed.authoritative_state_mutated);
+    assert!(failed
+        .refresh_triggers
+        .contains(&membrain_core::engine::reconsolidation::RefreshTrigger::EmbeddingRefresh));
+    assert!(failed
+        .refresh_triggers
+        .contains(&membrain_core::engine::reconsolidation::RefreshTrigger::IndexRefresh));
+    assert!(failed
+        .refresh_triggers
+        .contains(&membrain_core::engine::reconsolidation::RefreshTrigger::CacheInvalidate));
     assert!(!failed.pending_update_cleared);
     assert!(!failed.restabilized);
+}
+
+#[test]
+fn reconsolidation_run_audit_entries_include_refresh_trigger_details() {
+    let memories = vec![
+        LabileMemory {
+            memory_id: mid(21),
+            labile_state: LabileState::new(100, 50),
+            pending_update: Some(
+                PendingUpdate::new(mid(21), 105, UpdateSource::User)
+                    .with_content("apply me".to_string()),
+            ),
+            current_strength: 0.6,
+            pre_reopen_state: PreReopenState {
+                memory_id: mid(21),
+                reopen_tick: 100,
+                strength_at_reopen: 0.55,
+                stability_at_reopen: 3.0,
+                access_count_at_reopen: 5,
+            },
+            refresh_readiness: RefreshReadiness::Ready,
+        },
+        LabileMemory {
+            memory_id: mid(22),
+            labile_state: LabileState::new(100, 10),
+            pending_update: Some(
+                PendingUpdate::new(mid(22), 105, UpdateSource::System)
+                    .with_content("stale".to_string()),
+            ),
+            current_strength: 0.7,
+            pre_reopen_state: PreReopenState {
+                memory_id: mid(22),
+                reopen_tick: 100,
+                strength_at_reopen: 0.65,
+                stability_at_reopen: 4.0,
+                access_count_at_reopen: 6,
+            },
+            refresh_readiness: RefreshReadiness::Ready,
+        },
+        LabileMemory {
+            memory_id: mid(23),
+            labile_state: LabileState::new(100, 50),
+            pending_update: Some(
+                PendingUpdate::new(mid(23), 105, UpdateSource::Agent)
+                    .with_content("defer".to_string()),
+            ),
+            current_strength: 0.8,
+            pre_reopen_state: PreReopenState {
+                memory_id: mid(23),
+                reopen_tick: 100,
+                strength_at_reopen: 0.75,
+                stability_at_reopen: 5.0,
+                access_count_at_reopen: 7,
+            },
+            refresh_readiness: RefreshReadiness::Deferred,
+        },
+    ];
+
+    let run = ReconsolidationRun::new(
+        membrain_core::api::NamespaceId::new("test.recon.audit").unwrap(),
+        ReconsolidationPolicy::default(),
+        memories,
+        120,
+    );
+    let mut handle = MaintenanceJobHandle::new(run, 10);
+    handle.start();
+
+    let completed_run = loop {
+        let snapshot = handle.poll();
+        match snapshot.state {
+            MaintenanceJobState::Completed(_) => break handle.operation().clone(),
+            MaintenanceJobState::Running { .. } => continue,
+            _ => std::process::abort(),
+        }
+    };
+
+    let entries = completed_run.append_only_audit_entries();
+    assert_eq!(entries.len(), 3);
+    assert!(entries[0]
+        .detail
+        .contains("refresh_triggers=embedding_refresh,index_refresh,cache_invalidate"));
+    assert!(entries[1].detail.contains("refresh_triggers=none"));
+    assert!(entries[2]
+        .detail
+        .contains("refresh_triggers=embedding_refresh,index_refresh,cache_invalidate"));
 }
 
 // ── LTP/LTD lifecycle ────────────────────────────────────────────────────────

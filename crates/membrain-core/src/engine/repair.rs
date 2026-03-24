@@ -455,6 +455,9 @@ impl MaintenanceOperation for RepairRun {
             .flatten();
         let graph_rebuild_report = self.graph_rebuild_report(target);
         let verification_artifact = self.mock_verification_artifact(target);
+        let graph_verification_passed = graph_rebuild_report
+            .as_ref()
+            .map(|report| report.metrics.verification_passed);
         let graph_detail = graph_rebuild_report.as_ref().map(|report| {
             if report.metrics.verification_passed {
                 "verified_against_durable_truth"
@@ -509,7 +512,8 @@ impl MaintenanceOperation for RepairRun {
             target,
             status,
             detail,
-            verification_passed: verification_artifact.verification_passed,
+            verification_passed: verification_artifact.verification_passed
+                && graph_verification_passed.unwrap_or(true),
             rebuild_entrypoint,
             rebuilt_outputs,
         });

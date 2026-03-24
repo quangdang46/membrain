@@ -491,7 +491,7 @@ fn consolidation_runs_emit_lineage_preserving_artifacts_through_maintenance_hand
     );
     assert_eq!(
         summary.derived_artifacts[0].source_time_range_ms,
-        (0, 120_000)
+        (900_000, 1_020_000)
     );
     assert_eq!(
         summary.derived_artifacts[0].contradiction_semantics,
@@ -516,7 +516,7 @@ fn consolidation_runs_emit_lineage_preserving_artifacts_through_maintenance_hand
     );
     assert_eq!(
         summary.derived_artifacts[1].source_time_range_ms,
-        (0, 120_000)
+        (900_000, 1_020_000)
     );
     assert_eq!(summary.derived_artifacts[2].source_ids, vec![MemoryId(3)]);
     assert_eq!(summary.derivation_failures[0].source_ids, vec![MemoryId(3)]);

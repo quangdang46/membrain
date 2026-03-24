@@ -989,6 +989,18 @@ fn parse_audit_kind(value: &str) -> Option<AuditEventKind> {
         "maintenance_consolidation_partial" => {
             Some(AuditEventKind::MaintenanceConsolidationPartial)
         }
+        "maintenance_reconsolidation_applied" => {
+            Some(AuditEventKind::MaintenanceReconsolidationApplied)
+        }
+        "maintenance_reconsolidation_discarded" => {
+            Some(AuditEventKind::MaintenanceReconsolidationDiscarded)
+        }
+        "maintenance_reconsolidation_deferred" => {
+            Some(AuditEventKind::MaintenanceReconsolidationDeferred)
+        }
+        "maintenance_reconsolidation_blocked" => {
+            Some(AuditEventKind::MaintenanceReconsolidationBlocked)
+        }
         "incident_recorded" => Some(AuditEventKind::IncidentRecorded),
         "archive_recorded" => Some(AuditEventKind::ArchiveRecorded),
         _ => None,
@@ -1051,6 +1063,7 @@ fn share_output(memory_id: u64, namespace: &NamespaceId, visibility: &'static st
         Some("policy_redacted"),
         Some(1),
     )
+    .expect("known audit op should produce filtered rows")
     .rows;
 
     ShareOutput {
@@ -1092,6 +1105,7 @@ fn unshare_output(memory_id: u64, namespace: &NamespaceId) -> ShareOutput {
         Some("policy_denied"),
         Some(1),
     )
+    .expect("known audit op should produce filtered rows")
     .rows;
 
     ShareOutput {
@@ -1112,13 +1126,21 @@ fn filter_audit_rows(
     since: Option<u64>,
     op: Option<&str>,
     recent: Option<usize>,
-) -> AuditExport {
+) -> anyhow::Result<AuditExport> {
     let op = op.map(str::trim).filter(|value| !value.is_empty());
+    let category = op.and_then(parse_audit_category);
+    let kind = op.and_then(parse_audit_kind);
+    if let Some(op_value) = op.filter(|_| category.is_none() && kind.is_none()) {
+        anyhow::bail!(
+            "unknown audit --op value `{}`; expected a known category or kind",
+            op_value
+        );
+    }
     let filter = AuditLogFilter {
         namespace: Some(namespace.clone()),
         memory_id: memory_id.map(MemoryId),
-        category: op.and_then(parse_audit_category),
-        kind: op.and_then(parse_audit_kind),
+        category,
+        kind,
         min_sequence: since,
         ..AuditLogFilter::default()
     };
@@ -1129,12 +1151,12 @@ fn filter_audit_rows(
     } = log.slice(&filter, recent);
     let rows = rows.into_iter().map(AuditRow::from).collect::<Vec<_>>();
 
-    AuditExport {
+    Ok(AuditExport {
         total_matches,
         returned_rows: rows.len(),
         truncated,
         rows,
-    }
+    })
 }
 
 fn print_audit_rows(export: &AuditExport, json: bool) -> anyhow::Result<()> {
@@ -1768,7 +1790,7 @@ async fn main() -> anyhow::Result<()> {
         } => {
             let ns = NamespaceId::new(namespace)?;
             let log = sample_audit_log(&ns);
-            let export = filter_audit_rows(&log, &ns, *id, *since, op.as_deref(), *recent);
+            let export = filter_audit_rows(&log, &ns, *id, *since, op.as_deref(), *recent)?;
             print_audit_rows(&export, *json)?;
         }
         Commands::Share {
@@ -1865,7 +1887,8 @@ mod tests {
     fn audit_rows_preserve_request_id_in_json_export() {
         let namespace = NamespaceId::new("team.alpha").expect("valid namespace");
         let log = sample_audit_log(&namespace);
-        let export = filter_audit_rows(&log, &namespace, Some(21), None, None, None);
+        let export = filter_audit_rows(&log, &namespace, Some(21), None, None, None)
+            .expect("valid audit export");
 
         assert_eq!(export.total_matches, 3);
         assert_eq!(export.returned_rows, 3);
@@ -2100,7 +2123,8 @@ mod tests {
     fn audit_export_reports_truncation_for_recent_limit() {
         let namespace = NamespaceId::new("team.alpha").expect("valid namespace");
         let log = sample_audit_log(&namespace);
-        let export = filter_audit_rows(&log, &namespace, Some(21), None, None, Some(1));
+        let export = filter_audit_rows(&log, &namespace, Some(21), None, None, Some(1))
+            .expect("valid audit export");
 
         assert_eq!(export.total_matches, 3);
         assert_eq!(export.returned_rows, 1);
@@ -2125,15 +2149,52 @@ mod tests {
             parse_audit_kind("maintenance_consolidation_partial"),
             Some(membrain_core::observability::AuditEventKind::MaintenanceConsolidationPartial)
         );
+        assert_eq!(
+            parse_audit_kind("maintenance_reconsolidation_applied"),
+            Some(membrain_core::observability::AuditEventKind::MaintenanceReconsolidationApplied)
+        );
+        assert_eq!(
+            parse_audit_kind("maintenance_reconsolidation_discarded"),
+            Some(membrain_core::observability::AuditEventKind::MaintenanceReconsolidationDiscarded)
+        );
+        assert_eq!(
+            parse_audit_kind("maintenance_reconsolidation_deferred"),
+            Some(membrain_core::observability::AuditEventKind::MaintenanceReconsolidationDeferred)
+        );
+        assert_eq!(
+            parse_audit_kind("maintenance_reconsolidation_blocked"),
+            Some(membrain_core::observability::AuditEventKind::MaintenanceReconsolidationBlocked)
+        );
         assert_eq!(parse_audit_category("unknown"), None);
         assert_eq!(parse_audit_kind("unknown"), None);
+    }
+
+    #[test]
+    fn audit_filter_rejects_unknown_op_values() {
+        let namespace = NamespaceId::new("team.alpha").expect("valid namespace");
+        let log = sample_audit_log(&namespace);
+        let error = filter_audit_rows(
+            &log,
+            &namespace,
+            Some(21),
+            None,
+            Some("not_a_real_op"),
+            None,
+        )
+        .expect_err("unknown op should fail instead of silently widening the query");
+
+        assert_eq!(
+            error.to_string(),
+            "unknown audit --op value `not_a_real_op`; expected a known category or kind"
+        );
     }
 
     #[test]
     fn text_export_includes_request_id_field() {
         let namespace = NamespaceId::new("team.alpha").expect("valid namespace");
         let log = sample_audit_log(&namespace);
-        let export = filter_audit_rows(&log, &namespace, Some(21), None, None, Some(1));
+        let export = filter_audit_rows(&log, &namespace, Some(21), None, None, Some(1))
+            .expect("valid audit export");
 
         let rendered = export
             .rows
@@ -2167,7 +2228,8 @@ mod tests {
     fn audit_text_export_distinguishes_empty_slice_from_no_matches() {
         let namespace = NamespaceId::new("team.alpha").expect("valid namespace");
         let log = sample_audit_log(&namespace);
-        let export = filter_audit_rows(&log, &namespace, Some(21), None, None, Some(0));
+        let export = filter_audit_rows(&log, &namespace, Some(21), None, None, Some(0))
+            .expect("valid audit export");
 
         assert_eq!(export.total_matches, 3);
         assert_eq!(export.returned_rows, 0);
