@@ -640,6 +640,12 @@ impl RetrievalExplain {
                 (None, Some(era_id)) => format!("landmark opened era \"{era_id}\""),
                 (None, None) => "memory remained an unlabeled landmark".to_string(),
             };
+            if let Some(era_started_at_tick) = landmark.era_started_at_tick {
+                detail.push_str(&format!(" at tick {era_started_at_tick}"));
+            }
+            if landmark.detection_score > 0 {
+                detail.push_str(&format!(" with detection_score={}", landmark.detection_score));
+            }
             if prepared.prefilter_stays_metadata_only() {
                 detail.push_str(" while staying on metadata-only Tier2 planning");
             }
@@ -649,11 +655,15 @@ impl RetrievalExplain {
                 detail,
             });
         } else {
+            let mut detail =
+                "memory stayed recallable without landmark promotion or era creation".to_string();
+            if landmark.detection_score > 0 {
+                detail.push_str(&format!(" (detection_score={})", landmark.detection_score));
+            }
             self.result_reasons.push(ResultReason {
                 memory_id,
                 reason_code: "temporal_landmark_not_selected".to_string(),
-                detail: "memory stayed recallable without landmark promotion or era creation"
-                    .to_string(),
+                detail,
             });
         }
     }
@@ -1023,18 +1033,44 @@ impl ResultBuilder {
     /// filtered results is recorded in `omitted_summary.confidence_filtered`.
     pub fn build_with_confidence_filter(
         mut self,
-        explain: RetrievalExplain,
+        mut explain: RetrievalExplain,
         min_confidence: u16,
     ) -> RetrievalResultSet {
-        let pre_filter_count = self.evidence_pack.len();
-        self.evidence_pack
-            .retain(|item| item.result.uncertainty_markers.confidence >= min_confidence);
-        let filtered_count = pre_filter_count - self.evidence_pack.len();
+        let mut filtered_memory_ids = Vec::new();
+        self.evidence_pack.retain(|item| {
+            let keep = item.result.uncertainty_markers.confidence >= min_confidence;
+            if !keep {
+                filtered_memory_ids.push(item.result.memory_id);
+            }
+            keep
+        });
+        let filtered_count = filtered_memory_ids.len();
+
+        if filtered_count > 0 {
+            explain.result_reasons.push(ResultReason {
+                memory_id: None,
+                reason_code: "confidence_threshold_applied".to_string(),
+                detail: format!(
+                    "filtered {filtered_count} candidate(s) below min_confidence={min_confidence}"
+                ),
+            });
+            explain
+                .result_reasons
+                .extend(filtered_memory_ids.into_iter().map(|memory_id| ResultReason {
+                    memory_id: Some(memory_id),
+                    reason_code: "low_confidence_suppressed".to_string(),
+                    detail: format!(
+                        "candidate suppressed because confidence fell below min_confidence={min_confidence}"
+                    ),
+                }));
+        }
 
         self.evidence_pack
             .sort_by(|a, b| b.result.score.cmp(&a.result.score));
         let truncated = self.evidence_pack.len() > self.max_results;
-        let outcome_class = if truncated {
+        let outcome_class = if self.evidence_pack.is_empty() {
+            OutcomeClass::Preview
+        } else if truncated {
             OutcomeClass::Partial
         } else {
             OutcomeClass::Accepted
@@ -1098,7 +1134,7 @@ impl ResultBuilder {
                 dedup_dropped: 0,
                 budget_capped: usize::from(truncated),
                 duplicate_collapsed: 0,
-                low_confidence_suppressed: 0,
+                low_confidence_suppressed: filtered_count,
                 stale_bypassed: 0,
                 confidence_filtered: filtered_count,
             },
@@ -1779,10 +1815,12 @@ mod tests {
             explain.result_reasons[2].reason_code,
             "temporal_landmark_selected"
         );
+        assert!(explain.result_reasons[2].detail.contains("launch"));
+        assert!(explain.result_reasons[2].detail.contains("tick 88"));
+        assert!(explain.result_reasons[2].detail.contains("detection_score="));
         assert!(explain.result_reasons[2]
             .detail
             .contains("metadata-only Tier2 planning"));
-        assert!(explain.result_reasons[2].detail.contains("launch"));
     }
 
     #[test]
@@ -1825,6 +1863,9 @@ mod tests {
         assert!(explain.result_reasons[2]
             .detail
             .contains("without landmark promotion or era creation"));
+        assert!(!explain.result_reasons[2]
+            .detail
+            .contains("detection_score="));
     }
 
     #[test]
@@ -2560,7 +2601,7 @@ mod tests {
         assert_eq!(result_set.count(), 1);
         assert_eq!(result_set.evidence_pack[0].result.memory_id, MemoryId(41));
         assert_eq!(result_set.omitted_summary.confidence_filtered, 1);
-        assert_eq!(result_set.omitted_summary.low_confidence_suppressed, 0);
+        assert_eq!(result_set.omitted_summary.low_confidence_suppressed, 1);
         assert!(
             result_set.evidence_pack[0]
                 .result

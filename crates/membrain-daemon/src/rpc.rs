@@ -663,6 +663,7 @@ impl RuntimeMethodRequest {
                 Ok(RuntimeRequest::StreamsList)
             }
             "sleep" => {
+                reject_unknown_fields(&self.params, &["millis"])?;
                 let millis = self
                     .params
                     .get("millis")
@@ -671,6 +672,7 @@ impl RuntimeMethodRequest {
                 Ok(RuntimeRequest::Sleep { millis })
             }
             "set_posture" => {
+                reject_unknown_fields(&self.params, &["posture", "reasons"])?;
                 let posture = self
                     .params
                     .get("posture")

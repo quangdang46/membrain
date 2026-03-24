@@ -452,39 +452,26 @@ fn response_trace_for_result_set(result_set: &RetrievalResultSet) -> ResponseTra
     let graph_expansion = result_set.explain_graph_expansion();
     let policy_summary = TracePolicySummary::from_result_set(result_set);
     let provenance_summary = TraceProvenanceSummary::from_result_set(result_set);
-    let freshness_markers = result_set
-        .evidence_pack
-        .iter()
-        .flat_map(|item| {
-            item.freshness_markers
-                .stale_warning
-                .then_some(FreshnessMarker {
-                    code: "stale_warning",
-                    detail: "result set contains stale evidence",
-                })
+    let (freshness_markers, conflict_markers, uncertainty_markers) = result_set.explain_markers();
+    let freshness_markers = freshness_markers
+        .into_iter()
+        .map(|marker| FreshnessMarker {
+            code: marker.code,
+            detail: marker.detail,
         })
         .collect();
-    let conflict_markers = result_set
-        .evidence_pack
-        .iter()
-        .filter(|item| {
-            !matches!(
-                item.result.conflict_markers.conflict_state,
-                membrain_core::engine::contradiction::ResolutionState::None
-            )
-        })
-        .map(|_| ConflictMarker {
-            code: "conflict_present",
-            detail: "result carries contradiction lineage",
+    let conflict_markers = conflict_markers
+        .into_iter()
+        .map(|marker| ConflictMarker {
+            code: marker.code,
+            detail: marker.detail,
         })
         .collect();
-    let uncertainty_markers = result_set
-        .evidence_pack
-        .iter()
-        .filter(|item| item.result.uncertainty_markers.uncertainty_score > 0)
-        .map(|_| UncertaintyMarker {
-            code: "uncertainty_present",
-            detail: "result carries bounded uncertainty markers",
+    let uncertainty_markers = uncertainty_markers
+        .into_iter()
+        .map(|marker| UncertaintyMarker {
+            code: marker.code,
+            detail: marker.detail,
         })
         .collect();
     let score_components = result_set
@@ -1892,6 +1879,11 @@ mod tests {
     };
     use clap::Parser;
     use membrain_core::api::{NamespaceId, TraceStage};
+    use membrain_core::engine::confidence::{ConfidenceInputs, ConfidencePolicy};
+    use membrain_core::engine::ranking::{fuse_scores, RankingInput, RankingProfile};
+    use membrain_core::engine::result::{AnsweredFrom, ResultBuilder, RetrievalExplain};
+    use membrain_core::engine::recall::{RecallPlanKind, RecallTraceStage};
+    use membrain_core::types::{CanonicalMemoryType, MemoryId, SessionId};
 
     #[test]
     fn audit_rows_preserve_request_id_in_json_export() {
@@ -2041,6 +2033,69 @@ mod tests {
                 TraceStage::PolicyGate,
                 TraceStage::Packaging
             ]
+        );
+    }
+
+    #[test]
+    fn response_trace_bundle_uses_canonical_uncertainty_markers() {
+        let namespace = NamespaceId::new("team.gamma").unwrap();
+        let mut builder = ResultBuilder::new(1, namespace.clone());
+        let ranked = fuse_scores(
+            RankingInput {
+                recency: 250,
+                salience: 250,
+                strength: 250,
+                provenance: 250,
+                conflict: 500,
+                confidence: 250,
+            },
+            RankingProfile::balanced(),
+        );
+        builder.add_with_confidence(
+            MemoryId(77),
+            namespace.clone(),
+            SessionId(3),
+            CanonicalMemoryType::Event,
+            "high uncertainty result".into(),
+            &ranked,
+            AnsweredFrom::Tier2Indexed,
+            &ConfidenceInputs {
+                corroboration_count: 0,
+                ticks_since_last_access: 128,
+                age_ticks: 256,
+                resolution_state: membrain_core::engine::contradiction::ResolutionState::None,
+                conflict_score: 0,
+                causal_parent_count: 0,
+                authoritativeness: 0,
+                recall_count: 0,
+            },
+            &ConfidencePolicy::default(),
+        );
+        let explain = RetrievalExplain {
+            recall_plan: RecallPlanKind::Tier2ExactThenTier3Fallback,
+            route_reason: "uncertainty marker test".to_string(),
+            tiers_consulted: vec!["tier2_exact".to_string()],
+            trace_stages: vec![RecallTraceStage::Tier2Exact],
+            tier1_answered_directly: false,
+            candidate_budget: 1,
+            time_consumed_ms: Some(5),
+            ranking_profile: "balanced".to_string(),
+            contradictions_found: 0,
+            query_by_example: None,
+            result_reasons: vec![],
+        };
+        let result_set = builder.build(explain);
+
+        let (_, _, _, _, _, _, _, _, _, _, uncertainty_markers) =
+            response_trace_for_result_set(&result_set);
+        let (_, _, expected_uncertainty_markers) = result_set.explain_markers();
+
+        assert_eq!(uncertainty_markers.len(), 1);
+        assert_eq!(expected_uncertainty_markers.len(), 1);
+        assert_eq!(uncertainty_markers[0].code, expected_uncertainty_markers[0].code);
+        assert_eq!(
+            uncertainty_markers[0].detail,
+            expected_uncertainty_markers[0].detail
         );
     }
 

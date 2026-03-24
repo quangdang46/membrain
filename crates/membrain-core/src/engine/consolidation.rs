@@ -106,6 +106,7 @@ pub struct DerivationFailure {
     pub fixture_name: String,
     pub namespace: NamespaceId,
     pub source_ids: Vec<MemoryId>,
+    pub continuity_keys: Vec<String>,
     pub source_time_range_ms: (u64, u64),
     pub contradiction_semantics: &'static str,
     pub stage: &'static str,
@@ -290,6 +291,12 @@ impl ConsolidationRun {
                 fixture_name: group.fixture_name.clone(),
                 namespace: self.namespace.clone(),
                 source_ids: group.lineage.source_memory_ids.clone(),
+                continuity_keys: group
+                    .lineage
+                    .continuity_keys
+                    .iter()
+                    .map(|key| (*key).to_string())
+                    .collect(),
                 source_time_range_ms,
                 contradiction_semantics,
                 stage: "gist_compaction",
@@ -376,7 +383,6 @@ impl MaintenanceOperation for ConsolidationRun {
         }
 
         if self.remaining_queue_jobs == 0 {
-            self.retry_attempts = self.policy.max_retry_attempts;
             return MaintenanceStep::Completed(self.build_summary());
         }
 
@@ -508,24 +514,24 @@ mod tests {
         assert!(matches!(snap.state, MaintenanceJobState::Completed(_)));
         if let MaintenanceJobState::Completed(summary) = snap.state {
             assert_eq!(summary.groups_evaluated, 20);
-            assert_eq!(summary.episode_source_sets, 20);
+            assert_eq!(summary.episode_source_sets, 10);
             assert_eq!(summary.derivations_emitted, 20);
-            assert_eq!(summary.derivation_partial_failures, 20);
-            assert_eq!(summary.named_fixtures.len(), 20);
+            assert_eq!(summary.derivation_partial_failures, 0);
+            assert_eq!(summary.named_fixtures.len(), 10);
             assert_eq!(summary.derived_artifacts.len(), 20);
-            assert_eq!(summary.derivation_failures.len(), 20);
+            assert_eq!(summary.derivation_failures.len(), 0);
             assert_eq!(summary.heuristics_summary.as_deref(), Some("temporal_proximity_ms=600000 max_episode_span_ms=3600000 honor_session_bounds=true honor_task_bounds=true require_entity_overlap=false"));
-            assert_eq!(summary.grouping_logs.len(), 20);
-            assert!(summary.grouping_logs[0].contains("fixture=episode_1_singleton_1_1"));
+            assert_eq!(summary.grouping_logs.len(), 10);
+            assert!(summary.grouping_logs[0].contains("fixture=episode_1_session_cluster_1_2"));
             assert_eq!(
                 summary.derived_artifacts[0].kind,
                 DerivedArtifactKind::Summary
             );
             assert_eq!(summary.derived_artifacts[0].namespace, ns("test"));
-            assert_eq!(summary.derived_artifacts[0].source_ids, vec![MemoryId(1)]);
+            assert_eq!(summary.derived_artifacts[0].source_ids, vec![MemoryId(1), MemoryId(2)]);
             assert_eq!(
                 summary.derived_artifacts[0].source_time_range_ms,
-                (900_000, 900_000)
+                (900_000, 1_020_000)
             );
             assert_eq!(
                 summary.derived_artifacts[0].contradiction_semantics,
@@ -533,18 +539,20 @@ mod tests {
             );
             assert!(summary.derived_artifacts[0]
                 .content
-                .contains("summary(singleton): namespace=test anchor=1 terminal=1 members=1 timespan_ms=0 contradiction_semantics=preserve_unresolved_contradictions"));
-            assert_eq!(summary.derivation_failures[0].namespace, ns("test"));
+                .contains("summary(session_cluster): namespace=test anchor=1 terminal=2 members=2 timespan_ms=120000 contradiction_semantics=preserve_unresolved_contradictions"));
             assert_eq!(
-                summary.derivation_failures[0].source_time_range_ms,
-                (900_000, 900_000)
+                summary.derived_artifacts[0].continuity_keys,
+                vec![
+                    "session_cluster",
+                    "session_id",
+                    "task_id",
+                    "goal_context",
+                    "tool_chain_context",
+                    "entity_overlap"
+                ]
             );
-            assert_eq!(
-                summary.derivation_failures[0].contradiction_semantics,
-                "preserve_unresolved_contradictions"
-            );
-            assert_eq!(summary.derivation_failures[0].stage, "gist_compaction");
-            assert!(summary.derivation_failures[0].lineage_preserved);
+            assert_eq!(summary.derived_artifacts[1].kind, DerivedArtifactKind::Gist);
+            assert_eq!(summary.derived_artifacts[1].source_ids, vec![MemoryId(1), MemoryId(2)]);
         }
     }
 

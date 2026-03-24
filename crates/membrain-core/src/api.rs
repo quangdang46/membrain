@@ -2564,7 +2564,7 @@ mod tests {
         );
         assert_eq!(response.freshness_markers[0].code, "fresh");
         assert_eq!(response.conflict_markers[0].code, "no_open_conflict");
-        assert_eq!(response.uncertainty_markers[0].code, "low_uncertainty");
+        assert_eq!(response.uncertainty_markers[0].code, "low_confidence");
         assert_eq!(
             response
                 .passive_observation

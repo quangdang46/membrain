@@ -424,6 +424,7 @@ mod tests {
             RawEncodeInput::new(RawIntakeKind::Event, "project launch deadline was moved")
                 .with_landmark_signals(crate::types::LandmarkSignals::new(0.91, 0.83, 0.31, 88)),
         );
+        let landmark_record = layout.landmark_record();
 
         assert!(layout.metadata.landmark.is_landmark);
         assert_eq!(
@@ -439,6 +440,23 @@ mod tests {
         assert!(layout
             .metadata
             .landmark
+            .detection_reason
+            .as_deref()
+            .is_some_and(|reason| reason.contains("crossed landmark thresholds")));
+        assert_eq!(landmark_record.namespace.as_str(), "tests/landmarks");
+        assert_eq!(landmark_record.memory_id, MemoryId(77));
+        assert!(landmark_record.is_landmark);
+        assert_eq!(
+            landmark_record.landmark_label.as_deref(),
+            Some("project launch deadline was moved")
+        );
+        assert_eq!(
+            landmark_record.era_id.as_deref(),
+            Some("era-projectlaunc-0088")
+        );
+        assert_eq!(landmark_record.era_started_at_tick, Some(88));
+        assert_eq!(landmark_record.detection_score, 803);
+        assert!(landmark_record
             .detection_reason
             .as_deref()
             .is_some_and(|reason| reason.contains("crossed landmark thresholds")));

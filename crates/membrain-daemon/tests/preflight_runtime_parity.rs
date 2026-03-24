@@ -283,3 +283,105 @@ async fn preflight_run_and_explain_keep_degraded_serialization_parity() {
 
     shutdown_runtime(&socket_path, handle).await;
 }
+
+#[tokio::test]
+async fn preflight_methods_reuse_validation_error_model_for_unknown_fields() {
+    let (socket_path, handle) = spawn_runtime("preflight-validation-errors").await;
+
+    let run_response = send_request(
+        &socket_path,
+        json!({
+            "jsonrpc":"2.0",
+            "method":"preflight.run",
+            "params":{
+                "namespace":"team.alpha",
+                "original_query":"inspect authorization state",
+                "proposed_action":"preview policy gate",
+                "unexpected":true
+            },
+            "id":"preflight-run-unknown-field"
+        }),
+    )
+    .await;
+    assert_eq!(run_response["error"]["code"], json!(-32602));
+    assert_eq!(
+        run_response["error"]["message"],
+        json!("unknown field unexpected")
+    );
+    assert_eq!(run_response["error"]["data"], json!(null));
+
+    let explain_response = send_request(
+        &socket_path,
+        json!({
+            "jsonrpc":"2.0",
+            "method":"preflight.explain",
+            "params":{
+                "namespace":"team.alpha",
+                "original_query":"inspect authorization state",
+                "proposed_action":"preview policy gate",
+                "unexpected":true
+            },
+            "id":"preflight-explain-unknown-field"
+        }),
+    )
+    .await;
+    assert_eq!(explain_response["error"]["code"], json!(-32602));
+    assert_eq!(
+        explain_response["error"]["message"],
+        json!("unknown field unexpected")
+    );
+    assert_eq!(explain_response["error"]["data"], json!(null));
+
+    let allow_response = send_request(
+        &socket_path,
+        json!({
+            "jsonrpc":"2.0",
+            "method":"preflight.allow",
+            "params":{
+                "namespace":"team.alpha",
+                "authorization_token":"allow-123",
+                "bypass_flags":["manual_override"],
+                "unexpected":true
+            },
+            "id":"preflight-allow-unknown-field"
+        }),
+    )
+    .await;
+    assert_eq!(allow_response["error"]["code"], json!(-32602));
+    assert_eq!(
+        allow_response["error"]["message"],
+        json!("unknown field unexpected")
+    );
+    assert_eq!(allow_response["error"]["data"], json!(null));
+
+    shutdown_runtime(&socket_path, handle).await;
+}
+
+#[tokio::test]
+async fn preflight_allow_rejects_non_string_bypass_flags_with_shared_validation_error() {
+    let (socket_path, handle) = spawn_runtime("preflight-allow-invalid-bypass").await;
+
+    let allow_response = send_request(
+        &socket_path,
+        json!({
+            "jsonrpc":"2.0",
+            "method":"preflight.allow",
+            "params":{
+                "namespace":"team.alpha",
+                "authorization_token":"allow-123",
+                "bypass_flags":["manual_override", 7]
+            },
+            "id":"preflight-allow-invalid-bypass"
+        }),
+    )
+    .await;
+
+    assert_eq!(allow_response["error"]["code"], json!(-32602));
+    assert_eq!(
+        allow_response["error"]["message"],
+        json!("bypass_flags must be an array of strings")
+    );
+    assert_eq!(allow_response["error"]["data"], json!(null));
+
+    shutdown_runtime(&socket_path, handle).await;
+}

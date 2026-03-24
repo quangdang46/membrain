@@ -11,8 +11,9 @@ use membrain_core::engine::maintenance::{
 use membrain_core::engine::ranking::RankingRuntime;
 use membrain_core::engine::recall::{RecallRuntime, RecallTraceStage};
 use membrain_core::engine::repair::{IndexRepairEntrypoint, RepairTarget};
+use membrain_core::engine::result::RetrievalExplain;
 use membrain_core::engine::retrieval_planner::{
-    PrimaryCue, RetrievalRequest, RetrievalRequestValidationError,
+    PrimaryCue, RetrievalPlanTrace, RetrievalRequest, RetrievalRequestValidationError,
 };
 use membrain_core::observability::OutcomeClass;
 use membrain_core::policy::{
@@ -373,6 +374,71 @@ fn cli_rejects_exact_id_plus_query_by_example_mix() {
         RetrievalRequestValidationError::ExactIdWithExampleCue
     );
     assert_eq!(error.as_str(), "exact_id_with_example_cue");
+}
+
+#[test]
+fn cli_rejects_duplicate_query_by_example_cues() {
+    let namespace = NamespaceId::new("cli.team").unwrap();
+    let request = RetrievalRequest::hybrid(namespace, "release blocker", 4)
+        .with_like_memory(MemoryId(21))
+        .with_unlike_memory(MemoryId(21));
+    let error = request.normalize_query_by_example().unwrap_err();
+
+    assert_eq!(
+        error,
+        RetrievalRequestValidationError::DuplicateExampleCue(MemoryId(21))
+    );
+    assert_eq!(error.as_str(), "duplicate_example_cue");
+}
+
+#[test]
+fn cli_query_by_example_explain_names_source_mode_and_materialization_gaps() {
+    let namespace = NamespaceId::new("cli.team").unwrap();
+    let request = RetrievalRequest::hybrid(namespace, "  release blocker  ", 4)
+        .with_like_memory(MemoryId(21))
+        .with_unlike_memory(MemoryId(34));
+    let normalization = request.normalize_query_by_example().unwrap();
+    let mut trace = RetrievalPlanTrace::new(&request);
+    trace.set_query_by_example_materialization(&normalization, &[MemoryId(21)]);
+    trace.set_final_candidates(3);
+
+    let mut explain = RetrievalExplain::from_plan(
+        &membrain_core::engine::recall::RecallEngine.plan_recall(
+            membrain_core::engine::recall::RecallRequest::small_session_lookup(SessionId(9)),
+            RuntimeConfig::default(),
+        ),
+        "balanced",
+    );
+    explain.set_query_by_example_trace(&trace);
+
+    let query_by_example = explain.query_by_example.expect("query-by-example trace");
+    assert_eq!(query_by_example.primary_cue, "query_text");
+    assert_eq!(
+        query_by_example.requested_seed_descriptors,
+        vec!["like:21", "unlike:34"]
+    );
+    assert_eq!(
+        query_by_example.materialized_seed_descriptors,
+        vec!["like:21"]
+    );
+    assert_eq!(query_by_example.missing_seed_descriptors, vec!["unlike:34"]);
+    assert_eq!(query_by_example.expanded_candidate_count, 3);
+    assert_eq!(
+        query_by_example.influence_summary,
+        "primary cue query_text expanded 3 candidate(s) from 2 requested seed(s); 1 seed(s) materialized and 1 seed(s) remained unavailable"
+    );
+    assert!(explain.result_reasons.iter().any(|reason| {
+        reason.reason_code == "query_by_example_seed_materialized"
+            && reason.detail == "seed like:21 materialized from stored evidence"
+    }));
+    assert!(explain.result_reasons.iter().any(|reason| {
+        reason.reason_code == "query_by_example_seed_missing"
+            && reason.detail == "seed unlike:34 was requested but not available for expansion"
+    }));
+    assert!(explain.result_reasons.iter().any(|reason| {
+        reason.reason_code == "query_by_example_candidate_expansion"
+            && reason.detail.contains("primary cue query_text expanded 3 candidate(s)")
+    }));
 }
 
 #[test]

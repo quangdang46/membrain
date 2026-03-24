@@ -790,12 +790,27 @@ impl ReconsolidationRun {
                     .and_then(|state| state.emotional_valence)
                     .map(|value| format!("{value:.3}"))
                     .unwrap_or_else(|| "none".to_string());
+                let strength_before = record
+                    .strength_before
+                    .map(|value| format!("{value:.3}"))
+                    .unwrap_or_else(|| "none".to_string());
+                let strength_after = record
+                    .strength_after
+                    .map(|value| format!("{value:.3}"))
+                    .unwrap_or_else(|| "none".to_string());
+                let preserved_strength = record
+                    .preserved_strength
+                    .map(|value| format!("{value:.3}"))
+                    .unwrap_or_else(|| "none".to_string());
                 let detail = format!(
-                    "reconsolidation {} at tick {} (outcome={}, source={}, refresh_triggers={}, executed_refresh_triggers={}, deferred_refresh_triggers={}, applied_content={}, applied_emotional_arousal={}, applied_emotional_valence={}, restabilized={}, authoritative_state_mutated={}, pending_update_cleared={})",
+                    "reconsolidation {} at tick {} (outcome={}, source={}, strength_before={}, strength_after={}, preserved_strength={}, refresh_triggers={}, executed_refresh_triggers={}, deferred_refresh_triggers={}, applied_content={}, applied_emotional_arousal={}, applied_emotional_valence={}, restabilized={}, authoritative_state_mutated={}, pending_update_cleared={})",
                     record.audit_kind.as_str(),
                     record.tick,
                     record.outcome.as_str(),
                     record.update_source.map(|source| source.as_str()).unwrap_or("none"),
+                    strength_before,
+                    strength_after,
+                    preserved_strength,
                     refresh_triggers,
                     executed_refresh_triggers,
                     deferred_refresh_triggers,
@@ -2016,16 +2031,28 @@ mod tests {
         assert_eq!(entries[2].memory_id, Some(MemoryId(3)));
         assert_eq!(entries[3].memory_id, Some(MemoryId(4)));
         assert!(entries[0].detail.contains("reconsolidation applied"));
+        assert!(entries[0].detail.contains("strength_before=0.600"));
+        assert!(entries[0].detail.contains("strength_after=0.650"));
+        assert!(entries[0].detail.contains("preserved_strength=0.550"));
         assert!(entries[0]
             .detail
             .contains("refresh_triggers=embedding_refresh,index_refresh,cache_invalidate"));
         assert!(entries[1].detail.contains("reconsolidation discarded"));
+        assert!(entries[1].detail.contains("strength_before=0.800"));
+        assert!(entries[1].detail.contains("strength_after=none"));
+        assert!(entries[1].detail.contains("preserved_strength=0.750"));
         assert!(entries[1].detail.contains("refresh_triggers=none"));
         assert!(entries[2].detail.contains("reconsolidation deferred"));
+        assert!(entries[2].detail.contains("strength_before=0.700"));
+        assert!(entries[2].detail.contains("strength_after=none"));
+        assert!(entries[2].detail.contains("preserved_strength=0.650"));
         assert!(entries[2]
             .detail
             .contains("refresh_triggers=embedding_refresh,index_refresh,cache_invalidate"));
         assert!(entries[3].detail.contains("reconsolidation blocked"));
+        assert!(entries[3].detail.contains("strength_before=0.700"));
+        assert!(entries[3].detail.contains("strength_after=none"));
+        assert!(entries[3].detail.contains("preserved_strength=0.650"));
         assert!(entries[3]
             .detail
             .contains("refresh_triggers=embedding_refresh,index_refresh,cache_invalidate"));

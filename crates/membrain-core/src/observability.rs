@@ -734,6 +734,20 @@ fn conflict_marker(markers: &crate::engine::result::ConflictMarkers) -> Option<C
 }
 
 fn uncertainty_marker(markers: &crate::engine::result::UncertaintyMarkers) -> UncertaintyMarker {
+    if markers.confidence < 500 {
+        return UncertaintyMarker {
+            code: "low_confidence",
+            detail: "bounded evidence fell below the action-oriented confidence threshold",
+        };
+    }
+
+    if markers.missing_evidence_uncertainty.unwrap_or(0) >= 500 {
+        return UncertaintyMarker {
+            code: "missing_evidence",
+            detail: "bounded evidence is missing corroborating support needed to reduce uncertainty",
+        };
+    }
+
     if markers.uncertainty_score >= 500 {
         UncertaintyMarker {
             code: "high_uncertainty",

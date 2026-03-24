@@ -520,6 +520,10 @@ fn consolidation_runs_emit_lineage_preserving_artifacts_through_maintenance_hand
     );
     assert_eq!(summary.derived_artifacts[2].source_ids, vec![MemoryId(3)]);
     assert_eq!(summary.derivation_failures[0].source_ids, vec![MemoryId(3)]);
+    assert_eq!(
+        summary.derivation_failures[0].continuity_keys,
+        vec!["singleton"]
+    );
     assert_eq!(summary.derivation_failures[0].stage, "gist_compaction");
     assert_eq!(
         summary.derivation_failures[0].reason,
@@ -625,7 +629,7 @@ fn consolidation_runs_stop_after_queue_budget_and_report_partial_status() {
     assert_eq!(summary.queue_report.queue_depth_after, 2);
     assert_eq!(summary.queue_report.jobs_processed, 1);
     assert_eq!(summary.queue_report.affected_item_count, 2);
-    assert_eq!(summary.queue_report.retry_attempts, 2);
+    assert_eq!(summary.queue_report.retry_attempts, 1);
     assert_eq!(summary.queue_report.duration_ms, 14);
     assert!(summary.queue_report.partial_run);
     assert_eq!(second.polls_used, 2);

@@ -227,6 +227,31 @@ impl Tier2LandmarkRecord {
             detection_reason: metadata.landmark.detection_reason.clone(),
         }
     }
+
+    /// Returns the landmark label preserved on the explicit durable landmark row.
+    pub fn landmark_label(&self) -> Option<&str> {
+        self.landmark_label.as_deref()
+    }
+
+    /// Returns the era identifier preserved on the explicit durable landmark row.
+    pub fn era_id(&self) -> Option<&str> {
+        self.era_id.as_deref()
+    }
+
+    /// Returns the era start tick preserved on the explicit durable landmark row.
+    pub const fn era_started_at_tick(&self) -> Option<u64> {
+        self.era_started_at_tick
+    }
+
+    /// Returns the bounded landmark detection score preserved on the explicit durable landmark row.
+    pub const fn landmark_detection_score(&self) -> u16 {
+        self.detection_score
+    }
+
+    /// Returns the inspectable detection reason preserved on the explicit durable landmark row.
+    pub fn landmark_detection_reason(&self) -> Option<&str> {
+        self.detection_reason.as_deref()
+    }
 }
 
 /// Borrowed metadata-only view used by Tier2 prefilter/index planners.

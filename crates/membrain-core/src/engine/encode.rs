@@ -609,11 +609,15 @@ impl EncodeEngine {
         let era_id = format!("era-{}-{:04}", era_slug, era_started_at_tick.min(9_999));
         let detection_score = landmark_detection_score(signals);
         let detection_reason = format!(
-            "arousal={:.2} novelty={:.2} recent_similarity={:.2} gap_ticks={} crossed landmark thresholds",
+            "arousal={:.2} novelty={:.2} recent_similarity={:.2} gap_ticks={} crossed landmark thresholds (arousal>={:.2}, novelty>={:.2}, recent_similarity<={:.2}, gap_ticks>={})",
             signals.arousal,
             signals.novelty,
             signals.recent_similarity,
-            signals.ticks_since_last_landmark
+            signals.ticks_since_last_landmark,
+            LANDMARK_AROUSAL_THRESHOLD,
+            LANDMARK_NOVELTY_THRESHOLD,
+            LANDMARK_SIMILARITY_FLOOR,
+            LANDMARK_MIN_ERA_GAP_TICKS
         );
 
         LandmarkMetadata {

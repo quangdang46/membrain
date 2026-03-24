@@ -356,6 +356,237 @@ fn recall_trace_exposes_query_by_example_seed_selection_details() {
 }
 
 #[test]
+fn confidence_filter_emits_explain_reasons_for_suppressed_candidates() {
+    let mut builder = ResultBuilder::new(3, ns("confidence_filter_explain"));
+
+    let high = fuse_scores(
+        RankingInput {
+            recency: 900,
+            salience: 900,
+            strength: 800,
+            provenance: 900,
+            conflict: 500,
+            confidence: 900,
+        },
+        RankingProfile::balanced(),
+    );
+    let low = fuse_scores(
+        RankingInput {
+            recency: 200,
+            salience: 200,
+            strength: 200,
+            provenance: 200,
+            conflict: 500,
+            confidence: 200,
+        },
+        RankingProfile::balanced(),
+    );
+
+    builder.add_with_confidence(
+        MemoryId(41),
+        ns("confidence_filter_explain"),
+        SessionId(1),
+        CanonicalMemoryType::Event,
+        "high confidence".into(),
+        &high,
+        AnsweredFrom::Tier2Indexed,
+        &membrain_core::engine::confidence::ConfidenceInputs {
+            corroboration_count: 8,
+            ticks_since_last_access: 10,
+            age_ticks: 10,
+            resolution_state: membrain_core::engine::contradiction::ResolutionState::None,
+            conflict_score: 0,
+            causal_parent_count: 4,
+            authoritativeness: 950,
+            recall_count: 6,
+        },
+        &membrain_core::engine::confidence::ConfidencePolicy::default(),
+    );
+    builder.add_with_confidence(
+        MemoryId(42),
+        ns("confidence_filter_explain"),
+        SessionId(1),
+        CanonicalMemoryType::Event,
+        "low confidence".into(),
+        &low,
+        AnsweredFrom::Tier2Indexed,
+        &membrain_core::engine::confidence::ConfidenceInputs {
+            corroboration_count: 0,
+            ticks_since_last_access: 1000,
+            age_ticks: 1000,
+            resolution_state: membrain_core::engine::contradiction::ResolutionState::Unresolved,
+            conflict_score: 800,
+            causal_parent_count: 0,
+            authoritativeness: 100,
+            recall_count: 0,
+        },
+        &membrain_core::engine::confidence::ConfidencePolicy::default(),
+    );
+
+    let result_set = builder.build_with_confidence_filter(
+        RetrievalExplain {
+            recall_plan: membrain_core::engine::recall::RecallPlanKind::Tier2ExactThenTier3Fallback,
+            route_reason: "confidence filter explain".to_string(),
+            tiers_consulted: vec!["tier2_exact".to_string()],
+            trace_stages: vec![RecallTraceStage::Tier2Exact],
+            tier1_answered_directly: false,
+            candidate_budget: 3,
+            time_consumed_ms: Some(7),
+            ranking_profile: "balanced".to_string(),
+            contradictions_found: 0,
+            query_by_example: None,
+            result_reasons: vec![],
+        },
+        500,
+    );
+
+    assert_eq!(result_set.count(), 1);
+    assert_eq!(result_set.omitted_summary.confidence_filtered, 1);
+    assert_eq!(result_set.omitted_summary.low_confidence_suppressed, 1);
+    assert!(result_set.explain.result_reasons.iter().any(|reason| {
+        reason.reason_code == "confidence_threshold_applied"
+            && reason.detail == "filtered 1 candidate(s) below min_confidence=500"
+    }));
+    assert!(result_set.explain.result_reasons.iter().any(|reason| {
+        reason.memory_id == Some(MemoryId(42))
+            && reason.reason_code == "low_confidence_suppressed"
+            && reason.detail
+                == "candidate suppressed because confidence fell below min_confidence=500"
+    }));
+    assert!(result_set.evidence_pack[0]
+        .result
+        .uncertainty_markers
+        .confidence_interval
+        .is_some());
+}
+
+#[test]
+fn confidence_filter_empty_result_set_degrades_outcome_from_accepted() {
+    let mut builder = ResultBuilder::new(3, ns("confidence_filter_empty"));
+
+    let low = fuse_scores(
+        RankingInput {
+            recency: 200,
+            salience: 200,
+            strength: 200,
+            provenance: 200,
+            conflict: 500,
+            confidence: 200,
+        },
+        RankingProfile::balanced(),
+    );
+
+    builder.add_with_confidence(
+        MemoryId(99),
+        ns("confidence_filter_empty"),
+        SessionId(1),
+        CanonicalMemoryType::Event,
+        "filtered away".into(),
+        &low,
+        AnsweredFrom::Tier2Indexed,
+        &membrain_core::engine::confidence::ConfidenceInputs {
+            corroboration_count: 0,
+            ticks_since_last_access: 1000,
+            age_ticks: 1000,
+            resolution_state: membrain_core::engine::contradiction::ResolutionState::Unresolved,
+            conflict_score: 800,
+            causal_parent_count: 0,
+            authoritativeness: 100,
+            recall_count: 0,
+        },
+        &membrain_core::engine::confidence::ConfidencePolicy::default(),
+    );
+
+    let result_set = builder.build_with_confidence_filter(
+        RetrievalExplain {
+            recall_plan: membrain_core::engine::recall::RecallPlanKind::Tier2ExactThenTier3Fallback,
+            route_reason: "confidence filter emptied the result set".to_string(),
+            tiers_consulted: vec!["tier2_exact".to_string()],
+            trace_stages: vec![RecallTraceStage::Tier2Exact],
+            tier1_answered_directly: false,
+            candidate_budget: 3,
+            time_consumed_ms: Some(7),
+            ranking_profile: "balanced".to_string(),
+            contradictions_found: 0,
+            query_by_example: None,
+            result_reasons: vec![],
+        },
+        500,
+    );
+
+    assert_eq!(result_set.count(), 0);
+    assert_eq!(result_set.outcome_class, membrain_core::observability::OutcomeClass::Preview);
+    assert_eq!(
+        result_set.policy_summary.outcome_class,
+        membrain_core::observability::OutcomeClass::Preview
+    );
+    assert_eq!(result_set.omitted_summary.confidence_filtered, 1);
+    assert!(result_set.explain.result_reasons.iter().any(|reason| {
+        reason.reason_code == "confidence_threshold_applied"
+            && reason.detail == "filtered 1 candidate(s) below min_confidence=500"
+    }));
+}
+
+#[test]
+fn explain_markers_surface_low_confidence_when_result_is_retained() {
+    let mut builder = ResultBuilder::new(1, ns("low_confidence_marker"));
+    let ranked = fuse_scores(
+        RankingInput {
+            recency: 300,
+            salience: 300,
+            strength: 300,
+            provenance: 200,
+            conflict: 500,
+            confidence: 200,
+        },
+        RankingProfile::balanced(),
+    );
+
+    builder.add_with_confidence(
+        MemoryId(77),
+        ns("low_confidence_marker"),
+        SessionId(1),
+        CanonicalMemoryType::Event,
+        "retained low confidence".into(),
+        &ranked,
+        AnsweredFrom::Tier2Indexed,
+        &membrain_core::engine::confidence::ConfidenceInputs {
+            corroboration_count: 0,
+            ticks_since_last_access: 1000,
+            age_ticks: 1000,
+            resolution_state: membrain_core::engine::contradiction::ResolutionState::Unresolved,
+            conflict_score: 900,
+            causal_parent_count: 0,
+            authoritativeness: 100,
+            recall_count: 0,
+        },
+        &membrain_core::engine::confidence::ConfidencePolicy::default(),
+    );
+
+    let result_set = builder.build(RetrievalExplain {
+        recall_plan: membrain_core::engine::recall::RecallPlanKind::Tier2ExactThenTier3Fallback,
+        route_reason: "low confidence marker".to_string(),
+        tiers_consulted: vec!["tier2_exact".to_string()],
+        trace_stages: vec![RecallTraceStage::Tier2Exact],
+        tier1_answered_directly: false,
+        candidate_budget: 1,
+        time_consumed_ms: Some(4),
+        ranking_profile: "balanced".to_string(),
+        contradictions_found: 0,
+        query_by_example: None,
+        result_reasons: vec![],
+    });
+
+    let (_, _, uncertainty_markers) = result_set.explain_markers();
+    assert_eq!(uncertainty_markers.len(), 1);
+    assert_eq!(uncertainty_markers[0].code, "low_confidence");
+    assert_eq!(
+        uncertainty_markers[0].detail,
+        "bounded evidence fell below the action-oriented confidence threshold"
+    );
+}
+
+#[test]
 fn answered_from_tier_reports_correct_source() {
     assert_eq!(AnsweredFrom::Tier1Hot.as_str(), "tier1_hot");
     assert_eq!(AnsweredFrom::Tier2Indexed.as_str(), "tier2_indexed");

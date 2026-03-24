@@ -100,6 +100,40 @@ async fn runtime_doctor_rejects_unknown_params_like_other_zero_arg_methods() {
     );
     assert_eq!(doctor_response["error"]["data"], json!(null));
 
+    let resources_list_response = send_request(
+        &socket_path,
+        json!({
+            "jsonrpc":"2.0",
+            "method":"resources.list",
+            "params":{"unexpected":true},
+            "id":"resources-list-invalid"
+        }),
+    )
+    .await;
+    assert_eq!(resources_list_response["error"]["code"], json!(-32602));
+    assert_eq!(
+        resources_list_response["error"]["message"],
+        json!("unknown field unexpected")
+    );
+    assert_eq!(resources_list_response["error"]["data"], json!(null));
+
+    let streams_list_response = send_request(
+        &socket_path,
+        json!({
+            "jsonrpc":"2.0",
+            "method":"streams.list",
+            "params":{"unexpected":true},
+            "id":"streams-list-invalid"
+        }),
+    )
+    .await;
+    assert_eq!(streams_list_response["error"]["code"], json!(-32602));
+    assert_eq!(
+        streams_list_response["error"]["message"],
+        json!("unknown field unexpected")
+    );
+    assert_eq!(streams_list_response["error"]["data"], json!(null));
+
     shutdown_runtime(&socket_path, handle).await;
 }
 
@@ -201,6 +235,51 @@ async fn runtime_doctor_resource_read_matches_runtime_doctor_payload_shape() {
     assert_eq!(metrics.cancelled_requests, 0);
     assert_eq!(metrics.maintenance_runs, 0);
 
+    let status_resource = send_request(
+        &socket_path,
+        json!({
+            "jsonrpc":"2.0",
+            "method":"resource.read",
+            "params":{"uri":"membrain://daemon/runtime/status"},
+            "id":"resource-read-status"
+        }),
+    )
+    .await;
+    assert_eq!(status_resource["result"]["status"], json!("ok"));
+    assert_eq!(
+        status_resource["result"]["payload"]["resource_kind"],
+        json!("runtime_status")
+    );
+    assert_eq!(
+        status_resource["result"]["payload"]["payload"]["posture"],
+        json!("full")
+    );
+    assert!(status_resource["result"]["payload"]["payload"]["metrics"].is_object());
+
+    let streams_resource = send_request(
+        &socket_path,
+        json!({
+            "jsonrpc":"2.0",
+            "method":"resource.read",
+            "params":{"uri":"membrain://daemon/runtime/streams"},
+            "id":"resource-read-streams"
+        }),
+    )
+    .await;
+    assert_eq!(streams_resource["result"]["status"], json!("ok"));
+    assert_eq!(
+        streams_resource["result"]["payload"]["resource_kind"],
+        json!("stream_listing")
+    );
+    assert_eq!(
+        streams_resource["result"]["payload"]["payload"]["streams"][0]["method"],
+        json!("maintenance.status")
+    );
+    assert_eq!(
+        streams_resource["result"]["payload"]["payload"]["streams"][0]["delivery"],
+        json!("jsonrpc_notification")
+    );
+
     let missing_resource = send_request(
         &socket_path,
         json!({
@@ -219,6 +298,73 @@ async fn runtime_doctor_resource_read_matches_runtime_doctor_payload_shape() {
     assert_eq!(
         missing_resource["error"]["data"]["error_kind"],
         json!("validation_failure")
+    );
+
+    shutdown_runtime(&socket_path, handle).await;
+}
+
+#[tokio::test]
+async fn runtime_resource_and_stream_listings_match_shared_mcp_payload_shape() {
+    let (socket_path, handle) = spawn_runtime().await;
+
+    let resources_list = send_request(
+        &socket_path,
+        json!({
+            "jsonrpc":"2.0",
+            "method":"resources.list",
+            "params":{},
+            "id":"resources-list"
+        }),
+    )
+    .await;
+    assert_eq!(resources_list["result"]["status"], json!("ok"));
+    assert_eq!(
+        resources_list["result"]["payload"]["namespace"],
+        json!("daemon.runtime")
+    );
+    assert_eq!(
+        resources_list["result"]["payload"]["resources"][0]["resource_kind"],
+        json!("runtime_status")
+    );
+    assert_eq!(
+        resources_list["result"]["payload"]["resources"][1]["resource_kind"],
+        json!("runtime_doctor")
+    );
+    assert_eq!(
+        resources_list["result"]["payload"]["resources"][2]["resource_kind"],
+        json!("stream_listing")
+    );
+    assert_eq!(
+        resources_list["result"]["payload"]["resources"][3]["uri_template"],
+        json!("membrain://{namespace}/memories/{memory_id}")
+    );
+
+    let streams_list = send_request(
+        &socket_path,
+        json!({
+            "jsonrpc":"2.0",
+            "method":"streams.list",
+            "params":{},
+            "id":"streams-list"
+        }),
+    )
+    .await;
+    assert_eq!(streams_list["result"]["status"], json!("ok"));
+    assert_eq!(
+        streams_list["result"]["payload"]["namespace"],
+        json!("daemon.runtime")
+    );
+    assert_eq!(
+        streams_list["result"]["payload"]["streams"][0]["name"],
+        json!("maintenance-status")
+    );
+    assert_eq!(
+        streams_list["result"]["payload"]["streams"][0]["method"],
+        json!("maintenance.status")
+    );
+    assert_eq!(
+        streams_list["result"]["payload"]["streams"][0]["example_subscriptions"][0],
+        json!("maintenance.status")
     );
 
     shutdown_runtime(&socket_path, handle).await;
@@ -264,6 +410,40 @@ async fn runtime_reuses_error_model_for_invalid_jsonrpc_and_unknown_methods() {
         json!("unknown method 'not_a_real_method'")
     );
     assert_eq!(unknown_method["error"]["data"], json!(null));
+
+    let invalid_set_posture = send_request(
+        &socket_path,
+        json!({
+            "jsonrpc":"2.0",
+            "method":"set_posture",
+            "params":{"posture":"degraded","unexpected":true},
+            "id":"set-posture-invalid"
+        }),
+    )
+    .await;
+    assert_eq!(invalid_set_posture["error"]["code"], json!(-32602));
+    assert_eq!(
+        invalid_set_posture["error"]["message"],
+        json!("unknown field unexpected")
+    );
+    assert_eq!(invalid_set_posture["error"]["data"], json!(null));
+
+    let invalid_sleep = send_request(
+        &socket_path,
+        json!({
+            "jsonrpc":"2.0",
+            "method":"sleep",
+            "params":{"millis":1,"unexpected":true},
+            "id":"sleep-invalid"
+        }),
+    )
+    .await;
+    assert_eq!(invalid_sleep["error"]["code"], json!(-32602));
+    assert_eq!(
+        invalid_sleep["error"]["message"],
+        json!("unknown field unexpected")
+    );
+    assert_eq!(invalid_sleep["error"]["data"], json!(null));
 
     shutdown_runtime(&socket_path, handle).await;
 }

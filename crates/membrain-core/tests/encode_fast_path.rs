@@ -236,7 +236,13 @@ fn qualified_landmark_signals_stay_visible_in_fast_path_trace_for_temporal_consu
         .landmark
         .detection_reason
         .as_deref()
-        .is_some_and(|reason| reason.contains("crossed landmark thresholds")));
+        .is_some_and(|reason| {
+            reason.contains("crossed landmark thresholds")
+                && reason.contains("arousal>=0.70")
+                && reason.contains("novelty>=0.75")
+                && reason.contains("recent_similarity<=0.85")
+                && reason.contains("gap_ticks>=50")
+        }));
     assert_eq!(
         prepared.classification.route_family,
         FastPathRouteFamily::Event
@@ -266,6 +272,18 @@ fn landmark_era_slug_falls_back_when_text_has_no_ascii_alphanumerics() {
     assert_eq!(prepared.trace.landmark, prepared.normalized.landmark);
     assert_eq!(prepared.normalized.landmark.era_started_at_tick, Some(88));
     assert!(prepared.normalized.landmark.detection_score >= 850);
+    assert!(prepared
+        .normalized
+        .landmark
+        .detection_reason
+        .as_deref()
+        .is_some_and(|reason| {
+            reason.contains("crossed landmark thresholds")
+                && reason.contains("arousal>=0.70")
+                && reason.contains("novelty>=0.75")
+                && reason.contains("recent_similarity<=0.85")
+                && reason.contains("gap_ticks>=50")
+        }));
 }
 
 #[test]

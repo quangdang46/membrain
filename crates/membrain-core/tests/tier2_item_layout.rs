@@ -291,15 +291,22 @@ fn tier2_metadata_preserves_landmark_and_era_fields_for_durable_recall() {
         landmark_record.landmark_label.as_deref(),
         Some("project launch deadline was moved")
     );
+    assert_eq!(landmark_record.landmark_label(), Some("project launch deadline was moved"));
     assert_eq!(
         landmark_record.era_id.as_deref(),
         Some("era-projectlaunc-0088")
     );
+    assert_eq!(landmark_record.era_id(), Some("era-projectlaunc-0088"));
     assert_eq!(landmark_record.era_started_at_tick, Some(88));
+    assert_eq!(landmark_record.era_started_at_tick(), Some(88));
     assert_eq!(landmark_record.detection_score, 903);
+    assert_eq!(landmark_record.landmark_detection_score(), 903);
     assert!(landmark_record
         .detection_reason
         .as_deref()
+        .is_some_and(|reason| reason.contains("crossed landmark thresholds")));
+    assert!(landmark_record
+        .landmark_detection_reason()
         .is_some_and(|reason| reason.contains("crossed landmark thresholds")));
     assert_eq!(
         prefilter.landmark_label(),
@@ -346,10 +353,15 @@ fn tier2_non_landmarks_remain_explicitly_non_landmarks_in_metadata_views() {
     assert_eq!(landmark_record.memory_id, MemoryId(78));
     assert!(!landmark_record.is_landmark);
     assert_eq!(landmark_record.landmark_label, None);
+    assert_eq!(landmark_record.landmark_label(), None);
     assert_eq!(landmark_record.era_id, None);
+    assert_eq!(landmark_record.era_id(), None);
     assert_eq!(landmark_record.era_started_at_tick, None);
+    assert_eq!(landmark_record.era_started_at_tick(), None);
     assert_eq!(landmark_record.detection_score, 0);
+    assert_eq!(landmark_record.landmark_detection_score(), 0);
     assert_eq!(landmark_record.detection_reason, None);
+    assert_eq!(landmark_record.landmark_detection_reason(), None);
     assert_eq!(prefilter.landmark_label(), None);
     assert_eq!(prefilter.era_id(), None);
     assert_eq!(index_key.landmark_label(), None);
