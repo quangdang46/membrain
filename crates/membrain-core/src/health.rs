@@ -52,10 +52,26 @@ impl TrendDirection {
 /// One machine-readable trend aggregate used by health surfaces.
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
 pub struct HealthTrend {
+    pub subsystem: &'static str,
     pub metric: &'static str,
     pub previous: u64,
     pub current: u64,
     pub direction: TrendDirection,
+}
+
+/// One machine-readable metric sample attached to a subsystem health row.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+pub struct SubsystemMetric {
+    pub metric: &'static str,
+    pub value: u64,
+}
+
+/// One machine-readable trend rollup for a subsystem dashboard card.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+pub struct SubsystemTrendSummary {
+    pub subsystem: &'static str,
+    pub state: SubsystemHealthState,
+    pub trends: Vec<HealthTrend>,
 }
 
 /// One machine-readable feature-availability entry.
@@ -72,6 +88,21 @@ pub struct SubsystemStatus {
     pub subsystem: &'static str,
     pub state: SubsystemHealthState,
     pub detail: String,
+    pub metrics: Vec<SubsystemMetric>,
+    pub reasons: Vec<&'static str>,
+}
+
+/// Canonical degraded-mode status surface shared across operator interfaces.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+pub struct DegradedStatusSurface {
+    pub posture: AvailabilityPosture,
+    pub summary: String,
+    pub affected_subsystems: Vec<&'static str>,
+    pub surviving_query_capabilities: Vec<&'static str>,
+    pub surviving_mutation_capabilities: Vec<&'static str>,
+    pub degraded_reasons: Vec<&'static str>,
+    pub remediation_steps: Vec<&'static str>,
+    pub recommended_runbooks: Vec<&'static str>,
 }
 
 /// Per-cache-family health row used by aggregate health reports.
@@ -100,6 +131,10 @@ pub struct CacheHealthReport {
     pub hints_submitted: u64,
     pub hints_consumed: u64,
     pub hints_dropped: u64,
+    pub drop_budget_exhausted_count: u64,
+    pub drop_intent_changed_count: u64,
+    pub drop_scope_changed_count: u64,
+    pub drop_disabled_count: u64,
 }
 
 /// Aggregate index health summary derived from managed index reports.
@@ -135,6 +170,9 @@ pub struct RepairHealthReport {
     pub corrupt: u32,
     pub rebuilt: u32,
     pub queue_depth: u64,
+    pub degraded_mode: Option<&'static str>,
+    pub rollback_trigger: Option<&'static str>,
+    pub remediation_steps: Vec<&'static str>,
 }
 
 /// Inputs used to build the shared health report.
@@ -166,6 +204,19 @@ pub struct BrainHealthInputs {
     pub previous_total_recalls: Option<u64>,
     pub previous_total_encodes: Option<u64>,
     pub previous_repair_queue_depth: Option<u64>,
+    pub previous_hot_memories: Option<usize>,
+    pub previous_low_confidence_count: Option<usize>,
+    pub previous_unresolved_conflicts: Option<usize>,
+    pub previous_uncertain_count: Option<usize>,
+    pub previous_cache_hit_count: Option<u64>,
+    pub previous_cache_miss_count: Option<u64>,
+    pub previous_cache_bypass_count: Option<u64>,
+    pub previous_prefetch_queue_depth: Option<usize>,
+    pub previous_prefetch_drop_count: Option<u64>,
+    pub previous_index_stale_count: Option<usize>,
+    pub previous_index_missing_count: Option<usize>,
+    pub previous_index_repair_backlog_total: Option<usize>,
+    pub previous_availability_posture: Option<AvailabilityPosture>,
 }
 
 /// Canonical machine-readable operator health report.
@@ -193,10 +244,12 @@ pub struct BrainHealthReport {
     pub feature_availability: Vec<FeatureAvailabilityEntry>,
     pub availability_posture: Option<AvailabilityPosture>,
     pub availability_notes: Option<String>,
+    pub degraded_status: Option<DegradedStatusSurface>,
     pub cache: CacheHealthReport,
     pub indexes: IndexHealthSummary,
     pub repair: Option<RepairHealthReport>,
     pub subsystem_status: Vec<SubsystemStatus>,
+    pub trend_summary: Vec<SubsystemTrendSummary>,
     pub trends: Vec<HealthTrend>,
     pub total_recalls: u64,
     pub total_encodes: u64,
@@ -217,96 +270,339 @@ impl BrainHealthReport {
         let repair_queue_depth = repair.as_ref().map(|report| report.queue_depth);
         let availability_posture = inputs.availability.as_ref().map(|a| a.posture);
         let availability_notes = inputs.availability.as_ref().map(availability_note);
+        let degraded_status = degraded_status_surface(
+            inputs.availability.as_ref(),
+            &cache,
+            &indexes,
+            repair.as_ref(),
+        );
         let backpressure_state = backpressure_state(cache.prefetch_queue_depth, repair_queue_depth);
-        let mut subsystem_status = vec![
-            SubsystemStatus {
-                subsystem: "cache",
-                state: cache.state,
-                detail: format!(
-                    "hits={} misses={} bypasses={} queue_depth={}",
-                    cache.total_hit_count,
-                    cache.total_miss_count,
-                    cache.total_bypass_count,
-                    cache.prefetch_queue_depth
-                ),
-            },
-            SubsystemStatus {
-                subsystem: "index",
-                state: indexes.state,
-                detail: format!(
-                    "healthy={} stale={} needs_rebuild={} missing={} backlog={}",
-                    indexes.healthy_count,
-                    indexes.stale_count,
-                    indexes.needs_rebuild_count,
-                    indexes.missing_count,
-                    indexes.repair_backlog_total
-                ),
-            },
-        ];
+        let hot_utilization_pct = percent(inputs.hot_memories, inputs.hot_capacity);
+
+        let mut subsystem_status = vec![SubsystemStatus {
+            subsystem: "memory",
+            state: memory_state(
+                inputs.low_confidence_count,
+                inputs.unresolved_conflicts,
+                inputs.uncertain_count,
+            ),
+            detail: format!(
+                "hot_memories={} hot_utilization_pct={} low_confidence={} conflicts={} uncertain={}",
+                inputs.hot_memories,
+                hot_utilization_pct.round() as u64,
+                inputs.low_confidence_count,
+                inputs.unresolved_conflicts,
+                inputs.uncertain_count
+            ),
+            metrics: vec![
+                SubsystemMetric {
+                    metric: "hot_memories",
+                    value: inputs.hot_memories as u64,
+                },
+                SubsystemMetric {
+                    metric: "hot_capacity",
+                    value: inputs.hot_capacity as u64,
+                },
+                SubsystemMetric {
+                    metric: "hot_utilization_pct",
+                    value: hot_utilization_pct.round() as u64,
+                },
+                SubsystemMetric {
+                    metric: "low_confidence_count",
+                    value: inputs.low_confidence_count as u64,
+                },
+                SubsystemMetric {
+                    metric: "unresolved_conflicts",
+                    value: inputs.unresolved_conflicts as u64,
+                },
+                SubsystemMetric {
+                    metric: "uncertain_count",
+                    value: inputs.uncertain_count as u64,
+                },
+            ],
+            reasons: memory_reasons(
+                inputs.low_confidence_count,
+                inputs.unresolved_conflicts,
+                inputs.uncertain_count,
+            ),
+        }];
+        subsystem_status.push(SubsystemStatus {
+            subsystem: "cache",
+            state: cache.state,
+            detail: format!(
+                "hits={} misses={} bypasses={} stale_warnings={} queue_depth={} hints_dropped={}",
+                cache.total_hit_count,
+                cache.total_miss_count,
+                cache.total_bypass_count,
+                cache.total_stale_warning_count,
+                cache.prefetch_queue_depth,
+                cache.hints_dropped
+            ),
+            metrics: vec![
+                SubsystemMetric {
+                    metric: "cache_hit_count",
+                    value: cache.total_hit_count,
+                },
+                SubsystemMetric {
+                    metric: "cache_miss_count",
+                    value: cache.total_miss_count,
+                },
+                SubsystemMetric {
+                    metric: "cache_bypass_count",
+                    value: cache.total_bypass_count,
+                },
+                SubsystemMetric {
+                    metric: "cache_stale_warning_count",
+                    value: cache.total_stale_warning_count,
+                },
+                SubsystemMetric {
+                    metric: "prefetch_queue_depth",
+                    value: cache.prefetch_queue_depth as u64,
+                },
+                SubsystemMetric {
+                    metric: "prefetch_drop_count",
+                    value: cache.hints_dropped,
+                },
+            ],
+            reasons: cache_reasons(&cache),
+        });
+        subsystem_status.push(SubsystemStatus {
+            subsystem: "index",
+            state: indexes.state,
+            detail: format!(
+                "healthy={} stale={} needs_rebuild={} missing={} backlog={}",
+                indexes.healthy_count,
+                indexes.stale_count,
+                indexes.needs_rebuild_count,
+                indexes.missing_count,
+                indexes.repair_backlog_total
+            ),
+            metrics: vec![
+                SubsystemMetric {
+                    metric: "healthy_count",
+                    value: indexes.healthy_count as u64,
+                },
+                SubsystemMetric {
+                    metric: "stale_count",
+                    value: indexes.stale_count as u64,
+                },
+                SubsystemMetric {
+                    metric: "needs_rebuild_count",
+                    value: indexes.needs_rebuild_count as u64,
+                },
+                SubsystemMetric {
+                    metric: "missing_count",
+                    value: indexes.missing_count as u64,
+                },
+                SubsystemMetric {
+                    metric: "repair_backlog_total",
+                    value: indexes.repair_backlog_total as u64,
+                },
+            ],
+            reasons: index_reasons(&indexes),
+        });
         if let Some(repair) = &repair {
             subsystem_status.push(SubsystemStatus {
                 subsystem: "repair",
                 state: repair.state,
                 detail: format!(
-                    "checked={} degraded={} corrupt={} rebuilt={} queue_depth={}",
+                    "checked={} degraded={} corrupt={} rebuilt={} queue_depth={} degraded_mode={} rollback_trigger={} remediation_steps={}",
                     repair.targets_checked,
                     repair.degraded,
                     repair.corrupt,
                     repair.rebuilt,
-                    repair.queue_depth
+                    repair.queue_depth,
+                    repair.degraded_mode.unwrap_or("none"),
+                    repair.rollback_trigger.unwrap_or("none"),
+                    if repair.remediation_steps.is_empty() {
+                        "none".to_string()
+                    } else {
+                        repair.remediation_steps.join(",")
+                    }
                 ),
+                metrics: vec![
+                    SubsystemMetric {
+                        metric: "targets_checked",
+                        value: repair.targets_checked as u64,
+                    },
+                    SubsystemMetric {
+                        metric: "degraded_count",
+                        value: repair.degraded as u64,
+                    },
+                    SubsystemMetric {
+                        metric: "corrupt_count",
+                        value: repair.corrupt as u64,
+                    },
+                    SubsystemMetric {
+                        metric: "rebuilt_count",
+                        value: repair.rebuilt as u64,
+                    },
+                    SubsystemMetric {
+                        metric: "queue_depth",
+                        value: repair.queue_depth,
+                    },
+                ],
+                reasons: repair_reasons(repair),
             });
         }
         if let Some(availability) = &inputs.availability {
             subsystem_status.push(SubsystemStatus {
                 subsystem: "availability",
-                state: match availability.posture {
-                    AvailabilityPosture::Full => SubsystemHealthState::Healthy,
-                    AvailabilityPosture::Degraded | AvailabilityPosture::ReadOnly => {
-                        SubsystemHealthState::Degraded
-                    }
-                    AvailabilityPosture::Offline => SubsystemHealthState::Unavailable,
-                },
+                state: availability_state(availability.posture),
                 detail: format!(
                     "posture={} reasons={} recovery={}",
                     availability.posture.as_str(),
-                    availability.reason_names().join(","),
-                    availability.recovery_condition_names().join(",")
+                    join_or_none(&availability.reason_names()),
+                    join_or_none(&availability.recovery_condition_names())
                 ),
+                metrics: vec![SubsystemMetric {
+                    metric: "availability_posture",
+                    value: availability_rank(availability.posture) as u64,
+                }],
+                reasons: availability.reason_names(),
             });
         }
 
         let mut trends = Vec::new();
-        if let Some(previous) = inputs.previous_total_recalls {
-            trends.push(HealthTrend {
-                metric: "total_recalls",
-                previous,
-                current: inputs.total_recalls,
-                direction: higher_is_better(previous, inputs.total_recalls),
-            });
-        }
-        if let Some(previous) = inputs.previous_total_encodes {
-            trends.push(HealthTrend {
-                metric: "total_encodes",
-                previous,
-                current: inputs.total_encodes,
-                direction: higher_is_better(previous, inputs.total_encodes),
-            });
-        }
-        if let Some(previous) = inputs.previous_repair_queue_depth.zip(repair_queue_depth) {
-            trends.push(HealthTrend {
-                metric: "repair_queue_depth",
-                previous: previous.0,
-                current: previous.1,
-                direction: lower_is_better(previous.0, previous.1),
-            });
-        }
+        push_trend(
+            &mut trends,
+            "memory",
+            "hot_memories",
+            inputs.previous_hot_memories.map(|value| value as u64),
+            Some(inputs.hot_memories as u64),
+            higher_is_better,
+        );
+        push_trend(
+            &mut trends,
+            "memory",
+            "low_confidence_count",
+            inputs.previous_low_confidence_count.map(|value| value as u64),
+            Some(inputs.low_confidence_count as u64),
+            lower_is_better,
+        );
+        push_trend(
+            &mut trends,
+            "memory",
+            "unresolved_conflicts",
+            inputs.previous_unresolved_conflicts.map(|value| value as u64),
+            Some(inputs.unresolved_conflicts as u64),
+            lower_is_better,
+        );
+        push_trend(
+            &mut trends,
+            "memory",
+            "uncertain_count",
+            inputs.previous_uncertain_count.map(|value| value as u64),
+            Some(inputs.uncertain_count as u64),
+            lower_is_better,
+        );
+        push_trend(
+            &mut trends,
+            "activity",
+            "total_recalls",
+            inputs.previous_total_recalls,
+            Some(inputs.total_recalls),
+            higher_is_better,
+        );
+        push_trend(
+            &mut trends,
+            "activity",
+            "total_encodes",
+            inputs.previous_total_encodes,
+            Some(inputs.total_encodes),
+            higher_is_better,
+        );
+        push_trend(
+            &mut trends,
+            "cache",
+            "cache_hit_count",
+            inputs.previous_cache_hit_count,
+            Some(cache.total_hit_count),
+            higher_is_better,
+        );
+        push_trend(
+            &mut trends,
+            "cache",
+            "cache_miss_count",
+            inputs.previous_cache_miss_count,
+            Some(cache.total_miss_count),
+            lower_is_better,
+        );
+        push_trend(
+            &mut trends,
+            "cache",
+            "cache_bypass_count",
+            inputs.previous_cache_bypass_count,
+            Some(cache.total_bypass_count),
+            lower_is_better,
+        );
+        push_trend(
+            &mut trends,
+            "cache",
+            "prefetch_queue_depth",
+            inputs.previous_prefetch_queue_depth.map(|value| value as u64),
+            Some(cache.prefetch_queue_depth as u64),
+            lower_is_better,
+        );
+        push_trend(
+            &mut trends,
+            "cache",
+            "prefetch_drop_count",
+            inputs.previous_prefetch_drop_count,
+            Some(cache.hints_dropped),
+            lower_is_better,
+        );
+        push_trend(
+            &mut trends,
+            "index",
+            "stale_count",
+            inputs.previous_index_stale_count.map(|value| value as u64),
+            Some(indexes.stale_count as u64),
+            lower_is_better,
+        );
+        push_trend(
+            &mut trends,
+            "index",
+            "missing_count",
+            inputs.previous_index_missing_count.map(|value| value as u64),
+            Some(indexes.missing_count as u64),
+            lower_is_better,
+        );
+        push_trend(
+            &mut trends,
+            "index",
+            "repair_backlog_total",
+            inputs
+                .previous_index_repair_backlog_total
+                .map(|value| value as u64),
+            Some(indexes.repair_backlog_total as u64),
+            lower_is_better,
+        );
+        push_trend(
+            &mut trends,
+            "repair",
+            "repair_queue_depth",
+            inputs.previous_repair_queue_depth,
+            repair_queue_depth,
+            lower_is_better,
+        );
+        push_trend(
+            &mut trends,
+            "availability",
+            "availability_posture",
+            inputs
+                .previous_availability_posture
+                .map(|posture| availability_rank(posture) as u64),
+            availability_posture.map(|posture| availability_rank(posture) as u64),
+            lower_is_better,
+        );
+        let trend_summary = summarize_trends(&trends, &subsystem_status);
 
         Self {
             hot_memories: inputs.hot_memories,
             hot_capacity: inputs.hot_capacity,
             cold_memories: inputs.cold_memories,
-            hot_utilization_pct: percent(inputs.hot_memories, inputs.hot_capacity),
+            hot_utilization_pct,
             avg_strength: inputs.avg_strength,
             avg_confidence: inputs.avg_confidence,
             low_confidence_count: inputs.low_confidence_count,
@@ -325,10 +621,12 @@ impl BrainHealthReport {
             feature_availability: inputs.feature_availability,
             availability_posture,
             availability_notes,
+            degraded_status,
             cache,
             indexes,
             repair,
             subsystem_status,
+            trend_summary,
             trends,
             total_recalls: inputs.total_recalls,
             total_encodes: inputs.total_encodes,
@@ -422,6 +720,10 @@ impl CacheHealthReport {
             hints_submitted: cache.prefetch.metrics.hints_submitted,
             hints_consumed: cache.prefetch.metrics.hints_consumed,
             hints_dropped: cache.prefetch.metrics.hints_dropped,
+            drop_budget_exhausted_count: cache.prefetch.metrics.dropped_budget_exhausted,
+            drop_intent_changed_count: cache.prefetch.metrics.dropped_intent_changed,
+            drop_scope_changed_count: cache.prefetch.metrics.dropped_scope_changed,
+            drop_disabled_count: cache.prefetch.metrics.dropped_disabled,
         }
     }
 }
@@ -495,6 +797,30 @@ impl RepairHealthReport {
             corrupt: summary.corrupt,
             rebuilt: summary.rebuilt,
             queue_depth,
+            degraded_mode: summary.degraded_mode.map(|mode| mode.as_str()),
+            rollback_trigger: summary.rollback_trigger.map(|trigger| trigger.as_str()),
+            remediation_steps: summary
+                .operator_reports
+                .iter()
+                .find(|report| report.degraded_mode.is_some() || report.rollback_trigger.is_some())
+                .map(|report| {
+                    report
+                        .remediation_steps
+                        .iter()
+                        .map(|step| step.as_str())
+                        .collect()
+                })
+                .unwrap_or_else(|| {
+                    let mut steps = vec!["check_health"];
+                    if summary.rollback_trigger.is_some() {
+                        steps.push("rollback_recent_change");
+                    }
+                    if summary.degraded_mode.is_some() {
+                        steps.push("run_repair");
+                        steps.push("inspect_state");
+                    }
+                    steps
+                }),
         }
     }
 }
@@ -562,6 +888,249 @@ fn availability_note(availability: &AvailabilitySummary) -> String {
                 recovery.join(",")
             }
         )
+    }
+}
+
+fn memory_state(
+    low_confidence_count: usize,
+    unresolved_conflicts: usize,
+    uncertain_count: usize,
+) -> SubsystemHealthState {
+    if unresolved_conflicts > 0 {
+        SubsystemHealthState::Blocked
+    } else if low_confidence_count > 0 || uncertain_count > 0 {
+        SubsystemHealthState::Degraded
+    } else {
+        SubsystemHealthState::Healthy
+    }
+}
+
+fn memory_reasons(
+    low_confidence_count: usize,
+    unresolved_conflicts: usize,
+    uncertain_count: usize,
+) -> Vec<&'static str> {
+    let mut reasons = Vec::new();
+    if low_confidence_count > 0 {
+        reasons.push("low_confidence_present");
+    }
+    if unresolved_conflicts > 0 {
+        reasons.push("conflicts_unresolved");
+    }
+    if uncertain_count > 0 {
+        reasons.push("uncertain_memories_present");
+    }
+    reasons
+}
+
+fn cache_reasons(cache: &CacheHealthReport) -> Vec<&'static str> {
+    let mut reasons = Vec::new();
+    if cache
+        .family_status
+        .iter()
+        .any(|family| family.state == SubsystemHealthState::Unavailable)
+    {
+        reasons.push("cache_family_unavailable");
+    }
+    if cache.total_bypass_count > 0 {
+        reasons.push("cache_bypass_detected");
+    }
+    if cache.total_stale_warning_count > 0 {
+        reasons.push("cache_stale_warning_detected");
+    }
+    if cache.hints_dropped > 0 {
+        reasons.push("prefetch_drop_detected");
+    }
+    reasons
+}
+
+fn index_reasons(indexes: &IndexHealthSummary) -> Vec<&'static str> {
+    let mut reasons = Vec::new();
+    if indexes.stale_count > 0 {
+        reasons.push("stale_index_present");
+    }
+    if indexes.needs_rebuild_count > 0 {
+        reasons.push("index_rebuild_required");
+    }
+    if indexes.missing_count > 0 {
+        reasons.push("index_missing");
+    }
+    if indexes.repair_backlog_total > 0 {
+        reasons.push("index_repair_backlog");
+    }
+    reasons
+}
+
+fn repair_reasons(repair: &RepairHealthReport) -> Vec<&'static str> {
+    let mut reasons = Vec::new();
+    if repair.degraded > 0 {
+        reasons.push("repair_degraded_targets_present");
+    }
+    if repair.corrupt > 0 {
+        reasons.push("repair_corrupt_targets_present");
+    }
+    if repair.queue_depth > 0 {
+        reasons.push("repair_queue_backlog");
+    }
+    if repair.rollback_trigger.is_some() {
+        reasons.push("repair_rollback_triggered");
+    }
+    reasons
+}
+
+fn availability_state(posture: AvailabilityPosture) -> SubsystemHealthState {
+    match posture {
+        AvailabilityPosture::Full => SubsystemHealthState::Healthy,
+        AvailabilityPosture::Degraded | AvailabilityPosture::ReadOnly => {
+            SubsystemHealthState::Degraded
+        }
+        AvailabilityPosture::Offline => SubsystemHealthState::Unavailable,
+    }
+}
+
+fn availability_rank(posture: AvailabilityPosture) -> u8 {
+    match posture {
+        AvailabilityPosture::Full => 0,
+        AvailabilityPosture::Degraded => 1,
+        AvailabilityPosture::ReadOnly => 2,
+        AvailabilityPosture::Offline => 3,
+    }
+}
+
+fn push_trend(
+    trends: &mut Vec<HealthTrend>,
+    subsystem: &'static str,
+    metric: &'static str,
+    previous: Option<u64>,
+    current: Option<u64>,
+    comparator: fn(u64, u64) -> TrendDirection,
+) {
+    if let Some((previous, current)) = previous.zip(current) {
+        trends.push(HealthTrend {
+            subsystem,
+            metric,
+            previous,
+            current,
+            direction: comparator(previous, current),
+        });
+    }
+}
+
+fn summarize_trends(
+    trends: &[HealthTrend],
+    subsystem_status: &[SubsystemStatus],
+) -> Vec<SubsystemTrendSummary> {
+    subsystem_status
+        .iter()
+        .map(|status| SubsystemTrendSummary {
+            subsystem: status.subsystem,
+            state: status.state,
+            trends: trends
+                .iter()
+                .filter(|trend| trend.subsystem == status.subsystem)
+                .cloned()
+                .collect(),
+        })
+        .collect()
+}
+
+fn degraded_status_surface(
+    availability: Option<&AvailabilitySummary>,
+    cache: &CacheHealthReport,
+    indexes: &IndexHealthSummary,
+    repair: Option<&RepairHealthReport>,
+) -> Option<DegradedStatusSurface> {
+    let availability = availability?;
+    if availability.posture == AvailabilityPosture::Full {
+        return None;
+    }
+
+    let mut affected_subsystems = Vec::new();
+    if cache.state != SubsystemHealthState::Healthy {
+        affected_subsystems.push("cache");
+    }
+    if indexes.state != SubsystemHealthState::Healthy {
+        affected_subsystems.push("index");
+    }
+    if repair.is_some_and(|report| report.state != SubsystemHealthState::Healthy) {
+        affected_subsystems.push("repair");
+    }
+    if affected_subsystems.is_empty() {
+        affected_subsystems.push("availability");
+    }
+
+    let degraded_reasons = availability.reason_names();
+    let remediation_steps = availability.recovery_condition_names();
+    let recommended_runbooks = recommended_runbooks(&degraded_reasons, repair);
+    let summary = format!(
+        "posture={} affected_subsystems={} surviving_queries={} surviving_mutations={} reasons={} remediation={} runbooks={}",
+        availability.posture.as_str(),
+        affected_subsystems.join(","),
+        join_or_none(&availability.query_capabilities),
+        join_or_none(&availability.mutation_capabilities),
+        join_or_none(&degraded_reasons),
+        join_or_none(&remediation_steps),
+        join_or_none(&recommended_runbooks),
+    );
+
+    Some(DegradedStatusSurface {
+        posture: availability.posture,
+        summary,
+        affected_subsystems,
+        surviving_query_capabilities: availability.query_capabilities.clone(),
+        surviving_mutation_capabilities: availability.mutation_capabilities.clone(),
+        degraded_reasons,
+        remediation_steps,
+        recommended_runbooks,
+    })
+}
+
+fn recommended_runbooks(
+    degraded_reasons: &[&'static str],
+    repair: Option<&RepairHealthReport>,
+) -> Vec<&'static str> {
+    let mut runbooks = Vec::new();
+    if degraded_reasons
+        .iter()
+        .any(|reason| matches!(*reason, "index_bypassed" | "cache_invalidated"))
+    {
+        runbooks.push("index_rebuild_operations");
+    }
+    if degraded_reasons
+        .iter()
+        .any(|reason| *reason == "index_bypassed")
+    {
+        runbooks.push("tier2_index_drift");
+    }
+    if degraded_reasons.iter().any(|reason| {
+        matches!(
+            *reason,
+            "repair_in_flight" | "repair_rollback_required" | "repair_rollback_in_progress"
+        )
+    }) || repair.is_some_and(|report| report.queue_depth > 0)
+    {
+        runbooks.push("repair_backlog_growth");
+    }
+    if degraded_reasons.iter().any(|reason| {
+        matches!(
+            *reason,
+            "graph_unavailable" | "authoritative_input_unreadable"
+        )
+    }) || repair.is_some_and(|report| report.state == SubsystemHealthState::Blocked)
+    {
+        runbooks.push("incident_response");
+    }
+    if runbooks.is_empty() {
+        runbooks.push("incident_response");
+    }
+    runbooks
+}
+
+fn join_or_none(values: &[&'static str]) -> String {
+    if values.is_empty() {
+        "none".to_string()
+    } else {
+        values.join(",")
     }
 }
 
@@ -633,6 +1202,10 @@ mod tests {
             error_count: 2,
             rebuild_duration_ms: 33,
             rollback_state: Some("rollback_required"),
+            degraded_mode: Some(crate::engine::repair::RepairDegradedMode::EnterReadOnly),
+            rollback_trigger: Some(
+                crate::engine::repair::RepairRollbackTrigger::VerificationMismatch,
+            ),
             queue_report: crate::observability::MaintenanceQueueReport {
                 queue_family: "repair",
                 queue_status: crate::observability::MaintenanceQueueStatus::Partial,
@@ -648,10 +1221,23 @@ mod tests {
             verification_artifacts: HashMap::new(),
             operator_reports: Vec::new(),
             graph_rebuild_reports: HashMap::new(),
+            cache_invalidation_reports: HashMap::new(),
+            cache_warmup_reports: HashMap::new(),
         });
 
         assert_eq!(report.state, SubsystemHealthState::Blocked);
         assert_eq!(report.queue_depth, 2);
+        assert_eq!(report.degraded_mode, Some("enter_read_only"));
+        assert_eq!(report.rollback_trigger, Some("verification_mismatch"));
+        assert_eq!(
+            report.remediation_steps,
+            vec![
+                "check_health",
+                "rollback_recent_change",
+                "run_repair",
+                "inspect_state"
+            ]
+        );
     }
 
     #[test]
@@ -688,6 +1274,8 @@ mod tests {
             error_count: 2,
             rebuild_duration_ms: 41,
             rollback_state: Some("rollback_required"),
+            degraded_mode: Some(crate::engine::repair::RepairDegradedMode::EnterReadOnly),
+            rollback_trigger: Some(crate::engine::repair::RepairRollbackTrigger::VerificationMismatch),
             queue_report: crate::observability::MaintenanceQueueReport {
                 queue_family: "repair",
                 queue_status: crate::observability::MaintenanceQueueStatus::Partial,
@@ -706,6 +1294,7 @@ mod tests {
                 verification_passed: false,
                 rebuild_entrypoint: Some(IndexRepairEntrypoint::RebuildIfNeeded),
                 rebuilt_outputs: vec!["fts5_memory_index"],
+                repair_hooks: Vec::new(),
             }],
             verification_artifacts: HashMap::from([(
                 RepairTarget::LexicalIndex,
@@ -717,6 +1306,7 @@ mod tests {
                     derived_generation: "durable.v1",
                     parity_check: "fts5_projection_matches_durable_truth",
                     verification_passed: false,
+                    repair_hooks: Vec::new(),
                 },
             )]),
             operator_reports: vec![RepairOperatorReport {
@@ -725,16 +1315,31 @@ mod tests {
                 verification_passed: false,
                 rebuild_entrypoint: Some(IndexRepairEntrypoint::RebuildIfNeeded),
                 rebuilt_outputs: vec!["fts5_memory_index"],
+                durable_sources: vec!["durable_memory_records"],
+                repair_hooks: Vec::new(),
                 verification_artifact_name: "fts5_lexical_parity",
                 affected_item_count: 10,
                 error_count: 2,
                 rebuild_duration_ms: 41,
                 rollback_state: Some("rollback_required"),
+                degraded_mode: Some(crate::engine::repair::RepairDegradedMode::EnterReadOnly),
+                rollback_trigger: Some(crate::engine::repair::RepairRollbackTrigger::VerificationMismatch),
+                remediation_steps: vec![
+                    RemediationStep::CheckHealth,
+                    RemediationStep::RollbackRecentChange,
+                    RemediationStep::RunRepair,
+                    RemediationStep::InspectState,
+                ],
                 queue_depth_before: 3,
                 queue_depth_after: 0,
-                operator_log: "target=lexical_index status=corrupt affected_item_count=10 error_count=2 rebuild_duration_ms=41 rollback_state=rollback_required queue_depth_before=3 queue_depth_after=0".to_string(),
+                graph_hooks: Vec::new(),
+                cache_invalidation_events: Vec::new(),
+                cache_warmup_events: Vec::new(),
+                operator_log: "target=lexical_index status=corrupt affected_item_count=10 error_count=2 rebuild_duration_ms=41 rollback_state=rollback_required degraded_mode=enter_read_only rollback_trigger=verification_mismatch remediation_steps=check_health,rollback_recent_change,run_repair,inspect_state queue_depth_before=3 queue_depth_after=0".to_string(),
             }],
             graph_rebuild_reports: HashMap::new(),
+            cache_invalidation_reports: HashMap::new(),
+            cache_warmup_reports: HashMap::new(),
         };
 
         let report = BrainHealthReport::from_inputs(
@@ -774,6 +1379,19 @@ mod tests {
                 previous_total_recalls: Some(44),
                 previous_total_encodes: Some(10),
                 previous_repair_queue_depth: Some(0),
+                previous_hot_memories: Some(70),
+                previous_low_confidence_count: Some(5),
+                previous_unresolved_conflicts: Some(2),
+                previous_uncertain_count: Some(4),
+                previous_cache_hit_count: Some(0),
+                previous_cache_miss_count: Some(1),
+                previous_cache_bypass_count: Some(0),
+                previous_prefetch_queue_depth: Some(0),
+                previous_prefetch_drop_count: Some(0),
+                previous_index_stale_count: Some(0),
+                previous_index_missing_count: Some(0),
+                previous_index_repair_backlog_total: Some(0),
+                previous_availability_posture: Some(AvailabilityPosture::Full),
             },
             &cache,
             Some(&repair_summary),
@@ -787,11 +1405,46 @@ mod tests {
         assert_eq!(report.backpressure_state, Some("high"));
         assert_eq!(report.repair_queue_depth, Some(2));
         assert_eq!(report.repair.as_ref().map(|r| r.targets_checked), Some(3));
+        assert_eq!(
+            report.degraded_status.as_ref().map(|status| status.posture),
+            Some(AvailabilityPosture::Degraded)
+        );
+        assert!(report.degraded_status.as_ref().is_some_and(|status| status
+            .affected_subsystems
+            .contains(&"cache")
+            && status.affected_subsystems.contains(&"index")
+            && status.affected_subsystems.contains(&"repair")
+            && status.surviving_query_capabilities == vec!["recall", "health"]
+            && status.surviving_mutation_capabilities == vec!["encode"]
+            && status
+                .degraded_reasons
+                .contains(&"repair_rollback_required")
+            && status.remediation_steps.contains(&"run_repair")
+            && status
+                .recommended_runbooks
+                .contains(&"repair_backlog_growth")));
+        assert_eq!(
+            report.repair.as_ref().and_then(|r| r.degraded_mode),
+            Some("enter_read_only")
+        );
+        assert_eq!(
+            report.repair.as_ref().and_then(|r| r.rollback_trigger),
+            Some("verification_mismatch")
+        );
         assert!(report
             .subsystem_status
             .iter()
             .find(|status| status.subsystem == "repair")
-            .is_some_and(|status| status.detail.contains("queue_depth=2")));
+            .is_some_and(|status| {
+                status.detail.contains("queue_depth=2")
+                    && status.detail.contains("degraded_mode=enter_read_only")
+                    && status
+                        .detail
+                        .contains("rollback_trigger=verification_mismatch")
+                    && status.reasons.contains(&"repair_corrupt_targets_present")
+                    && status.metrics.iter().any(|metric| metric.metric == "queue_depth"
+                        && metric.value == 2)
+            }));
         assert_eq!(report.cache.state, SubsystemHealthState::Unavailable);
         assert_eq!(report.indexes.state, SubsystemHealthState::Degraded);
         assert_eq!(
@@ -802,17 +1455,38 @@ mod tests {
             .subsystem_status
             .iter()
             .any(|row| row.subsystem == "availability"
-                && row.state == SubsystemHealthState::Degraded));
+                && row.state == SubsystemHealthState::Degraded
+                && row.reasons.contains(&"repair_rollback_required")));
+        assert!(report
+            .subsystem_status
+            .iter()
+            .any(|row| row.subsystem == "memory"
+                && row.state == SubsystemHealthState::Blocked
+                && row.reasons.contains(&"conflicts_unresolved")));
         assert!(report
             .trends
             .iter()
-            .any(|trend| trend.metric == "total_recalls"
+            .any(|trend| trend.subsystem == "activity"
+                && trend.metric == "total_recalls"
                 && trend.direction == TrendDirection::Improving));
         assert!(report
             .trends
             .iter()
-            .any(|trend| trend.metric == "repair_queue_depth"
+            .any(|trend| trend.subsystem == "repair"
+                && trend.metric == "repair_queue_depth"
                 && trend.direction == TrendDirection::Worsening));
+        assert!(report
+            .trends
+            .iter()
+            .any(|trend| trend.subsystem == "memory"
+                && trend.metric == "unresolved_conflicts"
+                && trend.direction == TrendDirection::Improving));
+        assert!(report
+            .trend_summary
+            .iter()
+            .find(|summary| summary.subsystem == "cache")
+            .is_some_and(|summary| summary.state == SubsystemHealthState::Unavailable
+                && summary.trends.iter().any(|trend| trend.metric == "cache_hit_count")));
         assert!(report
             .cache
             .family_status
@@ -873,6 +1547,19 @@ mod tests {
                 previous_total_recalls: None,
                 previous_total_encodes: None,
                 previous_repair_queue_depth: None,
+                previous_hot_memories: None,
+                previous_low_confidence_count: None,
+                previous_unresolved_conflicts: None,
+                previous_uncertain_count: None,
+                previous_cache_hit_count: None,
+                previous_cache_miss_count: None,
+                previous_cache_bypass_count: None,
+                previous_prefetch_queue_depth: None,
+                previous_prefetch_drop_count: None,
+                previous_index_stale_count: None,
+                previous_index_missing_count: None,
+                previous_index_repair_backlog_total: None,
+                previous_availability_posture: None,
             },
             &cache,
             None,
@@ -889,7 +1576,15 @@ mod tests {
         assert_eq!(prefetch_family.bypass_count, 2);
         assert_eq!(report.cache.hints_submitted, 2);
         assert_eq!(report.cache.hints_dropped, 2);
+        assert_eq!(report.cache.drop_scope_changed_count, 2);
         assert_eq!(report.cache.total_bypass_count, 2);
         assert_eq!(report.cache.state, SubsystemHealthState::Degraded);
+        assert!(report
+            .subsystem_status
+            .iter()
+            .find(|row| row.subsystem == "cache")
+            .is_some_and(|row| row.reasons.contains(&"prefetch_drop_detected")
+                && row.metrics.iter().any(|metric| metric.metric == "prefetch_drop_count"
+                    && metric.value == 2)));
     }
 }

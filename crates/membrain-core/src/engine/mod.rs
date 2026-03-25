@@ -8,10 +8,12 @@ pub mod consolidation;
 pub mod context_budget;
 /// Contradiction records and conflict-aware storage surfaces.
 pub mod contradiction;
+/// Semantic comparison inputs and snapshot diff surfaces.
+pub mod diff;
+/// Offline dream-mode scheduling and bounded synthesis surfaces.
+pub mod dream;
 /// Encode-path orchestration surfaces.
 pub mod encode;
-/// Passive-observation segmentation and bounded intake surfaces.
-pub mod observe;
 /// Episode formation and grouping rules.
 pub mod episode;
 /// Forgetting and demotion maintenance surfaces.
@@ -20,8 +22,12 @@ pub mod forgetting;
 pub mod intent;
 /// Proactive and retroactive interference detection and penalty surfaces.
 pub mod interference;
+/// Lease-policy, freshness-state, and bounded lease scanning surfaces.
+pub mod lease;
 /// Shared cancellable maintenance control surfaces.
 pub mod maintenance;
+/// Passive-observation segmentation and bounded intake surfaces.
+pub mod observe;
 /// Ranking and score-fusion surfaces.
 pub mod ranking;
 /// Recall-path orchestration surfaces.

@@ -1,4 +1,5 @@
 use crate::api::{AgentId, NamespaceId, WorkspaceId};
+use crate::observability::AuditEventKind;
 use crate::policy::SharingVisibility;
 
 /// Version of the shared core API consumed by wrapper crates.
@@ -12,7 +13,7 @@ pub struct CoreApiVersion {
 
 impl CoreApiVersion {
     pub(crate) const fn current() -> Self {
-        Self { major: 0, minor: 2 }
+        Self { major: 0, minor: 5 }
     }
 }
 
@@ -179,6 +180,8 @@ pub struct RawEncodeInput {
     pub landmark_signals: Option<LandmarkSignals>,
     /// Optional currently active era carried by the caller for non-landmark memories.
     pub active_era_id: Option<String>,
+    /// Optional current logical tick so landmark era boundaries can use an absolute anchor.
+    pub current_tick: Option<u64>,
 }
 
 impl RawEncodeInput {
@@ -189,6 +192,7 @@ impl RawEncodeInput {
             raw_text: raw_text.into(),
             landmark_signals: None,
             active_era_id: None,
+            current_tick: None,
         }
     }
 
@@ -201,6 +205,12 @@ impl RawEncodeInput {
     /// Attaches the caller's currently active era for additive temporal anchoring.
     pub fn with_active_era_id(mut self, active_era_id: impl Into<String>) -> Self {
         self.active_era_id = Some(active_era_id.into());
+        self
+    }
+
+    /// Attaches the caller's current logical tick for absolute era boundary anchoring.
+    pub fn with_current_tick(mut self, current_tick: u64) -> Self {
+        self.current_tick = Some(current_tick);
         self
     }
 }
@@ -259,6 +269,10 @@ pub struct NormalizedMemoryEnvelope {
     pub observation_source: Option<String>,
     /// Optional passive-observation batch grouping preserved for inspect and repair.
     pub observation_chunk_id: Option<String>,
+    /// Whether this record already has causal parents in durable truth.
+    pub has_causal_parents: bool,
+    /// Whether this record is already a source for downstream causal children.
+    pub has_causal_children: bool,
     /// Cross-agent sharing envelope preserved for later namespace and visibility mediation.
     pub sharing: SharingMetadata,
 }
@@ -270,6 +284,31 @@ pub struct MemoryId(pub u64);
 /// Stable identifier for one named time-travel snapshot.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
 pub struct SnapshotId(pub u64);
+
+/// Retention semantics attached to one named snapshot handle.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SnapshotRetentionClass {
+    /// Ordinary historical anchor that can be deleted when policy allows.
+    Standard,
+    /// Restorable safety anchor that must not be silently dropped when it is the last active one.
+    Restorable,
+}
+
+impl SnapshotRetentionClass {
+    /// Returns the stable machine-readable retention label.
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Standard => "standard",
+            Self::Restorable => "restorable",
+        }
+    }
+
+    /// Returns whether deletion must preserve at least one active anchor in scope.
+    pub const fn requires_anchor_protection(self) -> bool {
+        matches!(self, Self::Restorable)
+    }
+}
 
 /// Durable anchor used when retrieval or maintenance targets historical state.
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
@@ -308,6 +347,76 @@ impl SnapshotAnchor {
             Self::Tick { .. } => None,
         }
     }
+
+    /// Returns a stable display label for operator-facing surfaces.
+    pub fn display_label(&self) -> String {
+        match self {
+            Self::Named { snapshot_name, .. } => format!("snapshot:{snapshot_name}"),
+            Self::Tick { as_of_tick } => format!("tick:{as_of_tick}"),
+        }
+    }
+}
+
+/// Stable category names surfaced by semantic diff outputs.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SemanticDiffCategory {
+    New,
+    Strengthened,
+    Weakened,
+    Archived,
+    Conflicting,
+    DerivedState,
+}
+
+impl SemanticDiffCategory {
+    /// Returns the stable machine-readable category label.
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::New => "new",
+            Self::Strengthened => "strengthened",
+            Self::Weakened => "weakened",
+            Self::Archived => "archived",
+            Self::Conflicting => "conflicting",
+            Self::DerivedState => "derived_state",
+        }
+    }
+}
+
+/// Directional change between two anchored historical states.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct SemanticDiffEntry {
+    /// Stable diff category for downstream formatting.
+    pub category: SemanticDiffCategory,
+    /// Human-readable bounded summary of the detected change.
+    pub summary: String,
+    /// Optional memory identity linked to the change when evidence names one.
+    pub memory_id: Option<MemoryId>,
+    /// Optional audit kind that supplied the evidence for this diff row.
+    pub audit_kind: Option<AuditEventKind>,
+    /// First anchor where the change was absent.
+    pub before_anchor: SnapshotAnchor,
+    /// Second anchor where the change became visible.
+    pub after_anchor: SnapshotAnchor,
+    /// Whether the diff row reflects unresolved conflict rather than consensus.
+    pub unresolved: bool,
+}
+
+/// Structured semantic diff artifact comparing two historical anchors.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct SemanticDiff {
+    /// Namespace the compared anchors belong to.
+    pub namespace: NamespaceId,
+    /// Earlier anchor used as the baseline.
+    pub before_anchor: SnapshotAnchor,
+    /// Later anchor used as the comparison target.
+    pub after_anchor: SnapshotAnchor,
+    /// Stable category counts across all surfaced diff rows.
+    pub category_counts: Vec<(SemanticDiffCategory, usize)>,
+    /// Bounded inspectable diff rows ordered by category and tick.
+    pub entries: Vec<SemanticDiffEntry>,
+    /// Explicit caveat describing what this artifact does not prove.
+    pub caution: &'static str,
 }
 
 /// Durable metadata stored for one named snapshot without copying memory payloads.
@@ -321,6 +430,14 @@ pub struct SnapshotMetadata {
     pub snapshot_name: String,
     /// Logical tick captured by the snapshot.
     pub as_of_tick: u64,
+    /// Logical tick when the snapshot metadata row was created.
+    pub created_at_tick: u64,
+    /// Optional operator note attached to the named historical anchor.
+    pub note: Option<String>,
+    /// Number of visible namespace-scoped memories counted at capture time.
+    pub memory_count: u64,
+    /// Retention class controlling how eagerly the handle may be deleted.
+    pub retention_class: SnapshotRetentionClass,
     /// Whether the snapshot is still active for historical recall.
     pub active: bool,
 }
@@ -333,11 +450,39 @@ impl SnapshotMetadata {
         snapshot_name: impl Into<String>,
         as_of_tick: u64,
     ) -> Self {
+        Self::captured(
+            snapshot_id,
+            namespace,
+            snapshot_name,
+            as_of_tick,
+            as_of_tick,
+            None,
+            0,
+            SnapshotRetentionClass::Standard,
+        )
+    }
+
+    /// Builds one explicit captured snapshot with retention and bounded storage metadata.
+    #[allow(clippy::too_many_arguments)]
+    pub fn captured(
+        snapshot_id: SnapshotId,
+        namespace: NamespaceId,
+        snapshot_name: impl Into<String>,
+        as_of_tick: u64,
+        created_at_tick: u64,
+        note: Option<String>,
+        memory_count: u64,
+        retention_class: SnapshotRetentionClass,
+    ) -> Self {
         Self {
             snapshot_id,
             namespace,
             snapshot_name: snapshot_name.into(),
             as_of_tick,
+            created_at_tick,
+            note,
+            memory_count,
+            retention_class,
             active: true,
         }
     }
@@ -351,6 +496,11 @@ impl SnapshotMetadata {
         }
     }
 
+    /// Returns whether this snapshot is protected as a restorable safety anchor.
+    pub const fn is_restorable(&self) -> bool {
+        self.retention_class.requires_anchor_protection()
+    }
+
     /// Marks the snapshot as deleted while preserving its durable identity.
     pub fn deleted(mut self) -> Self {
         self.active = false;
@@ -360,9 +510,14 @@ impl SnapshotMetadata {
 
 #[cfg(test)]
 mod tests {
-    use super::{SharingMetadata, SnapshotAnchor, SnapshotId, SnapshotMetadata};
+    use super::{
+        SemanticDiff, SemanticDiffCategory, SemanticDiffEntry, SharingMetadata, SnapshotAnchor,
+        SnapshotId, SnapshotMetadata, SnapshotRetentionClass,
+    };
     use crate::api::{AgentId, NamespaceId, WorkspaceId};
+    use crate::observability::AuditEventKind;
     use crate::policy::SharingVisibility;
+    use crate::types::MemoryId;
 
     #[test]
     fn named_snapshot_anchor_preserves_tick_and_label() {
@@ -384,7 +539,35 @@ mod tests {
         assert_eq!(metadata.snapshot_id, SnapshotId(9));
         assert_eq!(metadata.snapshot_name, "pre_repair");
         assert_eq!(metadata.as_of_tick, 64);
+        assert_eq!(metadata.created_at_tick, 64);
+        assert_eq!(metadata.memory_count, 0);
+        assert_eq!(metadata.retention_class, SnapshotRetentionClass::Standard);
         assert!(!metadata.active);
+    }
+
+    #[test]
+    fn captured_snapshot_metadata_preserves_note_memory_count_and_retention() {
+        let namespace = NamespaceId::new("tests.snapshot").unwrap();
+        let metadata = SnapshotMetadata::captured(
+            SnapshotId(11),
+            namespace,
+            "before_refactor",
+            120,
+            123,
+            Some("pre-change safety anchor".to_string()),
+            7,
+            SnapshotRetentionClass::Restorable,
+        );
+
+        assert_eq!(metadata.snapshot_id, SnapshotId(11));
+        assert_eq!(metadata.snapshot_name, "before_refactor");
+        assert_eq!(metadata.as_of_tick, 120);
+        assert_eq!(metadata.created_at_tick, 123);
+        assert_eq!(metadata.note.as_deref(), Some("pre-change safety anchor"));
+        assert_eq!(metadata.memory_count, 7);
+        assert_eq!(metadata.retention_class, SnapshotRetentionClass::Restorable);
+        assert!(metadata.is_restorable());
+        assert!(metadata.active);
     }
 
     #[test]
@@ -405,6 +588,64 @@ mod tests {
         assert_eq!(sharing.visibility.as_str(), "shared");
         assert_eq!(sharing.workspace_id.unwrap().as_str(), "ws.alpha");
         assert_eq!(sharing.agent_id.unwrap().as_str(), "agent.writer");
+    }
+
+    #[test]
+    fn snapshot_anchor_display_label_is_stable() {
+        let named = SnapshotAnchor::Named {
+            snapshot_id: SnapshotId(3),
+            snapshot_name: "baseline".to_string(),
+            as_of_tick: 44,
+        };
+        let tick = SnapshotAnchor::Tick { as_of_tick: 91 };
+
+        assert_eq!(named.display_label(), "snapshot:baseline");
+        assert_eq!(tick.display_label(), "tick:91");
+    }
+
+    #[test]
+    fn semantic_diff_category_labels_are_stable() {
+        assert_eq!(SemanticDiffCategory::New.as_str(), "new");
+        assert_eq!(SemanticDiffCategory::Strengthened.as_str(), "strengthened");
+        assert_eq!(SemanticDiffCategory::Weakened.as_str(), "weakened");
+        assert_eq!(SemanticDiffCategory::Archived.as_str(), "archived");
+        assert_eq!(SemanticDiffCategory::Conflicting.as_str(), "conflicting");
+        assert_eq!(SemanticDiffCategory::DerivedState.as_str(), "derived_state");
+    }
+
+    #[test]
+    fn semantic_diff_preserves_entries_and_category_counts() {
+        let namespace = NamespaceId::new("tests.semantic_diff").unwrap();
+        let before_anchor = SnapshotAnchor::Tick { as_of_tick: 10 };
+        let after_anchor = SnapshotAnchor::Named {
+            snapshot_id: SnapshotId(8),
+            snapshot_name: "after".to_string(),
+            as_of_tick: 20,
+        };
+        let entry = SemanticDiffEntry {
+            category: SemanticDiffCategory::Conflicting,
+            summary: "conflicting belief surfaced for memory=7".to_string(),
+            memory_id: Some(MemoryId(7)),
+            audit_kind: Some(AuditEventKind::EncodeRejected),
+            before_anchor: before_anchor.clone(),
+            after_anchor: after_anchor.clone(),
+            unresolved: true,
+        };
+        let diff = SemanticDiff {
+            namespace,
+            before_anchor,
+            after_anchor,
+            category_counts: vec![(SemanticDiffCategory::Conflicting, 1)],
+            entries: vec![entry.clone()],
+            caution: "semantic diff summarizes bounded historical evidence and does not prove consensus or truth",
+        };
+
+        assert_eq!(diff.entries, vec![entry]);
+        assert_eq!(
+            diff.category_counts,
+            vec![(SemanticDiffCategory::Conflicting, 1)]
+        );
+        assert!(diff.caution.contains("does not prove consensus or truth"));
     }
 }
 

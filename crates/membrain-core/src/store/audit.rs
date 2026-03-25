@@ -188,6 +188,18 @@ pub struct AuditLogEntry {
     pub actor_source: &'static str,
     /// Optional request-scoped correlation handle for cross-surface audit parity.
     pub request_id: Option<String>,
+    /// Optional logical mutation tick preserved for forensics and range slicing.
+    pub tick: Option<u64>,
+    /// Optional pre-mutation strength snapshot quantized to 0..=1000.
+    pub before_strength: Option<u16>,
+    /// Optional post-mutation strength snapshot quantized to 0..=1000.
+    pub after_strength: Option<u16>,
+    /// Optional pre-mutation confidence snapshot quantized to 0..=1000.
+    pub before_confidence: Option<u16>,
+    /// Optional post-mutation confidence snapshot quantized to 0..=1000.
+    pub after_confidence: Option<u16>,
+    /// Optional maintenance, migration, incident, or replay-safe snapshot correlation handle.
+    pub related_snapshot: Option<String>,
     /// Optional maintenance, migration, or incident correlation handle.
     pub related_run: Option<String>,
     /// Whether policy redaction affected the visible entry.
@@ -214,6 +226,12 @@ impl AuditLogEntry {
             session_id: None,
             actor_source,
             request_id: None,
+            tick: None,
+            before_strength: None,
+            after_strength: None,
+            before_confidence: None,
+            after_confidence: None,
+            related_snapshot: None,
             related_run: None,
             redacted: false,
             detail: detail.into(),
@@ -235,6 +253,40 @@ impl AuditLogEntry {
     /// Attaches an optional request-scoped correlation handle.
     pub fn with_request_id(mut self, request_id: impl Into<String>) -> Self {
         self.request_id = Some(request_id.into());
+        self
+    }
+
+    /// Attaches an optional logical mutation tick.
+    pub fn with_tick(mut self, tick: u64) -> Self {
+        self.tick = Some(tick);
+        self
+    }
+
+    /// Attaches optional pre/post strength snapshots normalized to 0..=1000.
+    pub fn with_strength_delta(
+        mut self,
+        before_strength: Option<u16>,
+        after_strength: Option<u16>,
+    ) -> Self {
+        self.before_strength = before_strength;
+        self.after_strength = after_strength;
+        self
+    }
+
+    /// Attaches optional pre/post confidence snapshots normalized to 0..=1000.
+    pub fn with_confidence_delta(
+        mut self,
+        before_confidence: Option<u16>,
+        after_confidence: Option<u16>,
+    ) -> Self {
+        self.before_confidence = before_confidence;
+        self.after_confidence = after_confidence;
+        self
+    }
+
+    /// Attaches an optional snapshot correlation handle.
+    pub fn with_related_snapshot(mut self, related_snapshot: impl Into<String>) -> Self {
+        self.related_snapshot = Some(related_snapshot.into());
         self
     }
 
@@ -260,9 +312,12 @@ pub struct AuditLogFilter {
     pub category: Option<AuditEventCategory>,
     pub kind: Option<AuditEventKind>,
     pub request_id: Option<String>,
+    pub related_snapshot: Option<String>,
     pub related_run: Option<String>,
     pub min_sequence: Option<u64>,
     pub max_sequence: Option<u64>,
+    pub min_tick: Option<u64>,
+    pub max_tick: Option<u64>,
     pub redacted: Option<bool>,
 }
 
@@ -287,6 +342,12 @@ impl AuditLogFilter {
                 .as_deref()
                 .is_none_or(|request_id| entry.request_id.as_deref() == Some(request_id))
             && self
+                .related_snapshot
+                .as_deref()
+                .is_none_or(|related_snapshot| {
+                    entry.related_snapshot.as_deref() == Some(related_snapshot)
+                })
+            && self
                 .related_run
                 .as_deref()
                 .is_none_or(|related_run| entry.related_run.as_deref() == Some(related_run))
@@ -296,6 +357,12 @@ impl AuditLogFilter {
             && self
                 .max_sequence
                 .is_none_or(|max_sequence| entry.sequence <= max_sequence)
+            && self
+                .min_tick
+                .is_none_or(|min_tick| entry.tick.is_some_and(|tick| tick >= min_tick))
+            && self
+                .max_tick
+                .is_none_or(|max_tick| entry.tick.is_some_and(|tick| tick <= max_tick))
             && self
                 .redacted
                 .is_none_or(|redacted| entry.redacted == redacted)
@@ -380,6 +447,11 @@ impl AppendOnlyAuditLog {
     /// Returns the last retained sequence, if any rows are present.
     pub fn last_sequence(&self) -> Option<u64> {
         self.entries.back().map(|entry| entry.sequence)
+    }
+
+    /// Returns the highest retained logical tick, if any rows carry one.
+    pub fn max_tick(&self) -> Option<u64> {
+        self.entries.iter().filter_map(|entry| entry.tick).max()
     }
 
     /// Returns the canonical row sequence range retained in this log.
@@ -490,6 +562,7 @@ mod tests {
         ContradictionId, ContradictionKind, ContradictionRecord, PreferredAnswerState,
         ResolutionState,
     };
+    use crate::engine::maintenance::MaintenanceController;
     use crate::observability::{AuditEventCategory, AuditEventKind};
     use crate::policy::PolicyModule;
     use crate::types::{MemoryId, SessionId};
@@ -534,6 +607,7 @@ mod tests {
         assert_eq!(log.next_sequence(), 1);
         assert_eq!(log.last_sequence(), None);
         assert_eq!(log.retained_sequence_range(), None);
+        assert_eq!(log.slice(&AuditLogFilter::default(), None).rows.len(), 0);
     }
 
     #[test]
@@ -600,9 +674,16 @@ mod tests {
         assert_eq!(first.sequence, 1);
         assert_eq!(second.sequence, 2);
         assert_eq!(first.request_id.as_deref(), Some("req-encode-11"));
+        assert_eq!(first.tick, None);
+        assert_eq!(first.before_strength, None);
+        assert_eq!(first.after_strength, None);
+        assert_eq!(first.before_confidence, None);
+        assert_eq!(first.after_confidence, None);
+        assert_eq!(first.related_snapshot, None);
         assert_eq!(log.len(), 2);
         assert_eq!(log.next_sequence(), 3);
         assert_eq!(log.last_sequence(), Some(2));
+        assert_eq!(log.max_tick(), None);
         assert_eq!(log.retained_sequence_range(), Some(1..=2));
         assert_eq!(log.entries()[0].kind, AuditEventKind::EncodeAccepted);
         assert_eq!(log.entries()[1].kind, AuditEventKind::PolicyDenied);
@@ -743,6 +824,10 @@ mod tests {
             .with_memory_id(MemoryId(41))
             .with_session_id(SessionId(12))
             .with_request_id("req-policy-41")
+            .with_tick(41)
+            .with_strength_delta(Some(900), Some(700))
+            .with_confidence_delta(Some(820), Some(610))
+            .with_related_snapshot("snapshot-41")
             .with_related_run("incident-2026-03-20")
             .with_redaction(),
         );
@@ -771,6 +856,15 @@ mod tests {
         let incident_entries = log.entries_for_related_run("incident-2026-03-20");
         let migration_entries = log.entries_for_kind(AuditEventKind::MaintenanceMigrationApplied);
         let migration_run_entries = log.entries_for_related_run("migration-0042");
+        let snapshot_entries = log.slice(
+            &AuditLogFilter {
+                related_snapshot: Some("snapshot-41".to_string()),
+                min_tick: Some(40),
+                max_tick: Some(41),
+                ..AuditLogFilter::default()
+            },
+            Some(8),
+        );
 
         assert_eq!(memory_entries.len(), 2);
         assert_eq!(session_entries.len(), 1);
@@ -788,6 +882,16 @@ mod tests {
         );
         assert_eq!(request_entries[0], memory_entries[0]);
         assert_eq!(incident_entries[0], memory_entries[0]);
+        assert_eq!(snapshot_entries.total_matches, 1);
+        assert_eq!(snapshot_entries.rows[0].tick, Some(41));
+        assert_eq!(snapshot_entries.rows[0].before_strength, Some(900));
+        assert_eq!(snapshot_entries.rows[0].after_strength, Some(700));
+        assert_eq!(snapshot_entries.rows[0].before_confidence, Some(820));
+        assert_eq!(snapshot_entries.rows[0].after_confidence, Some(610));
+        assert_eq!(
+            snapshot_entries.rows[0].related_snapshot.as_deref(),
+            Some("snapshot-41")
+        );
         assert_eq!(migration_entries.len(), 1);
         assert_eq!(migration_run_entries.len(), 1);
         assert_eq!(migration_entries[0].actor_source, "migration_runner");
@@ -850,7 +954,37 @@ mod tests {
         assert_eq!(entries[1].kind, AuditEventKind::ArchiveRecorded);
         assert_eq!(log.next_sequence(), 4);
         assert_eq!(log.last_sequence(), Some(3));
+        assert_eq!(log.max_tick(), None);
         assert_eq!(log.retained_sequence_range(), Some(2..=3));
+    }
+
+    #[test]
+    fn audit_log_reports_highest_retained_tick() {
+        let mut log = AppendOnlyAuditLog::new(4);
+        let namespace = team_alpha();
+
+        log.append(
+            AuditLogEntry::new(
+                AuditEventCategory::Encode,
+                AuditEventKind::EncodeAccepted,
+                namespace.clone(),
+                "encode_engine",
+                "accepted encode",
+            )
+            .with_tick(3),
+        );
+        log.append(
+            AuditLogEntry::new(
+                AuditEventCategory::Maintenance,
+                AuditEventKind::MaintenanceForgettingEvaluated,
+                namespace,
+                "forgetting_engine",
+                "evaluated forgetting policy",
+            )
+            .with_tick(9),
+        );
+
+        assert_eq!(log.max_tick(), Some(9));
     }
 
     #[test]
@@ -954,7 +1088,10 @@ mod tests {
             )
             .with_memory_id(MemoryId(51))
             .with_session_id(SessionId(4))
-            .with_request_id("req-encode-51"),
+            .with_request_id("req-encode-51")
+            .with_tick(1)
+            .with_strength_delta(None, Some(830))
+            .with_confidence_delta(None, Some(910)),
         );
         log.append(
             AuditLogEntry::new(
@@ -966,6 +1103,8 @@ mod tests {
             )
             .with_memory_id(MemoryId(51))
             .with_request_id("req-policy-51")
+            .with_tick(2)
+            .with_related_snapshot("snapshot-incident-51")
             .with_related_run("incident-2026-03-23")
             .with_redaction(),
         );
@@ -978,6 +1117,8 @@ mod tests {
                 "applied audit-log schema migration",
             )
             .with_memory_id(MemoryId(51))
+            .with_tick(3)
+            .with_related_snapshot("snapshot-migration-0043")
             .with_related_run("migration-0043"),
         );
 
@@ -985,6 +1126,7 @@ mod tests {
             namespace: Some(namespace.clone()),
             memory_id: Some(MemoryId(51)),
             min_sequence: Some(2),
+            min_tick: Some(2),
             ..AuditLogFilter::default()
         };
         let slice = log.slice(&filter, Some(1));
@@ -995,6 +1137,11 @@ mod tests {
         assert_eq!(
             slice.rows[0].kind,
             AuditEventKind::MaintenanceMigrationApplied
+        );
+        assert_eq!(slice.rows[0].tick, Some(3));
+        assert_eq!(
+            slice.rows[0].related_snapshot.as_deref(),
+            Some("snapshot-migration-0043")
         );
     }
 
@@ -1013,7 +1160,10 @@ mod tests {
             )
             .with_memory_id(MemoryId(61))
             .with_session_id(SessionId(7))
-            .with_request_id("req-encode-61"),
+            .with_request_id("req-encode-61")
+            .with_tick(7)
+            .with_strength_delta(None, Some(780))
+            .with_confidence_delta(None, Some(910)),
         );
         log.append(
             AuditLogEntry::new(
@@ -1025,6 +1175,8 @@ mod tests {
             )
             .with_memory_id(MemoryId(61))
             .with_request_id("req-policy-61")
+            .with_tick(8)
+            .with_related_snapshot("snapshot-policy-61")
             .with_related_run("incident-2026-03-23")
             .with_redaction(),
         );
@@ -1044,9 +1196,17 @@ mod tests {
         assert_eq!(slice.rows[0].kind, AuditEventKind::EncodeAccepted);
         assert_eq!(slice.rows[1].kind, AuditEventKind::PolicyRedacted);
         assert_eq!(slice.rows[0].request_id.as_deref(), Some("req-encode-61"));
+        assert_eq!(slice.rows[0].tick, Some(7));
+        assert_eq!(slice.rows[0].after_strength, Some(780));
+        assert_eq!(slice.rows[0].after_confidence, Some(910));
         assert_eq!(
             slice.rows[1].related_run.as_deref(),
             Some("incident-2026-03-23")
+        );
+        assert_eq!(slice.rows[1].tick, Some(8));
+        assert_eq!(
+            slice.rows[1].related_snapshot.as_deref(),
+            Some("snapshot-policy-61")
         );
         assert!(slice.rows[1].redacted);
     }
@@ -1064,7 +1224,8 @@ mod tests {
                 "policy_module",
                 "denied namespace widening",
             )
-            .with_request_id("req-policy-denied"),
+            .with_request_id("req-policy-denied")
+            .with_tick(12),
         );
         log.append(
             AuditLogEntry::new(
@@ -1075,12 +1236,15 @@ mod tests {
                 "redacted actor metadata",
             )
             .with_request_id("req-policy-redacted")
+            .with_tick(13)
             .with_redaction(),
         );
 
         let filter = AuditLogFilter {
             kind: Some(AuditEventKind::PolicyRedacted),
             request_id: Some("req-policy-redacted".to_string()),
+            min_tick: Some(13),
+            max_tick: Some(13),
             redacted: Some(true),
             ..AuditLogFilter::default()
         };
@@ -1095,7 +1259,82 @@ mod tests {
         assert_eq!(rows.len(), 1);
         assert_eq!(rows[0].kind, AuditEventKind::PolicyRedacted);
         assert_eq!(rows[0].request_id.as_deref(), Some("req-policy-redacted"));
+        assert_eq!(rows[0].tick, Some(13));
         assert!(rows[0].redacted);
+    }
+
+    #[test]
+    fn reconsolidation_and_forgetting_audit_rows_preserve_tick_and_delta_fields() {
+        let forgetting_engine = crate::engine::forgetting::ForgettingEngine;
+        let forgetting_candidates = vec![crate::engine::forgetting::ForgettingCandidate {
+            memory_id: MemoryId(9),
+            current_score: 30,
+            eligibility_score: None,
+        }];
+        let forgetting_run = crate::engine::forgetting::ForgettingRun::new(
+            team_alpha(),
+            crate::engine::forgetting::ForgettingPolicy::default(),
+            forgetting_candidates,
+        )
+        .with_tick(77);
+        let mut forgetting_handle =
+            crate::engine::maintenance::MaintenanceJobHandle::new(forgetting_run, 2);
+        forgetting_handle.poll();
+        let forgetting_rows =
+            forgetting_engine.append_only_audit_entries(forgetting_handle.operation());
+        assert_eq!(forgetting_rows.len(), 1);
+        assert_eq!(forgetting_rows[0].tick, Some(77));
+        assert_eq!(forgetting_rows[0].before_strength, None);
+        assert_eq!(forgetting_rows[0].after_strength, None);
+        assert_eq!(forgetting_rows[0].before_confidence, None);
+        assert_eq!(forgetting_rows[0].after_confidence, None);
+
+        let recon_run = crate::engine::reconsolidation::ReconsolidationRun::new(
+            team_alpha(),
+            crate::engine::reconsolidation::ReconsolidationPolicy::default(),
+            vec![crate::engine::reconsolidation::LabileMemory {
+                memory_id: MemoryId(10),
+                labile_state: crate::engine::reconsolidation::LabileState::new(100, 50),
+                pending_update: Some(
+                    crate::engine::reconsolidation::PendingUpdate::new(
+                        MemoryId(10),
+                        105,
+                        crate::engine::reconsolidation::UpdateSource::User,
+                    )
+                    .with_content("apply me".to_string()),
+                ),
+                current_strength: 0.6,
+                pre_reopen_state: crate::engine::reconsolidation::PreReopenState {
+                    memory_id: MemoryId(10),
+                    reopen_tick: 100,
+                    strength_at_reopen: 0.55,
+                    stability_at_reopen: 3.0,
+                    access_count_at_reopen: 5,
+                },
+                restabilize_to: crate::engine::reconsolidation::ReopenStableState::Consolidated,
+                refresh_readiness: crate::engine::reconsolidation::RefreshReadiness::Ready,
+            }],
+            120,
+        );
+        let mut recon_handle = crate::engine::maintenance::MaintenanceJobHandle::new(recon_run, 10);
+        recon_handle.start();
+        let completed_recon_run = loop {
+            let snapshot = recon_handle.poll();
+            match snapshot.state {
+                crate::engine::maintenance::MaintenanceJobState::Completed(_) => {
+                    break recon_handle.operation().clone();
+                }
+                crate::engine::maintenance::MaintenanceJobState::Running { .. } => continue,
+                _ => unreachable!("reconsolidation test should complete"),
+            }
+        };
+        let recon_rows = completed_recon_run.append_only_audit_entries();
+        assert_eq!(recon_rows.len(), 1);
+        assert_eq!(recon_rows[0].tick, Some(120));
+        assert_eq!(recon_rows[0].before_strength, Some(600));
+        assert_eq!(recon_rows[0].after_strength, Some(650));
+        assert_eq!(recon_rows[0].before_confidence, None);
+        assert_eq!(recon_rows[0].after_confidence, None);
     }
 
     #[test]
@@ -1108,9 +1347,12 @@ mod tests {
             category: Some(AuditEventCategory::Maintenance),
             kind: Some(AuditEventKind::MaintenanceRepairRollbackCompleted),
             request_id: Some("req-repair-88".to_string()),
+            related_snapshot: Some("snapshot-repair-88".to_string()),
             related_run: Some("repair-run-88".to_string()),
             min_sequence: Some(7),
             max_sequence: Some(9),
+            min_tick: Some(70),
+            max_tick: Some(90),
             redacted: Some(true),
         };
 
@@ -1134,9 +1376,12 @@ mod tests {
         assert_eq!(filter_json["category"], "maintenance");
         assert_eq!(filter_json["kind"], "maintenance_repair_rollback_completed");
         assert_eq!(filter_json["request_id"], "req-repair-88");
+        assert_eq!(filter_json["related_snapshot"], "snapshot-repair-88");
         assert_eq!(filter_json["related_run"], "repair-run-88");
         assert_eq!(filter_json["min_sequence"], 7);
         assert_eq!(filter_json["max_sequence"], 9);
+        assert_eq!(filter_json["min_tick"], 70);
+        assert_eq!(filter_json["max_tick"], 90);
         assert_eq!(filter_json["redacted"], true);
     }
 }

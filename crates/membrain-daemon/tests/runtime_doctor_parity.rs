@@ -103,6 +103,27 @@ async fn runtime_zero_arg_methods_accept_common_envelope_fields() {
     assert_eq!(doctor_response["result"]["status"], json!("ok"));
     assert!(doctor_response["error"].is_null());
 
+    let health_response = send_request(
+        &socket_path,
+        json!({
+            "jsonrpc":"2.0",
+            "method":"health",
+            "params":{
+                "request_id":"req-health-ctx",
+                "workspace_id":"ws-7",
+                "agent_id":"agent-3",
+                "session_id":"session-9",
+                "task_id":"task-2",
+                "time_budget_ms":75,
+                "policy_context":{"include_public":true,"sharing_visibility":"public"}
+            },
+            "id":"health-common"
+        }),
+    )
+    .await;
+    assert_eq!(health_response["result"]["hot_memories"], json!(76));
+    assert!(health_response["error"].is_null());
+
     let resources_list_response = send_request(
         &socket_path,
         json!({
@@ -170,6 +191,24 @@ async fn runtime_doctor_rejects_unknown_params_like_other_zero_arg_methods() {
     );
     assert_eq!(doctor_response["error"]["data"], json!(null));
 
+    let health_response = send_request(
+        &socket_path,
+        json!({
+            "jsonrpc":"2.0",
+            "method":"health",
+            "params":{"unexpected":true},
+            "id":"health-invalid"
+        }),
+    )
+    .await;
+
+    assert_eq!(health_response["error"]["code"], json!(-32602));
+    assert_eq!(
+        health_response["error"]["message"],
+        json!("unknown field unexpected")
+    );
+    assert_eq!(health_response["error"]["data"], json!(null));
+
     let resources_list_response = send_request(
         &socket_path,
         json!({
@@ -231,6 +270,7 @@ async fn runtime_doctor_jsonrpc_response_matches_shared_doctor_contract_fields()
 
     let result = &doctor_response["result"];
     assert_eq!(result["status"], json!("warn"));
+    assert_eq!(result["error_kind"], json!(null));
     assert_eq!(result["action"], json!("doctor"));
     assert_eq!(result["posture"], json!(RuntimePosture::Degraded.as_str()));
     assert_eq!(result["degraded_reasons"], json!(["repair_in_flight"]));
@@ -245,7 +285,10 @@ async fn runtime_doctor_jsonrpc_response_matches_shared_doctor_contract_fields()
         result["warnings"]
             .as_array()
             .expect("warnings should be an array"),
-        &vec![json!("operator_review_recommended")]
+        &vec![
+            json!("operator_review_recommended"),
+            json!("stale_action_critical_recheck_required")
+        ]
     );
     let indexes = result["indexes"]
         .as_array()
@@ -260,6 +303,41 @@ async fn runtime_doctor_jsonrpc_response_matches_shared_doctor_contract_fields()
     assert_eq!(result["posture"], json!("degraded"));
     assert_eq!(result["degraded_reasons"], json!(["repair_in_flight"]));
     assert!(result["metrics"].is_object());
+    assert_eq!(result["summary"]["ok_checks"], json!(2));
+    assert_eq!(result["summary"]["warn_checks"], json!(3));
+    assert_eq!(result["summary"]["fail_checks"], json!(0));
+    assert_eq!(result["repair_engine_component"], json!("engine.repair"));
+    assert!(result["checks"].is_array());
+    assert_eq!(result["checks"][3]["name"], json!("serving_posture"));
+    assert_eq!(result["checks"][3]["status"], json!("warn"));
+    assert_eq!(result["checks"][4]["name"], json!("lease_freshness"));
+    assert_eq!(result["checks"][4]["status"], json!("warn"));
+    assert!(result["runbook_hints"].is_array());
+    assert_eq!(
+        result["runbook_hints"][0]["runbook_id"],
+        json!("index_rebuild_operations")
+    );
+    assert_eq!(
+        result["runbook_hints"][1]["runbook_id"],
+        json!("tier2_index_drift")
+    );
+    assert_eq!(
+        result["runbook_hints"][2]["runbook_id"],
+        json!("repair_backlog_growth")
+    );
+    assert_eq!(
+        result["runbook_hints"][3]["runbook_id"],
+        json!("incident_response")
+    );
+    assert_eq!(result["availability"]["posture"], json!("degraded"));
+    assert_eq!(
+        result["availability"]["degraded_reasons"],
+        json!(["repair_in_flight"])
+    );
+    assert_eq!(
+        result["remediation"]["next_steps"],
+        json!(["check_health", "run_repair"])
+    );
     assert!(result["indexes"].is_array());
     assert!(result["repair_reports"].is_array());
     assert_eq!(
@@ -270,7 +348,10 @@ async fn runtime_doctor_jsonrpc_response_matches_shared_doctor_contract_fields()
         result["repair_reports"][1]["target"],
         json!("metadata_index")
     );
-    assert_eq!(result["repair_reports"][0]["rebuild_entrypoint"], json!(null));
+    assert_eq!(
+        result["repair_reports"][0]["rebuild_entrypoint"],
+        json!(null)
+    );
     assert_eq!(
         result["repair_reports"][0]["verification_artifact_name"],
         json!("fts5_lexical_parity")
@@ -284,11 +365,11 @@ async fn runtime_doctor_jsonrpc_response_matches_shared_doctor_contract_fields()
         json!(128)
     );
     assert_eq!(result["repair_reports"][0]["derived_rows"], json!(128));
+    assert_eq!(result["repair_reports"][0]["durable_sources"], json!([]));
     assert_eq!(
-        result["repair_reports"][0]["durable_sources"],
-        json!([])
+        result["repair_reports"][0]["affected_item_count"],
+        json!(128)
     );
-    assert_eq!(result["repair_reports"][0]["affected_item_count"], json!(128));
     assert_eq!(result["repair_reports"][0]["error_count"], json!(0));
     assert_eq!(result["repair_reports"][0]["queue_depth_before"], json!(4));
     assert_eq!(result["repair_reports"][0]["queue_depth_after"], json!(0));
@@ -299,6 +380,103 @@ async fn runtime_doctor_jsonrpc_response_matches_shared_doctor_contract_fields()
     assert!(result["health"].is_object());
     assert_eq!(result["health"]["availability_posture"], json!("Degraded"));
     assert_eq!(result["health"]["repair_queue_depth"], json!(0));
+
+    shutdown_runtime(&socket_path, handle).await;
+}
+
+#[tokio::test]
+async fn runtime_health_jsonrpc_response_matches_shared_health_contract_fields() {
+    let (socket_path, handle) = spawn_runtime().await;
+
+    let posture_response = send_request(
+        &socket_path,
+        json!({
+            "jsonrpc":"2.0",
+            "method":"set_posture",
+            "params":{"posture":"degraded","reasons":["repair_in_flight"]},
+            "id":"posture-health"
+        }),
+    )
+    .await;
+    assert_eq!(posture_response["result"]["posture"], json!("degraded"));
+
+    let health_response = send_request(
+        &socket_path,
+        json!({"jsonrpc":"2.0","method":"health","params":{},"id":"health"}),
+    )
+    .await;
+
+    let result = &health_response["result"];
+    assert_eq!(result["hot_memories"], json!(76));
+    assert_eq!(result["hot_capacity"], json!(100));
+    assert_eq!(result["hot_utilization_pct"], json!(76.0));
+    let avg_confidence = result["avg_confidence"]
+        .as_f64()
+        .expect("avg_confidence should be numeric");
+    assert!((avg_confidence - 0.84).abs() < 1e-6);
+    assert_eq!(result["unresolved_conflicts"], json!(1));
+    assert_eq!(result["availability_posture"], json!("Degraded"));
+    assert_eq!(result["repair_queue_depth"], json!(0));
+    assert!(result["cache"].is_object());
+    assert!(result["indexes"].is_object());
+    assert!(result["subsystem_status"].is_array());
+    assert!(result["trends"].is_array());
+    assert!(result["trend_summary"].is_array());
+    assert_eq!(result["feature_availability"][0]["feature"], json!("health"));
+    assert_eq!(result["feature_availability"][0]["posture"], json!("Full"));
+    assert_eq!(
+        result["feature_availability"][0]["note"],
+        json!("daemon_doctor_embeds_brain_health_report")
+    );
+    assert_eq!(result["degraded_status"]["posture"], json!("Degraded"));
+    assert_eq!(
+        result["degraded_status"]["surviving_query_capabilities"],
+        json!(["recall", "health"])
+    );
+    assert_eq!(
+        result["degraded_status"]["recommended_runbooks"],
+        json!(["repair_backlog_growth"])
+    );
+
+    shutdown_runtime(&socket_path, handle).await;
+}
+
+#[tokio::test]
+async fn runtime_health_resource_read_matches_runtime_health_payload_shape() {
+    let (socket_path, handle) = spawn_runtime().await;
+
+    let health_resource = send_request(
+        &socket_path,
+        json!({
+            "jsonrpc":"2.0",
+            "method":"resource.read",
+            "params":{"uri":"membrain://daemon/runtime/health"},
+            "id":"resource-read-health"
+        }),
+    )
+    .await;
+
+    let result = &health_resource["result"];
+    assert_eq!(result["status"], json!("ok"));
+    assert_eq!(
+        result["payload"]["uri"],
+        json!("membrain://daemon/runtime/health")
+    );
+    assert_eq!(result["payload"]["resource_kind"], json!("runtime_health"));
+    assert_eq!(result["payload"]["payload"]["hot_memories"], json!(76));
+    assert_eq!(result["payload"]["payload"]["hot_capacity"], json!(100));
+    assert!(result["payload"]["payload"]["cache"].is_object());
+    assert!(result["payload"]["payload"]["indexes"].is_object());
+    assert!(result["payload"]["payload"]["trend_summary"].is_array());
+    assert_eq!(
+        result["payload"]["payload"]["feature_availability"][0]["feature"],
+        json!("health")
+    );
+    assert_eq!(
+        result["payload"]["payload"]["feature_availability"][0]["posture"],
+        json!("Full")
+    );
+    assert!(result["payload"]["payload"]["degraded_status"].is_null());
 
     shutdown_runtime(&socket_path, handle).await;
 }
@@ -327,7 +505,32 @@ async fn runtime_doctor_resource_read_matches_runtime_doctor_payload_shape() {
     assert_eq!(result["payload"]["resource_kind"], json!("runtime_doctor"));
     assert_eq!(result["payload"]["payload"]["action"], json!("doctor"));
     assert_eq!(result["payload"]["payload"]["posture"], json!("full"));
+    assert_eq!(
+        result["payload"]["payload"]["summary"]["ok_checks"],
+        json!(5)
+    );
+    assert_eq!(
+        result["payload"]["payload"]["summary"]["warn_checks"],
+        json!(0)
+    );
+    assert_eq!(
+        result["payload"]["payload"]["summary"]["fail_checks"],
+        json!(0)
+    );
+    assert_eq!(
+        result["payload"]["payload"]["repair_engine_component"],
+        json!("engine.repair")
+    );
     assert!(result["payload"]["payload"]["metrics"].is_object());
+    assert!(result["payload"]["payload"]["checks"].is_array());
+    assert_eq!(
+        result["payload"]["payload"]["checks"][4]["status"],
+        json!("ok")
+    );
+    assert_eq!(result["payload"]["payload"]["runbook_hints"], json!([]));
+    assert_eq!(result["payload"]["payload"]["availability"], json!(null));
+    assert_eq!(result["payload"]["payload"]["error_kind"], json!(null));
+    assert_eq!(result["payload"]["payload"]["remediation"], json!(null));
     assert!(result["payload"]["payload"]["indexes"].is_array());
     assert!(result["payload"]["payload"]["repair_reports"].is_array());
     assert!(result["payload"]["payload"]["warnings"].is_array());
@@ -360,6 +563,7 @@ async fn runtime_doctor_resource_read_matches_runtime_doctor_payload_shape() {
         result["payload"]["payload"]["repair_reports"][0]["affected_item_count"],
         json!(128)
     );
+    assert_eq!(result["payload"]["payload"]["warnings"], json!([]));
     assert_eq!(
         result["payload"]["payload"]["health"]["availability_posture"],
         json!(null)
@@ -467,14 +671,18 @@ async fn runtime_resource_and_stream_listings_match_shared_mcp_payload_shape() {
     );
     assert_eq!(
         resources_list["result"]["payload"]["resources"][1]["resource_kind"],
-        json!("runtime_doctor")
+        json!("runtime_health")
     );
     assert_eq!(
         resources_list["result"]["payload"]["resources"][2]["resource_kind"],
+        json!("runtime_doctor")
+    );
+    assert_eq!(
+        resources_list["result"]["payload"]["resources"][3]["resource_kind"],
         json!("stream_listing")
     );
     assert_eq!(
-        resources_list["result"]["payload"]["resources"][3]["uri_template"],
+        resources_list["result"]["payload"]["resources"][4]["uri_template"],
         json!("membrain://{namespace}/memories/{memory_id}")
     );
 

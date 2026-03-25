@@ -542,6 +542,167 @@ impl ResponseWarning {
     }
 }
 
+/// Storage facts for one derived skill artifact.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+pub struct SkillArtifactStorageView {
+    pub storage_class: &'static str,
+    pub authority_class: &'static str,
+    pub acceptance_state: &'static str,
+    pub review_status: &'static str,
+    pub durable: bool,
+    pub rebuildable: bool,
+    pub canonical_rebuild_source: &'static str,
+    pub freshness_status: &'static str,
+    pub repair_status: &'static str,
+}
+
+/// Reflection-compiler metadata preserved for one advisory skill artifact.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+pub struct ReflectionArtifactView {
+    pub artifact_class: &'static str,
+    pub source_outcome: &'static str,
+    pub checklist_items: Vec<String>,
+    pub advisory: bool,
+    pub trusted_by_default: bool,
+    pub release_rule: &'static str,
+    pub promotion_basis: &'static str,
+}
+
+/// Review-facing facts for one derived skill artifact.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+pub struct SkillArtifactReviewView {
+    pub derivation_rule: &'static str,
+    pub tentative: bool,
+    pub accepted: bool,
+    pub supporting_memory_count: usize,
+    pub source_citation_count: usize,
+    pub supporting_fields: Vec<String>,
+    pub operator_review_required: bool,
+    pub review_reason: &'static str,
+    pub reflection: Option<ReflectionArtifactView>,
+}
+
+/// Recall-facing facts for one derived skill artifact.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+pub struct SkillArtifactRecallView {
+    pub recall_surface: &'static str,
+    pub retrievable_as_procedural_hint: bool,
+    pub retrieval_kind: &'static str,
+    pub pattern_handle: String,
+    pub pattern_hash_hex: String,
+    pub query_cues: Vec<String>,
+    pub source_engram_id: FieldPresence<u64>,
+    pub member_count: usize,
+}
+
+/// Operator-facing summary for one derived skill artifact.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+pub struct SkillArtifactSummary {
+    pub namespace: String,
+    pub fixture_name: String,
+    pub content: String,
+    pub confidence: u16,
+    pub storage: SkillArtifactStorageView,
+    pub review: SkillArtifactReviewView,
+    pub recall: SkillArtifactRecallView,
+}
+
+/// Authoritative storage facts for one accepted procedural-store entry.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+pub struct ProceduralEntryStorageView {
+    pub storage_class: &'static str,
+    pub authority_class: &'static str,
+    pub durable_store: &'static str,
+    pub acceptance_state: &'static str,
+    pub lookup_strategy: &'static str,
+    pub direct_lookup_without_full_recall: bool,
+    pub durable: bool,
+    pub rebuildable: bool,
+    pub canonical_rebuild_source: &'static str,
+    pub freshness_status: &'static str,
+    pub repair_status: &'static str,
+    pub state: &'static str,
+    pub version: u32,
+}
+
+/// Review and lineage facts for one accepted procedural-store entry.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+pub struct ProceduralEntryReviewView {
+    pub accepted: bool,
+    pub accepted_by: String,
+    pub acceptance_reason: String,
+    pub source_fixture_name: String,
+    pub derivation_rule: &'static str,
+    pub supporting_memory_count: usize,
+    pub source_citation_count: usize,
+    pub source_engram_id: FieldPresence<u64>,
+    pub lineage_ancestors: Vec<u64>,
+    pub supersession_state: &'static str,
+    pub rollback_capable: bool,
+}
+
+/// Recall and policy facts for one authoritative procedural entry.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+pub struct ProceduralEntryRecallView {
+    pub recall_surface: &'static str,
+    pub retrieval_kind: &'static str,
+    pub pattern_handle: String,
+    pub pattern_hash_hex: String,
+    pub query_cues: Vec<String>,
+    pub visibility: &'static str,
+    pub sharing_scope: FieldPresence<&'static str>,
+    pub policy_outcome: OutcomeClass,
+    pub policy_blocked_stage: &'static str,
+    pub policy_denial_reasons: Vec<&'static str>,
+}
+
+/// Audit facts preserved for one procedural promotion or rollback.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+pub struct ProceduralEntryAuditView {
+    pub event_kind: &'static str,
+    pub actor_source: &'static str,
+    pub request_id: String,
+    pub sequence: u64,
+    pub redacted: bool,
+    pub detail: String,
+    pub rollback_supported: bool,
+}
+
+/// Operator-facing summary for one authoritative procedural-store entry.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+pub struct ProceduralEntrySummary {
+    pub namespace: String,
+    pub pattern: String,
+    pub action: String,
+    pub confidence: u16,
+    pub storage: ProceduralEntryStorageView,
+    pub review: ProceduralEntryReviewView,
+    pub recall: ProceduralEntryRecallView,
+    pub audit: ProceduralEntryAuditView,
+}
+
+/// Shared skills output preserved across operator surfaces.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+pub struct SkillArtifactsOutput {
+    pub namespace: String,
+    pub extraction_trigger: &'static str,
+    pub extracted_count: usize,
+    pub skipped_count: usize,
+    pub procedures: Vec<SkillArtifactSummary>,
+}
+
+/// Shared authoritative procedural-store output preserved across operator surfaces.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+pub struct ProceduralStoreOutput {
+    pub namespace: String,
+    pub outcome: &'static str,
+    pub extraction_trigger: &'static str,
+    pub reviewed_candidate_count: usize,
+    pub procedural_count: usize,
+    pub direct_lookup_supported: bool,
+    pub procedures: Vec<ProceduralEntrySummary>,
+}
+
 /// Machine-readable top-level route summary preserved across interfaces.
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
 pub struct RouteSummary {
@@ -813,7 +974,8 @@ impl RouteSummary {
             | "small session lookup scans the Tier1 recent window before Tier2 exact" => {
                 "small_session_lookup"
             }
-            "request uses bounded graph expansion from the Tier2-authorized seed shortlist" => {
+            "request uses bounded graph expansion from the Tier2-authorized seed shortlist"
+            | "bounded causal trace walked explicit source-backed links from the target memory" => {
                 "bounded_graph_expansion"
             }
             "request needs broader durable retrieval before cold fallback"
@@ -885,6 +1047,7 @@ impl ResultReason {
             "query_by_example_seed_materialized" => "query_by_example_seed_materialized",
             "query_by_example_seed_missing" => "query_by_example_seed_missing",
             "query_by_example_candidate_expansion" => "query_by_example_candidate_expansion",
+            "causal_chain_root_validated" => "causal_chain_root_validated",
             "temporal_prefilter_metadata_only" => "temporal_prefilter_metadata_only",
             "temporal_payload_deferred" => "temporal_payload_deferred",
             "temporal_landmark_selected" => "temporal_landmark_selected",
@@ -896,13 +1059,19 @@ impl ResultReason {
             "graph_cutoff_max_depth" => "graph_cutoff_max_depth",
             "graph_cutoff_budget" => "graph_cutoff_budget",
             "graph_cutoff_policy_namespace" => "graph_cutoff_policy_namespace",
+            "confidence_threshold_applied" => "confidence_threshold_applied",
+            "low_confidence_suppressed" => "low_confidence_suppressed",
+            "confidence_display_rule" => "confidence_display_rule",
+            "strength_threshold_applied" => "strength_threshold_applied",
+            "below_min_strength" => "below_min_strength",
             _ => "custom_reason_code",
         };
         let reason_family = match reason_code {
             "score_kept" | "no_match" | "tier2_exact_match" => "selection",
             "query_by_example_seed_materialized"
             | "query_by_example_seed_missing"
-            | "query_by_example_candidate_expansion" => "query_by_example",
+            | "query_by_example_candidate_expansion"
+            | "causal_chain_root_validated" => "query_by_example",
             "temporal_prefilter_metadata_only"
             | "temporal_payload_deferred"
             | "temporal_landmark_selected"
@@ -914,6 +1083,11 @@ impl ResultReason {
             "graph_cutoff_max_depth" | "graph_cutoff_budget" | "graph_cutoff_policy_namespace" => {
                 "graph"
             }
+            "confidence_threshold_applied"
+            | "low_confidence_suppressed"
+            | "confidence_display_rule"
+            | "strength_threshold_applied"
+            | "below_min_strength" => "threshold",
             _ => "custom",
         };
         let route_stage = match reason_code {
@@ -923,6 +1097,7 @@ impl ResultReason {
             | "query_by_example_seed_materialized"
             | "query_by_example_seed_missing"
             | "query_by_example_candidate_expansion"
+            | "causal_chain_root_validated"
             | "temporal_prefilter_metadata_only"
             | "temporal_payload_deferred"
             | "temporal_landmark_selected"
@@ -934,15 +1109,28 @@ impl ResultReason {
             "graph_cutoff_max_depth" | "graph_cutoff_budget" | "graph_cutoff_policy_namespace" => {
                 TraceStage::GraphExpansion
             }
+            "confidence_threshold_applied"
+            | "low_confidence_suppressed"
+            | "confidence_display_rule"
+            | "strength_threshold_applied"
+            | "below_min_strength" => TraceStage::Packaging,
             _ => TraceStage::Packaging,
         };
+
+        let policy_filter_applied = matches!(
+            reason_code,
+            "confidence_threshold_applied"
+                | "low_confidence_suppressed"
+                | "strength_threshold_applied"
+                | "below_min_strength"
+        );
 
         Self {
             memory_id: reason.memory_id,
             reason_code: reason_code.to_string(),
             reason_family: reason_family.to_string(),
             route_stage,
-            policy_filter_applied: false,
+            policy_filter_applied,
             detail: reason.detail.clone(),
         }
     }
@@ -1114,13 +1302,27 @@ impl CacheMetricsSummary {
                     summary.cache_bypass_count += 1;
                 }
                 CacheLookupOutcome::Disabled => {
+                    summary.cache_bypass_count += 1;
                     summary.degraded_mode_served = true;
                 }
             }
 
             match trace.cache_event {
-                CacheEventLabel::Invalidate => summary.cache_invalidation_count += 1,
-                CacheEventLabel::Prefetch => summary.prefetch_used_count += 1,
+                CacheEventLabel::Invalidate | CacheEventLabel::Invalidation => {
+                    summary.cache_invalidation_count += 1;
+                }
+                CacheEventLabel::Prefetch => {
+                    summary.prefetch_used_count += 1;
+                    if matches!(trace.outcome, CacheLookupOutcome::Hit) {
+                        summary.prefetch_hit_count += 1;
+                    }
+                }
+                CacheEventLabel::PrefetchDrop | CacheEventLabel::SessionExpired => {
+                    summary.prefetch_dropped_count += 1;
+                }
+                CacheEventLabel::Disabled => {
+                    summary.degraded_mode_served = true;
+                }
                 _ => {}
             }
 
@@ -1137,32 +1339,48 @@ impl CacheMetricsSummary {
                         summary.tier2_query_hit_count += 1;
                     }
                 }
-                CacheFamilyLabel::AnnProbe => {
+                CacheFamilyLabel::Result | CacheFamilyLabel::ResultCache => {
+                    summary.post_tier2_candidates = Some(trace.candidates_after);
+                    if matches!(trace.outcome, CacheLookupOutcome::Hit) {
+                        summary.result_cache_hit_count += 1;
+                    }
+                }
+                CacheFamilyLabel::AnnProbe | CacheFamilyLabel::AnnProbeCache => {
                     summary.post_ann_candidates = Some(trace.candidates_after);
                     if matches!(trace.outcome, CacheLookupOutcome::Hit) {
                         summary.ann_probe_hit_count += 1;
                     }
                 }
-                CacheFamilyLabel::Result => {
-                    if matches!(trace.outcome, CacheLookupOutcome::Hit) {
-                        summary.result_cache_hit_count += 1;
-                    }
-                }
-                CacheFamilyLabel::Summary => {
+                CacheFamilyLabel::Summary | CacheFamilyLabel::SummaryCache => {
                     if matches!(trace.outcome, CacheLookupOutcome::Hit) {
                         summary.summary_cache_hit_count += 1;
                     }
                 }
-                CacheFamilyLabel::Negative => {
+                CacheFamilyLabel::Negative | CacheFamilyLabel::NegativeCache => {
                     if matches!(trace.outcome, CacheLookupOutcome::Hit) {
                         summary.negative_cache_hit_count += 1;
                     }
                 }
-            }
-
-            if trace.warm_reuse {
-                summary.prefetch_hit_count +=
-                    usize::from(matches!(trace.cache_event, CacheEventLabel::Prefetch));
+                CacheFamilyLabel::EntityNeighborhood => {
+                    if matches!(trace.outcome, CacheLookupOutcome::Hit) {
+                        summary.entity_neighborhood_hit_count += 1;
+                    }
+                }
+                CacheFamilyLabel::PrefetchHints => {
+                    if matches!(trace.outcome, CacheLookupOutcome::Hit)
+                        && !matches!(trace.cache_event, CacheEventLabel::Prefetch)
+                    {
+                        summary.prefetch_hit_count += 1;
+                        summary.prefetch_used_count += 1;
+                    }
+                }
+                CacheFamilyLabel::SessionWarmup
+                | CacheFamilyLabel::GoalConditioned
+                | CacheFamilyLabel::ColdStartMitigation => {
+                    if matches!(trace.outcome, CacheLookupOutcome::Hit) {
+                        summary.tier2_query_hit_count += 1;
+                    }
+                }
             }
         }
 
@@ -1948,6 +2166,7 @@ mod tests {
                 time_consumed_ms: Some(7),
                 ranking_profile: "balanced".to_string(),
                 contradictions_found: 0,
+                historical_context: None,
                 query_by_example: None,
                 result_reasons: Vec::new(),
             },
@@ -1978,13 +2197,7 @@ mod tests {
                 stale_bypassed: 0,
                 confidence_filtered: 0,
             },
-            freshness_markers: FreshnessMarkers {
-                oldest_item_days: 0,
-                newest_item_days: 0,
-                volatile_items_included: false,
-                stale_warning: false,
-                as_of_tick: Some(42),
-            },
+            freshness_markers: FreshnessMarkers::fresh(Some(42)),
             packaging_metadata: PackagingMetadata {
                 result_budget: 5,
                 token_budget: None,
@@ -2074,13 +2287,7 @@ mod tests {
                     relation_to_seed: None,
                     graph_seed: None,
                 },
-                freshness_markers: FreshnessMarkers {
-                    oldest_item_days: 0,
-                    newest_item_days: 0,
-                    volatile_items_included: false,
-                    stale_warning: false,
-                    as_of_tick: Some(42),
-                },
+                freshness_markers: FreshnessMarkers::fresh(Some(42)),
                 omitted_fields: Vec::new(),
             }],
             action_pack: None,
@@ -2100,6 +2307,7 @@ mod tests {
                 time_consumed_ms: Some(7),
                 ranking_profile: "balanced".to_string(),
                 contradictions_found: 0,
+                historical_context: None,
                 query_by_example: None,
                 result_reasons: Vec::new(),
             },
@@ -2130,13 +2338,7 @@ mod tests {
                 stale_bypassed: 0,
                 confidence_filtered: 0,
             },
-            freshness_markers: FreshnessMarkers {
-                oldest_item_days: 0,
-                newest_item_days: 0,
-                volatile_items_included: false,
-                stale_warning: false,
-                as_of_tick: Some(42),
-            },
+            freshness_markers: FreshnessMarkers::fresh(Some(42)),
             packaging_metadata: PackagingMetadata {
                 result_budget: 5,
                 token_budget: None,
@@ -2226,6 +2428,8 @@ mod tests {
                     newest_item_days: 0,
                     volatile_items_included: false,
                     stale_warning: false,
+                    lease_sensitive: false,
+                    recheck_required: false,
                     as_of_tick: Some(77),
                 },
                 omitted_fields: Vec::new(),
@@ -2252,6 +2456,7 @@ mod tests {
                 time_consumed_ms: Some(5),
                 ranking_profile: "balanced".to_string(),
                 contradictions_found: 0,
+                historical_context: None,
                 query_by_example: None,
                 result_reasons: vec![
                     crate::engine::result::ResultReason {
@@ -2299,6 +2504,8 @@ mod tests {
                 newest_item_days: 0,
                 volatile_items_included: false,
                 stale_warning: false,
+                lease_sensitive: false,
+                recheck_required: false,
                 as_of_tick: Some(77),
             },
             packaging_metadata: PackagingMetadata {
@@ -2385,6 +2592,24 @@ mod tests {
         assert_eq!(mapped.reason_family, "temporal");
         assert_eq!(mapped.route_stage, TraceStage::Tier2Exact);
         assert!(mapped.detail.contains("era-launch-0042"));
+    }
+
+    #[test]
+    fn result_reason_from_threshold_reason_maps_threshold_family_and_policy_flag() {
+        let reason = crate::engine::result::ResultReason {
+            memory_id: Some(crate::types::MemoryId(42)),
+            reason_code: "low_confidence_suppressed".to_string(),
+            detail: "candidate suppressed because confidence fell below min_confidence=500"
+                .to_string(),
+        };
+
+        let mapped = ResultReason::from_result_reason(&reason);
+
+        assert_eq!(mapped.memory_id, Some(crate::types::MemoryId(42)));
+        assert_eq!(mapped.reason_code, "low_confidence_suppressed");
+        assert_eq!(mapped.reason_family, "threshold");
+        assert_eq!(mapped.route_stage, TraceStage::Packaging);
+        assert!(mapped.policy_filter_applied);
     }
 
     #[test]
@@ -2635,7 +2860,7 @@ mod tests {
         );
         assert_eq!(response.freshness_markers[0].code, "fresh");
         assert_eq!(response.conflict_markers[0].code, "no_open_conflict");
-        assert_eq!(response.uncertainty_markers[0].code, "low_confidence");
+        assert_eq!(response.uncertainty_markers[0].code, "low_uncertainty");
         assert_eq!(
             response
                 .passive_observation
@@ -2943,7 +3168,7 @@ mod tests {
         assert_eq!(cache_traces[2]["cache_family"], "ann_probe");
         assert_eq!(cache_traces[2]["cache_event"], "miss");
         assert_eq!(cache_traces[2]["cache_reason"], "stale_generation");
-        assert_eq!(cache_traces[2]["generation_status"], "Stale");
+        assert_eq!(cache_traces[2]["generation_status"], "stale");
         assert_eq!(cache_metrics_json["cache_hit_count"], 1);
         assert_eq!(cache_metrics_json["cache_miss_count"], 1);
         assert_eq!(cache_metrics_json["cache_bypass_count"], 1);

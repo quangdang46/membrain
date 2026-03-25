@@ -73,6 +73,7 @@ fn recent_tier1_result_set() -> RetrievalResultSet {
             time_consumed_ms: Some(12),
             ranking_profile: "balanced".to_string(),
             contradictions_found: 0,
+            historical_context: None,
             query_by_example: None,
             result_reasons: Vec::new(),
         },
@@ -116,6 +117,8 @@ fn recent_tier1_result_set() -> RetrievalResultSet {
             newest_item_days: 0,
             volatile_items_included: false,
             stale_warning: false,
+            lease_sensitive: false,
+            recheck_required: false,
             as_of_tick: Some(42),
         },
         packaging_metadata: PackagingMetadata {
@@ -369,6 +372,14 @@ fn retrieval_planner_trace_preserves_temporal_tick_window_and_snapshot_anchor() 
     assert_eq!(trace.token_budget, Some(256));
     assert_eq!(trace.time_budget_ms, Some(1200));
     assert_eq!(trace.snapshot_name.as_deref(), Some("incident_baseline"));
+    let historical = trace.historical_lookup.as_ref().expect("historical lookup");
+    assert_eq!(historical.window_kind.as_str(), "tick_window");
+    assert_eq!(
+        historical.selection_reason,
+        "explicit_snapshot_and_tick_window"
+    );
+    assert_eq!(historical.selected_tick_window, Some((40, 75)));
+    assert_eq!(historical.snapshot_as_of_tick, Some(75));
     let temporal = trace.temporal_query.expect("temporal query");
     assert_eq!(temporal.session_filter, Some(SessionId(33)));
     assert_eq!(temporal.tick_range, Some((40, 75)));

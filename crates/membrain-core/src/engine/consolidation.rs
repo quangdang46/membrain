@@ -3,7 +3,7 @@
 //! Owns the merge/compaction logic that combines related memories,
 //! deduplicates similar entries, and produces consolidated summaries.
 
-use crate::api::{ErrorKind, NamespaceId, TaskId};
+use crate::api::{ErrorKind, NamespaceId, RemediationStep, TaskId};
 use crate::engine::episode::{EpisodeCandidate, EpisodeGroupingModule, EpisodeGroupingReport};
 use crate::engine::maintenance::{
     DurableStateToken, InterruptedMaintenance, InterruptionReason, MaintenanceFailureArtifact,
@@ -118,6 +118,7 @@ pub struct DerivedSourceCitation {
     pub memory_id: MemoryId,
     pub source_ref: String,
     pub timestamp_ms: u64,
+    pub evidence_kind: &'static str,
 }
 
 /// Stable explain metadata showing how one derivation was formed.
@@ -127,6 +128,18 @@ pub struct DerivationExplain {
     pub status: &'static str,
     pub confidence: u16,
     pub supporting_fields: Vec<String>,
+}
+
+/// Inspectable reflection-compiler metadata preserved on advisory guidance artifacts.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ReflectionArtifactMetadata {
+    pub primary_guidance: &'static str,
+    pub source_outcome: &'static str,
+    pub checklist_items: Vec<String>,
+    pub advisory: bool,
+    pub trusted_by_default: bool,
+    pub release_rule: &'static str,
+    pub promotion_basis: &'static str,
 }
 
 /// Lineage-preserving derived artifact emitted by a consolidation run.
@@ -143,6 +156,7 @@ pub struct DerivedArtifact {
     pub provenance: DerivationProvenance,
     pub explain: DerivationExplain,
     pub content: String,
+    pub reflection: Option<ReflectionArtifactMetadata>,
 }
 
 /// Inspectable partial-failure record for derivation work that could not complete.
@@ -163,6 +177,63 @@ pub struct DerivationFailure {
 }
 
 // ── Consolidation summary ────────────────────────────────────────────────────
+
+/// Stable bounded compaction unit selected by the consolidation planner.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CompactionUnitKind {
+    EpisodeSourceSet,
+}
+
+impl CompactionUnitKind {
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::EpisodeSourceSet => "episode_source_set",
+        }
+    }
+}
+
+/// Inspectable unit-selection contract for one bounded compaction run.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CompactionUnitSelection {
+    pub unit_kind: CompactionUnitKind,
+    pub selected_units: u32,
+    pub selection_rule: &'static str,
+    pub durable_truth_source: &'static str,
+    pub derived_outputs: Vec<&'static str>,
+    pub authoritative_evidence_retained: bool,
+}
+
+/// Inspectable batching and cancellation contract for one bounded compaction run.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CompactionBatchPlan {
+    pub unit_selection: CompactionUnitSelection,
+    pub batch_size: u32,
+    pub queue_jobs_budget: u32,
+    pub planned_batches: u32,
+    pub completed_batches: u32,
+    pub pending_batches: u32,
+    pub completed_units: u32,
+    pub pending_units: u32,
+    pub cancellation_checkpoint: DurableStateToken,
+    pub cancellation_safety: &'static str,
+}
+
+/// Stable operator-facing compaction report emitted by one bounded compaction run.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CompactionOperatorReport {
+    pub report_kind: &'static str,
+    pub unit_kind: &'static str,
+    pub authoritative_truth_source: &'static str,
+    pub selected_units: u32,
+    pub completed_units: u32,
+    pub pending_units: u32,
+    pub queue_jobs_budget: u32,
+    pub queue_depth_before: u32,
+    pub queue_depth_after: u32,
+    pub degraded_mode: Option<&'static str>,
+    pub rollback_trigger: Option<&'static str>,
+    pub remediation_steps: Vec<RemediationStep>,
+}
 
 /// Operator-visible summary after a consolidation run completes.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -197,6 +268,10 @@ pub struct ConsolidationSummary {
     pub failure_artifacts: Vec<MaintenanceFailureArtifact>,
     /// Queue-level bounded scheduler and partial-run metrics.
     pub queue_report: MaintenanceQueueReport,
+    /// Inspectable compaction planning contract for this bounded run.
+    pub batch_plan: CompactionBatchPlan,
+    /// Stable operator-facing compaction report for degraded-mode and rollback review.
+    pub operator_report: CompactionOperatorReport,
 }
 
 // ── Consolidation operation ──────────────────────────────────────────────────
@@ -275,18 +350,34 @@ impl ConsolidationRun {
         } else {
             MaintenanceQueueStatus::Running
         };
+        let pending_units = self.total.saturating_sub(self.processed);
+        let planned_batches = queue_depth_before;
+        let completed_batches = jobs_processed;
+        let pending_batches = queue_depth_after;
         let mut failure_artifacts = self.failure_artifacts.clone();
+        let degraded_mode = queue_budget_exhausted.then_some("continue_degraded_reads");
+        let rollback_trigger = queue_budget_exhausted.then_some("verification_mismatch");
         if queue_budget_exhausted {
             failure_artifacts.push(self.repair_boundary_artifact(
                 "consolidation_queue_budget_boundary",
                 "scheduler_drain",
                 self.processed,
-                self.total.saturating_sub(self.processed),
+                pending_units,
                 ErrorKind::TimeoutFailure,
                 true,
                 "queue_budget_exhausted",
             ));
         }
+        let remediation_steps = if queue_budget_exhausted {
+            vec![
+                RemediationStep::CheckHealth,
+                RemediationStep::RollbackRecentChange,
+                RemediationStep::RunRepair,
+                RemediationStep::InspectState,
+            ]
+        } else {
+            Vec::new()
+        };
 
         ConsolidationSummary {
             groups_evaluated: self.processed,
@@ -316,6 +407,40 @@ impl ConsolidationRun {
                 retry_attempts: self.retry_attempts,
                 partial_run: self.derivation_partial_failures > 0 || self.processed < self.total,
             },
+            batch_plan: CompactionBatchPlan {
+                unit_selection: CompactionUnitSelection {
+                    unit_kind: CompactionUnitKind::EpisodeSourceSet,
+                    selected_units: self.total,
+                    selection_rule: "episode_source_sets_with_lineage_and_durable_citations",
+                    durable_truth_source: "durable_memory_rows",
+                    derived_outputs: vec!["summary", "fact", "gist", "relation", "skill"],
+                    authoritative_evidence_retained: true,
+                },
+                batch_size: self.policy.batch_size.max(1) as u32,
+                queue_jobs_budget: queue_depth_before,
+                planned_batches,
+                completed_batches,
+                pending_batches,
+                completed_units: self.processed,
+                pending_units,
+                cancellation_checkpoint: self.durable_token,
+                cancellation_safety:
+                    "interruptions preserve durable truth and resume from durable checkpoint",
+            },
+            operator_report: CompactionOperatorReport {
+                report_kind: "compaction_run_report",
+                unit_kind: CompactionUnitKind::EpisodeSourceSet.as_str(),
+                authoritative_truth_source: "durable_memory_rows",
+                selected_units: self.total,
+                completed_units: self.processed,
+                pending_units,
+                queue_jobs_budget: queue_depth_before,
+                queue_depth_before,
+                queue_depth_after,
+                degraded_mode,
+                rollback_trigger,
+                remediation_steps,
+            },
         }
     }
 
@@ -335,6 +460,7 @@ impl ConsolidationRun {
                     citation.memory_id.0
                 ),
                 timestamp_ms: citation.timestamp_ms,
+                evidence_kind: "durable_memory",
             })
             .collect()
     }
@@ -489,16 +615,34 @@ impl ConsolidationRun {
             .common_goal_context
             .or(group.explain.common_tool_chain_context)
             .unwrap_or(group.explain.primary_reason);
+        let successful_outcome = !group.explain.matching_fields.contains(&"failure_retry");
+        let primary_guidance = if successful_outcome {
+            "procedure"
+        } else {
+            "anti_pattern"
+        };
+        let outcome_label = if successful_outcome {
+            "successful_episode"
+        } else {
+            "failed_episode"
+        };
         let action_hint = if let Some(tool_chain) = group.explain.common_tool_chain_context {
             format!("repeat bounded workflow via {tool_chain}")
         } else if group.explain.matching_fields.contains(&"failure_retry") {
-            "repeat the successful retry workflow".to_string()
+            "avoid reusing the failed retry path without new evidence".to_string()
         } else {
             format!(
                 "repeat the shared {} pattern",
                 group.source_set_kind.as_str().replace('_', " ")
             )
         };
+        let checklist_items = vec![
+            format!("confirm goal context: {context_hint}"),
+            format!("review action trace: {action_hint}"),
+            format!("inspect supporting evidence count: {}", source_ids.len()),
+            format!("verify advisory status before reuse: {outcome_label}"),
+        ];
+        let checklist_rendered = checklist_items.join("|");
         let keywords_rendered = if top_keywords.is_empty() {
             "none".to_string()
         } else {
@@ -528,21 +672,32 @@ impl ConsolidationRun {
             },
             explain: Self::explain_for_group(group, DerivedArtifactKind::Skill, "tentative"),
             content: format!(
-                "skill({}): namespace={} source_engram_id={} confidence={} member_count={} tentative=true accepted=false context={} action_pattern={} keywords={} citations={}",
+                "skill({}): namespace={} source_engram_id={} confidence={} member_count={} tentative=true accepted=false guidance={} source_outcome={} advisory=true trusted_by_default=false release_rule=explicit_acceptance_or_repeated_use_with_lineage action_pattern={} checklist={} keywords={} citations={}",
                 group.source_set_kind.as_str(),
                 self.namespace.as_str(),
                 graph_seed.map_or(0, |seed| seed.0),
                 quality_score,
                 group.members.len(),
-                context_hint,
+                primary_guidance,
+                outcome_label,
                 action_hint,
+                checklist_rendered,
                 keywords_rendered,
                 source_citations
                     .iter()
-                    .map(|citation| citation.source_ref.clone())
+                    .map(|citation| format!("{}:{}", citation.evidence_kind, citation.source_ref))
                     .collect::<Vec<_>>()
                     .join(",")
             ),
+            reflection: Some(ReflectionArtifactMetadata {
+                primary_guidance,
+                source_outcome: outcome_label,
+                checklist_items,
+                advisory: true,
+                trusted_by_default: false,
+                release_rule: "explicit_acceptance_or_repeated_use_with_lineage",
+                promotion_basis: "human_approval_or_repeated_usefulness",
+            }),
         })
     }
 
@@ -603,6 +758,7 @@ impl ConsolidationRun {
                     .collect::<Vec<_>>()
                     .join(",")
             ),
+            reflection: None,
         };
         let mut artifacts = vec![summary];
 
@@ -630,7 +786,7 @@ impl ConsolidationRun {
                 },
                 explain: Self::explain_for_group(group, DerivedArtifactKind::Fact, "complete"),
                 content: format!(
-                    "fact({}): namespace={} canonical_claim=episode:{} members={} time_range_ms={}..{} contradiction_semantics={} lineage={} citations={} ",
+                    "fact({}): namespace={} canonical_claim=episode:{} members={} time_range_ms={}..{} contradiction_semantics={} lineage={} citations={} evidence_rule=durable_memory_only ",
                     group.source_set_kind.as_str(),
                     self.namespace.as_str(),
                     group.episode_id.0,
@@ -645,10 +801,11 @@ impl ConsolidationRun {
                         .join(","),
                     source_citations
                         .iter()
-                        .map(|citation| citation.source_ref.clone())
+                        .map(|citation| format!("{}:{}", citation.evidence_kind, citation.source_ref))
                         .collect::<Vec<_>>()
                         .join(",")
                 ),
+                reflection: None,
             });
         }
 
@@ -718,10 +875,11 @@ impl ConsolidationRun {
                     group.explain.matching_fields.join(","),
                     source_citations
                         .iter()
-                        .map(|citation| citation.source_ref.clone())
+                        .map(|citation| format!("{}:{}", citation.evidence_kind, citation.source_ref))
                         .collect::<Vec<_>>()
                         .join(",")
                 ),
+                reflection: None,
             });
             if relation_signal_reinforced {
                 artifacts.push(DerivedArtifact {
@@ -751,7 +909,7 @@ impl ConsolidationRun {
                         "reinforced"
                     ),
                     content: format!(
-                        "relation({}): namespace={} relation={} seed={} continuity={} contradiction_semantics={} status=reinforced members={} citations={}",
+                        "relation({}): namespace={} relation={} seed={} continuity={} contradiction_semantics={} status=reinforced members={} citations={} evidence_rule=durable_memory_only",
                         group.source_set_kind.as_str(),
                         self.namespace.as_str(),
                         RelationKind::SharedTopic.as_str(),
@@ -765,10 +923,11 @@ impl ConsolidationRun {
                             .join("→"),
                         source_citations
                             .iter()
-                            .map(|citation| citation.source_ref.clone())
+                            .map(|citation| format!("{}:{}", citation.evidence_kind, citation.source_ref))
                             .collect::<Vec<_>>()
                             .join(",")
                     ),
+                    reflection: None,
                 });
                 if let Some(skill) = self.derive_skill_artifact(
                     group,
@@ -988,7 +1147,7 @@ impl MaintenanceOperation for ConsolidationRun {
                     InterruptionReason::Cancelled => ErrorKind::TransientFailure,
                     InterruptionReason::TimedOut => ErrorKind::TimeoutFailure,
                 },
-                matches!(reason, InterruptionReason::TimedOut),
+                self.processed < self.total,
                 if self.retry_attempts < self.policy.max_retry_attempts {
                     "resume_from_durable_checkpoint"
                 } else {
@@ -1106,11 +1265,13 @@ mod tests {
                         memory_id: MemoryId(1),
                         source_ref: "memory://test/1".to_string(),
                         timestamp_ms: 900_000,
+                        evidence_kind: "durable_memory",
                     },
                     DerivedSourceCitation {
                         memory_id: MemoryId(2),
                         source_ref: "memory://test/2".to_string(),
                         timestamp_ms: 1_020_000,
+                        evidence_kind: "durable_memory",
                     }
                 ]
             );
@@ -1120,9 +1281,9 @@ mod tests {
             );
             assert_eq!(summary.derived_artifacts[1].explain.status, "complete");
             assert!(summary.derived_artifacts[1].explain.confidence >= 700);
-            assert!(summary.derived_artifacts[1]
-                .content
-                .contains("citations=memory://test/1,memory://test/2"));
+            assert!(summary.derived_artifacts[1].content.contains(
+                "citations=durable_memory:memory://test/1,durable_memory:memory://test/2"
+            ));
             assert_eq!(summary.derived_artifacts[2].kind, DerivedArtifactKind::Gist);
             assert_eq!(
                 summary.derived_artifacts[2].source_ids,
@@ -1148,11 +1309,13 @@ mod tests {
                         memory_id: MemoryId(1),
                         source_ref: "memory://test/1".to_string(),
                         timestamp_ms: 900_000,
+                        evidence_kind: "durable_memory",
                     },
                     DerivedSourceCitation {
                         memory_id: MemoryId(2),
                         source_ref: "memory://test/2".to_string(),
                         timestamp_ms: 1_020_000,
+                        evidence_kind: "durable_memory",
                     }
                 ]
             );
@@ -1169,6 +1332,120 @@ mod tests {
                 .content
                 .contains("status=reinforced"));
         }
+    }
+
+    #[test]
+    fn consolidation_run_extracts_tentative_skill_when_cluster_quality_is_high() {
+        let run = ConsolidationRun::new(
+            ns("test"),
+            ConsolidationPolicy {
+                min_skill_members: 2,
+                min_skill_quality: 700,
+                ..Default::default()
+            },
+            2,
+        );
+        let group = crate::engine::episode::SourceGroup {
+            episode_id: crate::engine::episode::EpisodeId(7),
+            fixture_name: "episode_7_session_cluster_1_2".to_string(),
+            source_set_kind: crate::engine::episode::SourceSetKind::SessionCluster,
+            members: vec![MemoryId(1), MemoryId(2)],
+            lineage: crate::engine::episode::EpisodeLineage {
+                source_memory_ids: vec![MemoryId(1), MemoryId(2)],
+                continuity_keys: vec![
+                    "session_cluster",
+                    "session_id",
+                    "task_id",
+                    "goal_context",
+                    "tool_chain_context",
+                    "entity_overlap",
+                ],
+                source_citations: vec![
+                    crate::engine::episode::EpisodeSourceCitation {
+                        memory_id: MemoryId(1),
+                        timestamp_ms: 900_000,
+                    },
+                    crate::engine::episode::EpisodeSourceCitation {
+                        memory_id: MemoryId(2),
+                        timestamp_ms: 1_020_000,
+                    },
+                ],
+            },
+            explain: crate::engine::episode::EpisodeFormationExplain {
+                primary_reason: "session_cluster",
+                start_timestamp_ms: 900_000,
+                end_timestamp_ms: 1_020_000,
+                time_span_ms: 120_000,
+                matching_fields: vec![
+                    "session_cluster",
+                    "session_id",
+                    "task_id",
+                    "goal_context",
+                    "tool_chain_context",
+                    "entity_overlap",
+                ],
+                common_goal_context: Some("capture source-set continuity"),
+                common_tool_chain_context: Some("maintenance.compactor"),
+                anchor_memory_id: MemoryId(1),
+                terminal_memory_id: MemoryId(2),
+            },
+        };
+
+        let ConsolidationAction::DeriveArtifacts {
+            artifacts,
+            partial_failure,
+            ..
+        } = run.action_for_group(&group)
+        else {
+            panic!("expected derivation action");
+        };
+
+        assert_eq!(artifacts.len(), 5);
+        assert_eq!(artifacts[4].kind, DerivedArtifactKind::Skill);
+        assert_eq!(artifacts[4].explain.derivation_rule, "skill_extraction");
+        assert_eq!(artifacts[4].explain.status, "tentative");
+        assert_eq!(
+            artifacts[4].provenance.source_ref,
+            "consolidation://test/episode_7_session_cluster_1_2#skill"
+        );
+        assert_eq!(
+            artifacts[4].provenance.relation_to_seed,
+            Some(RelationKind::DerivedFrom)
+        );
+        assert!(artifacts[4]
+            .content
+            .contains("skill(session_cluster): namespace=test source_engram_id=11 confidence="));
+        assert!(artifacts[4]
+            .content
+            .contains("tentative=true accepted=false"));
+        assert!(artifacts[4].content.contains("guidance=procedure"));
+        assert!(artifacts[4]
+            .content
+            .contains("source_outcome=successful_episode"));
+        assert!(artifacts[4]
+            .content
+            .contains("advisory=true trusted_by_default=false"));
+        assert!(artifacts[4]
+            .content
+            .contains("release_rule=explicit_acceptance_or_repeated_use_with_lineage"));
+        assert!(artifacts[4]
+            .content
+            .contains("action_pattern=repeat bounded workflow via maintenance.compactor"));
+        assert!(artifacts[4].content.contains("checklist="));
+        assert!(artifacts[4].content.contains("keywords="));
+        assert!(artifacts[4].content.contains("capture"));
+        assert!(artifacts[4].content.contains("continuity"));
+        assert!(artifacts[4].content.contains("compactor"));
+        let reflection = artifacts[4]
+            .reflection
+            .as_ref()
+            .expect("reflection compiler metadata present");
+        assert_eq!(reflection.primary_guidance, "procedure");
+        assert_eq!(reflection.source_outcome, "successful_episode");
+        assert!(reflection.advisory);
+        assert!(!reflection.trusted_by_default);
+        assert!(!reflection.checklist_items.is_empty());
+        assert!(partial_failure.is_none());
     }
 
     #[test]

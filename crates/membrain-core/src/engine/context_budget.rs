@@ -318,7 +318,10 @@ fn render_injection_content(candidate: &BudgetCandidate, format: InjectionFormat
                 .memory_type
                 .map(|memory_type| memory_type.as_str())
                 .unwrap_or("memory");
-            format!("- [{} #{}] {}", memory_type, candidate.memory_id.0, candidate.content)
+            format!(
+                "- [{} #{}] {}",
+                memory_type, candidate.memory_id.0, candidate.content
+            )
         }
         InjectionFormat::Json => serde_json::json!({
             "memory_id": candidate.memory_id.0,
@@ -1076,8 +1079,14 @@ mod tests {
 
     #[test]
     fn injection_source_kind_as_str() {
-        assert_eq!(InjectionSourceKind::RetrievalResult.as_str(), "retrieval_result");
-        assert_eq!(InjectionSourceKind::MemoryCandidate.as_str(), "memory_candidate");
+        assert_eq!(
+            InjectionSourceKind::RetrievalResult.as_str(),
+            "retrieval_result"
+        );
+        assert_eq!(
+            InjectionSourceKind::MemoryCandidate.as_str(),
+            "memory_candidate"
+        );
     }
 
     #[test]
@@ -1243,8 +1252,14 @@ mod tests {
 
         let response = engine.pack(&request, candidates);
         assert_eq!(response.injections.len(), 1);
-        assert_eq!(response.injections[0].content, "- [tool_outcome #1] deploy checklist");
-        assert_eq!(response.injections[0].source_kind, InjectionSourceKind::RetrievalResult);
+        assert_eq!(
+            response.injections[0].content,
+            "- [tool_outcome #1] deploy checklist"
+        );
+        assert_eq!(
+            response.injections[0].source_kind,
+            InjectionSourceKind::RetrievalResult
+        );
         assert!(response.injections[0]
             .inclusion_reasons
             .iter()

@@ -452,7 +452,9 @@ impl ForgettingRun {
 
     fn current_tier_for_record(&self, record: &ForgettingAuditRecord) -> &'static str {
         match record.reason {
-            "already_cold_canonical" | "archived_requires_restore_path" => TierOwnership::Cold.as_str(),
+            "already_cold_canonical" | "archived_requires_restore_path" => {
+                TierOwnership::Cold.as_str()
+            }
             _ => TierOwnership::Hot.as_str(),
         }
     }
@@ -892,10 +894,7 @@ impl ForgettingEngine {
     }
 
     /// Returns the stable demotion route for reversible tier movement.
-    pub const fn reversible_demote_action(
-        &self,
-        current_tier: TierOwnership,
-    ) -> ForgettingAction {
+    pub const fn reversible_demote_action(&self, current_tier: TierOwnership) -> ForgettingAction {
         match current_tier {
             TierOwnership::Hot => ForgettingAction::Demote {
                 from_tier: "tier1",
@@ -916,7 +915,9 @@ impl ForgettingEngine {
                 EligibilityDisposition::Ineligible | EligibilityDisposition::Review => {
                     ForgettingAction::Skip
                 }
-                EligibilityDisposition::Eligible if score.archive_eligible => ForgettingAction::Archive,
+                EligibilityDisposition::Eligible if score.archive_eligible => {
+                    ForgettingAction::Archive
+                }
                 EligibilityDisposition::Eligible if score.demotion_eligible => {
                     self.reversible_demote_action(score.current_tier)
                 }
@@ -1041,6 +1042,7 @@ impl ForgettingEngine {
                     detail,
                 )
                 .with_memory_id(record.memory_id)
+                .with_tick(record.tick)
                 .with_related_run(format!("forgetting-tick-{}", record.tick))
             })
             .collect()
@@ -1098,7 +1100,8 @@ impl ForgettingEngine {
             0.0
         };
 
-        let adjusted = (base - contradiction_penalty - idle_pressure + emotional_bonus).clamp(0.0, 1.0);
+        let adjusted =
+            (base - contradiction_penalty - idle_pressure + emotional_bonus).clamp(0.0, 1.0);
         let composite_score = (adjusted * 1000.0) as u16;
         let archive_eligible = composite_score < policy.forget_score_threshold;
         let demotion_score_eligible = composite_score < policy.demotion_score_threshold
@@ -1109,16 +1112,23 @@ impl ForgettingEngine {
             && factors.idle_days >= policy.idle_days_before_demotion;
         let review_floor = policy.forget_score_threshold.saturating_sub(REVIEW_BUFFER);
         let review_ceiling = policy.forget_score_threshold.saturating_add(REVIEW_BUFFER);
-        let near_forget_boundary = composite_score >= review_floor && composite_score <= review_ceiling;
+        let near_forget_boundary =
+            composite_score >= review_floor && composite_score <= review_ceiling;
 
         let (disposition, disposition_reason) = if factors.guards.legal_hold {
             (EligibilityDisposition::Ineligible, "legal_hold_protected")
         } else if factors.guards.pinned {
             (EligibilityDisposition::Ineligible, "pinned_protected")
         } else if factors.guards.lifecycle_state == LifecycleState::Archived {
-            (EligibilityDisposition::Ineligible, "archived_requires_restore_path")
+            (
+                EligibilityDisposition::Ineligible,
+                "archived_requires_restore_path",
+            )
         } else if archive_eligible && factors.guards.last_authoritative_evidence {
-            (EligibilityDisposition::Ineligible, "last_authoritative_evidence")
+            (
+                EligibilityDisposition::Ineligible,
+                "last_authoritative_evidence",
+            )
         } else if near_forget_boundary {
             (EligibilityDisposition::Review, "needs_review")
         } else if archive_eligible {
@@ -1127,9 +1137,15 @@ impl ForgettingEngine {
             if factors.guards.current_tier != TierOwnership::Hot {
                 (EligibilityDisposition::Ineligible, "already_cold_canonical")
             } else if factors.guards.lifecycle_state != LifecycleState::Dormant {
-                (EligibilityDisposition::Ineligible, "demotion_requires_dormant_lifecycle")
+                (
+                    EligibilityDisposition::Ineligible,
+                    "demotion_requires_dormant_lifecycle",
+                )
             } else if factors.idle_days < policy.idle_days_before_demotion {
-                (EligibilityDisposition::Ineligible, "demotion_requires_idle_days")
+                (
+                    EligibilityDisposition::Ineligible,
+                    "demotion_requires_idle_days",
+                )
             } else {
                 (EligibilityDisposition::Eligible, "below_demotion_threshold")
             }
@@ -1263,7 +1279,10 @@ mod tests {
         assert_eq!(summary.review_required, 0);
         assert_eq!(summary.audit_records.len(), 3);
         assert_eq!(summary.audit_records[0].action, ForgettingAction::Archive);
-        assert_eq!(summary.audit_records[0].audit_kind, "maintenance_forgetting_evaluated");
+        assert_eq!(
+            summary.audit_records[0].audit_kind,
+            "maintenance_forgetting_evaluated"
+        );
 
         let audit = handle.operation().audit_records();
         assert_eq!(audit.len(), 3);
@@ -1298,7 +1317,10 @@ mod tests {
         assert_eq!(explain.entries[0].reason_code, "below_forget_threshold");
         assert_eq!(explain.entries[0].disposition, "eligible");
         assert_eq!(explain.entries[0].policy_surface, "utility_forgetting");
-        assert_eq!(explain.entries[0].audit_kind, "maintenance_forgetting_evaluated");
+        assert_eq!(
+            explain.entries[0].audit_kind,
+            "maintenance_forgetting_evaluated"
+        );
         assert_eq!(explain.entries[0].resulting_archive_state, Some("archived"));
         assert!(explain.entries[0]
             .explanation
@@ -1579,8 +1601,18 @@ mod tests {
         assert_eq!(action, ForgettingAction::Skip);
         assert_eq!(score.disposition, EligibilityDisposition::Review);
         assert_eq!(score.disposition_reason, "needs_review");
-        assert!(score.composite_score >= policy.forget_score_threshold.saturating_sub(score.review_buffer));
-        assert!(score.composite_score <= policy.forget_score_threshold.saturating_add(score.review_buffer));
+        assert!(
+            score.composite_score
+                >= policy
+                    .forget_score_threshold
+                    .saturating_sub(score.review_buffer)
+        );
+        assert!(
+            score.composite_score
+                <= policy
+                    .forget_score_threshold
+                    .saturating_add(score.review_buffer)
+        );
     }
 
     #[test]
@@ -1602,7 +1634,9 @@ mod tests {
         assert_eq!(rows[0].memory_id, Some(MemoryId(1)));
         assert_eq!(rows[0].related_run.as_deref(), Some("forgetting-tick-99"));
         assert!(rows[0].detail.contains("action=archive"));
-        assert!(rows[0].detail.contains("reason_code=below_forget_threshold"));
+        assert!(rows[0]
+            .detail
+            .contains("reason_code=below_forget_threshold"));
     }
 
     #[test]

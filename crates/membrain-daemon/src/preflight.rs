@@ -218,8 +218,7 @@ pub fn evaluate_preflight(
         execution_id: (!preview_only
             && matches!(
                 outcome.outcome_class,
-                OutcomeClass::Accepted
-                    | OutcomeClass::Degraded
+                OutcomeClass::Accepted | OutcomeClass::Degraded
             ))
         .then(|| format!("exec-{request_correlation_id}")),
         outcome,
@@ -290,8 +289,7 @@ pub fn preflight_outcome_label(
     if local_confirmation
         && matches!(
             outcome.outcome_class,
-            OutcomeClass::Accepted
-                | OutcomeClass::Degraded
+            OutcomeClass::Accepted | OutcomeClass::Degraded
         )
     {
         "force_confirmed"
@@ -311,8 +309,7 @@ pub fn confirmation_reason(outcome: &SafeguardOutcome, local_confirmation: bool)
     (local_confirmation
         && matches!(
             outcome.outcome_class,
-            OutcomeClass::Accepted
-                | OutcomeClass::Degraded
+            OutcomeClass::Accepted | OutcomeClass::Degraded
         ))
     .then_some("operator confirmed exact previewed scope".to_string())
 }
@@ -375,14 +372,10 @@ pub fn to_preflight_outcome(
         .map(reason_code_label)
         .collect::<Vec<_>>();
     let outcome_class = outcome.outcome_class.as_str().to_string();
-    let degraded = matches!(
-        outcome.outcome_class,
-        OutcomeClass::Degraded
-    );
+    let degraded = matches!(outcome.outcome_class, OutcomeClass::Degraded);
     let success = matches!(
         outcome.outcome_class,
-        OutcomeClass::Accepted
-            | OutcomeClass::Degraded
+        OutcomeClass::Accepted | OutcomeClass::Degraded
     );
     PreflightOutcome {
         success,

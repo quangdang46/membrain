@@ -9,6 +9,7 @@ pub enum DurableSchemaObject {
     MemoryItemsTable,
     MemoryPayloadsTable,
     MemoryLineageEdgesTable,
+    CausalLinksTable,
     MemoryEntityRefsTable,
     MemoryRelationRefsTable,
     MemoryTagsTable,
@@ -18,7 +19,17 @@ pub enum DurableSchemaObject {
     EngramMembershipTable,
     GraphEdgeTable,
     SnapshotMetadataTable,
+    RecallLogTable,
+    HotPathCacheTable,
+    RecallSequencesTable,
+    CompressionLogTable,
+    EmotionalTimelineTable,
+    MemoryAuditLogTable,
+    BrainForksTable,
+    ForkMergeLogTable,
     LandmarksTable,
+    ProceduralMemoriesTable,
+    ProceduralLineageTable,
 }
 
 impl DurableSchemaObject {
@@ -28,6 +39,7 @@ impl DurableSchemaObject {
             Self::MemoryItemsTable => "memory_items",
             Self::MemoryPayloadsTable => "memory_payloads",
             Self::MemoryLineageEdgesTable => "memory_lineage_edges",
+            Self::CausalLinksTable => "causal_links",
             Self::MemoryEntityRefsTable => "memory_entity_refs",
             Self::MemoryRelationRefsTable => "memory_relation_refs",
             Self::MemoryTagsTable => "memory_tags",
@@ -37,7 +49,17 @@ impl DurableSchemaObject {
             Self::EngramMembershipTable => "engram_membership_table",
             Self::GraphEdgeTable => "graph_edge_table",
             Self::SnapshotMetadataTable => "snapshot_metadata",
+            Self::RecallLogTable => "recall_log",
+            Self::HotPathCacheTable => "hot_path_cache",
+            Self::RecallSequencesTable => "recall_sequences",
+            Self::CompressionLogTable => "compression_log",
+            Self::EmotionalTimelineTable => "emotional_timeline",
+            Self::MemoryAuditLogTable => "memory_audit_log",
+            Self::BrainForksTable => "brain_forks",
+            Self::ForkMergeLogTable => "fork_merge_log",
             Self::LandmarksTable => "landmarks",
+            Self::ProceduralMemoriesTable => "procedural_memories",
+            Self::ProceduralLineageTable => "procedural_lineage",
         }
     }
 }
@@ -53,7 +75,7 @@ pub struct SchemaVersion {
 
 impl SchemaVersion {
     /// The current canonical schema version.
-    pub const CURRENT: Self = Self { major: 0, minor: 2 };
+    pub const CURRENT: Self = Self { major: 0, minor: 5 };
 
     /// Builds a new schema version.
     pub const fn new(major: u32, minor: u32) -> Self {
@@ -117,6 +139,7 @@ impl MigrationModule {
                 DurableSchemaObject::MemoryItemsTable,
                 DurableSchemaObject::MemoryPayloadsTable,
                 DurableSchemaObject::MemoryLineageEdgesTable,
+                DurableSchemaObject::CausalLinksTable,
                 DurableSchemaObject::MemoryEntityRefsTable,
                 DurableSchemaObject::MemoryRelationRefsTable,
                 DurableSchemaObject::MemoryTagsTable,
@@ -126,7 +149,17 @@ impl MigrationModule {
                 DurableSchemaObject::EngramMembershipTable,
                 DurableSchemaObject::GraphEdgeTable,
                 DurableSchemaObject::SnapshotMetadataTable,
+                DurableSchemaObject::RecallLogTable,
+                DurableSchemaObject::HotPathCacheTable,
+                DurableSchemaObject::RecallSequencesTable,
+                DurableSchemaObject::CompressionLogTable,
+                DurableSchemaObject::EmotionalTimelineTable,
+                DurableSchemaObject::MemoryAuditLogTable,
+                DurableSchemaObject::BrainForksTable,
+                DurableSchemaObject::ForkMergeLogTable,
                 DurableSchemaObject::LandmarksTable,
+                DurableSchemaObject::ProceduralMemoriesTable,
+                DurableSchemaObject::ProceduralLineageTable,
             ],
         }
     }
@@ -187,7 +220,7 @@ mod tests {
 
     #[test]
     fn newer_minor_is_not_compatible_with_current_runtime() {
-        let newer_minor = SchemaVersion::new(0, 3);
+        let newer_minor = SchemaVersion::new(0, 6);
         assert!(!newer_minor.compatible_with(&SchemaVersion::CURRENT));
     }
 
@@ -216,6 +249,9 @@ mod tests {
             .contains(&DurableSchemaObject::MemoryLineageEdgesTable));
         assert!(manifest
             .authoritative_tables
+            .contains(&DurableSchemaObject::CausalLinksTable));
+        assert!(manifest
+            .authoritative_tables
             .contains(&DurableSchemaObject::MemoryEntityRefsTable));
         assert!(manifest
             .authoritative_tables
@@ -238,6 +274,36 @@ mod tests {
         assert!(manifest
             .authoritative_tables
             .contains(&DurableSchemaObject::SnapshotMetadataTable));
+        assert!(manifest
+            .authoritative_tables
+            .contains(&DurableSchemaObject::RecallLogTable));
+        assert!(manifest
+            .authoritative_tables
+            .contains(&DurableSchemaObject::HotPathCacheTable));
+        assert!(manifest
+            .authoritative_tables
+            .contains(&DurableSchemaObject::RecallSequencesTable));
+        assert!(manifest
+            .authoritative_tables
+            .contains(&DurableSchemaObject::CompressionLogTable));
+        assert!(manifest
+            .authoritative_tables
+            .contains(&DurableSchemaObject::EmotionalTimelineTable));
+        assert!(manifest
+            .authoritative_tables
+            .contains(&DurableSchemaObject::MemoryAuditLogTable));
+        assert!(manifest
+            .authoritative_tables
+            .contains(&DurableSchemaObject::BrainForksTable));
+        assert!(manifest
+            .authoritative_tables
+            .contains(&DurableSchemaObject::ForkMergeLogTable));
+        assert!(manifest
+            .authoritative_tables
+            .contains(&DurableSchemaObject::ProceduralMemoriesTable));
+        assert!(manifest
+            .authoritative_tables
+            .contains(&DurableSchemaObject::ProceduralLineageTable));
     }
 
     #[test]
@@ -253,6 +319,10 @@ mod tests {
         assert_eq!(
             DurableSchemaObject::MemoryLineageEdgesTable.as_str(),
             "memory_lineage_edges"
+        );
+        assert_eq!(
+            DurableSchemaObject::CausalLinksTable.as_str(),
+            "causal_links"
         );
         assert_eq!(
             DurableSchemaObject::MemoryEntityRefsTable.as_str(),
@@ -271,6 +341,32 @@ mod tests {
             DurableSchemaObject::SnapshotMetadataTable.as_str(),
             "snapshot_metadata"
         );
+        assert_eq!(DurableSchemaObject::RecallLogTable.as_str(), "recall_log");
+        assert_eq!(
+            DurableSchemaObject::HotPathCacheTable.as_str(),
+            "hot_path_cache"
+        );
+        assert_eq!(
+            DurableSchemaObject::RecallSequencesTable.as_str(),
+            "recall_sequences"
+        );
+        assert_eq!(
+            DurableSchemaObject::CompressionLogTable.as_str(),
+            "compression_log"
+        );
+        assert_eq!(
+            DurableSchemaObject::EmotionalTimelineTable.as_str(),
+            "emotional_timeline"
+        );
+        assert_eq!(
+            DurableSchemaObject::MemoryAuditLogTable.as_str(),
+            "memory_audit_log"
+        );
+        assert_eq!(DurableSchemaObject::BrainForksTable.as_str(), "brain_forks");
+        assert_eq!(
+            DurableSchemaObject::ForkMergeLogTable.as_str(),
+            "fork_merge_log"
+        );
         assert_eq!(DurableSchemaObject::EngramsTable.as_str(), "engrams_table");
         assert_eq!(
             DurableSchemaObject::EngramMembershipTable.as_str(),
@@ -279,6 +375,14 @@ mod tests {
         assert_eq!(
             DurableSchemaObject::GraphEdgeTable.as_str(),
             "graph_edge_table"
+        );
+        assert_eq!(
+            DurableSchemaObject::ProceduralMemoriesTable.as_str(),
+            "procedural_memories"
+        );
+        assert_eq!(
+            DurableSchemaObject::ProceduralLineageTable.as_str(),
+            "procedural_lineage"
         );
     }
 }

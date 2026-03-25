@@ -8,8 +8,9 @@ use membrain_core::engine::forgetting::{
 };
 use membrain_core::engine::interference::{InterferenceEngine, InterferencePolicy};
 use membrain_core::engine::maintenance::{
-    LogicalClock, MaintenanceController, MaintenanceJobHandle, MaintenanceJobState,
-    TickSequenceFixture,
+    DurableStateToken, InterruptedMaintenance, InterruptionReason, LogicalClock,
+    MaintenanceController, MaintenanceJobHandle, MaintenanceJobState, MaintenanceOperation,
+    MaintenanceProgress, MaintenanceStep, TickScenarioArtifact, TickSequenceFixture,
 };
 use membrain_core::engine::reconsolidation::{
     LabileMemory, LabileState, PendingUpdate, PreReopenState, ReconsolidationEngine,
@@ -39,7 +40,8 @@ fn policy_bundle() -> (
     )
 }
 
-fn replay_reconsolidation_apply_fixture() -> (Vec<u64>, ReconsolidationOutcome, Option<f32>) {
+fn replay_reconsolidation_apply_fixture(
+) -> (TickScenarioArtifact, ReconsolidationOutcome, Option<f32>) {
     let (_, _, recon_policy, _) = policy_bundle();
     let recon_engine = ReconsolidationEngine::new();
     let mut ticks = TickSequenceFixture::new(10);
@@ -58,10 +60,148 @@ fn replay_reconsolidation_apply_fixture() -> (Vec<u64>, ReconsolidationOutcome, 
     );
 
     (
-        ticks.history().to_vec(),
+        ticks.artifact("reconsolidation_apply_window"),
         result.outcome,
         result.new_strength,
     )
+}
+
+#[derive(Debug, Clone, PartialEq)]
+struct DeterministicStrengthFixture {
+    state: StrengthState,
+    current_tick: u64,
+    effective_strength: f32,
+    factors: EligibilityFactors,
+    decay: DecayDecision,
+}
+
+impl DeterministicStrengthFixture {
+    fn new(base_strength: f32, stability: f32, last_accessed_tick: u64, current_tick: u64) -> Self {
+        let engine = StrengthEngine::new();
+        let policy = StrengthPolicy::default();
+        let mut state = StrengthState::with_base(base_strength);
+        state.stability = stability;
+        state.last_accessed_tick = last_accessed_tick;
+        let effective_strength = engine.effective_strength(&state, current_tick);
+        let factors = engine.to_eligibility_factors(&state, current_tick);
+        let decay = engine.evaluate_decay(&state, current_tick, &policy);
+        Self {
+            state,
+            current_tick,
+            effective_strength,
+            factors,
+            decay,
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq)]
+struct DeterministicReconTickFixture {
+    artifact: TickScenarioArtifact,
+    result: membrain_core::engine::reconsolidation::ReconsolidationTickResult,
+}
+
+impl DeterministicReconTickFixture {
+    fn with_readiness(
+        scenario_name: &'static str,
+        readiness: RefreshReadiness,
+        window_ticks: u64,
+        start_tick: u64,
+        submit_after: u64,
+        resolve_after: u64,
+    ) -> Self {
+        let (_, _, recon_policy, _) = policy_bundle();
+        let recon_engine = ReconsolidationEngine::new();
+        let mut ticks = TickSequenceFixture::new(start_tick);
+        let labile = LabileState::new(ticks.current_tick(), window_ticks);
+        let submitted_tick = ticks.advance_by(submit_after);
+        let update = PendingUpdate::new(mid(1), submitted_tick, UpdateSource::User)
+            .with_content("revised".to_string());
+        let current_tick = ticks.advance_by(resolve_after);
+        let result = recon_engine.tick(
+            &labile,
+            Some(&update),
+            current_tick,
+            0.6,
+            &recon_policy,
+            readiness,
+        );
+        Self {
+            artifact: ticks.artifact(scenario_name),
+            result,
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct ScriptedTimeoutFixture {
+    artifact: TickScenarioArtifact,
+    interrupted: InterruptedMaintenance,
+    polls_used: u32,
+    recorded_interruptions: Vec<InterruptionReason>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct ScriptedMaintenanceFixture {
+    steps: Vec<MaintenanceStep<&'static str>>,
+    next_step: usize,
+    preserved: DurableStateToken,
+    interruptions: Vec<InterruptionReason>,
+    ticks: TickSequenceFixture,
+}
+
+impl ScriptedMaintenanceFixture {
+    fn timeout_fixture(max_polls: u32) -> ScriptedTimeoutFixture {
+        let operation = Self {
+            steps: vec![
+                MaintenanceStep::Pending(MaintenanceProgress::new(1, 3)),
+                MaintenanceStep::Pending(MaintenanceProgress::new(2, 3)),
+                MaintenanceStep::Completed("too late"),
+            ],
+            next_step: 0,
+            preserved: DurableStateToken(81),
+            interruptions: Vec::new(),
+            ticks: TickSequenceFixture::new(0),
+        };
+        let mut handle = MaintenanceJobHandle::new(operation, max_polls);
+        handle.start();
+        handle.poll();
+        handle.poll();
+        let timed_out = handle.poll();
+        let interrupted = match timed_out.state {
+            MaintenanceJobState::TimedOut(interrupted) => interrupted,
+            _ => std::process::abort(),
+        };
+        ScriptedTimeoutFixture {
+            artifact: handle
+                .operation()
+                .ticks
+                .artifact("deterministic_timeout_window"),
+            interrupted,
+            polls_used: timed_out.polls_used,
+            recorded_interruptions: handle.operation().interruptions.clone(),
+        }
+    }
+}
+
+impl MaintenanceOperation for ScriptedMaintenanceFixture {
+    type Summary = &'static str;
+
+    fn poll_step(&mut self) -> MaintenanceStep<Self::Summary> {
+        self.ticks.advance_by(1);
+        let step = self.steps[self.next_step].clone();
+        self.next_step += 1;
+        step
+    }
+
+    fn interrupt(&mut self, reason: InterruptionReason) -> InterruptedMaintenance {
+        self.interruptions.push(reason);
+        InterruptedMaintenance {
+            reason,
+            preserved_durable_state: self.preserved,
+            artifact: None,
+        }
+    }
 }
 
 // ── Deterministic fixture helpers ────────────────────────────────────────────
@@ -94,22 +234,18 @@ fn tick_sequence_fixture_records_replayable_history() {
 
 #[test]
 fn strength_state_maps_to_forgetting_eligibility() {
+    let mut fixture = DeterministicStrengthFixture::new(0.5, 5.0, 0, 5);
+    fixture.state.access_count = 10;
     let engine = StrengthEngine::new();
-    let mut state = StrengthState::with_base(0.5);
-    state.stability = 5.0;
-    state.last_accessed_tick = 0;
-    state.access_count = 10;
-
-    // Use small elapsed time so recency stays high
-    let factors = engine.to_eligibility_factors(&state, 5);
+    let factors = engine.to_eligibility_factors(&fixture.state, fixture.current_tick);
 
     let forgetting = ForgettingEngine;
     let (action, score) =
         forgetting.evaluate_memory_with_factors(mid(1), &factors, &ForgettingPolicy::default());
 
-    // Memory with moderate strength should not be forgotten
     assert_eq!(action, ForgettingAction::Skip);
     assert!(score.composite_score > 200);
+    assert!(factors.recency > 0.9);
 }
 
 #[test]
@@ -191,16 +327,26 @@ fn interference_excludes_duplicates_from_strength_penalties() {
 
 #[test]
 fn reconsolidation_applies_strength_bonus() {
-    let (history, outcome, new_strength) = replay_reconsolidation_apply_fixture();
+    let fixture = DeterministicReconTickFixture::with_readiness(
+        "reconsolidation_apply_window",
+        RefreshReadiness::Ready,
+        50,
+        10,
+        5,
+        15,
+    );
 
-    assert_eq!(history, vec![10, 15, 30]);
-    assert_eq!(outcome, ReconsolidationOutcome::Applied);
-    let new_strength = new_strength.unwrap_or_else(|| {
+    assert_eq!(
+        fixture.artifact.scenario_name,
+        "reconsolidation_apply_window"
+    );
+    assert_eq!(fixture.artifact.start_tick, 10);
+    assert_eq!(fixture.artifact.tick_history, vec![10, 15, 30]);
+    assert_eq!(fixture.result.outcome, ReconsolidationOutcome::Applied);
+    let new_strength = fixture.result.new_strength.unwrap_or_else(|| {
         std::process::abort();
     });
     assert!(new_strength > 0.6);
-
-    // Strength bonus should be capped
     assert!(new_strength <= 1.0);
 }
 
@@ -272,60 +418,65 @@ fn stale_reconsolidation_tick_records_update_source_without_mutation() {
 
 #[test]
 fn reconsolidation_does_not_mutate_when_refresh_is_deferred_or_failed() {
-    let engine = ReconsolidationEngine::new();
-    let policy = ReconsolidationPolicy::default();
-    let labile = LabileState::new(100, 50);
-    let update =
-        PendingUpdate::new(mid(1), 105, UpdateSource::User).with_content("revised".to_string());
-
-    let deferred = engine.tick(
-        &labile,
-        Some(&update),
-        120,
-        0.5,
-        &policy,
+    let deferred = DeterministicReconTickFixture::with_readiness(
+        "reconsolidation_deferred_refresh",
         RefreshReadiness::Deferred,
-    );
-    assert_eq!(deferred.outcome, ReconsolidationOutcome::DeferredRefresh);
-    assert_eq!(deferred.new_strength, None);
-    assert!(!deferred.authoritative_state_mutated);
-    assert!(deferred
-        .refresh_triggers
-        .contains(&membrain_core::engine::reconsolidation::RefreshTrigger::EmbeddingRefresh));
-    assert!(deferred
-        .refresh_triggers
-        .contains(&membrain_core::engine::reconsolidation::RefreshTrigger::IndexRefresh));
-    assert!(deferred
-        .refresh_triggers
-        .contains(&membrain_core::engine::reconsolidation::RefreshTrigger::CacheInvalidate));
-    assert!(!deferred.pending_update_cleared);
-    assert!(!deferred.restabilized);
-
-    let failed = engine.tick(
-        &labile,
-        Some(&update),
-        120,
-        0.5,
-        &policy,
-        RefreshReadiness::Failed,
+        50,
+        100,
+        5,
+        15,
     );
     assert_eq!(
-        failed.outcome,
+        deferred.result.outcome,
+        ReconsolidationOutcome::DeferredRefresh
+    );
+    assert_eq!(deferred.result.new_strength, None);
+    assert!(!deferred.result.authoritative_state_mutated);
+    assert!(deferred
+        .result
+        .refresh_triggers
+        .contains(&membrain_core::engine::reconsolidation::RefreshTrigger::EmbeddingRefresh));
+    assert!(deferred
+        .result
+        .refresh_triggers
+        .contains(&membrain_core::engine::reconsolidation::RefreshTrigger::IndexRefresh));
+    assert!(deferred
+        .result
+        .refresh_triggers
+        .contains(&membrain_core::engine::reconsolidation::RefreshTrigger::CacheInvalidate));
+    assert!(!deferred.result.pending_update_cleared);
+    assert!(!deferred.result.restabilized);
+    assert_eq!(deferred.artifact.tick_history, vec![100, 105, 120]);
+
+    let failed = DeterministicReconTickFixture::with_readiness(
+        "reconsolidation_failed_refresh",
+        RefreshReadiness::Failed,
+        50,
+        100,
+        5,
+        15,
+    );
+    assert_eq!(
+        failed.result.outcome,
         ReconsolidationOutcome::BlockedRefreshFailure
     );
-    assert_eq!(failed.new_strength, None);
-    assert!(!failed.authoritative_state_mutated);
+    assert_eq!(failed.result.new_strength, None);
+    assert!(!failed.result.authoritative_state_mutated);
     assert!(failed
+        .result
         .refresh_triggers
         .contains(&membrain_core::engine::reconsolidation::RefreshTrigger::EmbeddingRefresh));
     assert!(failed
+        .result
         .refresh_triggers
         .contains(&membrain_core::engine::reconsolidation::RefreshTrigger::IndexRefresh));
     assert!(failed
+        .result
         .refresh_triggers
         .contains(&membrain_core::engine::reconsolidation::RefreshTrigger::CacheInvalidate));
-    assert!(!failed.pending_update_cleared);
-    assert!(!failed.restabilized);
+    assert!(!failed.result.pending_update_cleared);
+    assert!(!failed.result.restabilized);
+    assert_eq!(failed.artifact.tick_history, vec![100, 105, 120]);
 }
 
 #[test]
@@ -430,24 +581,34 @@ fn ltp_then_recall_then_ltd_lifecycle() {
     state.stability = 2.0;
     state.last_accessed_tick = 0;
 
-    // Encode → strengthen (LTP)
     engine.apply_ltp(&mut state, 1, &policy);
     assert!(state.base_strength > 0.3);
 
-    // Strengthen again
     engine.apply_ltp(&mut state, 5, &policy);
     assert!(state.base_strength > 0.4);
 
-    // Decay over time (LTD)
-    let effective = engine.effective_strength(&state, 50);
-    assert!(effective < state.base_strength);
+    let recall_fixture = DeterministicStrengthFixture::new(
+        state.base_strength,
+        state.stability,
+        state.last_accessed_tick,
+        50,
+    );
+    assert!(recall_fixture.effective_strength < recall_fixture.state.base_strength);
+    assert!(recall_fixture.factors.recency < 0.7);
 
-    // Archive when below threshold
-    let decision = engine.evaluate_decay(&state, 1000, &policy);
-    if let DecayDecision::ApplyLTD { new_strength, .. } = decision {
-        assert!(new_strength < state.base_strength);
+    let archive_fixture = DeterministicStrengthFixture::new(
+        state.base_strength,
+        state.stability,
+        state.last_accessed_tick,
+        1000,
+    );
+    if let DecayDecision::ApplyLTD { new_strength, .. } = archive_fixture.decay {
+        assert!(new_strength < archive_fixture.state.base_strength);
     } else {
-        assert!(matches!(decision, DecayDecision::Archive { .. }));
+        assert!(matches!(
+            archive_fixture.decay,
+            DecayDecision::Archive { .. }
+        ));
     }
 }
 
@@ -553,41 +714,33 @@ fn full_lifecycle_is_deterministic() {
 
 #[test]
 fn decayed_strength_produces_forgetting_eligible_score() {
-    let engine = StrengthEngine::new();
-    let mut state = StrengthState::with_base(0.1);
-    state.stability = 1.0;
-    state.last_accessed_tick = 0;
-
-    // Heavily decayed memory (elapsed >> stability)
-    let factors = engine.to_eligibility_factors(&state, 1000);
+    let fixture = DeterministicStrengthFixture::new(0.1, 1.0, 0, 1000);
 
     let forgetting = ForgettingEngine;
-    let (action, _score) =
-        forgetting.evaluate_memory_with_factors(mid(1), &factors, &ForgettingPolicy::default());
+    let (action, _score) = forgetting.evaluate_memory_with_factors(
+        mid(1),
+        &fixture.factors,
+        &ForgettingPolicy::default(),
+    );
 
-    // Heavily decayed memory should not be skipped (should be demoted or forgotten)
     assert!(!matches!(action, ForgettingAction::Skip));
+    assert!(fixture.factors.recency < 0.1);
+    assert!(fixture.effective_strength <= fixture.factors.effective_strength);
 }
 
 #[test]
 fn max_strength_memory_resists_all_decay() {
-    let engine = StrengthEngine::new();
     let policy = StrengthPolicy::default();
+    let fixture = DeterministicStrengthFixture::new(1.0, 10.0, 0, 10);
 
-    let mut state = StrengthState::with_base(1.0);
-    state.stability = 10.0;
-    state.last_accessed_tick = 0;
+    assert!(fixture.effective_strength > 0.3);
 
-    // Even after moderate decay, max strength with high stability stays strong
-    let effective = engine.effective_strength(&state, 10);
-    assert!(effective > 0.3);
-
-    let decision = engine.evaluate_decay(&state, 10, &policy);
-    if let DecayDecision::ApplyLTD { new_strength, .. } = decision {
+    if let DecayDecision::ApplyLTD { new_strength, .. } = fixture.decay {
         assert!(new_strength > 0.3);
     } else {
-        assert!(!matches!(decision, DecayDecision::Archive { .. }));
+        assert!(!matches!(fixture.decay, DecayDecision::Archive { .. }));
     }
+    assert!(fixture.factors.recency > policy.min_strength);
 }
 
 #[test]
@@ -619,4 +772,26 @@ fn reconsolidation_empty_update_is_rejected() {
             membrain_core::engine::reconsolidation::UpdateRejectionReason::EmptyUpdate
         )
     ));
+}
+
+#[test]
+fn timeout_fixture_replays_operator_visible_timeout_semantics() {
+    let fixture = ScriptedMaintenanceFixture::timeout_fixture(2);
+
+    assert_eq!(
+        fixture.artifact.scenario_name,
+        "deterministic_timeout_window"
+    );
+    assert_eq!(fixture.artifact.start_tick, 0);
+    assert_eq!(fixture.artifact.tick_history, vec![0, 1, 2]);
+    assert_eq!(fixture.polls_used, 2);
+    assert_eq!(fixture.interrupted.reason, InterruptionReason::TimedOut);
+    assert_eq!(
+        fixture.interrupted.preserved_durable_state,
+        DurableStateToken(81)
+    );
+    assert_eq!(
+        fixture.recorded_interruptions,
+        vec![InterruptionReason::TimedOut]
+    );
 }

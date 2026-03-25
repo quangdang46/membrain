@@ -9,6 +9,10 @@
 //! Refs: docs/CACHE_AND_PREFETCH.md and docs/PLAN.md section 20.
 
 use crate::api::NamespaceId;
+use crate::observability::{
+    CacheEvalTrace, CacheEventLabel, CacheFamilyLabel, CacheLookupOutcome, CacheReasonLabel,
+    GenerationStatusLabel, WarmSourceLabel,
+};
 use crate::types::MemoryId;
 use std::collections::{HashMap, VecDeque};
 
@@ -1037,10 +1041,25 @@ impl PrefetchController {
     /// Consumes the next queued hint for the given namespace.
     /// Returns `None` if no matching hint is available.
     pub fn consume_hint(&mut self, namespace: &NamespaceId) -> Option<PrefetchHint> {
+        self.consume_matching_hint(namespace, |_| true)
+    }
+
+    /// Consumes the next queued hint for the given namespace that satisfies one predicate.
+    pub fn consume_matching_hint<F>(
+        &mut self,
+        namespace: &NamespaceId,
+        mut predicate: F,
+    ) -> Option<PrefetchHint>
+    where
+        F: FnMut(&PrefetchHint) -> bool,
+    {
         if !self.enabled {
             return None;
         }
-        let pos = self.queue.iter().position(|h| &h.namespace == namespace)?;
+        let pos = self
+            .queue
+            .iter()
+            .position(|hint| &hint.namespace == namespace && predicate(hint))?;
         let hint = self.queue.remove(pos)?;
         self.metrics.hints_consumed += 1;
         Some(hint)
@@ -1311,6 +1330,122 @@ impl CacheTraceStage {
             candidates_after: result.candidates_after as u32,
         }
     }
+
+    /// Converts this cache-native trace stage into the shared observability envelope.
+    pub fn to_observability_trace(&self) -> CacheEvalTrace {
+        CacheEvalTrace {
+            cache_family: self.cache_family.into(),
+            cache_event: self.cache_event.into(),
+            outcome: self.cache_event.into(),
+            cache_reason: self.cache_reason.map(Into::into),
+            warm_source: self.warm_source.map(Into::into),
+            generation_status: self.generation_status.into(),
+            candidates_before: self.candidates_before as usize,
+            candidates_after: self.candidates_after as usize,
+            warm_reuse: self.warm_source.is_some() && matches!(self.cache_event, CacheEvent::Hit),
+        }
+    }
+}
+
+impl From<CacheFamily> for CacheFamilyLabel {
+    fn from(value: CacheFamily) -> Self {
+        match value {
+            CacheFamily::Tier1Item => Self::Tier1Item,
+            CacheFamily::NegativeCache => Self::NegativeCache,
+            CacheFamily::ResultCache => Self::ResultCache,
+            CacheFamily::EntityNeighborhood => Self::EntityNeighborhood,
+            CacheFamily::SummaryCache => Self::SummaryCache,
+            CacheFamily::AnnProbeCache => Self::AnnProbeCache,
+            CacheFamily::PrefetchHints => Self::PrefetchHints,
+            CacheFamily::SessionWarmup => Self::SessionWarmup,
+            CacheFamily::GoalConditioned => Self::GoalConditioned,
+            CacheFamily::ColdStartMitigation => Self::ColdStartMitigation,
+        }
+    }
+}
+
+impl From<CacheEvent> for CacheEventLabel {
+    fn from(value: CacheEvent) -> Self {
+        match value {
+            CacheEvent::Hit => Self::Hit,
+            CacheEvent::Miss => Self::Miss,
+            CacheEvent::Bypass => Self::Bypass,
+            CacheEvent::Invalidation => Self::Invalidation,
+            CacheEvent::RepairWarmup => Self::RepairWarmup,
+            CacheEvent::StaleWarning => Self::StaleWarning,
+            CacheEvent::Disabled => Self::Disabled,
+            CacheEvent::PrefetchDrop => Self::PrefetchDrop,
+            CacheEvent::SessionExpired => Self::SessionExpired,
+        }
+    }
+}
+
+impl From<CacheEvent> for CacheLookupOutcome {
+    fn from(value: CacheEvent) -> Self {
+        match value {
+            CacheEvent::Hit => Self::Hit,
+            CacheEvent::Miss => Self::Miss,
+            CacheEvent::Bypass => Self::Bypass,
+            CacheEvent::Invalidation | CacheEvent::RepairWarmup | CacheEvent::PrefetchDrop => {
+                Self::Bypass
+            }
+            CacheEvent::StaleWarning => Self::StaleWarning,
+            CacheEvent::Disabled | CacheEvent::SessionExpired => Self::Disabled,
+        }
+    }
+}
+
+impl From<CacheReason> for CacheReasonLabel {
+    fn from(value: CacheReason) -> Self {
+        match value {
+            CacheReason::OwnerBoundaryMismatch => Self::OwnerBoundaryMismatch,
+            CacheReason::NamespaceMismatch => Self::NamespaceMismatch,
+            CacheReason::PolicyDenied => Self::PolicyDenied,
+            CacheReason::GenerationAnchorMismatch => Self::GenerationAnchorMismatch,
+            CacheReason::VersionMismatch => Self::VersionMismatch,
+            CacheReason::ScopeTooBroad => Self::ScopeTooBroad,
+            CacheReason::RecordNotPresent => Self::RecordNotPresent,
+            CacheReason::RepairIncomplete => Self::RepairIncomplete,
+            CacheReason::PolicyChanged => Self::PolicyChanged,
+            CacheReason::RedactionChanged => Self::RedactionChanged,
+            CacheReason::SchemaChanged => Self::SchemaChanged,
+            CacheReason::IndexChanged => Self::IndexChanged,
+            CacheReason::EmbeddingChanged => Self::EmbeddingChanged,
+            CacheReason::RankingChanged => Self::RankingChanged,
+            CacheReason::IntentChanged => Self::IntentChanged,
+            CacheReason::BudgetExhausted => Self::BudgetExhausted,
+            CacheReason::NamespaceNarrowed => Self::NamespaceNarrowed,
+            CacheReason::NamespaceWidened => Self::NamespaceWidened,
+        }
+    }
+}
+
+impl From<WarmSource> for WarmSourceLabel {
+    fn from(value: WarmSource) -> Self {
+        match value {
+            WarmSource::Tier1ItemCache => Self::Tier1ItemCache,
+            WarmSource::NegativeCache => Self::NegativeCache,
+            WarmSource::ResultCache => Self::ResultCache,
+            WarmSource::EntityNeighborhood => Self::EntityNeighborhood,
+            WarmSource::SummaryCache => Self::SummaryCache,
+            WarmSource::AnnProbeCache => Self::AnnProbeCache,
+            WarmSource::PrefetchHints => Self::PrefetchHints,
+            WarmSource::SessionWarmup => Self::SessionWarmup,
+            WarmSource::GoalConditioned => Self::GoalConditioned,
+            WarmSource::ColdStartMitigation => Self::ColdStartMitigation,
+        }
+    }
+}
+
+impl From<GenerationStatus> for GenerationStatusLabel {
+    fn from(value: GenerationStatus) -> Self {
+        match value {
+            GenerationStatus::Valid => Self::Valid,
+            GenerationStatus::Stale => Self::Stale,
+            GenerationStatus::VersionMismatched => Self::VersionMismatched,
+            GenerationStatus::Unknown => Self::Unknown,
+        }
+    }
 }
 
 // ──────────────────────────────────────────────────────────────────────────────
@@ -1386,6 +1521,32 @@ pub struct InvalidationOutcome {
     /// Per-family events suitable for inspect, explain, and audit surfaces.
     pub maintenance_events: Vec<CacheMaintenanceEvent>,
 }
+
+/// Verify-only hooks for checking cache warm-state parity without rewriting warm entries.
+pub const CACHE_WARM_STATE_VERIFY_HOOKS: [&str; 2] = [
+    "snapshot_current_generation_anchors",
+    "verify_generation_anchor_report",
+];
+
+/// Full repair hooks for rebuilding cache warm state after truth or generation drift.
+pub const CACHE_WARM_STATE_REBUILD_HOOKS: [&str; 8] = [
+    "snapshot_current_generation_anchors",
+    "invalidate_cache_families",
+    "drop_prefetch_hints",
+    "rebuild_tier1_item_cache",
+    "rebuild_result_cache",
+    "rebuild_summary_cache",
+    "rebuild_ann_probe_cache",
+    "verify_generation_anchor_report",
+];
+
+/// Families repopulated during cache warm-state repair after broad invalidation.
+pub const CACHE_WARM_STATE_WARMUP_FAMILIES: [CacheFamily; 4] = [
+    CacheFamily::Tier1Item,
+    CacheFamily::ResultCache,
+    CacheFamily::SummaryCache,
+    CacheFamily::AnnProbeCache,
+];
 
 // ──────────────────────────────────────────────────────────────────────────────
 // § 8  Composite cache manager  (mb-23u.9 umbrella)
@@ -1534,17 +1695,15 @@ impl CacheManager {
             }
         }
 
-        let (prefetch_reason, prefetch_event) = if namespace_scoped {
-            (
-                Some(CacheReason::NamespaceNarrowed),
-                CacheEvent::PrefetchDrop,
-            )
-        } else {
-            (Some(CacheReason::PolicyDenied), CacheEvent::PrefetchDrop)
-        };
+        let (prefetch_reason, prefetch_event) = (reason, CacheEvent::PrefetchDrop);
         let prefetch_dropped = if namespace_scoped {
-            self.prefetch
-                .cancel_namespace(namespace, PrefetchBypassReason::NamespaceNarrowed)
+            let bypass_reason = match trigger {
+                InvalidationTrigger::MemoryMutation => PrefetchBypassReason::IntentChanged,
+                InvalidationTrigger::PolicyChange => PrefetchBypassReason::PolicyDenied,
+                InvalidationTrigger::RedactionChange => PrefetchBypassReason::PolicyDenied,
+                _ => PrefetchBypassReason::NamespaceNarrowed,
+            };
+            self.prefetch.cancel_namespace(namespace, bypass_reason)
         } else {
             let dropped = self.prefetch.queue_depth();
             self.prefetch.cancel_all();
@@ -2049,6 +2208,81 @@ mod tests {
         assert_eq!(store.metrics.invalidation_count, 1);
     }
 
+    #[test]
+    fn cache_trace_stage_converts_to_shared_observability_trace() {
+        let result = CacheLookupResult {
+            family: CacheFamily::ResultCache,
+            event: CacheEvent::Hit,
+            reason: None,
+            warm_source: Some(WarmSource::ResultCache),
+            generation_status: GenerationStatus::Valid,
+            memory_ids: vec![MemoryId(10), MemoryId(20)],
+            candidates_after: 2,
+        };
+
+        let trace =
+            CacheTraceStage::from_lookup("result_cache_eval", &result, 6).to_observability_trace();
+
+        assert_eq!(trace.cache_family.as_str(), "result_cache");
+        assert_eq!(trace.cache_event.as_str(), "hit");
+        assert_eq!(trace.outcome.as_str(), "hit");
+        assert_eq!(
+            trace.warm_source.map(|source| source.as_str()),
+            Some("result_cache")
+        );
+        assert_eq!(trace.generation_status.as_str(), "valid");
+        assert_eq!(trace.candidates_before, 6);
+        assert_eq!(trace.candidates_after, 2);
+        assert!(trace.warm_reuse);
+    }
+
+    #[test]
+    fn maintenance_and_session_events_map_to_observability_outcomes() {
+        let invalidation_trace = CacheTraceStage {
+            stage: "repair_invalidation".into(),
+            cache_family: CacheFamily::SummaryCache,
+            cache_event: CacheEvent::Invalidation,
+            cache_reason: Some(CacheReason::SchemaChanged),
+            warm_source: None,
+            generation_status: GenerationStatus::Unknown,
+            candidates_before: 3,
+            candidates_after: 0,
+        }
+        .to_observability_trace();
+        assert_eq!(invalidation_trace.cache_event.as_str(), "invalidation");
+        assert_eq!(invalidation_trace.outcome.as_str(), "bypass");
+        assert_eq!(
+            invalidation_trace
+                .cache_reason
+                .map(|reason| reason.as_str()),
+            Some("schema_changed")
+        );
+        assert!(!invalidation_trace.warm_reuse);
+
+        let session_expired_trace = CacheTraceStage {
+            stage: "session_expired".into(),
+            cache_family: CacheFamily::PrefetchHints,
+            cache_event: CacheEvent::SessionExpired,
+            cache_reason: Some(CacheReason::IntentChanged),
+            warm_source: None,
+            generation_status: GenerationStatus::Unknown,
+            candidates_before: 2,
+            candidates_after: 0,
+        }
+        .to_observability_trace();
+        assert_eq!(
+            session_expired_trace.cache_event.as_str(),
+            "session_expired"
+        );
+        assert_eq!(session_expired_trace.outcome.as_str(), "disabled");
+        assert_eq!(
+            session_expired_trace
+                .cache_reason
+                .map(|reason| reason.as_str()),
+            Some("intent_changed")
+        );
+    }
+
     // ── § 9.7  LRU eviction ─────────────────────────────────────────────
 
     #[test]
@@ -2130,7 +2364,7 @@ mod tests {
         assert!(outcome.maintenance_events.iter().any(|event| {
             event.family == CacheFamily::PrefetchHints
                 && event.event == CacheEvent::PrefetchDrop
-                && event.reason == Some(CacheReason::NamespaceNarrowed)
+                && event.reason == Some(CacheReason::PolicyChanged)
                 && event.warm_source == Some(WarmSource::PrefetchHints)
         }));
         // team.beta should survive
@@ -2195,6 +2429,7 @@ mod tests {
         assert!(outcome.maintenance_events.iter().any(|event| {
             event.family == CacheFamily::PrefetchHints
                 && event.event == CacheEvent::PrefetchDrop
+                && event.reason == Some(CacheReason::NamespaceNarrowed)
                 && event.entries_affected == 2
         }));
         assert_eq!(mgr.tier1_item.len(), 0);
@@ -2266,6 +2501,19 @@ mod tests {
             assert!(outcome.maintenance_events.iter().any(|event| {
                 event.family == CacheFamily::Tier1Item
                     && event.event == CacheEvent::Invalidation
+                    && event.reason
+                        == Some(match trigger {
+                            InvalidationTrigger::SchemaChange => CacheReason::SchemaChanged,
+                            InvalidationTrigger::IndexChange => CacheReason::IndexChanged,
+                            InvalidationTrigger::EmbeddingChange => CacheReason::EmbeddingChanged,
+                            InvalidationTrigger::RankingChange => CacheReason::RankingChanged,
+                            InvalidationTrigger::RepairStarted => CacheReason::RepairIncomplete,
+                            _ => unreachable!("unexpected trigger in regression loop"),
+                        })
+            }));
+            assert!(outcome.maintenance_events.iter().any(|event| {
+                event.family == CacheFamily::PrefetchHints
+                    && event.event == CacheEvent::PrefetchDrop
                     && event.reason
                         == Some(match trigger {
                             InvalidationTrigger::SchemaChange => CacheReason::SchemaChanged,

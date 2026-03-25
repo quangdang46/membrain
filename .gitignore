@@ -6,3 +6,7 @@ target/
 .logs/
 __pycache__/
 state.json
+crates/membrain-cli/.fastembed_cache/
+.saw/
+.scope/
+.why/

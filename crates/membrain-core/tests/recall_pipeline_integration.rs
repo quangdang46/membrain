@@ -1,4 +1,8 @@
-use membrain_core::api::NamespaceId;
+use membrain_core::api::{FieldPresence, NamespaceId, PolicyContext, RequestContext, RequestId};
+use membrain_core::engine::contradiction::{
+    ContradictionCandidate, ContradictionExplain, ContradictionKind, PreferredAnswerState,
+    ResolutionState,
+};
 use membrain_core::engine::ranking::{fuse_scores, RankingInput, RankingProfile};
 use membrain_core::engine::recall::{RecallRequest, RecallRuntime, RecallTraceStage};
 use membrain_core::engine::result::{
@@ -10,10 +14,13 @@ use membrain_core::graph::{
     BoundedExpansionPlanner, CutoffReason, EntityId, EntityKind, ExpansionConstraints, GraphEdge,
     GraphEntity, RelationKind,
 };
+use membrain_core::health::{BrainHealthInputs, BrainHealthReport, FeatureAvailabilityEntry};
+use membrain_core::index::IndexModule;
 use membrain_core::observability::{
     CacheEvalTrace, CacheEventLabel, CacheFamilyLabel, CacheLookupOutcome, CacheReasonLabel,
     GenerationStatusLabel, WarmSourceLabel,
 };
+use membrain_core::store::cache::CacheManager;
 use membrain_core::types::{
     CanonicalMemoryType, MemoryId, RawEncodeInput, RawIntakeKind, SessionId,
 };
@@ -174,6 +181,7 @@ fn result_builder_adds_and_ranks_candidates() {
         time_consumed_ms: Some(5),
         ranking_profile: "balanced".to_string(),
         contradictions_found: 0,
+        historical_context: None,
         query_by_example: None,
         result_reasons: vec![membrain_core::engine::result::ResultReason {
             memory_id: Some(MemoryId(2)),
@@ -229,6 +237,7 @@ fn result_builder_truncates_to_budget() {
         time_consumed_ms: Some(3),
         ranking_profile: "balanced".to_string(),
         contradictions_found: 0,
+        historical_context: None,
         query_by_example: None,
         result_reasons: vec![],
     };
@@ -252,6 +261,7 @@ fn empty_result_set_has_correct_outcome_class() {
         time_consumed_ms: Some(1),
         ranking_profile: "balanced".to_string(),
         contradictions_found: 0,
+        historical_context: None,
         query_by_example: None,
         result_reasons: vec![membrain_core::engine::result::ResultReason {
             memory_id: None,
@@ -273,6 +283,70 @@ fn empty_result_set_has_correct_outcome_class() {
     assert_eq!(result_set.count(), 0);
     assert!(!result_set.truncated);
     assert!(result_set.top().is_none());
+}
+
+#[test]
+fn historical_trace_exposes_snapshot_selection_details() {
+    let store = BrainStore::new(membrain_core::RuntimeConfig::default());
+    let namespace = ns("time_travel");
+    let snapshot = {
+        let mut mutable = store.clone();
+        mutable.capture_snapshot(
+            namespace.clone(),
+            "incident_baseline",
+            Some("before rollback".to_string()),
+            3,
+            membrain_core::types::SnapshotRetentionClass::Restorable,
+        )
+    };
+    let request = RetrievalRequest::hybrid(namespace, "rollback decision", 4)
+        .with_as_of_tick_range(20, 80)
+        .with_snapshot_name("incident_baseline");
+
+    let mut trace = RetrievalPlanTrace::new(&request);
+    trace.set_resolved_snapshot(snapshot.clone());
+    trace.set_final_candidates(2);
+
+    let mut explain = RetrievalExplain {
+        recall_plan: membrain_core::engine::recall::RecallPlanKind::Tier2ExactThenTier3Fallback,
+        route_reason: "historical retrieval".to_string(),
+        tiers_consulted: vec!["tier2_exact".to_string()],
+        trace_stages: vec![RecallTraceStage::Tier2Exact],
+        tier1_answered_directly: false,
+        candidate_budget: 4,
+        time_consumed_ms: Some(2),
+        ranking_profile: "balanced".to_string(),
+        contradictions_found: 0,
+        historical_context: None,
+        query_by_example: None,
+        result_reasons: vec![],
+    };
+    explain.set_historical_trace(&trace);
+
+    let historical_context = explain.historical_context.as_ref().unwrap();
+    assert_eq!(historical_context.window_kind, "snapshot");
+    assert_eq!(
+        historical_context.selection_reason,
+        "snapshot_anchor_overrides_tick_window_end"
+    );
+    assert_eq!(
+        historical_context.selected_tick_window,
+        Some((0, snapshot.as_of_tick))
+    );
+    assert_eq!(historical_context.as_of_tick, Some(snapshot.as_of_tick));
+    assert_eq!(historical_context.snapshot_id, Some(snapshot.snapshot_id));
+    assert_eq!(
+        historical_context.snapshot_name.as_deref(),
+        Some("incident_baseline")
+    );
+    assert!(explain.result_reasons.iter().any(|reason| {
+        reason.reason_code == "historical_window_selected"
+            && reason.detail.contains("historical retrieval used snapshot")
+    }));
+    assert!(explain.result_reasons.iter().any(|reason| {
+        reason.reason_code == "historical_snapshot_selected"
+            && reason.detail.contains("incident_baseline")
+    }));
 }
 
 #[test]
@@ -316,6 +390,7 @@ fn recall_trace_exposes_query_by_example_seed_selection_details() {
         time_consumed_ms: Some(2),
         ranking_profile: "balanced".to_string(),
         contradictions_found: 0,
+        historical_context: None,
         query_by_example: None,
         result_reasons: vec![ResultReason {
             memory_id: Some(MemoryId(42)),
@@ -413,6 +488,7 @@ fn confidence_filter_emits_explain_reasons_for_suppressed_candidates() {
         AnsweredFrom::Tier2Indexed,
         &membrain_core::engine::confidence::ConfidenceInputs {
             corroboration_count: 0,
+            reconsolidation_count: 0,
             ticks_since_last_access: 1000,
             age_ticks: 1000,
             resolution_state: membrain_core::engine::contradiction::ResolutionState::Unresolved,
@@ -435,6 +511,7 @@ fn confidence_filter_emits_explain_reasons_for_suppressed_candidates() {
             time_consumed_ms: Some(7),
             ranking_profile: "balanced".to_string(),
             contradictions_found: 0,
+            historical_context: None,
             query_by_example: None,
             result_reasons: vec![],
         },
@@ -487,6 +564,7 @@ fn confidence_filter_empty_result_set_degrades_outcome_from_accepted() {
         AnsweredFrom::Tier2Indexed,
         &membrain_core::engine::confidence::ConfidenceInputs {
             corroboration_count: 0,
+            reconsolidation_count: 0,
             ticks_since_last_access: 1000,
             age_ticks: 1000,
             resolution_state: membrain_core::engine::contradiction::ResolutionState::Unresolved,
@@ -509,6 +587,7 @@ fn confidence_filter_empty_result_set_degrades_outcome_from_accepted() {
             time_consumed_ms: Some(7),
             ranking_profile: "balanced".to_string(),
             contradictions_found: 0,
+            historical_context: None,
             query_by_example: None,
             result_reasons: vec![],
         },
@@ -529,6 +608,67 @@ fn confidence_filter_empty_result_set_degrades_outcome_from_accepted() {
         reason.reason_code == "confidence_threshold_applied"
             && reason.detail == "filtered 1 candidate(s) below min_confidence=500"
     }));
+}
+
+#[test]
+fn explain_markers_surface_reconsolidation_churn_when_present() {
+    let mut builder = ResultBuilder::new(1, ns("reconsolidation_churn_marker"));
+    let ranked = fuse_scores(
+        RankingInput {
+            recency: 500,
+            salience: 500,
+            strength: 500,
+            provenance: 500,
+            conflict: 500,
+            confidence: 800,
+        },
+        RankingProfile::balanced(),
+    );
+
+    builder.add_with_confidence(
+        MemoryId(78),
+        ns("reconsolidation_churn_marker"),
+        SessionId(1),
+        CanonicalMemoryType::Event,
+        "retained churn-heavy confidence".into(),
+        &ranked,
+        AnsweredFrom::Tier2Indexed,
+        &membrain_core::engine::confidence::ConfidenceInputs {
+            corroboration_count: 4,
+            reconsolidation_count: 16,
+            ticks_since_last_access: 10,
+            age_ticks: 10,
+            resolution_state: membrain_core::engine::contradiction::ResolutionState::None,
+            conflict_score: 0,
+            causal_parent_count: 2,
+            authoritativeness: 900,
+            recall_count: 4,
+        },
+        &membrain_core::engine::confidence::ConfidencePolicy::default(),
+    );
+
+    let result_set = builder.build(RetrievalExplain {
+        recall_plan: membrain_core::engine::recall::RecallPlanKind::Tier2ExactThenTier3Fallback,
+        route_reason: "reconsolidation churn marker".to_string(),
+        tiers_consulted: vec!["tier2_exact".to_string()],
+        trace_stages: vec![RecallTraceStage::Tier2Exact],
+        tier1_answered_directly: false,
+        candidate_budget: 1,
+        time_consumed_ms: Some(4),
+        ranking_profile: "balanced".to_string(),
+        contradictions_found: 0,
+        historical_context: None,
+        query_by_example: None,
+        result_reasons: vec![],
+    });
+
+    let (_, _, uncertainty_markers) = result_set.explain_markers();
+    assert_eq!(uncertainty_markers.len(), 1);
+    assert_eq!(uncertainty_markers[0].code, "reconsolidation_churn");
+    assert_eq!(
+        uncertainty_markers[0].detail,
+        "bounded evidence shows elevated reconsolidation churn and reduced reliability"
+    );
 }
 
 #[test]
@@ -556,6 +696,7 @@ fn explain_markers_surface_low_confidence_when_result_is_retained() {
         AnsweredFrom::Tier2Indexed,
         &membrain_core::engine::confidence::ConfidenceInputs {
             corroboration_count: 0,
+            reconsolidation_count: 0,
             ticks_since_last_access: 1000,
             age_ticks: 1000,
             resolution_state: membrain_core::engine::contradiction::ResolutionState::Unresolved,
@@ -577,6 +718,7 @@ fn explain_markers_surface_low_confidence_when_result_is_retained() {
         time_consumed_ms: Some(4),
         ranking_profile: "balanced".to_string(),
         contradictions_found: 0,
+        historical_context: None,
         query_by_example: None,
         result_reasons: vec![],
     });
@@ -609,6 +751,386 @@ fn payload_state_has_correct_string_representation() {
     assert_eq!(PayloadState::PreviewOnly.as_str(), "preview_only");
     assert_eq!(PayloadState::Deferred.as_str(), "deferred");
     assert_eq!(PayloadState::Redacted.as_str(), "redacted");
+}
+
+#[test]
+fn encode_to_recall_round_trip_preserves_payload_policy_and_temporal_explain() {
+    let store = BrainStore::new(membrain_core::RuntimeConfig::default());
+    let namespace = ns("round_trip");
+    let memory_id = MemoryId(21);
+    let session_id = SessionId(8);
+    let prepared = store.prepare_tier2_layout_with_trace_from_encode(
+        namespace.clone(),
+        memory_id,
+        session_id,
+        RawEncodeInput::new(RawIntakeKind::Event, "Launch day").with_landmark_signals(
+            membrain_core::types::LandmarkSignals::new(0.95, 0.91, 0.12, 88),
+        ),
+    );
+
+    let plan = store
+        .recall_engine()
+        .plan_recall(RecallRequest::exact(memory_id), store.config());
+    let ranking = fuse_scores(
+        RankingInput {
+            recency: 920,
+            salience: 910,
+            strength: 860,
+            provenance: 830,
+            conflict: 500,
+            confidence: 500,
+        },
+        RankingProfile::balanced(),
+    );
+    let mut builder = ResultBuilder::new(1, namespace.clone());
+    builder.add(
+        memory_id,
+        namespace.clone(),
+        session_id,
+        prepared.layout.metadata.memory_type,
+        prepared.layout.metadata.compact_text.clone(),
+        &ranking,
+        AnsweredFrom::Tier1Hot,
+    );
+    let mut explain = RetrievalExplain::from_plan(&plan, "balanced");
+    explain.push_temporal_landmark_reasons_from_prepared_layout(&prepared);
+    let result_set = builder.build(explain);
+    let (policy_summary, provenance_summary) = result_set.explain_policy_and_provenance();
+
+    assert_eq!(result_set.count(), 1);
+    assert_eq!(result_set.top().unwrap().result.memory_id, memory_id);
+    assert_eq!(result_set.top().unwrap().result.compact_text, "Launch day");
+    assert!(result_set.deferred_payloads.is_empty());
+    assert!(prepared.prefilter_stays_metadata_only());
+    assert!(prepared.layout.prefilter_stays_metadata_only());
+    assert_eq!(prepared.prefilter_trace.payload_fetch_count, 0);
+    assert!(result_set.explain.result_reasons.iter().any(|reason| {
+        reason.reason_code == "temporal_prefilter_metadata_only"
+            && reason.memory_id == Some(memory_id)
+    }));
+    assert!(result_set.explain.result_reasons.iter().any(|reason| {
+        reason.reason_code == "temporal_payload_deferred"
+            && reason.detail.contains("tier2://round_trip/payload")
+    }));
+    assert!(result_set.explain.result_reasons.iter().any(|reason| {
+        reason.reason_code == "temporal_landmark_selected" && reason.detail.contains("tick 88")
+    }));
+    assert_eq!(policy_summary.effective_namespace, "round_trip");
+    assert_eq!(policy_summary.policy_family, "namespace");
+    assert_eq!(policy_summary.sharing_scope, "custom_sharing_scope");
+    assert_eq!(policy_summary.retention_state, "absent");
+    assert_eq!(provenance_summary.source_reference, "result_builder");
+}
+
+#[test]
+fn health_report_surfaces_batch1_metrics_and_status_rollups() {
+    let mut cache = CacheManager::new(4, 4);
+    cache.prefetch.submit_hint(
+        ns("health_surface"),
+        membrain_core::store::cache::PrefetchTrigger::SessionRecency,
+        vec![MemoryId(1), MemoryId(2)],
+    );
+    let dropped = cache.prefetch.cancel_namespace(
+        &ns("health_surface"),
+        membrain_core::store::cache::PrefetchBypassReason::NamespaceNarrowed,
+    );
+    assert_eq!(dropped, 2);
+
+    let report = BrainHealthReport::from_inputs(
+        BrainHealthInputs {
+            hot_memories: 12,
+            hot_capacity: 20,
+            cold_memories: 5,
+            avg_strength: 0.61,
+            avg_confidence: 0.74,
+            low_confidence_count: 2,
+            decay_rate: 0.02,
+            archive_count: 3,
+            total_engrams: 4,
+            avg_cluster_size: 1.5,
+            top_engrams: vec![("ops".to_string(), 2)],
+            landmark_count: 1,
+            unresolved_conflicts: 0,
+            uncertain_count: 1,
+            dream_links_total: 7,
+            last_dream_tick: Some(99),
+            total_recalls: 15,
+            total_encodes: 6,
+            current_tick: 120,
+            daemon_uptime_ticks: 90,
+            index_reports: IndexModule::health_reports(),
+            availability: Some(membrain_core::api::AvailabilitySummary::degraded(
+                vec!["recall", "health"],
+                vec!["encode"],
+                vec![membrain_core::api::AvailabilityReason::PrefetchBypassed],
+                vec![membrain_core::api::RemediationStep::CheckHealth],
+            )),
+            feature_availability: vec![
+                FeatureAvailabilityEntry {
+                    feature: "health".to_string(),
+                    posture: membrain_core::api::AvailabilityPosture::Full,
+                    note: Some("dashboard_surface_ready".to_string()),
+                },
+                FeatureAvailabilityEntry {
+                    feature: "dream".to_string(),
+                    posture: membrain_core::api::AvailabilityPosture::Degraded,
+                    note: Some("offline_scheduler_only".to_string()),
+                },
+            ],
+            previous_total_recalls: Some(10),
+            previous_total_encodes: Some(5),
+            previous_repair_queue_depth: None,
+            previous_hot_memories: Some(10),
+            previous_low_confidence_count: Some(3),
+            previous_unresolved_conflicts: Some(1),
+            previous_uncertain_count: Some(2),
+            previous_cache_hit_count: Some(0),
+            previous_cache_miss_count: Some(0),
+            previous_cache_bypass_count: Some(0),
+            previous_prefetch_queue_depth: Some(0),
+            previous_prefetch_drop_count: Some(0),
+            previous_index_stale_count: Some(0),
+            previous_index_missing_count: Some(0),
+            previous_index_repair_backlog_total: Some(0),
+            previous_availability_posture: Some(membrain_core::api::AvailabilityPosture::Full),
+        },
+        &cache,
+        None,
+    );
+
+    assert_eq!(report.dream_links_total, 7);
+    assert_eq!(report.last_dream_tick, Some(99));
+    assert_eq!(report.feature_availability.len(), 2);
+    assert!(report.feature_availability.iter().any(|feature| {
+        feature.feature == "dream"
+            && feature.posture == membrain_core::api::AvailabilityPosture::Degraded
+            && feature.note.as_deref() == Some("offline_scheduler_only")
+    }));
+    assert_eq!(report.backpressure_state, Some("elevated"));
+    assert_eq!(report.availability_posture, Some(membrain_core::api::AvailabilityPosture::Degraded));
+    assert!(report
+        .availability_notes
+        .as_deref()
+        .is_some_and(|notes| notes.contains("prefetch_bypassed")));
+    assert!(report.subsystem_status.iter().any(|status| {
+        status.subsystem == "availability"
+            && status.detail.contains("posture=degraded")
+            && status.reasons.contains(&"prefetch_bypassed")
+    }));
+    assert!(report.trends.iter().any(|trend| {
+        trend.subsystem == "memory"
+            && trend.metric == "low_confidence_count"
+            && trend.direction == membrain_core::health::TrendDirection::Improving
+    }));
+    assert!(report.trend_summary.iter().any(|summary| {
+        summary.subsystem == "availability"
+            && summary
+                .trends
+                .iter()
+                .any(|trend| trend.metric == "availability_posture")
+    }));
+}
+
+#[test]
+fn contradiction_and_policy_integration_surface_redaction_and_legal_hold_visibility() {
+    let mut store = BrainStore::default();
+    let namespace = ns("policy_contradiction");
+    store.contradiction_engine_mut().register_memory(
+        namespace.clone(),
+        MemoryId(10),
+        101,
+        "deployment target is prod-a".into(),
+    );
+    store.contradiction_engine_mut().register_memory(
+        namespace.clone(),
+        MemoryId(20),
+        202,
+        "deployment target is prod-b".into(),
+    );
+    let branch = store
+        .record_encode_contradiction(
+            namespace.clone(),
+            MemoryId(10),
+            MemoryId(20),
+            ContradictionKind::Supersession,
+            880,
+        )
+        .unwrap();
+    let encode_candidate = ContradictionCandidate {
+        memory_id: MemoryId(30),
+        fingerprint: 202,
+        compact_text: "deployment target is prod-b".into(),
+        namespace: namespace.clone(),
+    };
+    let detect_outcome = store
+        .detect_and_branch_encode(namespace.clone(), MemoryId(30), &encode_candidate)
+        .unwrap();
+
+    let cross_namespace_request = RequestContext {
+        namespace: Some(namespace.clone()),
+        workspace_id: None,
+        agent_id: None,
+        session_id: Some(SessionId(5)),
+        task_id: None,
+        request_id: RequestId::new("req-policy-contradiction").unwrap(),
+        policy_context: PolicyContext {
+            include_public: false,
+            sharing_visibility: membrain_core::policy::SharingVisibility::Private,
+            caller_identity_bound: true,
+            workspace_acl_allowed: true,
+            agent_acl_allowed: true,
+            session_visibility_allowed: true,
+            legal_hold: false,
+        },
+        time_budget_ms: None,
+    };
+    let sharing_outcome = cross_namespace_request
+        .bind_namespace(None)
+        .unwrap()
+        .evaluate_cross_namespace_sharing_access(store.policy(), &ns("policy_other"));
+
+    let mut contradiction_ranked = fuse_scores(
+        RankingInput {
+            recency: 780,
+            salience: 770,
+            strength: 740,
+            provenance: 920,
+            conflict: 260,
+            confidence: 760,
+        },
+        RankingProfile::balanced(),
+    );
+    contradiction_ranked.contradiction_explains = vec![ContradictionExplain {
+        contradiction_id: branch.contradiction_id,
+        kind: ContradictionKind::Supersession,
+        resolution: ResolutionState::AuthoritativelyResolved,
+        preferred_answer_state: PreferredAnswerState::Preferred,
+        preferred_memory: Some(MemoryId(20)),
+        confidence_signal: 980,
+        conflicting_memory: MemoryId(10),
+        lineage_pair: [MemoryId(10), MemoryId(20)],
+        result_is_preferred: true,
+        superseded_memory: Some(MemoryId(10)),
+        resolution_reason: Some("authoritative archive".to_string()),
+        active_contradiction: false,
+        archived: true,
+        legal_hold: true,
+        authoritative_evidence: true,
+        retention_reason: Some("legal hold keeps archived contradiction".to_string()),
+        audit_visible: true,
+    }];
+
+    let mut builder = ResultBuilder::new(1, namespace.clone());
+    builder.add(
+        MemoryId(20),
+        namespace.clone(),
+        SessionId(5),
+        CanonicalMemoryType::Event,
+        "deployment target is prod-b".into(),
+        &contradiction_ranked,
+        AnsweredFrom::Tier2Indexed,
+    );
+    let mut result_set = builder.build(RetrievalExplain {
+        recall_plan: membrain_core::engine::recall::RecallPlanKind::Tier2ExactThenTier3Fallback,
+        route_reason: "contradiction and policy packaging".to_string(),
+        tiers_consulted: vec!["tier2_exact".to_string()],
+        trace_stages: vec![RecallTraceStage::Tier2Exact],
+        tier1_answered_directly: false,
+        candidate_budget: 4,
+        time_consumed_ms: Some(7),
+        ranking_profile: "balanced".to_string(),
+        contradictions_found: 0,
+        historical_context: None,
+        query_by_example: None,
+        result_reasons: vec![
+            ResultReason {
+                memory_id: Some(MemoryId(20)),
+                reason_code: "contradiction_retained_under_legal_hold".to_string(),
+                detail: "legal hold keeps archived authoritative evidence visible".to_string(),
+            },
+            ResultReason {
+                memory_id: None,
+                reason_code: "policy_redacted".to_string(),
+                detail: "1 cross-namespace item redacted by namespace policy".to_string(),
+            },
+        ],
+    });
+    result_set.policy_summary.redactions_applied = true;
+    result_set.policy_summary.restrictions_active = vec![
+        "cross_namespace_private".to_string(),
+        "retention".to_string(),
+    ];
+    result_set.policy_summary.filters = vec![membrain_core::api::PolicyFilterSummary::new(
+        namespace.as_str(),
+        "namespace",
+        membrain_core::observability::OutcomeClass::Accepted,
+        "package",
+        FieldPresence::Redacted,
+        FieldPresence::Present("legal_hold".to_string()),
+        sharing_outcome
+            .redaction_fields
+            .iter()
+            .map(|field| (*field).to_string())
+            .collect(),
+    )];
+    result_set.omitted_summary.policy_redacted = 1;
+
+    let (trace_policy_summary, _) = result_set.explain_policy_and_provenance();
+
+    assert!(detect_outcome.is_contradiction());
+    assert_eq!(
+        sharing_outcome.decision,
+        membrain_core::policy::SharingAccessDecision::Deny
+    );
+    assert_eq!(
+        sharing_outcome.redaction_fields,
+        vec!["memory_id", "sharing_scope", "workspace_id", "session_id"]
+    );
+    assert_eq!(result_set.explain.contradictions_found, 1);
+    assert_eq!(result_set.omitted_summary.policy_redacted, 1);
+    assert!(result_set.policy_summary.redactions_applied);
+    assert_eq!(
+        result_set.policy_summary.restrictions_active,
+        vec!["cross_namespace_private", "retention"]
+    );
+    assert_eq!(
+        result_set.evidence_pack[0]
+            .result
+            .conflict_markers
+            .audit_visible_count,
+        1
+    );
+    assert_eq!(
+        result_set.evidence_pack[0]
+            .result
+            .conflict_markers
+            .resolution_reasons,
+        vec!["authoritative archive".to_string()]
+    );
+    assert!(result_set
+        .explain
+        .result_reasons
+        .iter()
+        .any(|reason| { reason.reason_code == "contradiction_retained_under_legal_hold" }));
+    assert!(result_set.explain.result_reasons.iter().any(|reason| {
+        reason.reason_code == "policy_redacted" && reason.detail.contains("cross-namespace")
+    }));
+    assert_eq!(
+        trace_policy_summary.effective_namespace,
+        "policy_contradiction"
+    );
+    assert_eq!(trace_policy_summary.sharing_scope, "same_namespace");
+    assert_eq!(trace_policy_summary.retention_state, "retained");
+    assert_eq!(trace_policy_summary.redaction_fields, vec!["payload"]);
+    assert_eq!(
+        result_set.policy_summary.filters[0].redaction_fields,
+        vec![
+            "memory_id".to_string(),
+            "sharing_scope".to_string(),
+            "workspace_id".to_string(),
+            "session_id".to_string(),
+        ]
+    );
 }
 
 #[test]

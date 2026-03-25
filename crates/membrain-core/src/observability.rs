@@ -701,6 +701,9 @@ fn reason_code_label(reason_code: &str) -> &'static str {
         "query_by_example_seed_materialized" => "query_by_example_seed_materialized",
         "query_by_example_seed_missing" => "query_by_example_seed_missing",
         "query_by_example_candidate_expansion" => "query_by_example_candidate_expansion",
+        "causal_chain_root_validated" => "causal_chain_root_validated",
+        "historical_window_selected" => "historical_window_selected",
+        "historical_snapshot_selected" => "historical_snapshot_selected",
         "temporal_prefilter_metadata_only" => "temporal_prefilter_metadata_only",
         "temporal_payload_deferred" => "temporal_payload_deferred",
         "temporal_landmark_selected" => "temporal_landmark_selected",
@@ -709,12 +712,37 @@ fn reason_code_label(reason_code: &str) -> &'static str {
         "contradiction_selected" => "contradiction_selected",
         "contradiction_visible" => "contradiction_visible",
         "contradiction_retained_under_legal_hold" => "contradiction_retained_under_legal_hold",
+        "confidence_threshold_applied" => "confidence_threshold_applied",
+        "low_confidence_suppressed" => "low_confidence_suppressed",
+        "confidence_display_rule" => "confidence_display_rule",
+        "strength_threshold_applied" => "strength_threshold_applied",
+        "below_min_strength" => "below_min_strength",
         _ => "custom_reason_code",
     }
 }
 
 fn freshness_marker(markers: &crate::engine::result::FreshnessMarkers) -> FreshnessMarker {
-    if markers.stale_warning {
+    if markers.recheck_required {
+        FreshnessMarker {
+            code: "lease_sensitive",
+            detail: "result set contains stale action-critical evidence that now requires re-check or withholding",
+        }
+    } else if markers.lease_sensitive {
+        FreshnessMarker {
+            code: "lease_sensitive",
+            detail: "result set contains evidence whose lease expired and confidence was downgraded explicitly",
+        }
+    } else if let Some(as_of_tick) = markers.as_of_tick {
+        FreshnessMarker {
+            code: "as_of_scoped",
+            detail: Box::leak(
+                format!(
+                    "result set was packaged against historical state at as_of_tick={as_of_tick}"
+                )
+                .into_boxed_str(),
+            ),
+        }
+    } else if markers.stale_warning {
         FreshnessMarker {
             code: "stale_warning",
             detail: "result set includes stale or aging evidence",
@@ -808,6 +836,15 @@ pub enum CacheFamilyLabel {
     Result,
     Summary,
     Negative,
+    NegativeCache,
+    ResultCache,
+    EntityNeighborhood,
+    SummaryCache,
+    AnnProbeCache,
+    PrefetchHints,
+    SessionWarmup,
+    GoalConditioned,
+    ColdStartMitigation,
 }
 
 impl CacheFamilyLabel {
@@ -820,6 +857,15 @@ impl CacheFamilyLabel {
             Self::Result => "result",
             Self::Summary => "summary",
             Self::Negative => "negative",
+            Self::NegativeCache => "negative_cache",
+            Self::ResultCache => "result_cache",
+            Self::EntityNeighborhood => "entity_neighborhood",
+            Self::SummaryCache => "summary_cache",
+            Self::AnnProbeCache => "ann_probe_cache",
+            Self::PrefetchHints => "prefetch_hints",
+            Self::SessionWarmup => "session_warmup",
+            Self::GoalConditioned => "goal_conditioned",
+            Self::ColdStartMitigation => "cold_start_mitigation",
         }
     }
 }
@@ -833,6 +879,12 @@ pub enum CacheEventLabel {
     Bypass,
     Invalidate,
     Prefetch,
+    Invalidation,
+    RepairWarmup,
+    StaleWarning,
+    Disabled,
+    PrefetchDrop,
+    SessionExpired,
 }
 
 impl CacheEventLabel {
@@ -844,6 +896,12 @@ impl CacheEventLabel {
             Self::Bypass => "bypass",
             Self::Invalidate => "invalidate",
             Self::Prefetch => "prefetch",
+            Self::Invalidation => "invalidation",
+            Self::RepairWarmup => "repair_warmup",
+            Self::StaleWarning => "stale_warning",
+            Self::Disabled => "disabled",
+            Self::PrefetchDrop => "prefetch_drop",
+            Self::SessionExpired => "session_expired",
         }
     }
 }
@@ -853,11 +911,28 @@ impl CacheEventLabel {
 #[serde(rename_all = "snake_case")]
 pub enum CacheReasonLabel {
     PolicyBoundary,
-    NamespaceMismatch,
     SnapshotRequired,
     LegalHold,
     StaleGeneration,
     ColdStart,
+    OwnerBoundaryMismatch,
+    NamespaceMismatch,
+    PolicyDenied,
+    GenerationAnchorMismatch,
+    VersionMismatch,
+    ScopeTooBroad,
+    RecordNotPresent,
+    RepairIncomplete,
+    PolicyChanged,
+    RedactionChanged,
+    SchemaChanged,
+    IndexChanged,
+    EmbeddingChanged,
+    RankingChanged,
+    IntentChanged,
+    BudgetExhausted,
+    NamespaceNarrowed,
+    NamespaceWidened,
 }
 
 impl CacheReasonLabel {
@@ -865,11 +940,28 @@ impl CacheReasonLabel {
     pub const fn as_str(self) -> &'static str {
         match self {
             Self::PolicyBoundary => "policy_boundary",
-            Self::NamespaceMismatch => "namespace_mismatch",
             Self::SnapshotRequired => "snapshot_required",
             Self::LegalHold => "legal_hold",
             Self::StaleGeneration => "stale_generation",
             Self::ColdStart => "cold_start",
+            Self::OwnerBoundaryMismatch => "owner_boundary_mismatch",
+            Self::NamespaceMismatch => "namespace_mismatch",
+            Self::PolicyDenied => "policy_denied",
+            Self::GenerationAnchorMismatch => "generation_anchor_mismatch",
+            Self::VersionMismatch => "version_mismatch",
+            Self::ScopeTooBroad => "scope_too_broad",
+            Self::RecordNotPresent => "record_not_present",
+            Self::RepairIncomplete => "repair_incomplete",
+            Self::PolicyChanged => "policy_changed",
+            Self::RedactionChanged => "redaction_changed",
+            Self::SchemaChanged => "schema_changed",
+            Self::IndexChanged => "index_changed",
+            Self::EmbeddingChanged => "embedding_changed",
+            Self::RankingChanged => "ranking_changed",
+            Self::IntentChanged => "intent_changed",
+            Self::BudgetExhausted => "budget_exhausted",
+            Self::NamespaceNarrowed => "namespace_narrowed",
+            Self::NamespaceWidened => "namespace_widened",
         }
     }
 }
@@ -878,12 +970,16 @@ impl CacheReasonLabel {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum WarmSourceLabel {
-    Tier1ItemCache,
     Tier2QueryCache,
-    AnnProbeCache,
+    Tier1ItemCache,
+    NegativeCache,
     ResultCache,
+    EntityNeighborhood,
     SummaryCache,
+    AnnProbeCache,
     PrefetchHints,
+    SessionWarmup,
+    GoalConditioned,
     ColdStartMitigation,
 }
 
@@ -891,12 +987,16 @@ impl WarmSourceLabel {
     /// Returns the stable machine-readable warm-source label.
     pub const fn as_str(self) -> &'static str {
         match self {
-            Self::Tier1ItemCache => "tier1_item_cache",
             Self::Tier2QueryCache => "tier2_query_cache",
-            Self::AnnProbeCache => "ann_probe_cache",
+            Self::Tier1ItemCache => "tier1_item_cache",
+            Self::NegativeCache => "negative_cache",
             Self::ResultCache => "result_cache",
+            Self::EntityNeighborhood => "entity_neighborhood",
             Self::SummaryCache => "summary_cache",
+            Self::AnnProbeCache => "ann_probe_cache",
             Self::PrefetchHints => "prefetch_hints",
+            Self::SessionWarmup => "session_warmup",
+            Self::GoalConditioned => "goal_conditioned",
             Self::ColdStartMitigation => "cold_start_mitigation",
         }
     }
@@ -908,6 +1008,7 @@ impl WarmSourceLabel {
 pub enum GenerationStatusLabel {
     Valid,
     Stale,
+    VersionMismatched,
     Unknown,
 }
 
@@ -917,6 +1018,7 @@ impl GenerationStatusLabel {
         match self {
             Self::Valid => "valid",
             Self::Stale => "stale",
+            Self::VersionMismatched => "version_mismatched",
             Self::Unknown => "unknown",
         }
     }
@@ -1152,6 +1254,18 @@ mod tests {
         assert_eq!(report.duration_ms, 41);
         assert_eq!(report.retry_attempts, 1);
         assert!(report.partial_run);
+
+        let freshness_marker = super::freshness_marker(&FreshnessMarkers {
+            oldest_item_days: 0,
+            newest_item_days: 0,
+            volatile_items_included: true,
+            stale_warning: true,
+            lease_sensitive: true,
+            recheck_required: true,
+            as_of_tick: Some(21),
+        });
+        assert_eq!(freshness_marker.code, "lease_sensitive");
+        assert!(freshness_marker.detail.contains("re-check or withholding"));
     }
 
     #[test]
@@ -1170,16 +1284,36 @@ mod tests {
         assert_eq!(CacheFamilyLabel::Result.as_str(), "result");
         assert_eq!(CacheFamilyLabel::Summary.as_str(), "summary");
         assert_eq!(CacheFamilyLabel::Negative.as_str(), "negative");
+        assert_eq!(CacheFamilyLabel::NegativeCache.as_str(), "negative_cache");
+        assert_eq!(CacheFamilyLabel::ResultCache.as_str(), "result_cache");
+        assert_eq!(
+            CacheFamilyLabel::EntityNeighborhood.as_str(),
+            "entity_neighborhood"
+        );
+        assert_eq!(CacheFamilyLabel::SummaryCache.as_str(), "summary_cache");
+        assert_eq!(CacheFamilyLabel::AnnProbeCache.as_str(), "ann_probe_cache");
+        assert_eq!(CacheFamilyLabel::PrefetchHints.as_str(), "prefetch_hints");
+        assert_eq!(CacheFamilyLabel::SessionWarmup.as_str(), "session_warmup");
+        assert_eq!(
+            CacheFamilyLabel::GoalConditioned.as_str(),
+            "goal_conditioned"
+        );
+        assert_eq!(
+            CacheFamilyLabel::ColdStartMitigation.as_str(),
+            "cold_start_mitigation"
+        );
         assert_eq!(CacheEventLabel::Hit.as_str(), "hit");
         assert_eq!(CacheEventLabel::Miss.as_str(), "miss");
         assert_eq!(CacheEventLabel::Bypass.as_str(), "bypass");
         assert_eq!(CacheEventLabel::Invalidate.as_str(), "invalidate");
         assert_eq!(CacheEventLabel::Prefetch.as_str(), "prefetch");
+        assert_eq!(CacheEventLabel::Invalidation.as_str(), "invalidation");
+        assert_eq!(CacheEventLabel::RepairWarmup.as_str(), "repair_warmup");
+        assert_eq!(CacheEventLabel::StaleWarning.as_str(), "stale_warning");
+        assert_eq!(CacheEventLabel::Disabled.as_str(), "disabled");
+        assert_eq!(CacheEventLabel::PrefetchDrop.as_str(), "prefetch_drop");
+        assert_eq!(CacheEventLabel::SessionExpired.as_str(), "session_expired");
         assert_eq!(CacheReasonLabel::PolicyBoundary.as_str(), "policy_boundary");
-        assert_eq!(
-            CacheReasonLabel::NamespaceMismatch.as_str(),
-            "namespace_mismatch"
-        );
         assert_eq!(
             CacheReasonLabel::SnapshotRequired.as_str(),
             "snapshot_required"
@@ -1190,21 +1324,86 @@ mod tests {
             "stale_generation"
         );
         assert_eq!(CacheReasonLabel::ColdStart.as_str(), "cold_start");
+        assert_eq!(
+            CacheReasonLabel::OwnerBoundaryMismatch.as_str(),
+            "owner_boundary_mismatch"
+        );
+        assert_eq!(
+            CacheReasonLabel::NamespaceMismatch.as_str(),
+            "namespace_mismatch"
+        );
+        assert_eq!(CacheReasonLabel::PolicyDenied.as_str(), "policy_denied");
+        assert_eq!(
+            CacheReasonLabel::GenerationAnchorMismatch.as_str(),
+            "generation_anchor_mismatch"
+        );
+        assert_eq!(
+            CacheReasonLabel::VersionMismatch.as_str(),
+            "version_mismatch"
+        );
+        assert_eq!(CacheReasonLabel::ScopeTooBroad.as_str(), "scope_too_broad");
+        assert_eq!(
+            CacheReasonLabel::RecordNotPresent.as_str(),
+            "record_not_present"
+        );
+        assert_eq!(
+            CacheReasonLabel::RepairIncomplete.as_str(),
+            "repair_incomplete"
+        );
+        assert_eq!(CacheReasonLabel::PolicyChanged.as_str(), "policy_changed");
+        assert_eq!(
+            CacheReasonLabel::RedactionChanged.as_str(),
+            "redaction_changed"
+        );
+        assert_eq!(CacheReasonLabel::SchemaChanged.as_str(), "schema_changed");
+        assert_eq!(CacheReasonLabel::IndexChanged.as_str(), "index_changed");
+        assert_eq!(
+            CacheReasonLabel::EmbeddingChanged.as_str(),
+            "embedding_changed"
+        );
+        assert_eq!(CacheReasonLabel::RankingChanged.as_str(), "ranking_changed");
+        assert_eq!(CacheReasonLabel::IntentChanged.as_str(), "intent_changed");
+        assert_eq!(
+            CacheReasonLabel::BudgetExhausted.as_str(),
+            "budget_exhausted"
+        );
+        assert_eq!(
+            CacheReasonLabel::NamespaceNarrowed.as_str(),
+            "namespace_narrowed"
+        );
+        assert_eq!(
+            CacheReasonLabel::NamespaceWidened.as_str(),
+            "namespace_widened"
+        );
         assert_eq!(WarmSourceLabel::Tier1ItemCache.as_str(), "tier1_item_cache");
         assert_eq!(
             WarmSourceLabel::Tier2QueryCache.as_str(),
             "tier2_query_cache"
         );
-        assert_eq!(WarmSourceLabel::AnnProbeCache.as_str(), "ann_probe_cache");
+        assert_eq!(WarmSourceLabel::NegativeCache.as_str(), "negative_cache");
         assert_eq!(WarmSourceLabel::ResultCache.as_str(), "result_cache");
+        assert_eq!(
+            WarmSourceLabel::EntityNeighborhood.as_str(),
+            "entity_neighborhood"
+        );
         assert_eq!(WarmSourceLabel::SummaryCache.as_str(), "summary_cache");
+        assert_eq!(WarmSourceLabel::AnnProbeCache.as_str(), "ann_probe_cache");
         assert_eq!(WarmSourceLabel::PrefetchHints.as_str(), "prefetch_hints");
+        assert_eq!(WarmSourceLabel::SessionWarmup.as_str(), "session_warmup");
+        assert_eq!(
+            WarmSourceLabel::GoalConditioned.as_str(),
+            "goal_conditioned"
+        );
         assert_eq!(
             WarmSourceLabel::ColdStartMitigation.as_str(),
             "cold_start_mitigation"
         );
         assert_eq!(GenerationStatusLabel::Valid.as_str(), "valid");
         assert_eq!(GenerationStatusLabel::Stale.as_str(), "stale");
+        assert_eq!(
+            GenerationStatusLabel::VersionMismatched.as_str(),
+            "version_mismatched"
+        );
         assert_eq!(GenerationStatusLabel::Unknown.as_str(), "unknown");
     }
 
@@ -1252,6 +1451,7 @@ mod tests {
                 time_consumed_ms: Some(12),
                 ranking_profile: "balanced".to_string(),
                 contradictions_found: 0,
+                historical_context: None,
                 query_by_example: None,
                 result_reasons: vec![ResultReason {
                     memory_id: None,
@@ -1292,6 +1492,8 @@ mod tests {
                 newest_item_days: 0,
                 volatile_items_included: false,
                 stale_warning: false,
+                lease_sensitive: false,
+                recheck_required: false,
                 as_of_tick: Some(42),
             },
             packaging_metadata: PackagingMetadata {
@@ -1410,6 +1612,7 @@ mod tests {
                     time_consumed_ms: Some(1),
                     ranking_profile: "balanced".to_string(),
                     contradictions_found: 0,
+                    historical_context: None,
                     query_by_example: None,
                     result_reasons: Vec::new(),
                 },
@@ -1447,6 +1650,8 @@ mod tests {
                     newest_item_days: 0,
                     volatile_items_included: false,
                     stale_warning: false,
+                    lease_sensitive: false,
+                    recheck_required: false,
                     as_of_tick: Some(7),
                 },
                 packaging_metadata: PackagingMetadata {
@@ -1486,6 +1691,7 @@ mod tests {
                 time_consumed_ms: Some(3),
                 ranking_profile: "balanced".to_string(),
                 contradictions_found: 0,
+                historical_context: None,
                 query_by_example: None,
                 result_reasons: vec![ResultReason {
                     memory_id: Some(crate::types::MemoryId(21)),
@@ -1525,6 +1731,8 @@ mod tests {
                 newest_item_days: 0,
                 volatile_items_included: false,
                 stale_warning: false,
+                lease_sensitive: false,
+                recheck_required: false,
                 as_of_tick: Some(7),
             },
             packaging_metadata: PackagingMetadata {
@@ -1570,6 +1778,7 @@ mod tests {
                 time_consumed_ms: Some(3),
                 ranking_profile: "balanced".to_string(),
                 contradictions_found: 0,
+                historical_context: None,
                 query_by_example: None,
                 result_reasons: vec![ResultReason {
                     memory_id: Some(crate::types::MemoryId(21)),
@@ -1609,6 +1818,8 @@ mod tests {
                 newest_item_days: 0,
                 volatile_items_included: false,
                 stale_warning: false,
+                lease_sensitive: false,
+                recheck_required: false,
                 as_of_tick: Some(7),
             },
             packaging_metadata: PackagingMetadata {
@@ -1693,6 +1904,7 @@ mod tests {
                 time_consumed_ms: Some(3),
                 ranking_profile: "balanced".to_string(),
                 contradictions_found: 2,
+                historical_context: None,
                 query_by_example: None,
                 result_reasons: vec![
                     ResultReason {
@@ -1747,6 +1959,8 @@ mod tests {
                 newest_item_days: 0,
                 volatile_items_included: false,
                 stale_warning: false,
+                lease_sensitive: false,
+                recheck_required: false,
                 as_of_tick: Some(7),
             },
             packaging_metadata: PackagingMetadata {
@@ -1794,6 +2008,7 @@ mod tests {
                 time_consumed_ms: Some(1),
                 ranking_profile: "balanced".to_string(),
                 contradictions_found: 0,
+                historical_context: None,
                 query_by_example: None,
                 result_reasons: Vec::new(),
             },
@@ -1839,6 +2054,8 @@ mod tests {
                 newest_item_days: 0,
                 volatile_items_included: false,
                 stale_warning: false,
+                lease_sensitive: false,
+                recheck_required: false,
                 as_of_tick: Some(9),
             },
             packaging_metadata: PackagingMetadata {
@@ -1857,7 +2074,7 @@ mod tests {
         let (policy, _) = ObservabilityModule.explain_policy_and_provenance(&result_set);
 
         assert_eq!(policy.sharing_scope, "approved_public");
-        assert_eq!(policy.redaction_fields, vec!["workspace_id", "session_id"]);
+        assert_eq!(policy.redaction_fields, vec!["payload"]);
     }
 
     #[test]
@@ -1877,6 +2094,7 @@ mod tests {
                 time_consumed_ms: Some(1),
                 ranking_profile: "balanced".to_string(),
                 contradictions_found: 0,
+                historical_context: None,
                 query_by_example: None,
                 result_reasons: Vec::new(),
             },
@@ -1922,6 +2140,8 @@ mod tests {
                 newest_item_days: 0,
                 volatile_items_included: false,
                 stale_warning: false,
+                lease_sensitive: false,
+                recheck_required: false,
                 as_of_tick: Some(7),
             },
             packaging_metadata: PackagingMetadata {

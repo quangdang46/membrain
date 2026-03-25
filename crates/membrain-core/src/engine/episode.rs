@@ -7,6 +7,7 @@
 use crate::api::TaskId;
 use crate::graph::EntityId;
 use crate::types::{MemoryId, SessionId};
+use std::collections::{BTreeMap, HashMap};
 
 /// Stable identifier for a grouped source set or episode.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -126,6 +127,66 @@ pub struct EpisodeGroupingReport {
     pub sample_logs: Vec<String>,
 }
 
+/// Heuristics for the tentative skill-candidate pass derived from episodic clusters.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct SkillCandidateHeuristics {
+    pub min_source_groups: usize,
+    pub min_total_memories: usize,
+    pub min_supporting_continuities: usize,
+    pub require_context_anchor: bool,
+    pub keyword_limit: usize,
+}
+
+impl Default for SkillCandidateHeuristics {
+    fn default() -> Self {
+        Self {
+            min_source_groups: 2,
+            min_total_memories: 4,
+            min_supporting_continuities: 1,
+            require_context_anchor: true,
+            keyword_limit: 6,
+        }
+    }
+}
+
+/// Tentative pattern detected from repeated episodic clusters.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SkillCandidatePattern {
+    pub candidate_fixture: String,
+    pub source_set_kind: SourceSetKind,
+    pub source_episode_ids: Vec<EpisodeId>,
+    pub source_fixtures: Vec<String>,
+    pub source_memory_ids: Vec<MemoryId>,
+    pub member_count: usize,
+    pub continuity_keys: Vec<&'static str>,
+    pub dominant_keywords: Vec<String>,
+    pub goal_context: Option<&'static str>,
+    pub tool_chain_context: Option<&'static str>,
+    pub confidence: u16,
+    pub status: &'static str,
+    pub pattern_summary: String,
+}
+
+/// Explicit rejection record for a cluster that did not qualify as a tentative skill pattern.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SkillCandidateRejection {
+    pub cluster_fixture: String,
+    pub source_set_kind: SourceSetKind,
+    pub source_episode_ids: Vec<EpisodeId>,
+    pub member_count: usize,
+    pub reason: &'static str,
+    pub dominant_keywords: Vec<String>,
+}
+
+/// Deterministic skill-candidate analysis report for one bounded grouping pass.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SkillCandidateReport {
+    pub candidates: Vec<SkillCandidatePattern>,
+    pub rejections: Vec<SkillCandidateRejection>,
+    pub heuristics_summary: String,
+    pub sample_logs: Vec<String>,
+}
+
 /// Stable grouping boundary owned by `membrain-core`.
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
 pub struct EpisodeGroupingModule;
@@ -211,6 +272,185 @@ impl EpisodeGroupingModule {
         EpisodeGroupingReport {
             groups,
             heuristics_summary: Self::heuristics_summary(heuristics),
+            sample_logs,
+        }
+    }
+
+    /// Runs the first tentative skill-analysis pass over already-bounded episodic clusters.
+    pub fn analyze_skill_candidates(
+        &self,
+        groups: &[SourceGroup],
+        heuristics: &SkillCandidateHeuristics,
+    ) -> SkillCandidateReport {
+        let mut candidate_buckets: BTreeMap<
+            (&'static str, Option<&'static str>, Option<&'static str>),
+            Vec<&SourceGroup>,
+        > = BTreeMap::new();
+        let mut rejections = Vec::new();
+
+        for group in groups {
+            let continuity_count = group
+                .lineage
+                .continuity_keys
+                .iter()
+                .filter(|key| **key != group.explain.primary_reason)
+                .count();
+            let has_context_anchor = group.explain.common_goal_context.is_some()
+                || group.explain.common_tool_chain_context.is_some();
+
+            let rejection_reason = if group.members.len() < 2 {
+                Some("singleton_source_group")
+            } else if continuity_count < heuristics.min_supporting_continuities {
+                Some("insufficient_continuity_signal")
+            } else if heuristics.require_context_anchor && !has_context_anchor {
+                Some("missing_context_anchor")
+            } else {
+                None
+            };
+
+            if let Some(reason) = rejection_reason {
+                rejections.push(SkillCandidateRejection {
+                    cluster_fixture: group.fixture_name.clone(),
+                    source_set_kind: group.source_set_kind,
+                    source_episode_ids: vec![group.episode_id],
+                    member_count: group.members.len(),
+                    reason,
+                    dominant_keywords: Self::keywords_for_groups(
+                        std::slice::from_ref(&group),
+                        heuristics.keyword_limit,
+                    ),
+                });
+                continue;
+            }
+
+            let bucket_key = (
+                group.explain.primary_reason,
+                group.explain.common_goal_context,
+                group.explain.common_tool_chain_context,
+            );
+            candidate_buckets.entry(bucket_key).or_default().push(group);
+        }
+
+        let mut candidates = Vec::new();
+        for ((primary_reason, goal_context, tool_chain_context), bucket_groups) in candidate_buckets
+        {
+            let total_memories = bucket_groups
+                .iter()
+                .map(|group| group.members.len())
+                .sum::<usize>();
+            if bucket_groups.len() < heuristics.min_source_groups {
+                rejections.push(SkillCandidateRejection {
+                    cluster_fixture: bucket_groups[0].fixture_name.clone(),
+                    source_set_kind: bucket_groups[0].source_set_kind,
+                    source_episode_ids: bucket_groups
+                        .iter()
+                        .map(|group| group.episode_id)
+                        .collect(),
+                    member_count: total_memories,
+                    reason: "insufficient_cluster_repetition",
+                    dominant_keywords: Self::keywords_for_groups(
+                        &bucket_groups,
+                        heuristics.keyword_limit,
+                    ),
+                });
+                continue;
+            }
+            if total_memories < heuristics.min_total_memories {
+                rejections.push(SkillCandidateRejection {
+                    cluster_fixture: bucket_groups[0].fixture_name.clone(),
+                    source_set_kind: bucket_groups[0].source_set_kind,
+                    source_episode_ids: bucket_groups
+                        .iter()
+                        .map(|group| group.episode_id)
+                        .collect(),
+                    member_count: total_memories,
+                    reason: "insufficient_member_support",
+                    dominant_keywords: Self::keywords_for_groups(
+                        &bucket_groups,
+                        heuristics.keyword_limit,
+                    ),
+                });
+                continue;
+            }
+
+            let source_set_kind = bucket_groups[0].source_set_kind;
+            let continuity_keys = Self::shared_continuity_keys(&bucket_groups);
+            let dominant_keywords =
+                Self::keywords_for_groups(&bucket_groups, heuristics.keyword_limit);
+            let confidence = Self::skill_candidate_confidence(
+                &bucket_groups,
+                continuity_keys.len(),
+                total_memories,
+            );
+            let source_episode_ids = bucket_groups
+                .iter()
+                .map(|group| group.episode_id)
+                .collect::<Vec<_>>();
+            let source_fixtures = bucket_groups
+                .iter()
+                .map(|group| group.fixture_name.clone())
+                .collect::<Vec<_>>();
+            let mut source_memory_ids = bucket_groups
+                .iter()
+                .flat_map(|group| group.lineage.source_memory_ids.iter().copied())
+                .collect::<Vec<_>>();
+            source_memory_ids.sort_by_key(|id| id.0);
+            source_memory_ids.dedup_by_key(|id| id.0);
+            let candidate_fixture = format!(
+                "skill_candidate_{}_{}_{}_{}",
+                primary_reason,
+                goal_context.unwrap_or("unguided").replace(' ', "_"),
+                bucket_groups[0].episode_id.0,
+                bucket_groups.last().unwrap().episode_id.0
+            );
+            let pattern_summary = format!(
+                "tentative_pattern(kind={} episodes={} members={} goal_context={} tool_chain={} continuity={} keywords={})",
+                source_set_kind.as_str(),
+                source_episode_ids
+                    .iter()
+                    .map(|id| id.0.to_string())
+                    .collect::<Vec<_>>()
+                    .join(","),
+                total_memories,
+                goal_context.unwrap_or("absent"),
+                tool_chain_context.unwrap_or("absent"),
+                continuity_keys.join(","),
+                dominant_keywords.join(",")
+            );
+            candidates.push(SkillCandidatePattern {
+                candidate_fixture,
+                source_set_kind,
+                source_episode_ids,
+                source_fixtures,
+                source_memory_ids,
+                member_count: total_memories,
+                continuity_keys,
+                dominant_keywords,
+                goal_context,
+                tool_chain_context,
+                confidence,
+                status: "tentative",
+                pattern_summary,
+            });
+        }
+
+        candidates.sort_by(|left, right| {
+            right
+                .confidence
+                .cmp(&left.confidence)
+                .then_with(|| left.candidate_fixture.cmp(&right.candidate_fixture))
+        });
+        rejections.sort_by(|left, right| left.cluster_fixture.cmp(&right.cluster_fixture));
+        let sample_logs = candidates
+            .iter()
+            .map(Self::skill_candidate_log_line)
+            .chain(rejections.iter().map(Self::skill_rejection_log_line))
+            .collect();
+
+        SkillCandidateReport {
+            candidates,
+            rejections,
+            heuristics_summary: Self::skill_candidate_heuristics_summary(heuristics),
             sample_logs,
         }
     }
@@ -308,7 +548,8 @@ impl EpisodeGroupingModule {
                 common_tool_chain_context: members
                     .iter()
                     .all(|m| {
-                        m.tool_chain_context == first.tool_chain_context && m.tool_chain_context.is_some()
+                        m.tool_chain_context == first.tool_chain_context
+                            && m.tool_chain_context.is_some()
                     })
                     .then_some(first.tool_chain_context)
                     .flatten(),
@@ -356,6 +597,132 @@ impl EpisodeGroupingModule {
             heuristics.honor_session_bounds,
             heuristics.honor_task_bounds,
             heuristics.require_entity_overlap,
+        )
+    }
+
+    fn skill_candidate_heuristics_summary(heuristics: &SkillCandidateHeuristics) -> String {
+        format!(
+            "min_source_groups={} min_total_memories={} min_supporting_continuities={} require_context_anchor={} keyword_limit={}",
+            heuristics.min_source_groups,
+            heuristics.min_total_memories,
+            heuristics.min_supporting_continuities,
+            heuristics.require_context_anchor,
+            heuristics.keyword_limit,
+        )
+    }
+
+    fn shared_continuity_keys(groups: &[&SourceGroup]) -> Vec<&'static str> {
+        let Some(first) = groups.first() else {
+            return Vec::new();
+        };
+
+        let mut shared = vec![first.explain.primary_reason];
+        if first.explain.common_goal_context.is_some()
+            && groups
+                .iter()
+                .all(|group| group.explain.common_goal_context == first.explain.common_goal_context)
+        {
+            shared.push("goal_context");
+        }
+        if first.explain.common_tool_chain_context.is_some()
+            && groups.iter().all(|group| {
+                group.explain.common_tool_chain_context == first.explain.common_tool_chain_context
+            })
+        {
+            shared.push("tool_chain_context");
+        }
+        if groups
+            .iter()
+            .all(|group| group.explain.matching_fields.contains(&"entity_overlap"))
+        {
+            shared.push("entity_overlap");
+        }
+        if groups
+            .iter()
+            .all(|group| group.explain.matching_fields.contains(&"failure_retry"))
+        {
+            shared.push("failure_retry");
+        }
+        shared
+    }
+
+    fn keywords_for_groups(groups: &[&SourceGroup], keyword_limit: usize) -> Vec<String> {
+        let mut counts: HashMap<String, usize> = HashMap::new();
+        for group in groups {
+            for raw in [
+                Some(group.source_set_kind.as_str()),
+                group.explain.common_goal_context,
+                group.explain.common_tool_chain_context,
+            ]
+            .into_iter()
+            .flatten()
+            {
+                for token in raw.split(|ch: char| !ch.is_ascii_alphanumeric()) {
+                    let token = token.to_ascii_lowercase();
+                    if token.len() >= 4 {
+                        *counts.entry(token).or_default() += 1;
+                    }
+                }
+            }
+        }
+
+        let mut ranked = counts.into_iter().collect::<Vec<_>>();
+        ranked.sort_by(|left, right| right.1.cmp(&left.1).then_with(|| left.0.cmp(&right.0)));
+        ranked
+            .into_iter()
+            .take(keyword_limit.max(1))
+            .map(|(token, _)| token)
+            .collect()
+    }
+
+    fn skill_candidate_confidence(
+        groups: &[&SourceGroup],
+        shared_continuities: usize,
+        total_memories: usize,
+    ) -> u16 {
+        let base = 420u16;
+        let repetition_bonus = ((groups.len().saturating_sub(1)) as u16).saturating_mul(110);
+        let support_bonus = (total_memories.saturating_sub(2) as u16).saturating_mul(35);
+        let continuity_bonus = (shared_continuities as u16).saturating_mul(40);
+        base.saturating_add(repetition_bonus)
+            .saturating_add(support_bonus)
+            .saturating_add(continuity_bonus)
+            .min(950)
+    }
+
+    fn skill_candidate_log_line(candidate: &SkillCandidatePattern) -> String {
+        format!(
+            "candidate={} kind={} episodes={:?} members={} status={} confidence={} goal_context={} tool_chain={} continuity={:?} keywords={:?}",
+            candidate.candidate_fixture,
+            candidate.source_set_kind.as_str(),
+            candidate
+                .source_episode_ids
+                .iter()
+                .map(|id| id.0)
+                .collect::<Vec<_>>(),
+            candidate.member_count,
+            candidate.status,
+            candidate.confidence,
+            candidate.goal_context.unwrap_or("absent"),
+            candidate.tool_chain_context.unwrap_or("absent"),
+            candidate.continuity_keys,
+            candidate.dominant_keywords,
+        )
+    }
+
+    fn skill_rejection_log_line(rejection: &SkillCandidateRejection) -> String {
+        format!(
+            "rejected_fixture={} kind={} episodes={:?} members={} reason={} keywords={:?}",
+            rejection.cluster_fixture,
+            rejection.source_set_kind.as_str(),
+            rejection
+                .source_episode_ids
+                .iter()
+                .map(|id| id.0)
+                .collect::<Vec<_>>(),
+            rejection.member_count,
+            rejection.reason,
+            rejection.dominant_keywords,
         )
     }
 
@@ -590,5 +957,120 @@ mod tests {
         assert_eq!(groups[0].explain.primary_reason, "retry_cluster");
         assert!(groups[0].explain.matching_fields.contains(&"failure_retry"));
         assert_eq!(groups[1].source_set_kind, SourceSetKind::Singleton);
+    }
+
+    #[test]
+    fn skill_candidate_analysis_detects_repeated_context_anchored_patterns() {
+        let engine = EpisodeGroupingModule;
+        let mut first = cand(1, 1_000, Some("task-A"), Some(10), vec![100, 101]);
+        first.goal_context = Some("capture source-set continuity");
+        first.tool_chain_context = Some("maintenance.compactor");
+        let mut second = cand(2, 1_100, Some("task-A"), Some(10), vec![101, 102]);
+        second.goal_context = Some("capture source-set continuity");
+        second.tool_chain_context = Some("maintenance.compactor");
+        let mut third = cand(3, 4_000_000, Some("task-B"), Some(11), vec![200, 201]);
+        third.goal_context = Some("capture source-set continuity");
+        third.tool_chain_context = Some("maintenance.compactor");
+        let mut fourth = cand(4, 4_000_100, Some("task-B"), Some(11), vec![201, 202]);
+        fourth.goal_context = Some("capture source-set continuity");
+        fourth.tool_chain_context = Some("maintenance.compactor");
+
+        let groups = engine.form_episodes(
+            &GroupingHeuristics::default(),
+            &[first, second, third, fourth],
+        );
+        let report = engine.analyze_skill_candidates(&groups, &SkillCandidateHeuristics::default());
+
+        assert_eq!(groups.len(), 2);
+        assert_eq!(report.candidates.len(), 1);
+        assert!(report.rejections.is_empty());
+        assert_eq!(
+            report.heuristics_summary,
+            "min_source_groups=2 min_total_memories=4 min_supporting_continuities=1 require_context_anchor=true keyword_limit=6"
+        );
+        assert_eq!(
+            report.candidates[0].candidate_fixture,
+            "skill_candidate_session_cluster_capture_source-set_continuity_1_2"
+        );
+        assert_eq!(
+            report.candidates[0].source_set_kind,
+            SourceSetKind::SessionCluster
+        );
+        assert_eq!(
+            report.candidates[0].source_episode_ids,
+            vec![EpisodeId(1), EpisodeId(2)]
+        );
+        assert_eq!(
+            report.candidates[0].source_memory_ids,
+            vec![MemoryId(1), MemoryId(2), MemoryId(3), MemoryId(4)]
+        );
+        assert_eq!(report.candidates[0].member_count, 4);
+        assert_eq!(
+            report.candidates[0].continuity_keys,
+            vec![
+                "session_cluster",
+                "goal_context",
+                "tool_chain_context",
+                "entity_overlap"
+            ]
+        );
+        assert_eq!(
+            report.candidates[0].goal_context,
+            Some("capture source-set continuity")
+        );
+        assert_eq!(
+            report.candidates[0].tool_chain_context,
+            Some("maintenance.compactor")
+        );
+        assert_eq!(report.candidates[0].status, "tentative");
+        assert_eq!(report.candidates[0].confidence, 760);
+        assert!(report.candidates[0]
+            .dominant_keywords
+            .contains(&"capture".to_string()));
+        assert!(report.candidates[0]
+            .dominant_keywords
+            .contains(&"continuity".to_string()));
+        assert!(report.candidates[0]
+            .dominant_keywords
+            .contains(&"maintenance".to_string()));
+        assert!(report.sample_logs[0].contains(
+            "candidate=skill_candidate_session_cluster_capture_source-set_continuity_1_2"
+        ));
+    }
+
+    #[test]
+    fn skill_candidate_analysis_rejects_clusters_without_repetition_or_context_anchor() {
+        let engine = EpisodeGroupingModule;
+        let mut first = cand(1, 1_000, Some("task-A"), None, vec![100, 101]);
+        first.goal_context = Some("capture source-set continuity");
+        let mut second = cand(2, 1_100, Some("task-A"), None, vec![101, 102]);
+        second.goal_context = Some("capture source-set continuity");
+        let third = cand(3, 4_000_000, Some("task-B"), None, vec![300, 301]);
+        let fourth = cand(4, 4_000_100, Some("task-B"), None, vec![301, 302]);
+
+        let groups = engine.form_episodes(
+            &GroupingHeuristics::default(),
+            &[first, second, third, fourth],
+        );
+        let report = engine.analyze_skill_candidates(&groups, &SkillCandidateHeuristics::default());
+
+        assert!(report.candidates.is_empty());
+        assert_eq!(report.rejections.len(), 2);
+        assert!(report
+            .rejections
+            .iter()
+            .any(|rejection| rejection.reason == "insufficient_cluster_repetition"));
+        assert!(report
+            .rejections
+            .iter()
+            .any(|rejection| rejection.reason == "missing_context_anchor"));
+        assert!(report
+            .sample_logs
+            .iter()
+            .any(|log| log.contains("reason=insufficient_cluster_repetition")));
+        assert!(report
+            .sample_logs
+            .iter()
+            .any(|log| log.contains("reason=missing_context_anchor")));
     }
 }

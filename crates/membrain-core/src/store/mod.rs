@@ -3,6 +3,7 @@ pub mod audit;
 pub mod cache;
 pub mod cold;
 pub mod hot;
+pub mod procedural;
 pub mod tier2;
 /// Tier routing, promotion, demotion, and lifecycle-aware placement decisions.
 pub mod tier_router;
@@ -11,6 +12,10 @@ pub use audit::AuditLogStore;
 pub use cache::CacheManager;
 pub use cold::ColdStore;
 pub use hot::HotStore;
+pub use procedural::{
+    ProceduralEntryState, ProceduralMemoryRecord, ProceduralStore, ProceduralStoreError,
+    ProceduralStoreErrorReason,
+};
 pub use tier2::Tier2Store;
 
 use crate::migrate::DurableSchemaObject;
@@ -36,11 +41,13 @@ pub trait Tier2StoreApi {
             DurableSchemaObject::MemoryItemsTable,
             DurableSchemaObject::MemoryPayloadsTable,
             DurableSchemaObject::MemoryLineageEdgesTable,
+            DurableSchemaObject::CausalLinksTable,
             DurableSchemaObject::MemoryEntityRefsTable,
             DurableSchemaObject::MemoryRelationRefsTable,
             DurableSchemaObject::MemoryTagsTable,
             DurableSchemaObject::ConflictRecordsTable,
             DurableSchemaObject::DurableMemoryRecords,
+            DurableSchemaObject::SnapshotMetadataTable,
             DurableSchemaObject::LandmarksTable,
         ]
     }
@@ -52,10 +59,29 @@ pub trait ColdStoreApi {
     fn component_name(&self) -> &'static str;
 }
 
+/// Shared authoritative procedural-store boundary for accepted pattern→action mappings.
+pub trait ProceduralStoreApi {
+    /// Returns the stable component identifier for this procedural-store surface.
+    fn component_name(&self) -> &'static str;
+
+    /// Returns the authoritative durable schema objects this procedural store owns.
+    fn authoritative_schema_objects(&self) -> Vec<DurableSchemaObject> {
+        vec![
+            DurableSchemaObject::ProceduralMemoriesTable,
+            DurableSchemaObject::ProceduralLineageTable,
+        ]
+    }
+}
+
 /// Shared append-only audit-log boundary for forensic and governance history.
 pub trait AuditLogStoreApi {
     /// Returns the stable component identifier for this audit-log surface.
     fn component_name(&self) -> &'static str;
+
+    /// Returns the authoritative durable schema objects this audit surface owns.
+    fn authoritative_schema_objects(&self) -> Vec<DurableSchemaObject> {
+        vec![DurableSchemaObject::MemoryAuditLogTable]
+    }
 }
 
 /// Shared engram durability boundary for stores that own authoritative engram rows.
@@ -75,6 +101,7 @@ pub struct CoreStores {
     hot: HotStore,
     tier2: Tier2Store,
     cold: ColdStore,
+    procedural: ProceduralStore,
     audit: AuditLogStore,
 }
 
@@ -84,19 +111,26 @@ impl CoreStores {
         hot: HotStore,
         tier2: Tier2Store,
         cold: ColdStore,
+        procedural: ProceduralStore,
         audit: AuditLogStore,
     ) -> Self {
         Self {
             hot,
             tier2,
             cold,
+            procedural,
             audit,
         }
     }
 
     /// Returns the stable Tier1 hot-store component identifier exposed by the shared store facade.
-    pub fn hot_component_name(&self) -> &'static str {
+    pub fn hot_store_component_name(&self) -> &'static str {
         self.hot.component_name()
+    }
+
+    /// Returns the stable Tier1 hot-store component identifier exposed by the shared store facade.
+    pub fn hot_component_name(&self) -> &'static str {
+        self.hot_store_component_name()
     }
 
     /// Returns the stable append-only audit-log component identifier exposed by the shared store facade.
@@ -119,6 +153,11 @@ impl CoreStores {
         &self.cold
     }
 
+    /// Returns the authoritative procedural-store boundary.
+    pub fn procedural(&self) -> &ProceduralStore {
+        &self.procedural
+    }
+
     /// Returns the append-only audit-log store boundary.
     pub fn audit(&self) -> &AuditLogStore {
         &self.audit
@@ -128,24 +167,42 @@ impl CoreStores {
     pub fn tier2_authoritative_schema_objects(&self) -> Vec<DurableSchemaObject> {
         self.tier2.authoritative_schema_objects()
     }
+
+    /// Returns the authoritative durable schema objects exposed by the procedural store.
+    pub fn procedural_authoritative_schema_objects(&self) -> Vec<DurableSchemaObject> {
+        self.procedural.authoritative_schema_objects()
+    }
 }
 
 #[cfg(test)]
 mod tests {
-    use super::{CoreStores, HotStoreApi};
+    use super::{CoreStores, HotStoreApi, ProceduralStoreApi};
 
     #[test]
     fn core_stores_exposes_hot_store_component_identity() {
         let stores = CoreStores::default();
 
-        assert_eq!(stores.hot_component_name(), "store.hot");
+        assert_eq!(stores.hot_store_component_name(), "store.hot");
     }
 
     #[test]
     fn core_stores_hot_facade_matches_underlying_component_identity() {
         let stores = CoreStores::default();
 
-        assert_eq!(stores.hot_component_name(), stores.hot().component_name());
+        assert_eq!(
+            stores.hot_store_component_name(),
+            stores.hot().component_name()
+        );
+    }
+
+    #[test]
+    fn core_stores_hot_component_name_alias_matches_hot_store_accessor() {
+        let stores = CoreStores::default();
+
+        assert_eq!(
+            stores.hot_component_name(),
+            stores.hot_store_component_name()
+        );
     }
 
     #[test]
@@ -153,5 +210,22 @@ mod tests {
         let stores = CoreStores::default();
 
         assert_eq!(stores.audit_component_name(), "store.audit");
+    }
+
+    #[test]
+    fn core_stores_exposes_procedural_store_component_identity() {
+        let stores = CoreStores::default();
+
+        assert_eq!(stores.procedural().component_name(), "store.procedural");
+    }
+
+    #[test]
+    fn core_stores_exposes_procedural_store_schema_objects() {
+        let stores = CoreStores::default();
+
+        assert_eq!(
+            stores.procedural_authoritative_schema_objects(),
+            stores.procedural().authoritative_schema_objects()
+        );
     }
 }

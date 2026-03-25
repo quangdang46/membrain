@@ -3,17 +3,23 @@
 //! Owns corruption detection, index rebuild, and data integrity verification
 //! surfaces that can be triggered by operator commands or automated health checks.
 
-use crate::api::NamespaceId;
+use crate::api::{NamespaceId, RemediationStep};
 use crate::engine::maintenance::{
     DurableStateToken, InterruptedMaintenance, InterruptionReason, MaintenanceOperation,
     MaintenanceProgress, MaintenanceStep,
 };
 use crate::graph::{
-    DerivedGraphRebuilder, EdgeDerivationInput, GraphFailureInjection, GraphRebuildReport,
-    GraphRebuilder, RelationKind,
+    DerivedGraphRebuilder, EdgeDerivationInput, GraphFailureInjection, GraphRebuildHook,
+    GraphRebuildReport, GraphRebuilder, RelationKind,
 };
 use crate::migrate::DurableSchemaObject;
 use crate::observability::{MaintenanceQueueReport, MaintenanceQueueStatus};
+use crate::store::cache::{
+    CacheAdmissionRequest, CacheFamily, CacheGenerationAnchors, CacheKey, CacheMaintenanceEvent,
+    CacheManager, InvalidationOutcome, InvalidationTrigger, PrefetchTrigger,
+    CACHE_WARM_STATE_REBUILD_HOOKS, CACHE_WARM_STATE_VERIFY_HOOKS,
+    CACHE_WARM_STATE_WARMUP_FAMILIES,
+};
 use crate::types::MemoryId;
 use std::collections::HashMap;
 
@@ -177,6 +183,7 @@ pub struct RepairCheckResult {
     pub verification_passed: bool,
     pub rebuild_entrypoint: Option<IndexRepairEntrypoint>,
     pub rebuilt_outputs: Vec<&'static str>,
+    pub repair_hooks: Vec<&'static str>,
 }
 
 // ── Repair summary ──────────────────────────────────────────────────────────
@@ -193,11 +200,15 @@ pub struct RepairSummary {
     pub error_count: u32,
     pub rebuild_duration_ms: u64,
     pub rollback_state: Option<&'static str>,
+    pub degraded_mode: Option<RepairDegradedMode>,
+    pub rollback_trigger: Option<RepairRollbackTrigger>,
     pub queue_report: MaintenanceQueueReport,
     pub results: Vec<RepairCheckResult>,
     pub verification_artifacts: HashMap<RepairTarget, VerificationArtifact>,
     pub operator_reports: Vec<RepairOperatorReport>,
     pub graph_rebuild_reports: HashMap<RepairTarget, GraphRebuildReport>,
+    pub cache_invalidation_reports: HashMap<RepairTarget, InvalidationOutcome>,
+    pub cache_warmup_reports: HashMap<RepairTarget, Vec<CacheMaintenanceEvent>>,
 }
 
 /// Operator-visible per-target repair report suitable for logs and handoff surfaces.
@@ -208,13 +219,21 @@ pub struct RepairOperatorReport {
     pub verification_passed: bool,
     pub rebuild_entrypoint: Option<IndexRepairEntrypoint>,
     pub rebuilt_outputs: Vec<&'static str>,
+    pub durable_sources: Vec<&'static str>,
+    pub repair_hooks: Vec<&'static str>,
     pub verification_artifact_name: &'static str,
     pub affected_item_count: u32,
     pub error_count: u32,
     pub rebuild_duration_ms: u64,
     pub rollback_state: Option<&'static str>,
+    pub degraded_mode: Option<RepairDegradedMode>,
+    pub rollback_trigger: Option<RepairRollbackTrigger>,
+    pub remediation_steps: Vec<RemediationStep>,
     pub queue_depth_before: u32,
     pub queue_depth_after: u32,
+    pub graph_hooks: Vec<&'static str>,
+    pub cache_invalidation_events: Vec<CacheMaintenanceEvent>,
+    pub cache_warmup_events: Vec<CacheMaintenanceEvent>,
     pub operator_log: String,
 }
 
@@ -228,6 +247,43 @@ pub struct VerificationArtifact {
     pub derived_generation: &'static str,
     pub parity_check: &'static str,
     pub verification_passed: bool,
+    pub repair_hooks: Vec<&'static str>,
+}
+
+/// Stable degraded-mode posture emitted when repair must fall back from full service.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RepairDegradedMode {
+    ContinueDegradedReads,
+    EnterReadOnly,
+    EnterOffline,
+}
+
+impl RepairDegradedMode {
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::ContinueDegradedReads => "continue_degraded_reads",
+            Self::EnterReadOnly => "enter_read_only",
+            Self::EnterOffline => "enter_offline",
+        }
+    }
+}
+
+/// Stable rollback trigger emitted when repair can no longer trust the current derived surface.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RepairRollbackTrigger {
+    VerificationMismatch,
+    DurableInputUnreadable,
+    RebuildVerificationFailed,
+}
+
+impl RepairRollbackTrigger {
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::VerificationMismatch => "verification_mismatch",
+            Self::DurableInputUnreadable => "durable_input_unreadable",
+            Self::RebuildVerificationFailed => "rebuild_verification_failed",
+        }
+    }
 }
 
 /// Canonical index rebuild plan derived from durable truth.
@@ -238,6 +294,7 @@ pub struct RepairRebuildPlan {
     pub durable_sources: Vec<&'static str>,
     pub authoritative_schema_objects: Vec<DurableSchemaObject>,
     pub rebuilt_outputs: Vec<&'static str>,
+    pub repair_hooks: Vec<&'static str>,
     pub verification_artifact: VerificationArtifact,
 }
 
@@ -260,6 +317,8 @@ pub struct RepairRun {
     results: Vec<RepairCheckResult>,
     verification_artifacts: HashMap<RepairTarget, VerificationArtifact>,
     graph_rebuild_reports: HashMap<RepairTarget, GraphRebuildReport>,
+    cache_invalidation_reports: HashMap<RepairTarget, InvalidationOutcome>,
+    cache_warmup_reports: HashMap<RepairTarget, Vec<CacheMaintenanceEvent>>,
     completed: bool,
     durable_token: DurableStateToken,
     total_duration_ms: u64,
@@ -268,16 +327,82 @@ pub struct RepairRun {
 }
 
 impl RepairRun {
-    fn rollback_state_for(&self, target: RepairTarget, status: RepairStatus) -> Option<&'static str> {
+    fn degraded_mode_for(
+        &self,
+        target: RepairTarget,
+        status: RepairStatus,
+    ) -> Option<RepairDegradedMode> {
         match (target, status, self.entrypoint) {
-            (RepairTarget::GraphConsistency, RepairStatus::Degraded, IndexRepairEntrypoint::VerifyOnly) => {
-                Some("rollback_required")
+            (
+                RepairTarget::GraphConsistency,
+                RepairStatus::Degraded,
+                IndexRepairEntrypoint::VerifyOnly,
+            ) => Some(RepairDegradedMode::ContinueDegradedReads),
+            (RepairTarget::GraphConsistency, RepairStatus::Corrupt, _) => {
+                Some(RepairDegradedMode::EnterOffline)
             }
-            (RepairTarget::GraphConsistency, RepairStatus::Rebuilt, IndexRepairEntrypoint::ForceRebuild) => {
-                Some("rollback_in_progress")
-            }
+            (_, RepairStatus::Corrupt, _) => Some(RepairDegradedMode::EnterReadOnly),
             _ => None,
         }
+    }
+
+    fn rollback_state_for(
+        &self,
+        target: RepairTarget,
+        status: RepairStatus,
+    ) -> Option<&'static str> {
+        match (target, status, self.entrypoint) {
+            (
+                RepairTarget::GraphConsistency,
+                RepairStatus::Degraded,
+                IndexRepairEntrypoint::VerifyOnly,
+            ) => Some("rollback_required"),
+            (
+                RepairTarget::GraphConsistency,
+                RepairStatus::Rebuilt,
+                IndexRepairEntrypoint::ForceRebuild,
+            ) => Some("rollback_in_progress"),
+            _ => None,
+        }
+    }
+
+    fn rollback_trigger_for(
+        &self,
+        target: RepairTarget,
+        status: RepairStatus,
+    ) -> Option<RepairRollbackTrigger> {
+        match (target, status, self.entrypoint) {
+            (
+                RepairTarget::GraphConsistency,
+                RepairStatus::Degraded,
+                IndexRepairEntrypoint::VerifyOnly,
+            ) => Some(RepairRollbackTrigger::VerificationMismatch),
+            (RepairTarget::GraphConsistency, RepairStatus::Corrupt, _) => {
+                Some(RepairRollbackTrigger::DurableInputUnreadable)
+            }
+            (
+                RepairTarget::GraphConsistency,
+                RepairStatus::Rebuilt,
+                IndexRepairEntrypoint::ForceRebuild,
+            ) => Some(RepairRollbackTrigger::RebuildVerificationFailed),
+            _ => None,
+        }
+    }
+
+    fn remediation_steps_for(
+        &self,
+        degraded_mode: Option<RepairDegradedMode>,
+        rollback_trigger: Option<RepairRollbackTrigger>,
+    ) -> Vec<RemediationStep> {
+        let mut steps = vec![RemediationStep::CheckHealth];
+        if rollback_trigger.is_some() {
+            steps.push(RemediationStep::RollbackRecentChange);
+        }
+        if degraded_mode.is_some() {
+            steps.push(RemediationStep::RunRepair);
+            steps.push(RemediationStep::InspectState);
+        }
+        steps
     }
 
     fn telemetry_for_target(
@@ -287,7 +412,10 @@ impl RepairRun {
         graph_rebuild_report: Option<&GraphRebuildReport>,
     ) -> (u32, u32, u64) {
         if let Some(report) = graph_rebuild_report {
-            let affected = report.metrics.durable_inputs_seen.max(report.metrics.rebuilt_edges) as u32;
+            let affected = report
+                .metrics
+                .durable_inputs_seen
+                .max(report.metrics.rebuilt_edges) as u32;
             let error_count = u32::from(!report.metrics.verification_passed);
             let duration_ms = report.hooks_run.len() as u64 * 11;
             return (affected, error_count, duration_ms);
@@ -303,7 +431,10 @@ impl RepairRun {
             RepairTarget::EngramIndex => 24,
             RepairTarget::ContradictionConsistency => 8,
         };
-        let error_count = u32::from(matches!(status, RepairStatus::Corrupt | RepairStatus::Degraded));
+        let error_count = u32::from(matches!(
+            status,
+            RepairStatus::Corrupt | RepairStatus::Degraded
+        ));
         let duration_ms = match target {
             RepairTarget::LexicalIndex | RepairTarget::MetadataIndex => 17,
             RepairTarget::SemanticHotIndex | RepairTarget::SemanticColdIndex => 23,
@@ -317,14 +448,19 @@ impl RepairRun {
     }
 
     fn operator_log_for_result(
+        &self,
         result: &RepairCheckResult,
         artifact: &VerificationArtifact,
+        durable_sources: &[&'static str],
         affected_item_count: u32,
         error_count: u32,
         rebuild_duration_ms: u64,
         rollback_state: Option<&'static str>,
         queue_depth_before: u32,
         queue_depth_after: u32,
+        graph_rebuild_report: Option<&GraphRebuildReport>,
+        cache_invalidation: Option<&InvalidationOutcome>,
+        cache_warmup: Option<&[CacheMaintenanceEvent]>,
     ) -> String {
         let entrypoint = result
             .rebuild_entrypoint
@@ -335,14 +471,89 @@ impl RepairRun {
         } else {
             result.rebuilt_outputs.join(",")
         };
+        let durable_sources = if durable_sources.is_empty() {
+            "none".to_string()
+        } else {
+            durable_sources.join(",")
+        };
+        let repair_hooks = if result.repair_hooks.is_empty() {
+            "none".to_string()
+        } else {
+            result.repair_hooks.join(",")
+        };
+        let graph_hooks = graph_rebuild_report
+            .map(|report| {
+                let names = report.hook_names();
+                if names.is_empty() {
+                    "none".to_string()
+                } else {
+                    names.join(",")
+                }
+            })
+            .unwrap_or_else(|| "none".to_string());
+        let cache_invalidation = cache_invalidation
+            .map(|report| {
+                format!(
+                    "{}:{}:{}",
+                    report.trigger.as_str(),
+                    report.entries_invalidated,
+                    report
+                        .maintenance_events
+                        .iter()
+                        .map(|event| format!(
+                            "{}:{}:{}:{}:{}:{}",
+                            event.family.as_str(),
+                            event.event.as_str(),
+                            event.reason.map(|reason| reason.as_str()).unwrap_or("none"),
+                            event
+                                .warm_source
+                                .map(|source| source.as_str())
+                                .unwrap_or("none"),
+                            event.generation_status.as_str(),
+                            event.entries_affected
+                        ))
+                        .collect::<Vec<_>>()
+                        .join("|")
+                )
+            })
+            .unwrap_or_else(|| "none".to_string());
+        let cache_warmup = cache_warmup
+            .map(|events| {
+                if events.is_empty() {
+                    "none".to_string()
+                } else {
+                    events
+                        .iter()
+                        .map(|event| {
+                            format!(
+                                "{}:{}:{}:{}:{}:{}",
+                                event.family.as_str(),
+                                event.event.as_str(),
+                                event.reason.map(|reason| reason.as_str()).unwrap_or("none"),
+                                event
+                                    .warm_source
+                                    .map(|source| source.as_str())
+                                    .unwrap_or("none"),
+                                event.generation_status.as_str(),
+                                event.entries_affected
+                            )
+                        })
+                        .collect::<Vec<_>>()
+                        .join("|")
+                }
+            })
+            .unwrap_or_else(|| "none".to_string());
 
         format!(
-            "target={} status={} verification_passed={} entrypoint={} rebuilt_outputs={} artifact={} parity_check={} authoritative_rows={} derived_rows={} authoritative_generation={} derived_generation={} affected_item_count={} error_count={} rebuild_duration_ms={} rollback_state={} queue_depth_before={} queue_depth_after={} detail={}",
+            "target={} status={} verification_passed={} entrypoint={} rebuilt_outputs={} durable_sources={} repair_hooks={} graph_hooks={} artifact={} parity_check={} authoritative_rows={} derived_rows={} authoritative_generation={} derived_generation={} affected_item_count={} error_count={} rebuild_duration_ms={} rollback_state={} degraded_mode={} rollback_trigger={} remediation_steps={} queue_depth_before={} queue_depth_after={} cache_invalidation={} cache_warmup={} detail={}",
             result.target.as_str(),
             result.status.as_str(),
             result.verification_passed,
             entrypoint,
             rebuilt_outputs,
+            durable_sources,
+            repair_hooks,
+            graph_hooks,
             artifact.artifact_name,
             artifact.parity_check,
             artifact.authoritative_rows,
@@ -353,8 +564,24 @@ impl RepairRun {
             error_count,
             rebuild_duration_ms,
             rollback_state.unwrap_or("none"),
+            self.degraded_mode_for(result.target, result.status)
+                .map(RepairDegradedMode::as_str)
+                .unwrap_or("none"),
+            self.rollback_trigger_for(result.target, result.status)
+                .map(RepairRollbackTrigger::as_str)
+                .unwrap_or("none"),
+            self.remediation_steps_for(
+                self.degraded_mode_for(result.target, result.status),
+                self.rollback_trigger_for(result.target, result.status),
+            )
+            .iter()
+            .map(|step| step.as_str())
+            .collect::<Vec<_>>()
+            .join(","),
             queue_depth_before,
             queue_depth_after,
+            cache_invalidation,
+            cache_warmup,
             result.detail,
         )
     }
@@ -373,6 +600,8 @@ impl RepairRun {
             results: Vec::new(),
             verification_artifacts: HashMap::new(),
             graph_rebuild_reports: HashMap::new(),
+            cache_invalidation_reports: HashMap::new(),
+            cache_warmup_reports: HashMap::new(),
             completed: false,
             durable_token: DurableStateToken(0),
             total_duration_ms: 0,
@@ -444,9 +673,18 @@ impl RepairRun {
             retry_attempts: self.total_error_count,
             partial_run,
         };
-        let rollback_state = self.results.iter().find_map(|result| {
-            self.rollback_state_for(result.target, result.status)
-        });
+        let rollback_state = self
+            .results
+            .iter()
+            .find_map(|result| self.rollback_state_for(result.target, result.status));
+        let degraded_mode = self
+            .results
+            .iter()
+            .find_map(|result| self.degraded_mode_for(result.target, result.status));
+        let rollback_trigger = self
+            .results
+            .iter()
+            .find_map(|result| self.rollback_trigger_for(result.target, result.status));
         let operator_reports = self
             .results
             .iter()
@@ -456,31 +694,67 @@ impl RepairRun {
                     .get(&result.target)
                     .expect("verification artifact should exist for every repair result");
                 let graph_rebuild_report = self.graph_rebuild_reports.get(&result.target);
+                let cache_invalidation = self.cache_invalidation_reports.get(&result.target);
+                let cache_warmup = self
+                    .cache_warmup_reports
+                    .get(&result.target)
+                    .map(Vec::as_slice);
+                let durable_sources = result
+                    .rebuild_entrypoint
+                    .and_then(|entrypoint| {
+                        RepairEngine.plan_rebuild_from_durable_truth(result.target, entrypoint)
+                    })
+                    .map(|plan| plan.durable_sources)
+                    .unwrap_or_default();
                 let (affected_item_count, error_count, rebuild_duration_ms) =
                     self.telemetry_for_target(result.target, result.status, graph_rebuild_report);
                 let rollback_state = self.rollback_state_for(result.target, result.status);
+                let degraded_mode = self.degraded_mode_for(result.target, result.status);
+                let rollback_trigger = self.rollback_trigger_for(result.target, result.status);
+                let remediation_steps = self.remediation_steps_for(degraded_mode, rollback_trigger);
+                let graph_hooks = graph_rebuild_report
+                    .map(|report| report.hook_names())
+                    .unwrap_or_default();
+                let cache_invalidation_events = cache_invalidation
+                    .map(|report| report.maintenance_events.clone())
+                    .unwrap_or_default();
+                let cache_warmup_events = cache_warmup
+                    .map(|events| events.to_vec())
+                    .unwrap_or_default();
                 RepairOperatorReport {
                     target: result.target,
                     status: result.status,
                     verification_passed: result.verification_passed,
                     rebuild_entrypoint: result.rebuild_entrypoint,
                     rebuilt_outputs: result.rebuilt_outputs.clone(),
+                    durable_sources: durable_sources.clone(),
+                    repair_hooks: result.repair_hooks.clone(),
                     verification_artifact_name: artifact.artifact_name,
                     affected_item_count,
                     error_count,
                     rebuild_duration_ms,
                     rollback_state,
+                    degraded_mode,
+                    rollback_trigger,
+                    remediation_steps,
                     queue_depth_before,
                     queue_depth_after,
-                    operator_log: Self::operator_log_for_result(
+                    graph_hooks,
+                    cache_invalidation_events,
+                    cache_warmup_events,
+                    operator_log: self.operator_log_for_result(
                         result,
                         artifact,
+                        &durable_sources,
                         affected_item_count,
                         error_count,
                         rebuild_duration_ms,
                         rollback_state,
                         queue_depth_before,
                         queue_depth_after,
+                        graph_rebuild_report,
+                        cache_invalidation,
+                        cache_warmup,
                     ),
                 }
             })
@@ -496,11 +770,15 @@ impl RepairRun {
             error_count: self.total_error_count,
             rebuild_duration_ms: self.total_duration_ms,
             rollback_state,
+            degraded_mode,
+            rollback_trigger,
             queue_report,
             results: self.results.clone(),
             verification_artifacts: self.verification_artifacts.clone(),
             operator_reports,
             graph_rebuild_reports: self.graph_rebuild_reports.clone(),
+            cache_invalidation_reports: self.cache_invalidation_reports.clone(),
+            cache_warmup_reports: self.cache_warmup_reports.clone(),
         }
     }
 
@@ -526,6 +804,10 @@ impl RepairRun {
             derived_generation: "durable.v1",
             parity_check: target.verification_parity_check(),
             verification_passed: true,
+            repair_hooks: match target {
+                RepairTarget::CacheWarmState => CACHE_WARM_STATE_VERIFY_HOOKS.to_vec(),
+                _ => Vec::new(),
+            },
         }
     }
 
@@ -580,6 +862,61 @@ impl RepairRun {
             self.graph_failure_injection_for(target, self.entrypoint),
         ))
     }
+
+    fn cache_warm_state_report(
+        &self,
+        target: RepairTarget,
+    ) -> Option<(InvalidationOutcome, Vec<CacheMaintenanceEvent>)> {
+        if target != RepairTarget::CacheWarmState {
+            return None;
+        }
+
+        let mut cache = CacheManager::new(8, 8);
+        let generations = CacheGenerationAnchors {
+            schema_generation: 2,
+            policy_generation: 2,
+            index_generation: 2,
+            embedding_generation: 2,
+            ranking_generation: 2,
+        };
+        for (index, family) in CACHE_WARM_STATE_WARMUP_FAMILIES.iter().enumerate() {
+            let key = CacheKey {
+                family: *family,
+                namespace: self.namespace.clone(),
+                workspace_key: None,
+                owner_key: None,
+                request_shape_hash: matches!(
+                    *family,
+                    CacheFamily::ResultCache | CacheFamily::AnnProbeCache
+                )
+                .then_some((index as u64) + 100),
+                item_key: (index as u64) + 1,
+                generations,
+            };
+            let request = CacheAdmissionRequest {
+                request_shape_hash: key.request_shape_hash,
+                ..CacheAdmissionRequest::default()
+            };
+            cache
+                .store_for(*family)
+                .expect("cache warm-state family should map to a bounded store")
+                .admit(key, vec![MemoryId((index as u64) + 1)], request);
+        }
+        cache.prefetch.submit_hint(
+            self.namespace.clone(),
+            PrefetchTrigger::SessionRecency,
+            vec![MemoryId(91), MemoryId(92)],
+        );
+
+        let invalidation =
+            cache.handle_invalidation(InvalidationTrigger::RepairStarted, &self.namespace);
+        let warmup = if self.entrypoint == IndexRepairEntrypoint::VerifyOnly {
+            Vec::new()
+        } else {
+            cache.repair_warmup(&CACHE_WARM_STATE_WARMUP_FAMILIES, 1)
+        };
+        Some((invalidation, warmup))
+    }
 }
 
 impl MaintenanceOperation for RepairRun {
@@ -598,8 +935,19 @@ impl MaintenanceOperation for RepairRun {
             .ne(&IndexRepairEntrypoint::VerifyOnly)
             .then(|| RepairEngine.plan_rebuild_from_durable_truth(target, self.entrypoint))
             .flatten();
+        let repair_hooks = rebuild_plan
+            .as_ref()
+            .map(|plan| plan.repair_hooks.clone())
+            .unwrap_or_else(|| match target {
+                RepairTarget::CacheWarmState => CACHE_WARM_STATE_VERIFY_HOOKS.to_vec(),
+                _ => Vec::new(),
+            });
         let graph_rebuild_report = self.graph_rebuild_report(target);
-        let verification_artifact = self.mock_verification_artifact(target);
+        let cache_warm_state_report = self.cache_warm_state_report(target);
+        let verification_artifact = rebuild_plan
+            .as_ref()
+            .map(|plan| plan.verification_artifact.clone())
+            .unwrap_or_else(|| self.mock_verification_artifact(target));
         let graph_verification_passed = graph_rebuild_report
             .as_ref()
             .map(|report| report.metrics.verification_passed);
@@ -653,6 +1001,10 @@ impl MaintenanceOperation for RepairRun {
         if let Some(report) = graph_rebuild_report {
             self.graph_rebuild_reports.insert(target, report);
         }
+        if let Some((invalidation, warmup)) = cache_warm_state_report {
+            self.cache_invalidation_reports.insert(target, invalidation);
+            self.cache_warmup_reports.insert(target, warmup);
+        }
         let telemetry_graph_report = self.graph_rebuild_reports.get(&target);
         let (affected_item_count, error_count, rebuild_duration_ms) =
             self.telemetry_for_target(target, status, telemetry_graph_report);
@@ -667,6 +1019,7 @@ impl MaintenanceOperation for RepairRun {
                 && graph_verification_passed.unwrap_or(true),
             rebuild_entrypoint,
             rebuilt_outputs,
+            repair_hooks,
         });
         self.current_index += 1;
         self.durable_token = DurableStateToken(self.current_index as u64);
@@ -747,10 +1100,15 @@ impl RepairEngine {
                 vec!["usearch_cold_ann", "cold_embedding_lookup"],
             ),
             RepairTarget::GraphConsistency => (
-                vec!["durable_memory_records", "graph_edge_table"],
+                vec![
+                    "durable_memory_records",
+                    "memory_relation_refs",
+                    "memory_lineage_edges",
+                ],
                 vec![
                     DurableSchemaObject::DurableMemoryRecords,
-                    DurableSchemaObject::GraphEdgeTable,
+                    DurableSchemaObject::MemoryRelationRefsTable,
+                    DurableSchemaObject::MemoryLineageEdgesTable,
                 ],
                 vec![
                     "graph_adjacency_projection",
@@ -793,13 +1151,34 @@ impl RepairEngine {
             _ => unreachable!("non-rebuild repair target filtered before rebuild planning"),
         };
 
+        let repair_hooks = match target {
+            RepairTarget::GraphConsistency => vec![
+                GraphRebuildHook::SnapshotDurableTruth.as_str(),
+                GraphRebuildHook::RebuildAdjacencyProjection.as_str(),
+                GraphRebuildHook::RebuildNeighborhoodCache.as_str(),
+                GraphRebuildHook::VerifyConsistencySnapshot.as_str(),
+            ],
+            RepairTarget::CacheWarmState => match entrypoint {
+                IndexRepairEntrypoint::VerifyOnly => CACHE_WARM_STATE_VERIFY_HOOKS.to_vec(),
+                IndexRepairEntrypoint::RebuildIfNeeded | IndexRepairEntrypoint::ForceRebuild => {
+                    CACHE_WARM_STATE_REBUILD_HOOKS.to_vec()
+                }
+            },
+            _ => Vec::new(),
+        };
+        let mut verification_artifact = self.mock_verification_artifact(target);
+        if !repair_hooks.is_empty() {
+            verification_artifact.repair_hooks = repair_hooks.clone();
+        }
+
         Some(RepairRebuildPlan {
             target,
             entrypoint,
             durable_sources,
             authoritative_schema_objects,
             rebuilt_outputs,
-            verification_artifact: self.mock_verification_artifact(target),
+            repair_hooks,
+            verification_artifact,
         })
     }
 
@@ -874,6 +1253,10 @@ impl RepairEngine {
             derived_generation: "durable.v1",
             parity_check: target.verification_parity_check(),
             verification_passed: true,
+            repair_hooks: match target {
+                RepairTarget::CacheWarmState => CACHE_WARM_STATE_VERIFY_HOOKS.to_vec(),
+                _ => Vec::new(),
+            },
         }
     }
 }
@@ -907,6 +1290,36 @@ mod tests {
                     assert_eq!(summary.results.len(), 10);
                     assert_eq!(summary.verification_artifacts.len(), 10);
                     assert_eq!(summary.operator_reports.len(), 10);
+                    let cache_report = summary
+                        .results
+                        .iter()
+                        .find(|result| result.target == RepairTarget::CacheWarmState)
+                        .expect("cache warm-state result should be present");
+                    assert_eq!(
+                        cache_report.repair_hooks,
+                        CACHE_WARM_STATE_VERIFY_HOOKS.to_vec()
+                    );
+                    let cache_artifact = summary
+                        .verification_artifacts
+                        .get(&RepairTarget::CacheWarmState)
+                        .expect("cache warm-state artifact should be present");
+                    assert_eq!(
+                        cache_artifact.repair_hooks,
+                        CACHE_WARM_STATE_VERIFY_HOOKS.to_vec()
+                    );
+                    let cache_invalidation = summary
+                        .cache_invalidation_reports
+                        .get(&RepairTarget::CacheWarmState)
+                        .expect("cache invalidation report should be present");
+                    assert_eq!(
+                        cache_invalidation.trigger,
+                        InvalidationTrigger::RepairStarted
+                    );
+                    assert!(cache_invalidation.entries_invalidated >= 5);
+                    assert!(summary
+                        .cache_warmup_reports
+                        .get(&RepairTarget::CacheWarmState)
+                        .is_some_and(Vec::is_empty));
                     let graph_report = summary
                         .graph_rebuild_reports
                         .get(&RepairTarget::GraphConsistency)
@@ -1043,7 +1456,10 @@ mod tests {
 
         assert_eq!(completed.targets_checked, 4);
         assert_eq!(completed.rebuilt, 4);
-        assert!(completed.results.iter().all(|result| result.target.is_index_rebuild_target()));
+        assert!(completed
+            .results
+            .iter()
+            .all(|result| result.target.is_index_rebuild_target()));
         assert_eq!(
             completed
                 .results
@@ -1175,7 +1591,8 @@ mod tests {
             graph_plan.authoritative_schema_objects,
             vec![
                 DurableSchemaObject::DurableMemoryRecords,
-                DurableSchemaObject::GraphEdgeTable,
+                DurableSchemaObject::MemoryRelationRefsTable,
+                DurableSchemaObject::MemoryLineageEdgesTable,
             ]
         );
         assert_eq!(
@@ -1184,6 +1601,14 @@ mod tests {
                 "graph_adjacency_projection",
                 "graph_neighborhood_cache",
                 "graph_consistency_snapshot",
+            ]
+        );
+        assert_eq!(
+            graph_plan.durable_sources,
+            vec![
+                "durable_memory_records",
+                "memory_relation_refs",
+                "memory_lineage_edges",
             ]
         );
         assert_eq!(
@@ -1209,6 +1634,14 @@ mod tests {
             "cache_generation_anchor_report"
         );
         assert_eq!(cache_plan.verification_artifact.authoritative_rows, 48);
+        assert_eq!(
+            cache_plan.repair_hooks,
+            CACHE_WARM_STATE_REBUILD_HOOKS.to_vec()
+        );
+        assert_eq!(
+            cache_plan.verification_artifact.repair_hooks,
+            CACHE_WARM_STATE_REBUILD_HOOKS.to_vec()
+        );
     }
 
     #[test]
@@ -1358,8 +1791,10 @@ mod tests {
         assert!(summary.operator_reports.iter().all(|report| {
             report.rebuild_entrypoint == Some(IndexRepairEntrypoint::ForceRebuild)
                 && report.verification_passed
+                && !report.durable_sources.is_empty()
                 && report.operator_log.contains("status=rebuilt")
                 && report.operator_log.contains("entrypoint=force_rebuild")
+                && report.operator_log.contains("durable_sources=")
                 && report
                     .operator_log
                     .contains(report.verification_artifact_name)
@@ -1380,6 +1815,89 @@ mod tests {
             .verification_artifacts
             .values()
             .all(|artifact| artifact.verification_passed));
+    }
+
+    #[test]
+    fn cache_warm_state_repair_reports_invalidation_hooks_and_warmup() {
+        let engine = RepairEngine;
+        let run = engine.create_targeted(
+            ns("cache.repair"),
+            vec![RepairTarget::CacheWarmState],
+            IndexRepairEntrypoint::RebuildIfNeeded,
+        );
+        let mut handle = MaintenanceJobHandle::new(run, 10);
+
+        handle.start();
+        let completed = handle.poll();
+        let MaintenanceJobState::Completed(summary) = completed.state else {
+            panic!("expected completed cache warm-state repair summary after first poll");
+        };
+
+        assert_eq!(summary.targets_checked, 1);
+        assert_eq!(summary.rebuilt, 1);
+        let result = summary
+            .results
+            .first()
+            .expect("cache warm-state result missing");
+        assert_eq!(result.target, RepairTarget::CacheWarmState);
+        assert_eq!(result.repair_hooks, CACHE_WARM_STATE_REBUILD_HOOKS.to_vec());
+
+        let invalidation = summary
+            .cache_invalidation_reports
+            .get(&RepairTarget::CacheWarmState)
+            .expect("cache invalidation report missing");
+        assert_eq!(invalidation.trigger, InvalidationTrigger::RepairStarted);
+        assert!(invalidation.entries_invalidated >= 5);
+        assert!(invalidation.maintenance_events.iter().any(|event| {
+            event.family == CacheFamily::PrefetchHints
+                && event.event == crate::store::cache::CacheEvent::PrefetchDrop
+                && event.entries_affected == 1
+        }));
+
+        let warmup = summary
+            .cache_warmup_reports
+            .get(&RepairTarget::CacheWarmState)
+            .expect("cache warmup report missing");
+        assert_eq!(warmup.len(), CACHE_WARM_STATE_WARMUP_FAMILIES.len());
+        assert!(warmup.iter().all(|event| {
+            event.event == crate::store::cache::CacheEvent::RepairWarmup
+                && event.entries_affected == 1
+        }));
+
+        let operator_report = summary
+            .operator_reports
+            .iter()
+            .find(|report| report.target == RepairTarget::CacheWarmState)
+            .expect("cache warm-state operator report missing");
+        assert_eq!(
+            operator_report.durable_sources,
+            vec![
+                "durable_memory_records",
+                "namespace_policy_metadata",
+                "current_generation_anchors",
+            ]
+        );
+        assert_eq!(
+            operator_report.repair_hooks,
+            CACHE_WARM_STATE_REBUILD_HOOKS.to_vec()
+        );
+        assert_eq!(
+            operator_report.cache_invalidation_events,
+            invalidation.maintenance_events
+        );
+        assert_eq!(operator_report.cache_warmup_events, *warmup);
+        assert!(operator_report.operator_log.contains(
+            "repair_hooks=snapshot_current_generation_anchors,invalidate_cache_families,drop_prefetch_hints,rebuild_tier1_item_cache,rebuild_result_cache,rebuild_summary_cache,rebuild_ann_probe_cache,verify_generation_anchor_report"
+        ));
+        assert!(operator_report.operator_log.contains(
+            "durable_sources=durable_memory_records,namespace_policy_metadata,current_generation_anchors"
+        ));
+        assert!(operator_report
+            .operator_log
+            .contains("cache_invalidation=repair_started:"));
+        assert!(operator_report.operator_log.contains(
+            "cache_warmup=tier1_item:repair_warmup:none:tier1_item_cache:valid:1|result_cache:repair_warmup:none:result_cache:valid:1|summary_cache:repair_warmup:none:summary_cache:valid:1|ann_probe_cache:repair_warmup:none:ann_probe_cache:valid:1"
+        ));
     }
 
     #[test]
@@ -1435,6 +1953,19 @@ mod tests {
                 && report.status == RepairStatus::Rebuilt
                 && report.rebuild_entrypoint == Some(IndexRepairEntrypoint::ForceRebuild)
                 && report.verification_passed
+                && report.durable_sources
+                    == vec![
+                        "durable_memory_records",
+                        "memory_relation_refs",
+                        "memory_lineage_edges",
+                    ]
+                && report.graph_hooks
+                    == vec![
+                        "snapshot_durable_truth",
+                        "rebuild_adjacency_projection",
+                        "rebuild_neighborhood_cache",
+                        "verify_consistency_snapshot",
+                    ]
         }));
         assert!(summary.operator_reports.iter().any(|report| {
             report.target == RepairTarget::PayloadIntegrity
@@ -1462,6 +1993,17 @@ mod tests {
         assert!(graph_report
             .operator_log
             .contains("hooks=snapshot_durable_truth,rebuild_adjacency_projection,rebuild_neighborhood_cache,verify_consistency_snapshot"));
+        let graph_operator_report = summary
+            .operator_reports
+            .iter()
+            .find(|report| report.target == RepairTarget::GraphConsistency)
+            .expect("graph consistency operator report should be present");
+        assert!(graph_operator_report.operator_log.contains(
+            "durable_sources=durable_memory_records,memory_relation_refs,memory_lineage_edges"
+        ));
+        assert!(graph_operator_report.operator_log.contains(
+            "graph_hooks=snapshot_durable_truth,rebuild_adjacency_projection,rebuild_neighborhood_cache,verify_consistency_snapshot"
+        ));
     }
 
     #[test]

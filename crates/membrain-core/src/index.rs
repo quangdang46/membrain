@@ -228,6 +228,160 @@ pub mod temporal_schema {
     "#;
 }
 
+// ── Snapshot Metadata Schema ──────────────────────────────────────────────────
+
+/// Snapshot metadata table schema for named historical inspection anchors.
+pub mod snapshot_schema {
+    /// Snapshot metadata table name.
+    pub const SNAPSHOT_METADATA_TABLE: &str = "snapshot_metadata";
+
+    /// CREATE TABLE for durable snapshot metadata with bounded namespace/name lookups.
+    pub const CREATE_SNAPSHOT_METADATA: &str = r#"
+        CREATE TABLE IF NOT EXISTS snapshot_metadata (
+            snapshot_id INTEGER PRIMARY KEY,
+            namespace TEXT NOT NULL,
+            snapshot_name TEXT NOT NULL,
+            as_of_tick INTEGER NOT NULL,
+            created_at_tick INTEGER NOT NULL,
+            note TEXT,
+            memory_count INTEGER NOT NULL,
+            retention_class TEXT NOT NULL,
+            active INTEGER NOT NULL DEFAULT 1,
+            UNIQUE(namespace, snapshot_name)
+        );
+        CREATE INDEX IF NOT EXISTS idx_snapshot_namespace_active
+            ON snapshot_metadata(namespace, active, created_at_tick);
+        CREATE INDEX IF NOT EXISTS idx_snapshot_namespace_retention
+            ON snapshot_metadata(namespace, retention_class, active);
+    "#;
+}
+
+// ── Batch 2 Follow-on Schema ──────────────────────────────────────────────────
+
+pub mod batch2_schema {
+    pub const RECALL_LOG_TABLE: &str = "recall_log";
+    pub const HOT_PATH_CACHE_TABLE: &str = "hot_path_cache";
+    pub const RECALL_SEQUENCES_TABLE: &str = "recall_sequences";
+    pub const COMPRESSION_LOG_TABLE: &str = "compression_log";
+    pub const EMOTIONAL_TIMELINE_TABLE: &str = "emotional_timeline";
+    pub const MEMORY_AUDIT_LOG_TABLE: &str = "memory_audit_log";
+    pub const BRAIN_FORKS_TABLE: &str = "brain_forks";
+    pub const FORK_MERGE_LOG_TABLE: &str = "fork_merge_log";
+
+    pub const CREATE_RECALL_LOG: &str = r#"
+        CREATE TABLE IF NOT EXISTS recall_log (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            tick INTEGER NOT NULL,
+            query_hash TEXT NOT NULL,
+            query_preview TEXT,
+            retrieved_ids TEXT NOT NULL,
+            tier TEXT NOT NULL,
+            latency_us INTEGER NOT NULL,
+            namespace_id TEXT NOT NULL DEFAULT 'default'
+        );
+        CREATE INDEX IF NOT EXISTS idx_recall_tick ON recall_log(tick DESC);
+        CREATE INDEX IF NOT EXISTS idx_recall_query ON recall_log(query_hash);
+    "#;
+
+    pub const CREATE_HOT_PATH_CACHE: &str = r#"
+        CREATE TABLE IF NOT EXISTS hot_path_cache (
+            memory_id TEXT PRIMARY KEY,
+            retrieve_count INTEGER NOT NULL DEFAULT 0,
+            last_retrieved INTEGER NOT NULL,
+            avg_rank REAL NOT NULL,
+            score REAL NOT NULL
+        );
+    "#;
+
+    pub const CREATE_RECALL_SEQUENCES: &str = r#"
+        CREATE TABLE IF NOT EXISTS recall_sequences (
+            query_hash_a TEXT NOT NULL,
+            query_hash_b TEXT NOT NULL,
+            count INTEGER NOT NULL DEFAULT 1,
+            last_seen INTEGER NOT NULL,
+            avg_gap_ticks REAL NOT NULL DEFAULT 10.0,
+            namespace_id TEXT NOT NULL DEFAULT 'default',
+            PRIMARY KEY (query_hash_a, query_hash_b, namespace_id)
+        );
+        CREATE INDEX IF NOT EXISTS idx_seq_a ON recall_sequences(query_hash_a, namespace_id);
+    "#;
+
+    pub const CREATE_COMPRESSION_LOG: &str = r#"
+        CREATE TABLE IF NOT EXISTS compression_log (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            schema_memory_id TEXT NOT NULL,
+            source_memory_count INTEGER NOT NULL,
+            tick INTEGER NOT NULL,
+            namespace_id TEXT NOT NULL DEFAULT 'default',
+            keyword_summary TEXT
+        );
+    "#;
+
+    pub const CREATE_EMOTIONAL_TIMELINE: &str = r#"
+        CREATE TABLE IF NOT EXISTS emotional_timeline (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            era_id TEXT,
+            tick_start INTEGER NOT NULL,
+            tick_end INTEGER,
+            avg_valence REAL NOT NULL,
+            avg_arousal REAL NOT NULL,
+            memory_count INTEGER NOT NULL DEFAULT 0,
+            namespace_id TEXT NOT NULL DEFAULT 'default'
+        );
+        CREATE INDEX IF NOT EXISTS idx_emotion_tick ON emotional_timeline(tick_start);
+    "#;
+
+    pub const CREATE_MEMORY_AUDIT_LOG: &str = r#"
+        CREATE TABLE IF NOT EXISTS memory_audit_log (
+            sequence INTEGER PRIMARY KEY,
+            category TEXT NOT NULL,
+            kind TEXT NOT NULL,
+            namespace_id TEXT NOT NULL,
+            memory_id INTEGER,
+            session_id INTEGER,
+            actor_source TEXT NOT NULL,
+            request_id TEXT,
+            tick INTEGER,
+            before_strength INTEGER,
+            after_strength INTEGER,
+            before_confidence INTEGER,
+            after_confidence INTEGER,
+            related_snapshot TEXT,
+            related_run TEXT,
+            redacted INTEGER NOT NULL DEFAULT 0,
+            detail TEXT NOT NULL
+        );
+        CREATE INDEX IF NOT EXISTS idx_memory_audit_namespace_seq ON memory_audit_log(namespace_id, sequence DESC);
+        CREATE INDEX IF NOT EXISTS idx_memory_audit_memory ON memory_audit_log(memory_id, sequence DESC);
+        CREATE INDEX IF NOT EXISTS idx_memory_audit_tick ON memory_audit_log(namespace_id, tick);
+    "#;
+
+    pub const CREATE_BRAIN_FORKS: &str = r#"
+        CREATE TABLE IF NOT EXISTS brain_forks (
+            name TEXT PRIMARY KEY,
+            parent_namespace TEXT NOT NULL,
+            forked_at_tick INTEGER NOT NULL,
+            inherited_vis TEXT NOT NULL DEFAULT 'public',
+            status TEXT NOT NULL DEFAULT 'active',
+            merged_at_tick INTEGER,
+            note TEXT
+        );
+    "#;
+
+    pub const CREATE_FORK_MERGE_LOG: &str = r#"
+        CREATE TABLE IF NOT EXISTS fork_merge_log (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            fork_name TEXT NOT NULL,
+            target_ns TEXT NOT NULL,
+            tick INTEGER NOT NULL,
+            memories_merged INTEGER NOT NULL,
+            conflicts_found INTEGER NOT NULL,
+            conflicts_auto_resolved INTEGER NOT NULL,
+            conflicts_pending INTEGER NOT NULL
+        );
+    "#;
+}
+
 // ── Namespace Prefilter Schema ────────────────────────────────────────────────
 
 /// Namespace prefilter table schema for fast scope narrowing.
@@ -932,6 +1086,46 @@ impl IndexModule {
     pub const fn entity_schema(&self) -> &'static str {
         entity_schema::CREATE_ENTITY_PREFILTER
     }
+
+    /// Returns the Batch 2 recall-log schema.
+    pub const fn recall_log_schema(&self) -> &'static str {
+        batch2_schema::CREATE_RECALL_LOG
+    }
+
+    /// Returns the Batch 2 hot-path-cache schema.
+    pub const fn hot_path_cache_schema(&self) -> &'static str {
+        batch2_schema::CREATE_HOT_PATH_CACHE
+    }
+
+    /// Returns the Batch 2 recall-sequences schema.
+    pub const fn recall_sequences_schema(&self) -> &'static str {
+        batch2_schema::CREATE_RECALL_SEQUENCES
+    }
+
+    /// Returns the Batch 2 compression-log schema.
+    pub const fn compression_log_schema(&self) -> &'static str {
+        batch2_schema::CREATE_COMPRESSION_LOG
+    }
+
+    /// Returns the Batch 2 emotional-timeline schema.
+    pub const fn emotional_timeline_schema(&self) -> &'static str {
+        batch2_schema::CREATE_EMOTIONAL_TIMELINE
+    }
+
+    /// Returns the Batch 2 memory-audit-log schema.
+    pub const fn memory_audit_log_schema(&self) -> &'static str {
+        batch2_schema::CREATE_MEMORY_AUDIT_LOG
+    }
+
+    /// Returns the Batch 2 brain-forks schema.
+    pub const fn brain_forks_schema(&self) -> &'static str {
+        batch2_schema::CREATE_BRAIN_FORKS
+    }
+
+    /// Returns the Batch 2 fork-merge-log schema.
+    pub const fn fork_merge_log_schema(&self) -> &'static str {
+        batch2_schema::CREATE_FORK_MERGE_LOG
+    }
 }
 
 impl IndexApi for IndexModule {
@@ -1135,6 +1329,37 @@ mod tests {
     fn namespace_schema_definitions() {
         assert!(namespace_schema::CREATE_NAMESPACE_PREFILTER.contains("is_archived"));
         assert!(namespace_schema::CREATE_NAMESPACE_PREFILTER.contains("is_pinned"));
+    }
+
+    #[test]
+    fn snapshot_schema_definitions() {
+        assert!(snapshot_schema::CREATE_SNAPSHOT_METADATA.contains("snapshot_metadata"));
+        assert!(snapshot_schema::CREATE_SNAPSHOT_METADATA.contains("created_at_tick"));
+        assert!(snapshot_schema::CREATE_SNAPSHOT_METADATA.contains("memory_count"));
+        assert!(snapshot_schema::CREATE_SNAPSHOT_METADATA.contains("retention_class"));
+        assert!(
+            snapshot_schema::CREATE_SNAPSHOT_METADATA.contains("UNIQUE(namespace, snapshot_name)")
+        );
+    }
+
+    #[test]
+    fn batch2_schema_definitions_cover_later_stage_follow_on_tables() {
+        assert!(batch2_schema::CREATE_RECALL_LOG.contains("recall_log"));
+        assert!(batch2_schema::CREATE_RECALL_LOG.contains("query_hash"));
+        assert!(batch2_schema::CREATE_HOT_PATH_CACHE.contains("hot_path_cache"));
+        assert!(batch2_schema::CREATE_HOT_PATH_CACHE.contains("avg_rank"));
+        assert!(batch2_schema::CREATE_RECALL_SEQUENCES.contains("recall_sequences"));
+        assert!(batch2_schema::CREATE_RECALL_SEQUENCES.contains("avg_gap_ticks"));
+        assert!(batch2_schema::CREATE_COMPRESSION_LOG.contains("compression_log"));
+        assert!(batch2_schema::CREATE_COMPRESSION_LOG.contains("schema_memory_id"));
+        assert!(batch2_schema::CREATE_EMOTIONAL_TIMELINE.contains("emotional_timeline"));
+        assert!(batch2_schema::CREATE_EMOTIONAL_TIMELINE.contains("avg_valence"));
+        assert!(batch2_schema::CREATE_MEMORY_AUDIT_LOG.contains("memory_audit_log"));
+        assert!(batch2_schema::CREATE_MEMORY_AUDIT_LOG.contains("before_strength"));
+        assert!(batch2_schema::CREATE_BRAIN_FORKS.contains("brain_forks"));
+        assert!(batch2_schema::CREATE_BRAIN_FORKS.contains("parent_namespace"));
+        assert!(batch2_schema::CREATE_FORK_MERGE_LOG.contains("fork_merge_log"));
+        assert!(batch2_schema::CREATE_FORK_MERGE_LOG.contains("conflicts_pending"));
     }
 
     #[test]

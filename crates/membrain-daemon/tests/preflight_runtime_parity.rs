@@ -151,13 +151,19 @@ async fn preflight_explain_and_allow_keep_blocked_scope_parity() {
         .starts_with("preflight-"));
 
     assert_eq!(allow_response["result"]["success"], json!(false));
-    assert_eq!(allow_response["result"]["preflight_state"], json!("missing_data"));
+    assert_eq!(
+        allow_response["result"]["preflight_state"],
+        json!("missing_data")
+    );
     assert_eq!(
         allow_response["result"]["preflight_outcome"],
         json!("blocked")
     );
     assert_eq!(allow_response["result"]["outcome_class"], json!("blocked"));
-    assert_eq!(allow_response["result"]["blocked_reasons"], json!(["scope_ambiguous"]));
+    assert_eq!(
+        allow_response["result"]["blocked_reasons"],
+        json!(["scope_ambiguous"])
+    );
     assert_eq!(
         allow_response["result"]["policy_summary"]["decision"],
         json!("allow")
@@ -170,7 +176,9 @@ async fn preflight_explain_and_allow_keep_blocked_scope_parity() {
         allow_response["result"]["confirmation"]["confirmed"],
         json!(true)
     );
-    assert!(allow_response["result"].get("confirmation_reason").is_none());
+    assert!(allow_response["result"]
+        .get("confirmation_reason")
+        .is_none());
     assert!(allow_response["result"].get("execution_id").is_none());
 
     shutdown_runtime(&socket_path, handle).await;

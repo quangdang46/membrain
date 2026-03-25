@@ -529,6 +529,7 @@ impl EncodeEngine {
             &compact_text,
             input.landmark_signals,
             input.active_era_id.as_deref(),
+            input.current_tick,
         );
 
         let observation_source = matches!(input.kind, crate::types::RawIntakeKind::Observation)
@@ -546,6 +547,8 @@ impl EncodeEngine {
             landmark,
             observation_source,
             observation_chunk_id,
+            has_causal_parents: false,
+            has_causal_children: false,
             sharing: SharingMetadata::default(),
         }
     }
@@ -577,6 +580,7 @@ impl EncodeEngine {
         compact_text: &str,
         signals: Option<LandmarkSignals>,
         active_era_id: Option<&str>,
+        current_tick: Option<u64>,
     ) -> LandmarkMetadata {
         let Some(signals) = signals else {
             let mut metadata = LandmarkMetadata::non_landmark();
@@ -616,7 +620,7 @@ impl EncodeEngine {
         } else {
             era_slug
         };
-        let era_started_at_tick = signals.ticks_since_last_landmark;
+        let era_started_at_tick = current_tick.unwrap_or(signals.ticks_since_last_landmark);
         let era_id = format!("era-{}-{:04}", era_slug, era_started_at_tick.min(9_999));
         let detection_score = landmark_detection_score(signals);
         let detection_reason = format!(

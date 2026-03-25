@@ -61,6 +61,8 @@ pub enum RelationKind {
     Mentions,
     /// Memory is derived from another memory (consolidation, revision).
     DerivedFrom,
+    /// Memory led to another memory through an explicit source-backed causal claim.
+    Causal,
     /// Memory contradicts another memory.
     Contradicts,
     /// Memory supersedes (replaces) another memory.
@@ -78,6 +80,7 @@ impl RelationKind {
         match self {
             Self::Mentions => "mentions",
             Self::DerivedFrom => "derived_from",
+            Self::Causal => "causal",
             Self::Contradicts => "contradicts",
             Self::Supersedes => "supersedes",
             Self::SharedTopic => "shared_topic",
@@ -91,6 +94,7 @@ impl RelationKind {
         matches!(
             self,
             Self::DerivedFrom
+                | Self::Causal
                 | Self::Contradicts
                 | Self::Supersedes
                 | Self::CreatedIn
@@ -107,6 +111,123 @@ pub struct GraphEdge {
     pub relation: RelationKind,
     /// Association strength (0..1000).
     pub strength: u16,
+}
+
+/// Canonical kinds of durable causal links between memory items.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
+pub enum CausalLinkType {
+    Derived,
+    Reconsolidated,
+    Extracted,
+    Inferred,
+}
+
+impl CausalLinkType {
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Derived => "derived",
+            Self::Reconsolidated => "reconsolidated",
+            Self::Extracted => "extracted",
+            Self::Inferred => "inferred",
+        }
+    }
+}
+
+/// Allowed evidence families that may support a causal claim.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
+pub enum CausalEvidenceKind {
+    DurableMemory,
+    ReconsolidationAudit,
+    ConsolidationArtifact,
+    BeliefVersionDiff,
+}
+
+impl CausalEvidenceKind {
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::DurableMemory => "durable_memory",
+            Self::ReconsolidationAudit => "reconsolidation_audit",
+            Self::ConsolidationArtifact => "consolidation_artifact",
+            Self::BeliefVersionDiff => "belief_version_diff",
+        }
+    }
+
+    pub const fn supports(self, link_type: CausalLinkType) -> bool {
+        match link_type {
+            CausalLinkType::Derived => {
+                matches!(self, Self::DurableMemory | Self::ConsolidationArtifact)
+            }
+            CausalLinkType::Reconsolidated => {
+                matches!(self, Self::DurableMemory | Self::ReconsolidationAudit)
+            }
+            CausalLinkType::Extracted => {
+                matches!(self, Self::DurableMemory | Self::ConsolidationArtifact)
+            }
+            CausalLinkType::Inferred => matches!(
+                self,
+                Self::DurableMemory
+                    | Self::ReconsolidationAudit
+                    | Self::ConsolidationArtifact
+                    | Self::BeliefVersionDiff
+            ),
+        }
+    }
+}
+
+/// Inspectable evidence attribution carried by one causal link.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct CausalEvidenceAttribution {
+    pub evidence_kind: CausalEvidenceKind,
+    pub source_ref: String,
+    pub supporting_memory_ids: Vec<MemoryId>,
+    pub confidence: u16,
+}
+
+impl CausalEvidenceAttribution {
+    pub fn is_source_backed(&self) -> bool {
+        !self.source_ref.is_empty() && !self.supporting_memory_ids.is_empty()
+    }
+}
+
+/// Durable causal-link row kept explicit instead of hidden behind traversal-only state.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct CausalLink {
+    pub src_memory_id: MemoryId,
+    pub dst_memory_id: MemoryId,
+    pub link_type: CausalLinkType,
+    pub created_at_ms: u64,
+    pub agent_id: Option<String>,
+    pub evidence: Vec<CausalEvidenceAttribution>,
+}
+
+impl CausalLink {
+    /// Whether this causal claim is explicitly source-backed by allowed evidence.
+    pub fn is_source_backed(&self) -> bool {
+        !self.evidence.is_empty()
+            && self.evidence.iter().all(|entry| {
+                entry.is_source_backed() && entry.evidence_kind.supports(self.link_type)
+            })
+            && self
+                .evidence
+                .iter()
+                .any(|entry| entry.evidence_kind == CausalEvidenceKind::DurableMemory)
+    }
+
+    /// Stable evidence log for explain and audit surfaces.
+    pub fn evidence_log(&self) -> String {
+        self.evidence
+            .iter()
+            .map(|entry| {
+                format!(
+                    "{}:{}@{}",
+                    entry.evidence_kind.as_str(),
+                    entry.source_ref,
+                    entry.confidence
+                )
+            })
+            .collect::<Vec<_>>()
+            .join(",")
+    }
 }
 
 // ── Neighborhood expansion ───────────────────────────────────────────────────
@@ -184,6 +305,58 @@ pub struct GraphExplain {
     pub followed_edges: Vec<FollowedEdgeSummary>,
     pub omitted_neighbors: Vec<OmittedNeighborSummary>,
     pub cutoff_reasons: Vec<CutoffReason>,
+}
+
+/// One bounded step in a causal trace from a target memory back toward its roots.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CausalTraceStep {
+    pub memory_id: MemoryId,
+    pub depth: usize,
+    pub link_type: Option<CausalLinkType>,
+    pub source_backed: bool,
+    pub evidence_log: Option<String>,
+}
+
+/// Bounded causal trace and traversal explain facts for one target memory.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CausalTrace {
+    pub target_memory_id: MemoryId,
+    pub steps: Vec<CausalTraceStep>,
+    pub root_memory_ids: Vec<MemoryId>,
+    pub depth: usize,
+    pub all_roots_valid: bool,
+    pub explain: GraphExplain,
+}
+
+/// One descendant penalized after invalidating one causal root.
+#[derive(Debug, Clone, PartialEq)]
+pub struct CausalInvalidationStep {
+    pub memory_id: MemoryId,
+    pub depth: usize,
+    pub confidence_delta: f32,
+    pub link_type: CausalLinkType,
+    pub source_backed: bool,
+    pub evidence_log: Option<String>,
+}
+
+/// Bounded report describing one causal invalidation cascade.
+#[derive(Debug, Clone, PartialEq)]
+pub struct CausalInvalidationReport {
+    pub root_memory_id: MemoryId,
+    pub chain_length: usize,
+    pub memories_penalized: usize,
+    pub avg_confidence_delta: f32,
+    pub steps: Vec<CausalInvalidationStep>,
+    pub explain: GraphExplain,
+}
+
+/// Returns the fixed confidence penalty applied at one causal depth.
+pub const fn cascade_penalty(depth: usize) -> f32 {
+    match depth {
+        1 => 0.20,
+        2 => 0.10,
+        _ => 0.05,
+    }
 }
 
 // ── Engram Clustering (mb-23u.8.5) ───────────────────────────────────────────
@@ -990,6 +1163,305 @@ impl GraphModule {
     pub const fn component_name(&self) -> &'static str {
         "graph"
     }
+
+    /// Builds a bounded invalidation cascade by walking explicit source-backed child links.
+    pub fn invalidate_causal_chain(
+        &self,
+        root_memory_id: MemoryId,
+        links: &[CausalLink],
+        max_depth: usize,
+        max_nodes: usize,
+    ) -> CausalInvalidationReport {
+        let constraints = ExpansionConstraints {
+            max_depth: max_depth.max(1).min(u8::MAX as usize) as u8,
+            max_entities: max_nodes.max(1),
+            min_strength: 0,
+            follow_reverse: false,
+        };
+        let planner = BoundedExpansionPlanner::new(constraints);
+        let seed = Self::entity_for_memory(root_memory_id);
+        let links_by_parent = causal_links_by_parent(links);
+        let links_by_child = causal_links_by_child(links);
+        let (neighborhood, explain) = planner.plan_bfs(seed, |entity_id| {
+            let Some(memory_id) = Self::memory_for_entity(entity_id) else {
+                return Vec::new();
+            };
+            links_by_parent
+                .get(&memory_id)
+                .into_iter()
+                .flat_map(|items| items.iter())
+                .filter(|link| link.is_source_backed())
+                .map(|link| {
+                    let child_entity = Self::entity_for_memory(link.dst_memory_id);
+                    (
+                        GraphEdge {
+                            from: entity_id,
+                            to: child_entity,
+                            relation: RelationKind::Causal,
+                            strength: strongest_evidence_confidence(link),
+                        },
+                        GraphEntity {
+                            id: child_entity,
+                            kind: EntityKind::Memory,
+                            label: format!("memory:{}", link.dst_memory_id.0),
+                            namespace: NamespaceId::new("causal-trace")
+                                .expect("static causal trace namespace is valid"),
+                            memory_id: Some(link.dst_memory_id),
+                        },
+                    )
+                })
+                .collect()
+        });
+
+        let mut depths = HashMap::new();
+        depths.insert(root_memory_id, 0usize);
+        let mut queue = VecDeque::from([root_memory_id]);
+        while let Some(parent) = queue.pop_front() {
+            let Some(parent_depth) = depths.get(&parent).copied() else {
+                continue;
+            };
+            if parent_depth >= max_depth.max(1) {
+                continue;
+            }
+            if let Some(entries) = links_by_parent.get(&parent) {
+                for link in entries {
+                    if !link.is_source_backed() {
+                        continue;
+                    }
+                    let child = link.dst_memory_id;
+                    if depths.len() >= max_nodes.max(1) {
+                        break;
+                    }
+                    if !depths.contains_key(&child) {
+                        let next_depth = parent_depth + 1;
+                        depths.insert(child, next_depth);
+                        queue.push_back(child);
+                    }
+                }
+            }
+        }
+
+        let mut seen_ids = neighborhood
+            .entities
+            .iter()
+            .filter_map(|entity| entity.memory_id)
+            .collect::<Vec<_>>();
+        seen_ids.sort_by_key(|id| id.0);
+        seen_ids.dedup_by_key(|id| id.0);
+
+        let mut steps = seen_ids
+            .into_iter()
+            .filter_map(|memory_id| {
+                let incoming_link = links_by_child.get(&memory_id).and_then(|entries| {
+                    entries
+                        .iter()
+                        .find(|link| link.is_source_backed())
+                        .copied()
+                        .or_else(|| entries.first().copied())
+                });
+                incoming_link.map(|link| CausalInvalidationStep {
+                    memory_id,
+                    depth: *depths.get(&memory_id).unwrap_or(&0),
+                    confidence_delta: cascade_penalty(*depths.get(&memory_id).unwrap_or(&0)),
+                    link_type: link.link_type,
+                    source_backed: link.is_source_backed(),
+                    evidence_log: Some(link.evidence_log()),
+                })
+            })
+            .collect::<Vec<_>>();
+        steps.sort_by_key(|step| (step.depth, step.memory_id.0));
+
+        let chain_length = steps.len();
+        let memories_penalized = chain_length;
+        let avg_confidence_delta = if memories_penalized == 0 {
+            0.0
+        } else {
+            steps.iter().map(|step| step.confidence_delta).sum::<f32>() / memories_penalized as f32
+        };
+
+        CausalInvalidationReport {
+            root_memory_id,
+            chain_length,
+            memories_penalized,
+            avg_confidence_delta,
+            steps,
+            explain,
+        }
+    }
+
+    /// Builds a bounded causal trace by walking explicit source-backed causal links.
+    pub fn trace_causality(
+        &self,
+        target_memory_id: MemoryId,
+        links: &[CausalLink],
+        max_depth: usize,
+        max_nodes: usize,
+    ) -> CausalTrace {
+        let constraints = ExpansionConstraints {
+            max_depth: max_depth.max(1).min(u8::MAX as usize) as u8,
+            max_entities: max_nodes.max(1),
+            min_strength: 0,
+            follow_reverse: false,
+        };
+        let planner = BoundedExpansionPlanner::new(constraints);
+        let seed = Self::entity_for_memory(target_memory_id);
+        let links_by_child = causal_links_by_child(links);
+        let (neighborhood, explain) = planner.plan_bfs(seed, |entity_id| {
+            let Some(memory_id) = Self::memory_for_entity(entity_id) else {
+                return Vec::new();
+            };
+            links_by_child
+                .get(&memory_id)
+                .into_iter()
+                .flat_map(|items| items.iter())
+                .map(|link| {
+                    let parent_entity = Self::entity_for_memory(link.src_memory_id);
+                    (
+                        GraphEdge {
+                            from: entity_id,
+                            to: parent_entity,
+                            relation: RelationKind::Causal,
+                            strength: strongest_evidence_confidence(link),
+                        },
+                        GraphEntity {
+                            id: parent_entity,
+                            kind: EntityKind::Memory,
+                            label: format!("memory:{}", link.src_memory_id.0),
+                            namespace: NamespaceId::new("causal-trace")
+                                .expect("static causal trace namespace is valid"),
+                            memory_id: Some(link.src_memory_id),
+                        },
+                    )
+                })
+                .collect()
+        });
+
+        let mut depths = HashMap::new();
+        depths.insert(target_memory_id, 0usize);
+        let mut queue = VecDeque::from([target_memory_id]);
+        while let Some(child) = queue.pop_front() {
+            let Some(child_depth) = depths.get(&child).copied() else {
+                continue;
+            };
+            if child_depth >= max_depth.max(1) {
+                continue;
+            }
+            if let Some(entries) = links_by_child.get(&child) {
+                for link in entries {
+                    let parent = link.src_memory_id;
+                    if depths.len() >= max_nodes.max(1) {
+                        break;
+                    }
+                    if !depths.contains_key(&parent) {
+                        let next_depth = child_depth + 1;
+                        depths.insert(parent, next_depth);
+                        queue.push_back(parent);
+                    }
+                }
+            }
+        }
+
+        let mut seen_ids = vec![target_memory_id];
+        seen_ids.extend(
+            neighborhood
+                .entities
+                .iter()
+                .filter_map(|entity| entity.memory_id),
+        );
+        seen_ids.sort_by_key(|id| id.0);
+        seen_ids.dedup_by_key(|id| id.0);
+
+        let mut steps = seen_ids
+            .into_iter()
+            .map(|memory_id| {
+                let incoming_link = links_by_child.get(&memory_id).and_then(|entries| {
+                    entries
+                        .iter()
+                        .min_by_key(|link| (link.created_at_ms, link.src_memory_id.0))
+                });
+                CausalTraceStep {
+                    memory_id,
+                    depth: *depths.get(&memory_id).unwrap_or(&0),
+                    link_type: incoming_link.map(|link| link.link_type),
+                    source_backed: incoming_link.is_none_or(|link| link.is_source_backed()),
+                    evidence_log: incoming_link.map(|link| link.evidence_log()),
+                }
+            })
+            .collect::<Vec<_>>();
+        steps.sort_by_key(|step| (step.depth, step.memory_id.0));
+
+        let mut root_memory_ids = steps
+            .iter()
+            .filter_map(|step| {
+                (!links_by_child.contains_key(&step.memory_id)).then_some(step.memory_id)
+            })
+            .collect::<Vec<_>>();
+        root_memory_ids.sort_by_key(|id| id.0);
+        root_memory_ids.dedup_by_key(|id| id.0);
+
+        let traversal_capped = explain.cutoff_reasons.iter().any(|reason| {
+            matches!(
+                reason,
+                CutoffReason::MaxDepthReached(_)
+                    | CutoffReason::MaxNodesReached(_)
+                    | CutoffReason::BudgetExhausted
+            )
+        });
+        let all_roots_valid = !traversal_capped
+            && !root_memory_ids.is_empty()
+            && steps
+                .iter()
+                .filter(|step| root_memory_ids.contains(&step.memory_id))
+                .all(|step| step.source_backed);
+        let depth = steps.iter().map(|step| step.depth).max().unwrap_or(0);
+
+        CausalTrace {
+            target_memory_id,
+            steps,
+            root_memory_ids,
+            depth,
+            all_roots_valid,
+            explain,
+        }
+    }
+
+    const fn entity_for_memory(memory_id: MemoryId) -> EntityId {
+        EntityId(memory_id.0)
+    }
+
+    const fn memory_for_entity(entity_id: EntityId) -> Option<MemoryId> {
+        Some(MemoryId(entity_id.0))
+    }
+}
+
+fn causal_links_by_child<'a>(links: &'a [CausalLink]) -> HashMap<MemoryId, Vec<&'a CausalLink>> {
+    let mut by_child = HashMap::<MemoryId, Vec<&'a CausalLink>>::new();
+    for link in links {
+        by_child.entry(link.dst_memory_id).or_default().push(link);
+    }
+    for entries in by_child.values_mut() {
+        entries.sort_by_key(|link| (link.created_at_ms, link.src_memory_id.0));
+    }
+    by_child
+}
+
+fn causal_links_by_parent<'a>(links: &'a [CausalLink]) -> HashMap<MemoryId, Vec<&'a CausalLink>> {
+    let mut by_parent = HashMap::<MemoryId, Vec<&'a CausalLink>>::new();
+    for link in links {
+        by_parent.entry(link.src_memory_id).or_default().push(link);
+    }
+    for entries in by_parent.values_mut() {
+        entries.sort_by_key(|link| (link.created_at_ms, link.dst_memory_id.0));
+    }
+    by_parent
+}
+
+fn strongest_evidence_confidence(link: &CausalLink) -> u16 {
+    link.evidence
+        .iter()
+        .map(|entry| entry.confidence)
+        .max()
+        .unwrap_or(0)
 }
 
 impl GraphApi for GraphModule {
@@ -1030,9 +1502,275 @@ mod tests {
     #[test]
     fn relation_kind_properties() {
         assert!(RelationKind::DerivedFrom.is_directed());
+        assert!(RelationKind::Causal.is_directed());
         assert!(RelationKind::Supersedes.is_directed());
         assert!(!RelationKind::Mentions.is_directed());
         assert!(!RelationKind::SharedTopic.is_directed());
+    }
+
+    #[test]
+    fn causal_link_requires_allowed_source_backed_evidence() {
+        let link = CausalLink {
+            src_memory_id: MemoryId(1),
+            dst_memory_id: MemoryId(2),
+            link_type: CausalLinkType::Reconsolidated,
+            created_at_ms: 42,
+            agent_id: Some("agent.writer".to_string()),
+            evidence: vec![
+                CausalEvidenceAttribution {
+                    evidence_kind: CausalEvidenceKind::DurableMemory,
+                    source_ref: "memory://tests/1".to_string(),
+                    supporting_memory_ids: vec![MemoryId(1)],
+                    confidence: 900,
+                },
+                CausalEvidenceAttribution {
+                    evidence_kind: CausalEvidenceKind::ReconsolidationAudit,
+                    source_ref: "reconsolidation://tests/1@42".to_string(),
+                    supporting_memory_ids: vec![MemoryId(1), MemoryId(2)],
+                    confidence: 880,
+                },
+            ],
+        };
+
+        assert!(link.is_source_backed());
+        assert!(link
+            .evidence_log()
+            .contains("durable_memory:memory://tests/1@900"));
+        assert!(link
+            .evidence_log()
+            .contains("reconsolidation_audit:reconsolidation://tests/1@42@880"));
+    }
+
+    #[test]
+    fn causal_link_rejects_unsupported_evidence_mix() {
+        let link = CausalLink {
+            src_memory_id: MemoryId(1),
+            dst_memory_id: MemoryId(2),
+            link_type: CausalLinkType::Derived,
+            created_at_ms: 42,
+            agent_id: None,
+            evidence: vec![CausalEvidenceAttribution {
+                evidence_kind: CausalEvidenceKind::ReconsolidationAudit,
+                source_ref: "reconsolidation://tests/1@42".to_string(),
+                supporting_memory_ids: vec![MemoryId(1)],
+                confidence: 700,
+            }],
+        };
+
+        assert!(!link.is_source_backed());
+    }
+
+    #[test]
+    fn trace_causality_walks_source_backed_parents_until_roots() {
+        let graph = GraphModule;
+        let trace = graph.trace_causality(
+            MemoryId(30),
+            &[
+                CausalLink {
+                    src_memory_id: MemoryId(20),
+                    dst_memory_id: MemoryId(30),
+                    link_type: CausalLinkType::Derived,
+                    created_at_ms: 120,
+                    agent_id: Some("agent.alpha".to_string()),
+                    evidence: vec![CausalEvidenceAttribution {
+                        evidence_kind: CausalEvidenceKind::DurableMemory,
+                        source_ref: "memory://tests/20".to_string(),
+                        supporting_memory_ids: vec![MemoryId(20)],
+                        confidence: 820,
+                    }],
+                },
+                CausalLink {
+                    src_memory_id: MemoryId(10),
+                    dst_memory_id: MemoryId(20),
+                    link_type: CausalLinkType::Reconsolidated,
+                    created_at_ms: 80,
+                    agent_id: Some("agent.beta".to_string()),
+                    evidence: vec![
+                        CausalEvidenceAttribution {
+                            evidence_kind: CausalEvidenceKind::DurableMemory,
+                            source_ref: "memory://tests/10".to_string(),
+                            supporting_memory_ids: vec![MemoryId(10)],
+                            confidence: 910,
+                        },
+                        CausalEvidenceAttribution {
+                            evidence_kind: CausalEvidenceKind::ReconsolidationAudit,
+                            source_ref: "reconsolidation://tests/10@80".to_string(),
+                            supporting_memory_ids: vec![MemoryId(10), MemoryId(20)],
+                            confidence: 780,
+                        },
+                    ],
+                },
+            ],
+            4,
+            8,
+        );
+
+        assert_eq!(trace.target_memory_id, MemoryId(30));
+        assert_eq!(trace.depth, 2);
+        assert_eq!(trace.root_memory_ids, vec![MemoryId(10)]);
+        assert!(trace.all_roots_valid);
+        assert_eq!(trace.steps.len(), 3);
+        assert_eq!(trace.steps[0].memory_id, MemoryId(30));
+        assert_eq!(trace.steps[0].depth, 0);
+        assert_eq!(trace.steps[1].memory_id, MemoryId(20));
+        assert_eq!(trace.steps[1].depth, 1);
+        assert_eq!(
+            trace.steps[1].link_type,
+            Some(CausalLinkType::Reconsolidated)
+        );
+        assert_eq!(trace.steps[2].memory_id, MemoryId(10));
+        assert_eq!(trace.steps[2].depth, 2);
+        assert_eq!(trace.steps[2].link_type, None);
+        assert_eq!(trace.steps[2].evidence_log, None);
+        assert_eq!(trace.explain.edges_followed, 2);
+        assert_eq!(trace.explain.followed_edges.len(), 2);
+        assert_eq!(
+            trace.explain.followed_edges[0].relation,
+            RelationKind::Causal
+        );
+    }
+
+    #[test]
+    fn trace_causality_marks_roots_invalid_when_traversal_hits_caps() {
+        let graph = GraphModule;
+        let trace = graph.trace_causality(
+            MemoryId(40),
+            &[
+                CausalLink {
+                    src_memory_id: MemoryId(30),
+                    dst_memory_id: MemoryId(40),
+                    link_type: CausalLinkType::Derived,
+                    created_at_ms: 140,
+                    agent_id: None,
+                    evidence: vec![CausalEvidenceAttribution {
+                        evidence_kind: CausalEvidenceKind::DurableMemory,
+                        source_ref: "memory://tests/30".to_string(),
+                        supporting_memory_ids: vec![MemoryId(30)],
+                        confidence: 800,
+                    }],
+                },
+                CausalLink {
+                    src_memory_id: MemoryId(20),
+                    dst_memory_id: MemoryId(30),
+                    link_type: CausalLinkType::Derived,
+                    created_at_ms: 120,
+                    agent_id: None,
+                    evidence: vec![CausalEvidenceAttribution {
+                        evidence_kind: CausalEvidenceKind::DurableMemory,
+                        source_ref: "memory://tests/20".to_string(),
+                        supporting_memory_ids: vec![MemoryId(20)],
+                        confidence: 780,
+                    }],
+                },
+                CausalLink {
+                    src_memory_id: MemoryId(10),
+                    dst_memory_id: MemoryId(20),
+                    link_type: CausalLinkType::Derived,
+                    created_at_ms: 100,
+                    agent_id: None,
+                    evidence: vec![CausalEvidenceAttribution {
+                        evidence_kind: CausalEvidenceKind::DurableMemory,
+                        source_ref: "memory://tests/10".to_string(),
+                        supporting_memory_ids: vec![MemoryId(10)],
+                        confidence: 760,
+                    }],
+                },
+            ],
+            1,
+            8,
+        );
+
+        assert_eq!(trace.depth, 1);
+        assert!(!trace.all_roots_valid);
+        assert!(trace.root_memory_ids.is_empty());
+        assert!(trace
+            .explain
+            .cutoff_reasons
+            .contains(&CutoffReason::MaxDepthReached(1)));
+    }
+
+    #[test]
+    fn invalidate_causal_chain_reports_bounded_penalties_by_depth() {
+        let graph = GraphModule;
+        let report = graph.invalidate_causal_chain(
+            MemoryId(10),
+            &[
+                CausalLink {
+                    src_memory_id: MemoryId(10),
+                    dst_memory_id: MemoryId(20),
+                    link_type: CausalLinkType::Derived,
+                    created_at_ms: 80,
+                    agent_id: Some("agent.alpha".to_string()),
+                    evidence: vec![CausalEvidenceAttribution {
+                        evidence_kind: CausalEvidenceKind::DurableMemory,
+                        source_ref: "memory://tests/10".to_string(),
+                        supporting_memory_ids: vec![MemoryId(10)],
+                        confidence: 910,
+                    }],
+                },
+                CausalLink {
+                    src_memory_id: MemoryId(20),
+                    dst_memory_id: MemoryId(30),
+                    link_type: CausalLinkType::Reconsolidated,
+                    created_at_ms: 120,
+                    agent_id: Some("agent.beta".to_string()),
+                    evidence: vec![
+                        CausalEvidenceAttribution {
+                            evidence_kind: CausalEvidenceKind::DurableMemory,
+                            source_ref: "memory://tests/20".to_string(),
+                            supporting_memory_ids: vec![MemoryId(20)],
+                            confidence: 820,
+                        },
+                        CausalEvidenceAttribution {
+                            evidence_kind: CausalEvidenceKind::ReconsolidationAudit,
+                            source_ref: "reconsolidation://tests/20@120".to_string(),
+                            supporting_memory_ids: vec![MemoryId(20), MemoryId(30)],
+                            confidence: 760,
+                        },
+                    ],
+                },
+                CausalLink {
+                    src_memory_id: MemoryId(30),
+                    dst_memory_id: MemoryId(40),
+                    link_type: CausalLinkType::Extracted,
+                    created_at_ms: 160,
+                    agent_id: Some("agent.gamma".to_string()),
+                    evidence: vec![
+                        CausalEvidenceAttribution {
+                            evidence_kind: CausalEvidenceKind::DurableMemory,
+                            source_ref: "memory://tests/30".to_string(),
+                            supporting_memory_ids: vec![MemoryId(30)],
+                            confidence: 790,
+                        },
+                        CausalEvidenceAttribution {
+                            evidence_kind: CausalEvidenceKind::ConsolidationArtifact,
+                            source_ref: "consolidation://tests/30#skill".to_string(),
+                            supporting_memory_ids: vec![MemoryId(30), MemoryId(40)],
+                            confidence: 740,
+                        },
+                    ],
+                },
+            ],
+            4,
+            8,
+        );
+
+        assert_eq!(report.root_memory_id, MemoryId(10));
+        assert_eq!(report.chain_length, 3);
+        assert_eq!(report.memories_penalized, 3);
+        assert!((report.avg_confidence_delta - (0.20 + 0.10 + 0.05) / 3.0).abs() < 1e-6);
+        assert_eq!(report.steps[0].memory_id, MemoryId(20));
+        assert_eq!(report.steps[0].depth, 1);
+        assert!((report.steps[0].confidence_delta - 0.20).abs() < 1e-6);
+        assert_eq!(report.steps[1].memory_id, MemoryId(30));
+        assert_eq!(report.steps[1].link_type, CausalLinkType::Reconsolidated);
+        assert!((report.steps[1].confidence_delta - 0.10).abs() < 1e-6);
+        assert_eq!(report.steps[2].memory_id, MemoryId(40));
+        assert_eq!(report.steps[2].link_type, CausalLinkType::Extracted);
+        assert!((report.steps[2].confidence_delta - 0.05).abs() < 1e-6);
+        assert_eq!(cascade_penalty(1), 0.20);
+        assert_eq!(cascade_penalty(2), 0.10);
+        assert_eq!(cascade_penalty(5), 0.05);
     }
 
     #[test]

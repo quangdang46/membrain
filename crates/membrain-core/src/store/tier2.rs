@@ -1,5 +1,6 @@
 use crate::api::{AgentId, NamespaceId, WorkspaceId};
 use crate::engine::confidence::{ConfidenceInputs, ConfidenceOutput};
+use crate::engine::lease::{FreshnessState, LeaseMetadata, LeasePolicy};
 use crate::observability::{Tier2PrefilterOutcome, Tier2PrefilterTrace};
 use crate::policy::SharingVisibility;
 use crate::store::Tier2StoreApi;
@@ -44,6 +45,12 @@ impl Tier2Store {
                 agent_id: envelope.sharing.agent_id.clone(),
                 observation_source: envelope.observation_source.clone(),
                 observation_chunk_id: envelope.observation_chunk_id.clone(),
+                lease: LeaseMetadata::recommended(
+                    envelope.memory_type,
+                    envelope.observation_source.is_some(),
+                ),
+                has_causal_parents: envelope.has_causal_parents,
+                has_causal_children: envelope.has_causal_children,
                 confidence_inputs,
                 confidence_output,
                 payload_locator: payload_locator.clone(),
@@ -91,6 +98,9 @@ impl Tier2DurableItemLayout {
             agent_id: self.metadata.agent_id.as_ref(),
             observation_source: self.metadata.observation_source.as_deref(),
             observation_chunk_id: self.metadata.observation_chunk_id.as_deref(),
+            lease: self.metadata.lease,
+            has_causal_parents: self.metadata.has_causal_parents,
+            has_causal_children: self.metadata.has_causal_children,
             confidence_inputs: self.metadata.confidence_inputs.as_ref(),
             confidence_output: self.metadata.confidence_output.as_ref(),
             payload_locator: self.metadata.payload_locator.clone(),
@@ -112,6 +122,9 @@ impl Tier2DurableItemLayout {
             visibility: self.metadata.visibility,
             workspace_id: self.metadata.workspace_id.as_ref(),
             agent_id: self.metadata.agent_id.as_ref(),
+            lease: self.metadata.lease,
+            has_causal_parents: self.metadata.has_causal_parents,
+            has_causal_children: self.metadata.has_causal_children,
             confidence_inputs: self.metadata.confidence_inputs.as_ref(),
             confidence_output: self.metadata.confidence_output.as_ref(),
             payload_locator: self.metadata.payload_locator.clone(),
@@ -209,6 +222,9 @@ pub struct Tier2MetadataRecord {
     pub agent_id: Option<AgentId>,
     pub observation_source: Option<String>,
     pub observation_chunk_id: Option<String>,
+    pub lease: LeaseMetadata,
+    pub has_causal_parents: bool,
+    pub has_causal_children: bool,
     pub confidence_inputs: Option<ConfidenceInputs>,
     pub confidence_output: Option<ConfidenceOutput>,
     pub payload_locator: Tier2PayloadLocator,
@@ -296,6 +312,9 @@ pub struct Tier2PrefilterView<'a> {
     pub agent_id: Option<&'a AgentId>,
     pub observation_source: Option<&'a str>,
     pub observation_chunk_id: Option<&'a str>,
+    pub lease: LeaseMetadata,
+    pub has_causal_parents: bool,
+    pub has_causal_children: bool,
     pub confidence_inputs: Option<&'a ConfidenceInputs>,
     pub confidence_output: Option<&'a ConfidenceOutput>,
     pub payload_locator: Tier2PayloadLocator,
@@ -305,6 +324,16 @@ impl Tier2PrefilterView<'_> {
     /// Returns the machine-readable sharing visibility preserved in metadata.
     pub const fn visibility(&self) -> SharingVisibility {
         self.visibility
+    }
+
+    /// Returns the machine-readable lease policy preserved in metadata.
+    pub const fn lease_policy(&self) -> LeasePolicy {
+        self.lease.lease_policy
+    }
+
+    /// Returns the current freshness state preserved in metadata.
+    pub const fn freshness_state(&self) -> FreshnessState {
+        self.lease.freshness_state
     }
 
     /// Returns the workspace scope preserved in metadata when one exists.
@@ -358,6 +387,9 @@ pub struct Tier2MetadataIndexKey<'a> {
     pub visibility: SharingVisibility,
     pub workspace_id: Option<&'a WorkspaceId>,
     pub agent_id: Option<&'a AgentId>,
+    pub lease: LeaseMetadata,
+    pub has_causal_parents: bool,
+    pub has_causal_children: bool,
     pub confidence_inputs: Option<&'a ConfidenceInputs>,
     pub confidence_output: Option<&'a ConfidenceOutput>,
     pub payload_locator: Tier2PayloadLocator,
@@ -367,6 +399,16 @@ impl Tier2MetadataIndexKey<'_> {
     /// Returns the machine-readable sharing visibility preserved on the metadata-only index key.
     pub const fn visibility(&self) -> SharingVisibility {
         self.visibility
+    }
+
+    /// Returns the machine-readable lease policy preserved on the metadata-only index key.
+    pub const fn lease_policy(&self) -> LeasePolicy {
+        self.lease.lease_policy
+    }
+
+    /// Returns the current freshness state preserved on the metadata-only index key.
+    pub const fn freshness_state(&self) -> FreshnessState {
+        self.lease.freshness_state
     }
 
     /// Returns the workspace scope preserved on the metadata-only index key when one exists.

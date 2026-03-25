@@ -72,8 +72,39 @@ fn cli_recall_json_preserves_route_and_result_fields() {
         .as_bool()
         .is_some());
     assert!(json["result"]["evidence_pack"].is_array());
+    assert_eq!(json["result"]["output_mode"], "balanced");
     assert!(json["result"]["action_pack"].is_null());
     assert_eq!(json["result"]["packaging_metadata"]["result_budget"], 3);
+    assert_eq!(
+        json["result"]["packaging_metadata"]["packaging_mode"],
+        "evidence_only"
+    );
+}
+
+#[test]
+fn cli_recall_high_mode_can_suppress_action_pack_when_policy_caveat_exists() {
+    let (ok, stdout, stderr) = run_membrain(&[
+        "recall",
+        "capital of France",
+        "--namespace",
+        "test_ns",
+        "--top",
+        "3",
+        "--confidence",
+        "high",
+        "--include-public",
+        "--json",
+    ]);
+
+    assert!(ok, "stderr: {stderr}");
+    let json = parse_json(&stdout);
+    assert_eq!(json["result"]["output_mode"], "strict");
+    assert!(json["result"]["evidence_pack"].is_array());
+    assert!(json["result"]["action_pack"].is_null());
+    assert_eq!(
+        json["result"]["packaging_metadata"]["packaging_mode"],
+        "evidence_only"
+    );
 }
 
 #[test]
@@ -321,6 +352,18 @@ fn cli_doctor_json_reports_health_and_repair_state() {
     assert_eq!(json["status"], "ok");
     assert_eq!(json["action"], "doctor");
     assert!(json["metrics"].is_object());
+    assert_eq!(json["summary"]["ok_checks"], 4);
+    assert_eq!(json["summary"]["warn_checks"], 1);
+    assert_eq!(json["summary"]["fail_checks"], 0);
+    assert_eq!(json["repair_engine_component"], "engine.repair");
+    assert!(json["checks"].is_array());
+    assert_eq!(json["checks"][4]["name"], "lease_freshness");
+    assert_eq!(json["checks"][4]["status"], "ok");
+    assert!(json["runbook_hints"].is_array());
+    assert_eq!(
+        json["runbook_hints"][0]["runbook_id"],
+        "index_rebuild_operations"
+    );
     assert!(json["indexes"].is_array());
     assert!(json["repair_reports"].is_array());
     assert_eq!(
@@ -335,6 +378,9 @@ fn cli_doctor_json_reports_health_and_repair_state() {
     assert_eq!(json["repair_reports"][0]["derived_rows"], 128);
     assert_eq!(json["repair_reports"][0]["queue_depth_before"], 4);
     assert_eq!(json["repair_reports"][3]["target"], "semantic_cold_index");
+    assert_eq!(json["warnings"], json!([]));
+    assert_eq!(json["error_kind"], json!(null));
+    assert_eq!(json["availability"], json!(null));
     assert!(json["health"].is_object());
 }
 
@@ -416,7 +462,9 @@ fn cli_preflight_human_output_preserves_blocked_and_force_confirmed_logs() {
     ]);
     assert!(!explain_ok, "blocked explain should exit non-zero");
     assert!(explain_stderr.is_empty(), "stderr: {explain_stderr}");
-    assert!(explain_stdout.contains("Preflight explain [blocked] state=blocked outcome=preview_only"));
+    assert!(
+        explain_stdout.contains("Preflight explain [blocked] state=blocked outcome=preview_only")
+    );
     assert!(explain_stdout.contains("blocked_reasons: scope_ambiguous, confirmation_required"));
 
     let (allow_ok, allow_stdout, allow_stderr) = run_membrain(&[
@@ -458,7 +506,10 @@ fn cli_share_json_reports_visibility_policy_and_audit_fields() {
     assert_eq!(json["result"]["audit"]["effective_namespace"], "team.beta");
     assert_eq!(json["result"]["audit"]["source_namespace"], "team.beta");
     assert_eq!(json["result"]["audit"]["target_namespace"], "team.beta");
-    assert_eq!(json["result"]["audit"]["policy_family"], "visibility_sharing");
+    assert_eq!(
+        json["result"]["audit"]["policy_family"],
+        "visibility_sharing"
+    );
     assert_eq!(json["result"]["audit"]["outcome_class"], "accepted");
     assert_eq!(json["result"]["audit"]["blocked_stage"], "policy_gate");
     assert_eq!(json["result"]["audit"]["related_run"], "share-run-42");
@@ -531,7 +582,10 @@ fn cli_unshare_json_reports_redaction_and_audit_fields() {
     assert_eq!(json["result"]["audit"]["effective_namespace"], "team.alpha");
     assert_eq!(json["result"]["audit"]["source_namespace"], "team.alpha");
     assert_eq!(json["result"]["audit"]["target_namespace"], "team.alpha");
-    assert_eq!(json["result"]["audit"]["policy_family"], "visibility_sharing");
+    assert_eq!(
+        json["result"]["audit"]["policy_family"],
+        "visibility_sharing"
+    );
     assert_eq!(json["result"]["audit"]["outcome_class"], "accepted");
     assert_eq!(json["result"]["audit"]["blocked_stage"], "policy_gate");
     assert_eq!(json["result"]["audit"]["related_run"], "share-run-42");
@@ -557,12 +611,21 @@ fn cli_share_and_unshare_json_audit_surfaces_keep_required_correlation_fields() 
     assert_eq!(share["result"]["audit"]["related_run"], "share-run-42");
     assert_eq!(share["result"]["audit"]["redaction_summary"], json!([]));
 
-    let (unshare_ok, unshare_stdout, unshare_stderr) =
-        run_membrain(&["unshare", "--id", "42", "--namespace", "team.alpha", "--json"]);
+    let (unshare_ok, unshare_stdout, unshare_stderr) = run_membrain(&[
+        "unshare",
+        "--id",
+        "42",
+        "--namespace",
+        "team.alpha",
+        "--json",
+    ]);
     assert!(unshare_ok, "stderr: {unshare_stderr}");
     let unshare = parse_json(&unshare_stdout);
     assert_eq!(unshare["result"]["audit"]["request_id"], "req-unshare-42");
-    assert_eq!(unshare["result"]["audit"]["effective_namespace"], "team.alpha");
+    assert_eq!(
+        unshare["result"]["audit"]["effective_namespace"],
+        "team.alpha"
+    );
     assert_eq!(unshare["result"]["audit"]["source_namespace"], "team.alpha");
     assert_eq!(unshare["result"]["audit"]["target_namespace"], "team.alpha");
     assert_eq!(unshare["result"]["audit"]["related_run"], "share-run-42");

@@ -1,14 +1,17 @@
 use clap::{ArgAction, Parser, Subcommand};
 use membrain_core::api::{
     AvailabilityReason, AvailabilitySummary, CacheMetricsSummary, ConflictMarker, FieldPresence,
-    FreshnessMarker, NamespaceId, PassiveObservationInspectSummary, RemediationStep, RequestId,
-    ResponseContext, ResponseWarning, TraceOmissionSummary, TracePolicySummary,
+    FreshnessMarker, NamespaceId, PassiveObservationInspectSummary, PolicyContext, RemediationStep,
+    RequestId, ResponseContext, ResponseWarning, TraceOmissionSummary, TracePolicySummary,
     TraceProvenanceSummary, TraceScoreComponent, TraceStage, UncertaintyMarker,
 };
+use membrain_core::embed::EmbeddingPurpose;
 use membrain_core::engine::confidence::{ConfidenceInputs, ConfidencePolicy};
 use membrain_core::engine::context_budget::{
     ContextBudgetRequest, ContextBudgetResponse, InjectionFormat,
 };
+use membrain_core::engine::dream::{DreamEngine, DreamPolicy, DreamSkipReason, DreamTrigger};
+use membrain_core::engine::lease::{LeaseMetadata, LeasePolicy, LeaseScanItem, LeaseScanner};
 use membrain_core::engine::maintenance::{
     MaintenanceController, MaintenanceJobHandle, MaintenanceJobState,
 };
@@ -19,14 +22,19 @@ use membrain_core::engine::ranking::{
 use membrain_core::engine::recall::RecallRuntime;
 use membrain_core::engine::repair::{IndexRepairEntrypoint, RepairTarget};
 use membrain_core::engine::result::{
-    AnsweredFrom, ResultBuilder, RetrievalExplain, RetrievalResultSet,
+    AnsweredFrom, EntryLane, EvidenceRole, ResultBuilder, RetrievalExplain, RetrievalResultSet,
 };
 use membrain_core::engine::retrieval_planner::{
     RetrievalPlanTrace, RetrievalRequest, RetrievalRequestValidationError,
 };
+use membrain_core::graph::{
+    CausalEvidenceAttribution, CausalEvidenceKind, CausalLink, CausalLinkType, EntityId,
+    RelationKind,
+};
 use membrain_core::health::{BrainHealthInputs, BrainHealthReport, FeatureAvailabilityEntry};
 use membrain_core::index::{IndexApi, IndexModule};
 use membrain_core::observability::{AuditEventCategory, AuditEventKind};
+use membrain_core::policy::SharingVisibility;
 use membrain_core::store::audit::{
     AppendOnlyAuditLog, AuditLogEntry, AuditLogFilter, AuditLogSlice, AuditLogStore,
 };
@@ -45,6 +53,7 @@ use membrain_daemon::preflight::{
 };
 use membrain_daemon::rpc::{RuntimeMetrics, RuntimePosture, RuntimeStatus};
 use serde::Serialize;
+use std::collections::HashSet;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Instant;
@@ -74,6 +83,8 @@ struct LocalMemoryRecord {
     landmark_label: Option<String>,
     era_id: Option<String>,
     passive_observation: Option<PassiveObservationInspectSummary>,
+    causal_parents: Vec<MemoryId>,
+    causal_link_type: Option<CausalLinkType>,
 }
 
 impl LocalMemoryRecord {
@@ -262,8 +273,11 @@ enum Commands {
     /// Explain the ranking and routing path for a recall query
     #[command(name = "why", visible_alias = "explain")]
     Explain {
-        /// Query string to explain
+        /// Query string or memory ID to explain
         query: String,
+        /// Maximum causal traversal depth when the target resolves to a memory ID
+        #[arg(long)]
+        depth: Option<usize>,
         /// Namespace to explain over
         #[arg(long, short = 'n', default_value = "default")]
         namespace: String,
@@ -289,6 +303,37 @@ enum Commands {
         /// Number of iterations
         #[arg(long, default_value_t = 100)]
         iters: usize,
+        #[command(flatten)]
+        output: SharedOutputFlags,
+    },
+    /// Run or inspect the bounded offline Dream Mode scheduler.
+    Dream {
+        /// Namespace whose dream scheduler state should be inspected.
+        #[arg(long, short = 'n', default_value = "default")]
+        namespace: String,
+        /// Show the current scheduler status instead of running a bounded cycle.
+        #[arg(long, default_value_t = false)]
+        status: bool,
+        /// Disable future background dream scheduling for this surfaced policy view.
+        #[arg(long, default_value_t = false)]
+        disable: bool,
+        /// Idle ticks observed before this run or status snapshot.
+        #[arg(long = "idle-ticks", default_value_t = 0)]
+        idle_ticks: u64,
+        /// Last known dream tick carried into the surfaced scheduler state.
+        #[arg(long = "last-run-tick")]
+        last_run_tick: Option<u64>,
+        /// Cumulative accepted dream links already visible before this run.
+        #[arg(long = "links-created-total", default_value_t = 0)]
+        links_created_total: u64,
+        #[command(flatten)]
+        output: SharedOutputFlags,
+    },
+    /// Show the bounded brain health dashboard.
+    Health {
+        /// Render a one-line health summary instead of the full dashboard.
+        #[arg(long, default_value_t = false)]
+        brief: bool,
         #[command(flatten)]
         output: SharedOutputFlags,
     },
@@ -409,6 +454,53 @@ enum Commands {
         #[command(flatten)]
         output: SharedOutputFlags,
     },
+    /// List or extract derived skill artifacts.
+    Skills {
+        /// Namespace to inspect.
+        #[arg(long, short = 'n', default_value = "default")]
+        namespace: String,
+        /// Trigger a bounded extraction pass before listing results.
+        #[arg(long, default_value_t = false)]
+        extract: bool,
+        #[command(flatten)]
+        output: SharedOutputFlags,
+    },
+    /// Promote reviewed skills into the authoritative procedural store.
+    Procedures {
+        /// Namespace to inspect or mutate.
+        #[arg(long, short = 'n', default_value = "default")]
+        namespace: String,
+        /// Promote the reviewed candidate matching this stable pattern handle.
+        #[arg(long)]
+        promote: Option<String>,
+        /// Roll back an existing accepted procedural entry by pattern handle.
+        #[arg(long)]
+        rollback: Option<String>,
+        /// Review note preserved on promotion or rollback.
+        #[arg(long)]
+        note: Option<String>,
+        /// Operator identity recorded on accepted procedural entries.
+        #[arg(long, default_value = "cli.operator")]
+        approved_by: String,
+        /// Request public visibility instead of shared visibility.
+        #[arg(long, default_value_t = false)]
+        public: bool,
+        #[command(flatten)]
+        output: SharedOutputFlags,
+    },
+    /// Cascade one bounded causal invalidation report from a root memory.
+    Invalidate {
+        /// The root memory ID to invalidate.
+        id: u64,
+        /// Namespace to inspect.
+        #[arg(long, short = 'n', default_value = "default")]
+        namespace: String,
+        /// Preview the penalty cascade without applying it.
+        #[arg(long = "dry-run", default_value_t = false)]
+        dry_run: bool,
+        #[command(flatten)]
+        output: SharedOutputFlags,
+    },
     /// Run the local daemon inside the CLI process
     Daemon {
         /// Unix socket path to bind
@@ -491,6 +583,28 @@ struct ObserveOutput {
     preview: Vec<ObservePreviewFragment>,
 }
 
+#[derive(Debug, Clone, Serialize)]
+struct SkillsOutput {
+    outcome: &'static str,
+    namespace: String,
+    extraction_trigger: &'static str,
+    extracted_count: usize,
+    skipped_count: usize,
+    reflection_compiler_active: bool,
+    procedures: Vec<membrain_core::api::SkillArtifactSummary>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+struct ProceduresOutput {
+    outcome: &'static str,
+    namespace: String,
+    extraction_trigger: &'static str,
+    reviewed_candidate_count: usize,
+    procedural_count: usize,
+    direct_lookup_supported: bool,
+    procedures: Vec<membrain_core::api::ProceduralEntrySummary>,
+}
+
 // ── Shared helper types ──────────────────────────────────────────────────────
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
@@ -546,6 +660,27 @@ struct BenchmarkOutput {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+struct DreamOutput {
+    outcome: &'static str,
+    namespace: String,
+    enabled: bool,
+    trigger: &'static str,
+    execution_window: &'static str,
+    idle_ticks_observed: u64,
+    idle_threshold_ticks: u64,
+    polls_consumed: u32,
+    bounded_window_poll_budget: u32,
+    batch_size: u32,
+    max_links_per_run: u32,
+    links_created: u32,
+    links_created_total: u64,
+    candidate_batches_scanned: u32,
+    last_run_tick: Option<u64>,
+    paused_reason: Option<&'static str>,
+    operator_log: Vec<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 struct AuditRow {
     sequence: u64,
     category: &'static str,
@@ -555,6 +690,12 @@ struct AuditRow {
     session_id: Option<u64>,
     triggered_by: &'static str,
     request_id: Option<String>,
+    tick: Option<u64>,
+    before_strength: Option<u16>,
+    after_strength: Option<u16>,
+    before_confidence: Option<u16>,
+    after_confidence: Option<u16>,
+    related_snapshot: Option<String>,
     related_run: Option<String>,
     redacted: bool,
     note: String,
@@ -596,6 +737,28 @@ struct ShareOutput {
     audit_rows: Vec<AuditRow>,
 }
 
+#[derive(Debug, Clone, PartialEq, Serialize)]
+struct InvalidateStepOutput {
+    memory_id: u64,
+    depth: usize,
+    confidence_delta: f32,
+    link_type: &'static str,
+    source_backed: bool,
+    evidence_log: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize)]
+struct InvalidateOutput {
+    outcome: &'static str,
+    root_memory_id: u64,
+    namespace: String,
+    dry_run: bool,
+    chain_length: usize,
+    memories_penalized: usize,
+    avg_confidence_delta: f32,
+    steps: Vec<InvalidateStepOutput>,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 struct DoctorIndexRow {
     family: &'static str,
@@ -627,6 +790,49 @@ struct RepairReportRow {
     queue_depth_after: u32,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+struct DoctorAvailability {
+    posture: &'static str,
+    query_capabilities: Vec<&'static str>,
+    mutation_capabilities: Vec<&'static str>,
+    degraded_reasons: Vec<&'static str>,
+    recovery_conditions: Vec<&'static str>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+struct DoctorRemediation {
+    summary: String,
+    next_steps: Vec<&'static str>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+struct DoctorCheck {
+    name: &'static str,
+    surface_kind: &'static str,
+    status: &'static str,
+    severity: &'static str,
+    affected_scope: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    degraded_impact: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    remediation: Option<DoctorRemediation>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+struct DoctorSummary {
+    ok_checks: usize,
+    warn_checks: usize,
+    fail_checks: usize,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+struct DoctorRunbookHint {
+    runbook_id: &'static str,
+    source_doc: &'static str,
+    section: &'static str,
+    reason: String,
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize)]
 struct DoctorReport {
     status: &'static str,
@@ -634,10 +840,20 @@ struct DoctorReport {
     posture: &'static str,
     degraded_reasons: Vec<String>,
     metrics: RuntimeMetrics,
+    summary: DoctorSummary,
     indexes: Vec<DoctorIndexRow>,
     repair_engine_component: &'static str,
     repair_reports: Vec<RepairReportRow>,
+    checks: Vec<DoctorCheck>,
+    runbook_hints: Vec<DoctorRunbookHint>,
     warnings: Vec<&'static str>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    error_kind: Option<&'static str>,
+    retryable: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    remediation: Option<DoctorRemediation>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    availability: Option<DoctorAvailability>,
     health: BrainHealthReport,
 }
 
@@ -652,6 +868,12 @@ impl From<AuditLogEntry> for AuditRow {
             session_id: entry.session_id.map(|id| id.0),
             triggered_by: entry.actor_source,
             request_id: entry.request_id,
+            tick: entry.tick,
+            before_strength: entry.before_strength,
+            after_strength: entry.after_strength,
+            before_confidence: entry.before_confidence,
+            after_confidence: entry.after_confidence,
+            related_snapshot: entry.related_snapshot,
             related_run: entry.related_run,
             redacted: entry.redacted,
             note: entry.detail,
@@ -675,6 +897,10 @@ fn intent_confidence_label(low_confidence_fallback: bool) -> &'static str {
     } else {
         "high"
     }
+}
+
+fn dream_skip_reason_label(reason: Option<DreamSkipReason>) -> Option<&'static str> {
+    reason.map(DreamSkipReason::as_str)
 }
 
 fn describe_retrieval_validation_error(error: RetrievalRequestValidationError) -> &'static str {
@@ -1002,16 +1228,470 @@ fn parse_injection_format(raw: &str) -> anyhow::Result<InjectionFormat> {
 }
 
 fn build_confidence_inputs(record: &LocalMemoryRecord) -> ConfidenceInputs {
+    let causal_parent_count = record.causal_parents.len().clamp(0, 4) as u32;
+    let reconsolidation_count = match record.causal_link_type {
+        Some(CausalLinkType::Reconsolidated) => 1,
+        _ => (record.payload_size_bytes / 512).min(16) as u32,
+    };
     ConfidenceInputs {
         corroboration_count: u32::from((record.provisional_salience / 250).min(4)),
-        reconsolidation_count: u32::from((record.payload_size_bytes / 512).min(16) as u16),
+        reconsolidation_count,
         ticks_since_last_access: u64::from(record.memory_id.0.saturating_mul(17)),
         age_ticks: u64::from(record.memory_id.0.saturating_mul(23)),
         resolution_state: membrain_core::engine::contradiction::ResolutionState::None,
         conflict_score: 0,
-        causal_parent_count: u32::from((record.payload_size_bytes / 256).clamp(1, 4) as u16),
+        causal_parent_count,
         authoritativeness: record.provisional_salience.saturating_add(100).min(1000),
-        recall_count: u32::from((record.memory_id.0 % 6) as u16),
+        recall_count: (record.memory_id.0 % 6) as u32,
+    }
+}
+
+fn action_uncertainty_markers(
+    confidence_output: &membrain_core::engine::confidence::ConfidenceOutput,
+) -> Vec<String> {
+    let mut markers = Vec::new();
+    if confidence_output.confidence < 500 {
+        markers.push("low_confidence".to_string());
+    }
+    if confidence_output.reconsolidation_uncertainty >= 500 {
+        markers.push("reconsolidation_churn".to_string());
+    }
+    if confidence_output.missing_evidence_uncertainty >= 500 {
+        markers.push("missing_evidence".to_string());
+    }
+    if markers.is_empty() {
+        markers.push("low_uncertainty".to_string());
+    }
+    markers
+}
+
+fn confidence_explain_for_result(
+    result: &membrain_core::engine::result::RetrievalResult,
+    config: ConfidenceDisplayConfig,
+) -> ConfidenceExplain {
+    ConfidenceExplain::new(
+        config,
+        result.uncertainty_markers.confidence,
+        result.uncertainty_markers.confidence_interval,
+        [
+            (
+                result
+                    .uncertainty_markers
+                    .freshness_uncertainty
+                    .unwrap_or(0),
+                None,
+            ),
+            (
+                result
+                    .uncertainty_markers
+                    .contradiction_uncertainty
+                    .unwrap_or(0),
+                None,
+            ),
+            (
+                result
+                    .uncertainty_markers
+                    .missing_evidence_uncertainty
+                    .unwrap_or(0),
+                None,
+            ),
+            (
+                result
+                    .uncertainty_markers
+                    .corroboration_uncertainty
+                    .unwrap_or(0),
+                None,
+            ),
+            (
+                result
+                    .uncertainty_markers
+                    .reconsolidation_uncertainty
+                    .unwrap_or(0),
+                None,
+            ),
+        ],
+    )
+}
+
+fn causal_links_for_records(
+    local_records: &[LocalMemoryRecord],
+    namespace: &NamespaceId,
+) -> Vec<CausalLink> {
+    let mut links = local_records
+        .iter()
+        .filter(|record| record.namespace == *namespace)
+        .flat_map(|record| {
+            record
+                .causal_parents
+                .iter()
+                .copied()
+                .map(move |parent_id| CausalLink {
+                    src_memory_id: parent_id,
+                    dst_memory_id: record.memory_id,
+                    link_type: record.causal_link_type.unwrap_or(CausalLinkType::Derived),
+                    created_at_ms: record.memory_id.0,
+                    agent_id: Some("cli_local".to_string()),
+                    evidence: vec![CausalEvidenceAttribution {
+                        evidence_kind: CausalEvidenceKind::DurableMemory,
+                        source_ref: format!(
+                            "memory://{}/{}",
+                            record.namespace.as_str(),
+                            parent_id.0
+                        ),
+                        supporting_memory_ids: vec![parent_id],
+                        confidence: record.provisional_salience.max(600),
+                    }],
+                })
+        })
+        .collect::<Vec<_>>();
+    links.sort_by_key(|link| {
+        (
+            link.dst_memory_id.0,
+            link.src_memory_id.0,
+            link.created_at_ms,
+        )
+    });
+    links
+}
+
+fn apply_causal_trace(
+    result_set: &mut RetrievalResultSet,
+    trace: &membrain_core::graph::CausalTrace,
+    target_memory_id: MemoryId,
+    requested_depth: Option<usize>,
+) {
+    result_set.explain.recall_plan =
+        membrain_core::engine::recall::RecallPlanKind::Tier2ExactThenGraphExpansion;
+    result_set.explain.route_reason =
+        "bounded causal trace walked explicit source-backed links from the target memory"
+            .to_string();
+    result_set.explain.trace_stages = vec![
+        membrain_core::engine::recall::RecallTraceStage::Tier2Exact,
+        membrain_core::engine::recall::RecallTraceStage::GraphExpansion,
+    ];
+    result_set.explain.tiers_consulted =
+        vec!["tier2_exact".to_string(), "graph_expansion".to_string()];
+    result_set.provenance_summary.graph_seed = Some(EntityId(target_memory_id.0));
+    result_set.provenance_summary.relation_to_seed = Some(RelationKind::Causal);
+    result_set.provenance_summary.lineage_ancestors = trace.root_memory_ids.clone();
+
+    let mut graph_memory_ids = trace
+        .steps
+        .iter()
+        .filter_map(|step| (step.depth > 0).then_some(step.memory_id))
+        .collect::<Vec<_>>();
+    graph_memory_ids.sort_by_key(|id| id.0);
+    graph_memory_ids.dedup_by_key(|id| id.0);
+
+    for item in &mut result_set.evidence_pack {
+        if item.result.memory_id == target_memory_id {
+            item.provenance_summary.graph_seed = Some(EntityId(target_memory_id.0));
+            item.provenance_summary.lineage_ancestors = trace.root_memory_ids.clone();
+            item.provenance_summary.relation_to_seed = Some(RelationKind::Causal);
+            item.result.entry_lane = EntryLane::Exact;
+            item.result.role = EvidenceRole::Primary;
+        } else if graph_memory_ids.contains(&item.result.memory_id) {
+            item.provenance_summary.graph_seed = Some(EntityId(target_memory_id.0));
+            item.provenance_summary.lineage_ancestors = trace.root_memory_ids.clone();
+            item.provenance_summary.relation_to_seed = Some(RelationKind::Causal);
+            item.result.entry_lane = EntryLane::Graph;
+            item.result.role = EvidenceRole::Supporting;
+        }
+    }
+
+    for step in &trace.steps {
+        let detail = if step.depth == 0 {
+            format!(
+                "memory #{} is the causal trace seed; traversal starts here before following bounded parent links",
+                step.memory_id.0
+            )
+        } else {
+            let mut detail = format!(
+                "memory #{} entered the bounded causal chain at depth {}",
+                step.memory_id.0, step.depth
+            );
+            if let Some(link_type) = step.link_type {
+                detail.push_str(&format!(" via {} link", link_type.as_str()));
+            }
+            if let Some(log) = &step.evidence_log {
+                detail.push_str(&format!(" with evidence {}", log));
+            }
+            if !step.source_backed {
+                detail.push_str(" (root evidence remains unverified)");
+            }
+            detail
+        };
+        result_set
+            .explain
+            .result_reasons
+            .push(membrain_core::engine::result::ResultReason {
+                memory_id: Some(step.memory_id),
+                reason_code: "query_by_example_seed_materialized".to_string(),
+                detail,
+            });
+    }
+    if trace.all_roots_valid {
+        result_set
+            .explain
+            .result_reasons
+            .push(membrain_core::engine::result::ResultReason {
+                memory_id: None,
+                reason_code: "causal_chain_root_validated".to_string(),
+                detail: format!(
+                    "causal trace resolved to source-backed root evidence {:?}",
+                    trace.root_memory_ids
+                ),
+            });
+    }
+
+    for cutoff in &trace.explain.cutoff_reasons {
+        let (reason_code, detail) = match cutoff {
+            membrain_core::graph::CutoffReason::MaxDepthReached(depth) => (
+                "graph_cutoff_max_depth",
+                if let Some(requested_depth) = requested_depth {
+                    format!(
+                        "causal traversal stopped at requested depth cap {requested_depth} (effective depth {depth})"
+                    )
+                } else {
+                    format!("causal traversal stopped at declared depth cap {depth}")
+                },
+            ),
+            membrain_core::graph::CutoffReason::MaxNodesReached(nodes) => (
+                "graph_cutoff_budget",
+                format!("causal traversal stopped after reaching declared node cap {nodes}"),
+            ),
+            membrain_core::graph::CutoffReason::BudgetExhausted => (
+                "graph_cutoff_budget",
+                "causal traversal exhausted its bounded traversal budget".to_string(),
+            ),
+            membrain_core::graph::CutoffReason::PolicyNamespaceBlocked => (
+                "graph_cutoff_policy_namespace",
+                "causal traversal omitted one or more parents because policy blocked them"
+                    .to_string(),
+            ),
+        };
+        result_set
+            .explain
+            .result_reasons
+            .push(membrain_core::engine::result::ResultReason {
+                memory_id: None,
+                reason_code: reason_code.to_string(),
+                detail,
+            });
+    }
+
+    for omitted in &trace.explain.omitted_neighbors {
+        result_set
+            .deferred_payloads
+            .push(membrain_core::engine::result::DeferredPayload {
+                memory_id: MemoryId(omitted.entity_id.0),
+                payload_state: membrain_core::engine::result::PayloadState::Deferred,
+                reason: format!("graph_omitted_neighbor:{:?}", omitted.reason),
+                hydration_path: "causal_trace_parent".to_string(),
+            });
+    }
+}
+
+fn strength_signal_for_result(result: &membrain_core::engine::result::RetrievalResult) -> u16 {
+    result
+        .score_summary
+        .signal_breakdown
+        .iter()
+        .find_map(|(family, raw_value, _, _)| (family == "strength").then_some(*raw_value))
+        .unwrap_or(0)
+}
+
+fn apply_min_strength_filter(
+    mut result_set: RetrievalResultSet,
+    min_strength: u16,
+) -> RetrievalResultSet {
+    let mut filtered_memory_ids = Vec::new();
+    result_set.evidence_pack.retain(|item| {
+        let keep = strength_signal_for_result(&item.result) >= min_strength;
+        if !keep {
+            filtered_memory_ids.push(item.result.memory_id);
+        }
+        keep
+    });
+    let filtered_count = filtered_memory_ids.len();
+
+    if filtered_count > 0 {
+        result_set.omitted_summary.threshold_dropped += filtered_count;
+        result_set
+            .explain
+            .result_reasons
+            .push(membrain_core::engine::result::ResultReason {
+                memory_id: None,
+                reason_code: "strength_threshold_applied".to_string(),
+                detail: format!(
+                    "filtered {filtered_count} candidate(s) below min_strength={min_strength}"
+                ),
+            });
+        result_set.explain.result_reasons.extend(filtered_memory_ids.into_iter().map(
+            |memory_id| membrain_core::engine::result::ResultReason {
+                memory_id: Some(memory_id),
+                reason_code: "below_min_strength".to_string(),
+                detail: format!(
+                    "candidate suppressed because effective strength fell below min_strength={min_strength}"
+                ),
+            },
+        ));
+    }
+
+    result_set.explain.contradictions_found = result_set
+        .evidence_pack
+        .iter()
+        .map(|item| item.result.contradiction_explains.len())
+        .sum();
+    result_set.outcome_class = if result_set.evidence_pack.is_empty() {
+        membrain_core::observability::OutcomeClass::Preview
+    } else if result_set.truncated {
+        membrain_core::observability::OutcomeClass::Partial
+    } else {
+        membrain_core::observability::OutcomeClass::Accepted
+    };
+    result_set.policy_summary.outcome_class = result_set.outcome_class;
+    result_set
+}
+
+fn cosine_similarity(left: &[f32], right: &[f32]) -> f32 {
+    if left.len() != right.len() || left.is_empty() {
+        return 0.0;
+    }
+
+    let mut dot = 0.0f32;
+    let mut left_norm = 0.0f32;
+    let mut right_norm = 0.0f32;
+    for (l, r) in left.iter().zip(right.iter()) {
+        dot += l * r;
+        left_norm += l * l;
+        right_norm += r * r;
+    }
+
+    if left_norm <= f32::EPSILON || right_norm <= f32::EPSILON {
+        0.0
+    } else {
+        dot / (left_norm.sqrt() * right_norm.sqrt())
+    }
+}
+
+fn query_by_example_memory_ids(
+    store: &BrainStore,
+    local_records: &[LocalMemoryRecord],
+    config: &RecallCommandConfig,
+) -> Vec<MemoryId> {
+    let mut seed_ids = Vec::new();
+    if let Some(memory_id) = config.like {
+        seed_ids.push(memory_id);
+    }
+    if let Some(memory_id) = config.unlike {
+        seed_ids.push(memory_id);
+    }
+    if seed_ids.is_empty() {
+        return Vec::new();
+    }
+
+    let mut local_config = store.embed().default_local_config();
+    local_config.show_download_progress = false;
+    let mut embedder = match store.embed().new_local_text_embedder(&local_config) {
+        Ok(embedder) => embedder,
+        Err(_) => return Vec::new(),
+    };
+
+    let mut seed_vectors = Vec::new();
+    for memory_id in &seed_ids {
+        let Some(record) = local_records
+            .iter()
+            .find(|record| record.namespace == config.namespace && record.memory_id == *memory_id)
+        else {
+            continue;
+        };
+        let Ok(embedding) = embedder.get_or_embed(EmbeddingPurpose::Content, &record.compact_text)
+        else {
+            continue;
+        };
+        seed_vectors.push((*memory_id, embedding.vector));
+    }
+
+    if seed_vectors.is_empty() {
+        return Vec::new();
+    }
+
+    let seed_set = seed_vectors
+        .iter()
+        .map(|(memory_id, _)| *memory_id)
+        .collect::<HashSet<_>>();
+    let local_ids = local_records
+        .iter()
+        .filter(|record| record.namespace == config.namespace)
+        .map(|record| record.memory_id)
+        .collect::<HashSet<_>>();
+    let mut scored = Vec::new();
+
+    for record in local_records.iter().filter(|record| {
+        record.namespace == config.namespace
+            && config.kind.as_deref().is_none_or(|kind| match kind {
+                "semantic" => record.memory_type == CanonicalMemoryType::Observation,
+                "procedural" => record.memory_type == CanonicalMemoryType::ToolOutcome,
+                _ => record.memory_type == CanonicalMemoryType::Event,
+            })
+            && config
+                .era
+                .as_deref()
+                .is_none_or(|era| record.era_id.as_deref() == Some(era))
+    }) {
+        let Ok(embedding) = embedder.get_or_embed(EmbeddingPurpose::Content, &record.compact_text)
+        else {
+            continue;
+        };
+
+        let mut like_score = None;
+        let mut unlike_score = None;
+        for (seed_id, vector) in &seed_vectors {
+            let similarity = cosine_similarity(&embedding.vector, vector);
+            if Some(*seed_id) == config.like {
+                like_score = Some(similarity);
+            }
+            if Some(*seed_id) == config.unlike {
+                unlike_score = Some(similarity);
+            }
+        }
+
+        let score = match (like_score, unlike_score) {
+            (Some(like), Some(unlike)) => like - unlike,
+            (Some(like), None) => like,
+            (None, Some(unlike)) => -unlike,
+            (None, None) => continue,
+        };
+        scored.push((record.memory_id, score));
+    }
+
+    scored.sort_by(|left, right| {
+        right
+            .1
+            .total_cmp(&left.1)
+            .then_with(|| left.0 .0.cmp(&right.0 .0))
+    });
+
+    let desired = config.top.max(seed_vectors.len());
+    let mut selected = Vec::new();
+    for (memory_id, _) in scored {
+        if seed_set.contains(&memory_id) && local_ids.len() > seed_set.len() {
+            continue;
+        }
+        selected.push(memory_id);
+        if selected.len() >= desired {
+            break;
+        }
+    }
+
+    if selected.is_empty() {
+        seed_vectors
+            .into_iter()
+            .map(|(memory_id, _)| memory_id)
+            .collect()
+    } else {
+        selected
     }
 }
 
@@ -1022,14 +1702,23 @@ fn build_retrieval_result_set(
     route_family: &'static str,
     route_reason: String,
     matched_ids: Vec<MemoryId>,
+    causal_seed: Option<MemoryId>,
+    graph_max_nodes: usize,
 ) -> RetrievalResultSet {
-    let mut builder = ResultBuilder::new(config.top, config.namespace.clone());
-    let confidence_display = if config.min_confidence.is_some() {
-        ConfidenceDisplayConfig::strict()
+    let output_mode = membrain_core::engine::result::DualOutputMode::from_label(&config.confidence)
+        .unwrap_or(membrain_core::engine::result::DualOutputMode::Balanced);
+    let bounded_top = if causal_seed.is_some() {
+        config
+            .top
+            .max(matched_ids.len())
+            .min(graph_max_nodes.max(config.top))
     } else {
-        ConfidenceDisplayConfig::default()
+        config.top
     };
+    let mut builder =
+        ResultBuilder::new(bounded_top, config.namespace.clone()).with_output_mode(output_mode);
     let confidence_policy = ConfidencePolicy::default();
+    let example_seeded = config.like.is_some() || config.unlike.is_some();
     let matched_empty = matched_ids.is_empty();
     let selected_ids = if matched_empty {
         local_records
@@ -1063,6 +1752,7 @@ fn build_retrieval_result_set(
             .collect::<Vec<_>>()
     };
 
+    let mut action_candidates = Vec::new();
     for memory_id in &selected_ids {
         if let Some(record) = local_records
             .iter()
@@ -1093,22 +1783,31 @@ fn build_retrieval_result_set(
                 &confidence_inputs,
                 &confidence_policy,
             );
+            action_candidates.push((
+                record.clone(),
+                confidence_output.confidence,
+                action_uncertainty_markers(&confidence_output),
+            ));
         }
     }
 
     let mut explain = RetrievalExplain {
-        recall_plan: if config.graph_expansion {
+        recall_plan: if causal_seed.is_some() || config.graph_expansion {
             membrain_core::engine::recall::RecallPlanKind::Tier2ExactThenGraphExpansion
         } else {
             membrain_core::engine::recall::RecallPlanKind::RecentTier1ThenTier2Exact
         },
         route_reason,
-        tiers_consulted: if config.graph_expansion {
+        tiers_consulted: if example_seeded {
+            vec!["tier2_exact".to_string()]
+        } else if causal_seed.is_some() || config.graph_expansion {
             vec!["tier2_exact".to_string(), "graph_expansion".to_string()]
         } else {
             vec!["tier1_recent".to_string()]
         },
-        trace_stages: if config.graph_expansion {
+        trace_stages: if example_seeded {
+            vec![membrain_core::engine::recall::RecallTraceStage::Tier2Exact]
+        } else if causal_seed.is_some() || config.graph_expansion {
             vec![
                 membrain_core::engine::recall::RecallTraceStage::Tier2Exact,
                 membrain_core::engine::recall::RecallTraceStage::GraphExpansion,
@@ -1116,18 +1815,23 @@ fn build_retrieval_result_set(
         } else {
             vec![membrain_core::engine::recall::RecallTraceStage::Tier1RecentWindow]
         },
-        tier1_answered_directly: !config.graph_expansion,
-        candidate_budget: config.top,
+        tier1_answered_directly: !(example_seeded
+            || causal_seed.is_some()
+            || config.graph_expansion),
+        candidate_budget: bounded_top,
         time_consumed_ms: None,
         ranking_profile: route_family.to_string(),
         contradictions_found: 0,
+        historical_context: None,
         query_by_example: None,
         result_reasons: selected_ids
             .iter()
             .map(|memory_id| membrain_core::engine::result::ResultReason {
                 memory_id: Some(*memory_id),
                 reason_code: "score_kept".to_string(),
-                detail: if matched_empty {
+                detail: if example_seeded {
+                    "query-by-example similarity kept this bounded candidate".to_string()
+                } else if matched_empty {
                     "fallback returned a recent memory from the bounded hot window".to_string()
                 } else {
                     "query matched the compact text inside the bounded hot window".to_string()
@@ -1141,7 +1845,12 @@ fn build_retrieval_result_set(
             .push(membrain_core::engine::result::ResultReason {
                 memory_id: None,
                 reason_code: "no_match".to_string(),
-                detail: "bounded hot-window scan returned no visible evidence".to_string(),
+                detail: if example_seeded {
+                    "query-by-example seeds did not produce any visible bounded candidates"
+                        .to_string()
+                } else {
+                    "bounded hot-window scan returned no visible evidence".to_string()
+                },
             });
     }
     if config.show_decaying {
@@ -1239,9 +1948,6 @@ fn build_retrieval_result_set(
                 detail: format!("results were filtered with min_strength={min_strength:.3}"),
             });
     }
-    if let Some(top_item) = builder.action_pack.as_ref().and_then(|_| None::<&membrain_core::engine::result::ActionArtifact>) {
-        let _ = top_item;
-    }
     if config.include_public {
         explain
             .result_reasons
@@ -1310,12 +2016,71 @@ fn build_retrieval_result_set(
         };
         if let Ok(normalization) = request.normalize_query_by_example() {
             let mut trace = RetrievalPlanTrace::new(&request);
-            trace.set_query_by_example_materialization(&normalization, &selected_ids);
+            let available_memory_ids = local_records
+                .iter()
+                .filter(|record| record.namespace == config.namespace)
+                .map(|record| record.memory_id)
+                .collect::<Vec<_>>();
+            trace.set_query_by_example_materialization(&normalization, &available_memory_ids);
             trace.set_final_candidates(selected_ids.len());
             explain.set_query_by_example_trace(&trace);
         }
     }
-    let mut result_set = builder.build(explain);
+
+    builder.action_pack = Some(
+        action_candidates
+            .iter()
+            .filter_map(|(record, confidence, uncertainty_markers)| {
+                let action_type = match record.memory_type {
+                    CanonicalMemoryType::ToolOutcome => Some("replay_tool_outcome"),
+                    CanonicalMemoryType::Observation => Some("review_observation"),
+                    CanonicalMemoryType::Event => Some("inspect_event_context"),
+                    _ => None,
+                }?;
+                let freshness_caveats = config
+                    .show_decaying
+                    .then(|| vec!["decay_sensitive_context".to_string()])
+                    .unwrap_or_default();
+                let policy_caveats = config
+                    .include_public
+                    .then(|| vec!["include_public_scope".to_string()])
+                    .unwrap_or_default();
+                Some(membrain_core::engine::result::ActionArtifact {
+                    action_type: action_type.to_string(),
+                    suggestion: format!(
+                        "Use evidence #{} ({}) as the next action anchor: {}",
+                        record.memory_id.0,
+                        record.memory_type.as_str(),
+                        record.compact_text
+                    ),
+                    supporting_evidence: vec![record.memory_id],
+                    confidence_score: *confidence,
+                    uncertainty_markers: uncertainty_markers.clone(),
+                    policy_caveats,
+                    freshness_caveats,
+                })
+            })
+            .collect(),
+    );
+
+    let mut result_set = if let Some(min_confidence) = config.min_confidence {
+        builder.build_with_confidence_filter(explain, (min_confidence * 1000.0) as u16)
+    } else {
+        builder.build(explain)
+    };
+    if let Some(min_strength) = config.min_strength {
+        result_set = apply_min_strength_filter(result_set, (min_strength * 1000.0) as u16);
+    }
+    if causal_seed.is_some() {
+        let mut order = selected_ids
+            .iter()
+            .enumerate()
+            .map(|(index, memory_id)| (*memory_id, index))
+            .collect::<std::collections::HashMap<_, _>>();
+        result_set
+            .evidence_pack
+            .sort_by_key(|item| order.remove(&item.result.memory_id).unwrap_or(usize::MAX));
+    }
     result_set.freshness_markers.as_of_tick = config.as_of;
     result_set.policy_summary.filters = vec![membrain_core::api::PolicyFilterSummary::new(
         config.namespace.as_str(),
@@ -1334,7 +2099,7 @@ fn build_retrieval_result_set(
         membrain_core::api::FieldPresence::Absent,
         Vec::new(),
     )];
-    result_set.packaging_metadata.result_budget = config.top;
+    result_set.packaging_metadata.result_budget = bounded_top;
     result_set.packaging_metadata.degraded_summary =
         (config.cold_tier == "avoid").then(|| "cold_tier_avoid".to_string());
     result_set
@@ -1383,6 +2148,8 @@ fn encode_memory(
         landmark_label: prepared.normalized.landmark.landmark_label.clone(),
         era_id: prepared.normalized.landmark.era_id.clone(),
         passive_observation: None,
+        causal_parents: Vec::new(),
+        causal_link_type: None,
     };
 
     hot.seed(local.as_hot_record());
@@ -1475,6 +2242,8 @@ fn budget_memories(
         intent_result.route_inputs.ranking_profile.as_str(),
         recall_plan.route_summary.reason.to_string(),
         matched_ids,
+        None,
+        store.config().graph_max_nodes,
     );
 
     let request = ContextBudgetRequest::new(token_budget)
@@ -1532,30 +2301,37 @@ fn recall_memories(
         "procedural" => CanonicalMemoryType::ToolOutcome,
         _ => CanonicalMemoryType::Event,
     });
-    let matched_ids = local_records
-        .iter()
-        .filter(|r| r.namespace == config.namespace)
-        .filter(|record| kind_filter.is_none_or(|kind| record.memory_type == kind))
-        .filter(|record| {
-            if query_lower.is_empty() {
-                return config.like == Some(record.memory_id)
-                    || config.unlike == Some(record.memory_id);
-            }
-            let text_lower = record.compact_text.to_lowercase();
-            text_lower.contains(&query_lower)
-                || query_lower.contains(&text_lower)
-                || record.memory_type.as_str().contains(&query_lower)
-        })
-        .map(|record| record.memory_id)
-        .collect::<Vec<_>>();
+    let matched_ids = if config.like.is_some() || config.unlike.is_some() {
+        query_by_example_memory_ids(store, local_records, config)
+    } else {
+        local_records
+            .iter()
+            .filter(|r| r.namespace == config.namespace)
+            .filter(|record| kind_filter.is_none_or(|kind| record.memory_type == kind))
+            .filter(|record| {
+                let text_lower = record.compact_text.to_lowercase();
+                text_lower.contains(&query_lower)
+                    || query_lower.contains(&text_lower)
+                    || record.memory_type.as_str().contains(&query_lower)
+            })
+            .map(|record| record.memory_id)
+            .collect::<Vec<_>>()
+    };
 
+    let route_reason = if config.like.is_some() || config.unlike.is_some() {
+        "query-by-example seed similarity expanded a bounded hot-window shortlist".to_string()
+    } else {
+        recall_plan.route_summary.reason.to_string()
+    };
     let result_set = build_retrieval_result_set(
         local_records,
         config,
         RankingProfile::balanced(),
         intent_result.route_inputs.ranking_profile.as_str(),
-        recall_plan.route_summary.reason.to_string(),
+        route_reason,
         matched_ids,
+        None,
+        store.config().graph_max_nodes,
     );
 
     let request_id = RequestId::new(format!(
@@ -1580,7 +2356,9 @@ fn inspect_memory(
     if let Some(record) = lookup.record {
         let passive_observation = local_records
             .iter()
-            .find(|local| local.memory_id == record.memory_id && local.namespace == record.namespace)
+            .find(|local| {
+                local.memory_id == record.memory_id && local.namespace == record.namespace
+            })
             .and_then(|local| local.passive_observation.clone());
 
         return Ok(InspectOutput {
@@ -1650,13 +2428,19 @@ fn observe_memories(
         .filter(|record| record.namespace == *namespace)
         .map(|record| record.fingerprint)
         .collect::<std::collections::HashSet<_>>();
-    let report = ObserveEngine::observe_content(store.encode_engine(), content, config, true, |fingerprint| {
-        let already_seen = seen_fingerprints.contains(&fingerprint);
-        if !already_seen {
-            seen_fingerprints.insert(fingerprint);
-        }
-        already_seen
-    });
+    let report = ObserveEngine::observe_content(
+        store.encode_engine(),
+        content,
+        config,
+        true,
+        |fingerprint| {
+            let already_seen = seen_fingerprints.contains(&fingerprint);
+            if !already_seen {
+                seen_fingerprints.insert(fingerprint);
+            }
+            already_seen
+        },
+    );
 
     if !dry_run {
         let session_id = SessionId(SESSION_ID.load(Ordering::SeqCst));
@@ -1682,6 +2466,8 @@ fn observe_memories(
                 passive_observation: Some(PassiveObservationInspectSummary::from_encode(
                     &prepared.passive_observation_inspect,
                 )),
+                causal_parents: Vec::new(),
+                causal_link_type: None,
             };
             hot.seed(local.as_hot_record());
             seen_fingerprints.insert(local.fingerprint);
@@ -1741,17 +2527,183 @@ fn observe_memories(
             observation_source: FieldPresence::Present(report.observation_source.clone()),
             observation_chunk_id: FieldPresence::Present(report.observation_chunk_id.clone()),
             retention_marker: FieldPresence::Present(
-                fragment.prepared.passive_observation_inspect.retention_marker,
+                fragment
+                    .prepared
+                    .passive_observation_inspect
+                    .retention_marker,
             ),
         });
     }
     response
 }
 
+fn skills_output(
+    store: &BrainStore,
+    namespace: &NamespaceId,
+    extract: bool,
+) -> ResponseContext<SkillsOutput> {
+    let result = store.skill_artifacts(
+        namespace.clone(),
+        membrain_core::engine::consolidation::ConsolidationPolicy {
+            minimum_candidates: 1,
+            batch_size: 2,
+            min_skill_members: 2,
+            ..Default::default()
+        },
+        2,
+        extract,
+    );
+    let request_id = RequestId::new(format!(
+        "skills-{}-{}",
+        namespace.as_str(),
+        if extract { "extract" } else { "list" }
+    ))
+    .expect("skills request id");
+    ResponseContext::success(
+        namespace.clone(),
+        request_id,
+        SkillsOutput {
+            outcome: if extract { "accepted" } else { "review" },
+            namespace: result.namespace.clone(),
+            extraction_trigger: result.extraction_trigger,
+            extracted_count: result.extracted_count,
+            skipped_count: result.skipped_count,
+            reflection_compiler_active: result
+                .procedures
+                .iter()
+                .any(|procedure| procedure.review.reflection.is_some()),
+            procedures: result.procedures,
+        },
+    )
+}
+
+fn procedures_output(
+    store: &mut BrainStore,
+    namespace: &NamespaceId,
+    promote: Option<&str>,
+    rollback: Option<&str>,
+    note: Option<&str>,
+    approved_by: &str,
+    public: bool,
+) -> anyhow::Result<ResponseContext<ProceduresOutput>> {
+    let request_id = RequestId::new(format!("procedures-{}", namespace.as_str()))?;
+    let context = membrain_core::api::RequestContext {
+        namespace: Some(namespace.clone()),
+        workspace_id: None,
+        agent_id: None,
+        session_id: None,
+        task_id: None,
+        request_id: request_id.clone(),
+        policy_context: PolicyContext {
+            include_public: public,
+            sharing_visibility: if public {
+                SharingVisibility::Public
+            } else {
+                SharingVisibility::Shared
+            },
+            caller_identity_bound: true,
+            workspace_acl_allowed: true,
+            agent_acl_allowed: true,
+            session_visibility_allowed: true,
+            legal_hold: false,
+        },
+        time_budget_ms: None,
+    };
+
+    if let Some(pattern_handle) = promote {
+        store
+            .promote_skill_to_procedural_with_context(
+                context,
+                pattern_handle,
+                approved_by,
+                note.unwrap_or("approved via CLI procedures surface"),
+            )
+            .map_err(|error| anyhow::anyhow!(error.reason.as_str()))?;
+    }
+    if let Some(pattern_handle) = rollback {
+        store
+            .rollback_procedural_entry(
+                namespace.clone(),
+                pattern_handle,
+                note.unwrap_or("rolled back via CLI procedures surface"),
+            )
+            .map_err(|error| anyhow::anyhow!(error.reason.as_str()))?;
+    }
+
+    let result = store.procedural_store_surface(
+        namespace.clone(),
+        membrain_core::engine::consolidation::ConsolidationPolicy {
+            minimum_candidates: 1,
+            batch_size: 2,
+            min_skill_members: 2,
+            ..Default::default()
+        },
+        2,
+        promote.is_some(),
+    );
+    Ok(ResponseContext::success(
+        namespace.clone(),
+        request_id,
+        ProceduresOutput {
+            outcome: result.outcome,
+            namespace: result.namespace,
+            extraction_trigger: result.extraction_trigger,
+            reviewed_candidate_count: result.reviewed_candidate_count,
+            procedural_count: result.procedural_count,
+            direct_lookup_supported: result.direct_lookup_supported,
+            procedures: result.procedures,
+        },
+    ))
+}
+
+fn invalidate_memory(
+    store: &BrainStore,
+    local_records: &[LocalMemoryRecord],
+    namespace: &NamespaceId,
+    memory_id: MemoryId,
+    dry_run: bool,
+) -> ResponseContext<InvalidateOutput> {
+    let links = causal_links_for_records(local_records, namespace);
+    let report = store.invalidate_causal_chain(memory_id, &links);
+    let request_id = RequestId::new(format!(
+        "invalidate-{}-{}-{}",
+        namespace.as_str(),
+        memory_id.0,
+        if dry_run { "dry-run" } else { "apply" }
+    ))
+    .expect("invalidate request id");
+    ResponseContext::success(
+        namespace.clone(),
+        request_id,
+        InvalidateOutput {
+            outcome: if dry_run { "preview" } else { "accepted" },
+            root_memory_id: memory_id.0,
+            namespace: namespace.as_str().to_string(),
+            dry_run,
+            chain_length: report.chain_length,
+            memories_penalized: report.memories_penalized,
+            avg_confidence_delta: report.avg_confidence_delta,
+            steps: report
+                .steps
+                .iter()
+                .map(|step| InvalidateStepOutput {
+                    memory_id: step.memory_id.0,
+                    depth: step.depth,
+                    confidence_delta: step.confidence_delta,
+                    link_type: step.link_type.as_str(),
+                    source_backed: step.source_backed,
+                    evidence_log: step.evidence_log.clone(),
+                })
+                .collect(),
+        },
+    )
+}
+
 fn explain_query(
     store: &BrainStore,
     local_records: &[LocalMemoryRecord],
     query: &str,
+    depth: Option<usize>,
     namespace: &NamespaceId,
 ) -> ResponseContext<RetrievalResultSet> {
     let intent_result = store.intent_engine().classify(query);
@@ -1783,18 +2735,37 @@ fn explain_query(
         .recall_engine()
         .plan_recall(recall_request, store.config());
 
+    let exact_memory_id = query.trim().parse::<u64>().ok().map(MemoryId);
     let query_lower = query.to_lowercase();
-    let matched_ids = local_records
-        .iter()
-        .filter(|r| r.namespace == *namespace)
-        .filter(|record| {
-            let text_lower = record.compact_text.to_lowercase();
-            text_lower.contains(&query_lower)
-                || query_lower.contains(&text_lower)
-                || record.memory_type.as_str().contains(&query_lower)
-        })
-        .map(|record| record.memory_id)
-        .collect::<Vec<_>>();
+    let causal_trace = exact_memory_id.map(|memory_id| {
+        let links = causal_links_for_records(local_records, namespace);
+        let requested_depth = depth.unwrap_or(store.config().graph_max_depth as usize);
+        store.graph().trace_causality(
+            memory_id,
+            &links,
+            requested_depth,
+            store.config().graph_max_nodes,
+        )
+    });
+    let matched_ids = if let Some(trace) = causal_trace.as_ref() {
+        trace
+            .steps
+            .iter()
+            .map(|step| step.memory_id)
+            .collect::<Vec<_>>()
+    } else {
+        local_records
+            .iter()
+            .filter(|r| r.namespace == *namespace)
+            .filter(|record| {
+                let text_lower = record.compact_text.to_lowercase();
+                text_lower.contains(&query_lower)
+                    || query_lower.contains(&text_lower)
+                    || record.memory_type.as_str().contains(&query_lower)
+            })
+            .map(|record| record.memory_id)
+            .collect::<Vec<_>>()
+    };
 
     let mut result_set = build_retrieval_result_set(
         local_records,
@@ -1803,6 +2774,8 @@ fn explain_query(
         intent_result.route_inputs.ranking_profile.as_str(),
         recall_plan.route_summary.reason.to_string(),
         matched_ids,
+        exact_memory_id,
+        store.config().graph_max_nodes,
     );
     result_set.explain.ranking_profile = intent_result
         .route_inputs
@@ -1823,6 +2796,9 @@ fn explain_query(
                 intent_result.log_record().matched_patterns.join(",")
             ),
         });
+    if let Some((memory_id, trace)) = exact_memory_id.zip(causal_trace.as_ref()) {
+        apply_causal_trace(&mut result_set, trace, memory_id, depth);
+    }
 
     let request_id = RequestId::new(format!(
         "explain-{}-{}",
@@ -1847,7 +2823,10 @@ fn sample_audit_log(namespace: &NamespaceId) -> AppendOnlyAuditLog {
         )
         .with_memory_id(MemoryId(21))
         .with_session_id(SessionId(5))
-        .with_request_id("req-encode-21"),
+        .with_request_id("req-encode-21")
+        .with_tick(1)
+        .with_strength_delta(None, Some(840))
+        .with_confidence_delta(None, Some(910)),
     );
     log.append(
         AuditLogEntry::new(
@@ -1859,6 +2838,8 @@ fn sample_audit_log(namespace: &NamespaceId) -> AppendOnlyAuditLog {
         )
         .with_memory_id(MemoryId(21))
         .with_request_id("req-policy-21")
+        .with_tick(2)
+        .with_related_snapshot("snapshot-incident-2026-03-20")
         .with_related_run("incident-2026-03-20")
         .with_redaction(),
     );
@@ -1872,22 +2853,38 @@ fn sample_audit_log(namespace: &NamespaceId) -> AppendOnlyAuditLog {
         )
         .with_memory_id(MemoryId(21))
         .with_request_id("req-migration-21")
+        .with_tick(3)
+        .with_related_snapshot("snapshot-migration-0042")
         .with_related_run("migration-0042"),
     );
-    log.append(AuditLogEntry::new(
-        AuditEventCategory::Archive,
-        AuditEventKind::ArchiveRecorded,
-        namespace.clone(),
-        "cold_store",
-        "archived superseded evidence",
-    ));
-    log.append(AuditLogEntry::new(
-        AuditEventCategory::Recall,
-        AuditEventKind::RecallServed,
-        namespace.clone(),
-        "recall_engine",
-        "served filtered audit history preview",
-    ));
+    log.append(
+        AuditLogEntry::new(
+            AuditEventCategory::Archive,
+            AuditEventKind::ArchiveRecorded,
+            namespace.clone(),
+            "cold_store",
+            "archived superseded evidence",
+        )
+        .with_request_id("req-archive-21")
+        .with_tick(4)
+        .with_strength_delta(Some(840), Some(120))
+        .with_confidence_delta(Some(910), Some(760))
+        .with_related_snapshot("snapshot-archive-21")
+        .with_related_run("archive-run-21"),
+    );
+    log.append(
+        AuditLogEntry::new(
+            AuditEventCategory::Recall,
+            AuditEventKind::RecallServed,
+            namespace.clone(),
+            "recall_engine",
+            "served filtered audit history preview",
+        )
+        .with_request_id("req-recall-21")
+        .with_tick(5)
+        .with_strength_delta(Some(120), Some(120))
+        .with_confidence_delta(Some(760), Some(760)),
+    );
     log
 }
 
@@ -1943,9 +2940,7 @@ fn parse_audit_kind(value: &str) -> Option<AuditEventKind> {
         "maintenance_reconsolidation_blocked" => {
             Some(AuditEventKind::MaintenanceReconsolidationBlocked)
         }
-        "maintenance_forgetting_evaluated" => {
-            Some(AuditEventKind::MaintenanceForgettingEvaluated)
-        }
+        "maintenance_forgetting_evaluated" => Some(AuditEventKind::MaintenanceForgettingEvaluated),
         "incident_recorded" => Some(AuditEventKind::IncidentRecorded),
         "archive_recorded" => Some(AuditEventKind::ArchiveRecorded),
         _ => None,
@@ -2146,7 +3141,7 @@ fn filter_audit_rows(
         session_id: session_id.map(SessionId),
         category,
         kind,
-        min_sequence: since,
+        min_tick: since,
         ..AuditLogFilter::default()
     };
     let AuditLogSlice {
@@ -2186,7 +3181,7 @@ fn print_audit_rows(export: &AuditExport, json: bool) -> anyhow::Result<()> {
 
     for row in &export.rows {
         println!(
-            "#{} {} {} ns={} memory={:?} session={:?} actor={} request_id={:?} redacted={} run={:?} note={}",
+            "#{} {} {} ns={} memory={:?} session={:?} actor={} request_id={:?} tick={:?} strength={:?}->{:?} confidence={:?}->{:?} snapshot={:?} redacted={} run={:?} note={}",
             row.sequence,
             row.category,
             row.kind,
@@ -2195,6 +3190,12 @@ fn print_audit_rows(export: &AuditExport, json: bool) -> anyhow::Result<()> {
             row.session_id,
             row.triggered_by,
             row.request_id,
+            row.tick,
+            row.before_strength,
+            row.after_strength,
+            row.before_confidence,
+            row.after_confidence,
+            row.related_snapshot,
             row.redacted,
             row.related_run,
             row.note,
@@ -2231,16 +3232,6 @@ fn doctor_report() -> DoctorReport {
             generation: report.generation,
         })
         .collect::<Vec<_>>();
-    let warnings = indexes
-        .iter()
-        .filter_map(|row| match row.health {
-            "stale" => Some("index_stale"),
-            "needs_rebuild" => Some("index_needs_rebuild"),
-            "missing" => Some("index_missing"),
-            _ => None,
-        })
-        .collect::<Vec<_>>();
-    let overall_status = if warnings.is_empty() { "ok" } else { "warn" };
     let store = BrainStore::new(RuntimeConfig::default());
     let repair_engine = store.repair_engine();
     let namespace = NamespaceId::new("doctor.system").expect("doctor namespace should be valid");
@@ -2264,11 +3255,11 @@ fn doctor_report() -> DoctorReport {
                             .iter()
                             .find(|report| report.target == result.target)
                             .expect("repair operator report should exist for each doctor result");
-                        let plan = result
-                            .rebuild_entrypoint
-                            .and_then(|entrypoint| {
-                                store.repair_engine().plan_index_rebuild(result.target, entrypoint)
-                            });
+                        let plan = result.rebuild_entrypoint.and_then(|entrypoint| {
+                            store
+                                .repair_engine()
+                                .plan_index_rebuild(result.target, entrypoint)
+                        });
                         let artifact = summary
                             .verification_artifacts
                             .get(&result.target)
@@ -2316,6 +3307,15 @@ fn doctor_report() -> DoctorReport {
             vec![RemediationStep::CheckHealth, RemediationStep::RunRepair],
         )
     });
+    let availability_view = availability
+        .as_ref()
+        .map(|availability| DoctorAvailability {
+            posture: availability.posture.as_str(),
+            query_capabilities: availability.query_capabilities.clone(),
+            mutation_capabilities: availability.mutation_capabilities.clone(),
+            degraded_reasons: availability.reason_names(),
+            recovery_conditions: availability.recovery_condition_names(),
+        });
 
     let mut cache = CacheManager::new(4, 4);
     cache.result.disable();
@@ -2348,7 +3348,7 @@ fn doctor_report() -> DoctorReport {
             current_tick: 200,
             daemon_uptime_ticks: 180,
             index_reports,
-            availability,
+            availability: availability.clone(),
             feature_availability: vec![FeatureAvailabilityEntry {
                 feature: "health".to_string(),
                 posture: membrain_core::api::AvailabilityPosture::Full,
@@ -2357,10 +3357,191 @@ fn doctor_report() -> DoctorReport {
             previous_total_recalls: Some(44),
             previous_total_encodes: Some(10),
             previous_repair_queue_depth: Some(0),
+            previous_hot_memories: Some(70),
+            previous_low_confidence_count: Some(5),
+            previous_unresolved_conflicts: Some(2),
+            previous_uncertain_count: Some(4),
+            previous_cache_hit_count: Some(0),
+            previous_cache_miss_count: Some(0),
+            previous_cache_bypass_count: Some(0),
+            previous_prefetch_queue_depth: Some(0),
+            previous_prefetch_drop_count: Some(0),
+            previous_index_stale_count: Some(1),
+            previous_index_missing_count: Some(0),
+            previous_index_repair_backlog_total: Some(1),
+            previous_availability_posture: Some(membrain_core::api::AvailabilityPosture::Full),
         },
         &cache,
         health_repair_summary.as_ref(),
     );
+
+    let lease_report = LeaseScanner.scan(
+        &[
+            LeaseScanItem {
+                memory_id: MemoryId(11),
+                lease: LeaseMetadata::new(LeasePolicy::Normal, 0),
+                action_critical: true,
+            },
+            LeaseScanItem {
+                memory_id: MemoryId(12),
+                lease: LeaseMetadata::new(LeasePolicy::Volatile, 20),
+                action_critical: true,
+            },
+            LeaseScanItem {
+                memory_id: MemoryId(13),
+                lease: LeaseMetadata::new(LeasePolicy::Durable, 0),
+                action_critical: false,
+            },
+        ],
+        40,
+        3,
+    );
+
+    let index_issue_count = indexes.iter().filter(|row| row.health != "ok").count();
+    let repair_issue_count = repair_reports
+        .iter()
+        .filter(|report| report.status != "healthy")
+        .count();
+    let stale_action_critical = lease_report.recheck_required_items > 0;
+    let mut warnings = indexes
+        .iter()
+        .filter_map(|row| match row.health {
+            "stale" => Some("index_stale"),
+            "needs_rebuild" => Some("index_needs_rebuild"),
+            "missing" => Some("index_missing"),
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    if stale_action_critical {
+        warnings.push("stale_action_critical_recheck_required");
+    }
+    let overall_status = if warnings.is_empty() { "ok" } else { "warn" };
+
+    let checks = vec![
+        DoctorCheck {
+            name: "schema_catalog",
+            surface_kind: "schema",
+            status: "ok",
+            severity: "info",
+            affected_scope: "schema.v1".to_string(),
+            degraded_impact: None,
+            remediation: None,
+        },
+        DoctorCheck {
+            name: "derived_indexes",
+            surface_kind: "derived_index",
+            status: if index_issue_count > 0 { "warn" } else { "ok" },
+            severity: if index_issue_count > 0 { "warning" } else { "info" },
+            affected_scope: format!("index_families={}", indexes.len()),
+            degraded_impact: (index_issue_count > 0).then(|| {
+                format!(
+                    "{index_issue_count} derived index families may require colder fallback or rebuild"
+                )
+            }),
+            remediation: (index_issue_count > 0).then(|| DoctorRemediation {
+                summary: "repair derived indexes and verify parity against durable truth"
+                    .to_string(),
+                next_steps: vec!["check_health", "run_repair"],
+            }),
+        },
+        DoctorCheck {
+            name: "repair_pipeline",
+            surface_kind: "repair",
+            status: if repair_issue_count > 0 { "warn" } else { "ok" },
+            severity: if repair_issue_count > 0 { "warning" } else { "info" },
+            affected_scope: format!("repair_targets={}", repair_reports.len()),
+            degraded_impact: (repair_issue_count > 0).then(|| {
+                format!(
+                    "{repair_issue_count} repair targets remain degraded or require rollback review"
+                )
+            }),
+            remediation: (repair_issue_count > 0).then(|| DoctorRemediation {
+                summary: "finish repair follow-up before clearing degraded-mode warnings"
+                    .to_string(),
+                next_steps: vec!["run_repair", "check_health"],
+            }),
+        },
+        DoctorCheck {
+            name: "serving_posture",
+            surface_kind: "availability",
+            status: overall_status,
+            severity: if overall_status == "warn" { "warning" } else { "info" },
+            affected_scope: status.posture.as_str().to_string(),
+            degraded_impact: availability_view.as_ref().map(|availability| {
+                format!(
+                    "query_capabilities={} mutation_capabilities={}",
+                    availability.query_capabilities.join(","),
+                    availability.mutation_capabilities.join(",")
+                )
+            }),
+            remediation: availability_view.as_ref().map(|availability| DoctorRemediation {
+                summary: format!(
+                    "runtime posture {} requires operator follow-up before normal service resumes",
+                    availability.posture
+                ),
+                next_steps: availability.recovery_conditions.clone(),
+            }),
+        },
+        DoctorCheck {
+            name: "lease_freshness",
+            surface_kind: "freshness",
+            status: if stale_action_critical { "warn" } else { "ok" },
+            severity: if stale_action_critical { "warning" } else { "info" },
+            affected_scope: format!("scanned_items={}", lease_report.scanned_items),
+            degraded_impact: stale_action_critical.then(|| {
+                format!(
+                    "{} action-critical items reached recheck_required; {} volatile items would be withheld",
+                    lease_report.recheck_required_items, lease_report.withheld_items
+                )
+            }),
+            remediation: stale_action_critical.then(|| DoctorRemediation {
+                summary: "inspect stale action-critical evidence before following action guidance"
+                    .to_string(),
+                next_steps: vec!["inspect_state", "check_health"],
+            }),
+        },
+    ];
+    let summary = DoctorSummary {
+        ok_checks: checks.iter().filter(|check| check.status == "ok").count(),
+        warn_checks: checks.iter().filter(|check| check.status == "warn").count(),
+        fail_checks: checks.iter().filter(|check| check.status == "fail").count(),
+    };
+    let mut runbook_hints = Vec::new();
+    if index_issue_count > 0 {
+        runbook_hints.push(DoctorRunbookHint {
+            runbook_id: "index_rebuild_operations",
+            source_doc: "docs/OPERATIONS.md",
+            section: "## 5. Index Rebuild Operations",
+            reason: "derived index serving is degraded or bypassed; rebuild and parity proof should be reviewed"
+                .to_string(),
+        });
+        runbook_hints.push(DoctorRunbookHint {
+            runbook_id: "tier2_index_drift",
+            source_doc: "docs/FAILURE_PLAYBOOK.md",
+            section: "## 2. Tier2 index drift",
+            reason:
+                "index-related degraded mode should follow the canonical drift containment matrix"
+                    .to_string(),
+        });
+    }
+    if repair_issue_count > 0 {
+        runbook_hints.push(DoctorRunbookHint {
+            runbook_id: "repair_backlog_growth",
+            source_doc: "docs/FAILURE_PLAYBOOK.md",
+            section: "## 9. Repair backlog growth",
+            reason: "repair follow-up is still visible in operator diagnostics and should be drained before declaring recovery"
+                .to_string(),
+        });
+    }
+    if stale_action_critical {
+        runbook_hints.push(DoctorRunbookHint {
+            runbook_id: "incident_response",
+            source_doc: "docs/OPERATIONS.md",
+            section: "## 7. Incident Response",
+            reason: "stale action-critical evidence requires explicit recheck/withhold review before acting"
+                .to_string(),
+        });
+    }
 
     DoctorReport {
         status: overall_status,
@@ -2368,16 +3549,130 @@ fn doctor_report() -> DoctorReport {
         posture: status.posture.as_str(),
         degraded_reasons: status.degraded_reasons,
         metrics: status.metrics,
+        summary,
         indexes,
         repair_engine_component: repair_engine.component_name(),
         repair_reports,
+        checks,
+        runbook_hints,
         warnings,
+        error_kind: None,
+        retryable: false,
+        remediation: availability_view
+            .as_ref()
+            .map(|availability| DoctorRemediation {
+                summary: format!(
+                    "runtime posture {} requires operator follow-up before normal service resumes",
+                    availability.posture
+                ),
+                next_steps: availability.recovery_conditions.clone(),
+            }),
+        availability: availability_view,
         health,
     }
 }
 
 fn print_doctor_report(report: &DoctorReport) -> anyhow::Result<()> {
     println!("{}", serde_json::to_string_pretty(report)?);
+    Ok(())
+}
+
+fn print_health_report(report: &BrainHealthReport, brief: bool) -> anyhow::Result<()> {
+    if brief {
+        let posture = report
+            .availability_posture
+            .map(|posture| posture.as_str())
+            .unwrap_or("full");
+        let cache_state = report.cache.state.as_str();
+        let index_state = report.indexes.state.as_str();
+        let repair_state = report
+            .repair
+            .as_ref()
+            .map(|repair| repair.state.as_str())
+            .unwrap_or("unavailable");
+        println!(
+            "health hot={}/{} ({:.1}%) confidence={:.2} conflicts={} posture={} cache={} index={} repair={}",
+            report.hot_memories,
+            report.hot_capacity,
+            report.hot_utilization_pct,
+            report.avg_confidence,
+            report.unresolved_conflicts,
+            posture,
+            cache_state,
+            index_state,
+            repair_state,
+        );
+        return Ok(());
+    }
+
+    println!(
+        "Brain health: hot={}/{} ({:.1}%) cold={} confidence={:.2} strength={:.2}",
+        report.hot_memories,
+        report.hot_capacity,
+        report.hot_utilization_pct,
+        report.cold_memories,
+        report.avg_confidence,
+        report.avg_strength,
+    );
+    println!(
+        "  quality: low_confidence={} conflicts={} uncertain={} decay_rate={:.3}",
+        report.low_confidence_count,
+        report.unresolved_conflicts,
+        report.uncertain_count,
+        report.decay_rate,
+    );
+    println!(
+        "  activity: recalls={} encodes={} tick={} uptime_ticks={}",
+        report.total_recalls,
+        report.total_encodes,
+        report.current_tick,
+        report.daemon_uptime_ticks,
+    );
+    println!(
+        "  posture: availability={} backpressure={} repair_queue={}",
+        report
+            .availability_posture
+            .map(|posture| posture.as_str())
+            .unwrap_or("full"),
+        report.backpressure_state.unwrap_or("normal"),
+        report
+            .repair_queue_depth
+            .map(|depth| depth.to_string())
+            .unwrap_or_else(|| "n/a".to_string()),
+    );
+    if let Some(notes) = &report.availability_notes {
+        println!("  notes: {notes}");
+    }
+    println!("  subsystems:");
+    for subsystem in &report.subsystem_status {
+        println!(
+            "    - {} [{}] {}",
+            subsystem.subsystem,
+            subsystem.state.as_str(),
+            subsystem.detail
+        );
+    }
+    if !report.feature_availability.is_empty() {
+        println!("  features:");
+        for feature in &report.feature_availability {
+            println!(
+                "    - {} [{}]{}",
+                feature.feature,
+                feature.posture.as_str(),
+                feature
+                    .note
+                    .as_ref()
+                    .map(|note| format!(" {note}"))
+                    .unwrap_or_default()
+            );
+        }
+    }
+    if let Some(degraded) = &report.degraded_status {
+        println!("  degraded summary: {}", degraded.summary);
+        if !degraded.recommended_runbooks.is_empty() {
+            println!("  runbooks: {}", degraded.recommended_runbooks.join(", "));
+        }
+    }
     Ok(())
 }
 
@@ -2535,7 +3830,7 @@ async fn main() -> anyhow::Result<()> {
     let cli = Cli::parse();
 
     // Shared core store and hot metadata store for encode/recall/inspect/explain
-    let store = BrainStore::new(RuntimeConfig::default());
+    let mut store = BrainStore::new(RuntimeConfig::default());
     let mut hot = store.hot_store().new_metadata_store(64);
     let mut local_records: Vec<LocalMemoryRecord> = Vec::new();
     let _session_id = SessionId(SESSION_ID.load(Ordering::SeqCst));
@@ -2633,6 +3928,11 @@ async fn main() -> anyhow::Result<()> {
                 cold_tier,
                 context.as_deref(),
             )?;
+            let confidence_display = if config.min_confidence.is_some() {
+                ConfidenceDisplayConfig::strict()
+            } else {
+                ConfidenceDisplayConfig::default()
+            };
             let response = recall_memories(&store, &hot, &local_records, &config);
             if output.json {
                 println!("{}", serde_json::to_string_pretty(&response)?);
@@ -2673,14 +3973,34 @@ async fn main() -> anyhow::Result<()> {
                     );
                 }
                 for (i, item) in result_set.evidence_pack.iter().enumerate() {
+                    let confidence_explain =
+                        confidence_explain_for_result(&item.result, confidence_display);
                     println!(
-                        "  [{}] #{} score={} lane={} | {}",
+                        "  [{}] #{} score={} confidence={} lane={} | {}",
                         i + 1,
                         item.result.memory_id.0,
                         item.result.score,
+                        confidence_explain.confidence,
                         item.result.entry_lane.as_str(),
                         item.result.compact_text,
                     );
+                    if confidence_explain.low_confidence_tagged {
+                        println!("      confidence_tag=low_confidence");
+                    }
+                    if let Some(interval) = confidence_explain.interval {
+                        println!(
+                            "      confidence_interval=[{}, {}, {}] width={}",
+                            interval.lower, interval.point, interval.upper, interval.width
+                        );
+                    }
+                    if output.verbose > 0 && !confidence_explain.uncertainty_breakdown.is_empty() {
+                        let parts = confidence_explain
+                            .uncertainty_breakdown
+                            .iter()
+                            .map(|(name, value)| format!("{name}={value}"))
+                            .collect::<Vec<_>>();
+                        println!("      uncertainty_breakdown: {}", parts.join(", "));
+                    }
                 }
                 if output.verbose > 0 {
                     if let Some(query_by_example) = result_set.explain.query_by_example.as_ref() {
@@ -2705,6 +4025,21 @@ async fn main() -> anyhow::Result<()> {
                         .collect::<Vec<_>>();
                     if !temporal_reasons.is_empty() {
                         println!("  temporal: {}", temporal_reasons.join(" | "));
+                    }
+                    let causal_reasons = result_set
+                        .explain
+                        .result_reasons
+                        .iter()
+                        .filter(|reason| {
+                            reason.reason_code == "query_by_example_seed_materialized"
+                                || reason.reason_code == "graph_cutoff_max_depth"
+                                || reason.reason_code == "graph_cutoff_budget"
+                                || reason.reason_code == "graph_cutoff_policy_namespace"
+                        })
+                        .map(|reason| reason.detail.as_str())
+                        .collect::<Vec<_>>();
+                    if !causal_reasons.is_empty() {
+                        println!("  causal: {}", causal_reasons.join(" | "));
                     }
                     if !response.warnings.is_empty() {
                         for warning in &response.warnings {
@@ -2878,11 +4213,12 @@ async fn main() -> anyhow::Result<()> {
         }
         Commands::Explain {
             query,
+            depth,
             namespace,
             output,
         } => {
             let ns = NamespaceId::new(namespace)?;
-            let response = explain_query(&store, &local_records, query, &ns);
+            let response = explain_query(&store, &local_records, query, *depth, &ns);
             if output.json {
                 println!("{}", serde_json::to_string_pretty(&response)?);
             } else {
@@ -2900,6 +4236,9 @@ async fn main() -> anyhow::Result<()> {
                         route_summary.tier1_answered_directly,
                         route_summary.routes_to_deeper_tiers,
                     );
+                    if let Some(depth_hint) = depth {
+                        println!("  causal_depth_cap: {}", depth_hint);
+                    }
                 }
                 let trace_stages = response
                     .trace_stages
@@ -3155,6 +4494,144 @@ async fn main() -> anyhow::Result<()> {
                 );
             }
         }
+        Commands::Dream {
+            namespace,
+            status,
+            disable,
+            idle_ticks,
+            last_run_tick,
+            links_created_total,
+            output,
+        } => {
+            let namespace = NamespaceId::new(namespace)?;
+            let policy = DreamPolicy {
+                enabled: !disable,
+                ..DreamPolicy::default()
+            };
+            let trigger = if *status {
+                DreamTrigger::IdleWindow
+            } else {
+                DreamTrigger::Manual
+            };
+            let engine = DreamEngine;
+            let dream_status = engine.status(
+                namespace.clone(),
+                trigger,
+                policy,
+                *idle_ticks,
+                *last_run_tick,
+                *links_created_total,
+            );
+
+            let dream_output = if *status || dream_status.should_skip() {
+                DreamOutput {
+                    outcome: if dream_status.should_skip() {
+                        "blocked"
+                    } else {
+                        "accepted"
+                    },
+                    namespace: namespace.as_str().to_string(),
+                    enabled: dream_status.enabled,
+                    trigger: dream_status.trigger.as_str(),
+                    execution_window: if dream_status.trigger == DreamTrigger::Manual {
+                        "manual_bounded_run"
+                    } else {
+                        "idle_window_only"
+                    },
+                    idle_ticks_observed: dream_status.idle_ticks_observed,
+                    idle_threshold_ticks: dream_status.idle_threshold_ticks,
+                    polls_consumed: 0,
+                    bounded_window_poll_budget: dream_status.bounded_window_poll_budget,
+                    batch_size: dream_status.batch_size,
+                    max_links_per_run: dream_status.max_links_per_run,
+                    links_created: 0,
+                    links_created_total: dream_status.links_created_total,
+                    candidate_batches_scanned: 0,
+                    last_run_tick: dream_status.last_run_tick,
+                    paused_reason: dream_skip_reason_label(dream_status.paused_reason),
+                    operator_log: vec![format!(
+                        "dream status trigger={} enabled={} idle_ticks={} threshold={}",
+                        dream_status.trigger.as_str(),
+                        dream_status.enabled,
+                        dream_status.idle_ticks_observed,
+                        dream_status.idle_threshold_ticks,
+                    )],
+                }
+            } else {
+                let run = engine.create_run(dream_status.clone());
+                let mut handle =
+                    MaintenanceJobHandle::new(run, dream_status.bounded_window_poll_budget);
+                handle.start();
+                let mut dream_output = None;
+                for _ in 0..(dream_status.bounded_window_poll_budget as usize + 1) {
+                    let snapshot = handle.poll();
+                    match snapshot.state {
+                        MaintenanceJobState::Completed(summary) => {
+                            dream_output = Some(DreamOutput {
+                                outcome: "accepted",
+                                namespace: summary.namespace.as_str().to_string(),
+                                enabled: dream_status.enabled,
+                                trigger: summary.trigger.as_str(),
+                                execution_window: summary.execution_window,
+                                idle_ticks_observed: summary.idle_ticks_observed,
+                                idle_threshold_ticks: summary.idle_threshold_ticks,
+                                polls_consumed: summary.polls_consumed,
+                                bounded_window_poll_budget: dream_status.bounded_window_poll_budget,
+                                batch_size: dream_status.batch_size,
+                                max_links_per_run: dream_status.max_links_per_run,
+                                links_created: summary.links_created,
+                                links_created_total: summary.links_created_total,
+                                candidate_batches_scanned: summary.candidate_batches_scanned,
+                                last_run_tick: Some(summary.last_run_tick),
+                                paused_reason: dream_skip_reason_label(summary.skipped_reason),
+                                operator_log: summary.operator_log,
+                            });
+                            break;
+                        }
+                        MaintenanceJobState::Running { .. } => continue,
+                        _ => {
+                            eprintln!("Dream job did not complete normally");
+                            std::process::exit(3);
+                        }
+                    }
+                }
+                dream_output.unwrap_or_else(|| {
+                    eprintln!("Dream job timed out");
+                    std::process::exit(3);
+                })
+            };
+
+            if output.json {
+                println!("{}", serde_json::to_string_pretty(&dream_output)?);
+            } else {
+                println!(
+                    "Dream '{}' in '{}' → enabled={}, trigger={}, idle={} / {}, polls={}, links={} (total={}), paused={}",
+                    dream_output.outcome,
+                    dream_output.namespace,
+                    dream_output.enabled,
+                    dream_output.trigger,
+                    dream_output.idle_ticks_observed,
+                    dream_output.idle_threshold_ticks,
+                    dream_output.polls_consumed,
+                    dream_output.links_created,
+                    dream_output.links_created_total,
+                    dream_output.paused_reason.unwrap_or("none"),
+                );
+                if output.verbose > 0 || dream_output.outcome != "accepted" {
+                    for line in &dream_output.operator_log {
+                        println!("  {line}");
+                    }
+                }
+            }
+        }
+        Commands::Health { brief, output } => {
+            let report = doctor_report().health;
+            if output.json {
+                println!("{}", serde_json::to_string_pretty(&report)?);
+            } else {
+                print_health_report(&report, *brief)?;
+            }
+        }
         Commands::Doctor { command, output } => {
             let _ = command.as_ref().unwrap_or(&DoctorCommands::Run);
             let report = doctor_report();
@@ -3165,7 +4642,23 @@ async fn main() -> anyhow::Result<()> {
                     println!("Doctor run [{}]", report.status);
                 }
                 println!("  posture: {}", report.posture);
+                println!("  checks: {}", report.checks.len());
+                println!(
+                    "  summary: ok={} warn={} fail={}",
+                    report.summary.ok_checks,
+                    report.summary.warn_checks,
+                    report.summary.fail_checks
+                );
                 println!("  indexes: {}", report.indexes.len());
+                if !report.runbook_hints.is_empty() {
+                    println!("  runbooks:");
+                    for hint in &report.runbook_hints {
+                        println!(
+                            "    - {} ({}) — {}",
+                            hint.runbook_id, hint.section, hint.reason
+                        );
+                    }
+                }
                 if output.verbose > 0 {
                     println!("  warnings: {}", report.warnings.join(", "));
                 }
@@ -3220,9 +4713,7 @@ async fn main() -> anyhow::Result<()> {
                 if !output.quiet {
                     println!(
                         "Observe '{}' in '{}' → {} fragment(s)",
-                        result.observation_source,
-                        result.namespace,
-                        result.fragments_previewed,
+                        result.observation_source, result.namespace, result.fragments_previewed,
                     );
                 }
                 println!("  batch: {}", result.observation_chunk_id);
@@ -3246,6 +4737,199 @@ async fn main() -> anyhow::Result<()> {
                             fragment.route_family,
                             fragment.write_decision,
                             fragment.compact_text
+                        );
+                    }
+                }
+            }
+        }
+        Commands::Skills {
+            namespace,
+            extract,
+            output,
+        } => {
+            let ns = NamespaceId::new(namespace)?;
+            let response = skills_output(&store, &ns, *extract);
+            if output.json {
+                println!("{}", serde_json::to_string_pretty(&response)?);
+            } else {
+                let result = response.result.as_ref().expect("skills result present");
+                if !output.quiet {
+                    println!(
+                        "Skills in '{}' → {} procedure(s)",
+                        result.namespace,
+                        result.procedures.len(),
+                    );
+                }
+                println!("  trigger: {}", result.extraction_trigger);
+                println!("  extracted: {}", result.extracted_count);
+                println!("  skipped: {}", result.skipped_count);
+                println!(
+                    "  reflection_compiler_active: {}",
+                    result.reflection_compiler_active
+                );
+                for (index, procedure) in result.procedures.iter().enumerate() {
+                    let artifact_class = procedure
+                        .review
+                        .reflection
+                        .as_ref()
+                        .map(|reflection| reflection.artifact_class)
+                        .unwrap_or("procedure");
+                    let source_outcome = procedure
+                        .review
+                        .reflection
+                        .as_ref()
+                        .map(|reflection| reflection.source_outcome)
+                        .unwrap_or("derived_episode");
+                    let release_rule = procedure
+                        .review
+                        .reflection
+                        .as_ref()
+                        .map(|reflection| reflection.release_rule)
+                        .unwrap_or("explicit_acceptance_required");
+                    println!(
+                        "  [{}] class={} source_outcome={} confidence={} review_status={} retrieval_kind={} release_rule={} | {}",
+                        index + 1,
+                        artifact_class,
+                        source_outcome,
+                        procedure.confidence,
+                        procedure.storage.review_status,
+                        procedure.recall.retrieval_kind,
+                        release_rule,
+                        procedure.content,
+                    );
+                    if output.verbose > 0 {
+                        println!(
+                            "      fixture={} derivation_rule={} member_count={} source_engram={} cues={}",
+                            procedure.fixture_name,
+                            procedure.review.derivation_rule,
+                            procedure.recall.member_count,
+                            match &procedure.recall.source_engram_id {
+                                FieldPresence::Present(value) => value.to_string(),
+                                FieldPresence::Absent => "absent".to_string(),
+                                FieldPresence::Redacted => "redacted".to_string(),
+                            },
+                            if procedure.recall.query_cues.is_empty() {
+                                "none".to_string()
+                            } else {
+                                procedure.recall.query_cues.join(",")
+                            }
+                        );
+                        if let Some(reflection) = &procedure.review.reflection {
+                            println!(
+                                "      advisory={} trusted_by_default={} promotion_basis={} checklist={}",
+                                reflection.advisory,
+                                reflection.trusted_by_default,
+                                reflection.promotion_basis,
+                                if reflection.checklist_items.is_empty() {
+                                    "none".to_string()
+                                } else {
+                                    reflection.checklist_items.join(" | ")
+                                }
+                            );
+                        }
+                    }
+                }
+            }
+        }
+        Commands::Invalidate {
+            id,
+            namespace,
+            dry_run,
+            output,
+        } => {
+            let ns = NamespaceId::new(namespace)?;
+            let response = invalidate_memory(&store, &local_records, &ns, MemoryId(*id), *dry_run);
+            if output.json {
+                println!("{}", serde_json::to_string_pretty(&response)?);
+            } else {
+                let result = response.result.as_ref().expect("invalidate result present");
+                if !output.quiet {
+                    println!(
+                        "Invalidate causal root #{} in '{}' → {} descendant(s)",
+                        result.root_memory_id, result.namespace, result.memories_penalized,
+                    );
+                }
+                println!("  dry_run: {}", result.dry_run);
+                println!("  chain_length: {}", result.chain_length);
+                println!("  avg_confidence_delta: {:.3}", result.avg_confidence_delta);
+                for step in &result.steps {
+                    println!(
+                        "  depth={} memory=#{} delta={:.2} link_type={} source_backed={}",
+                        step.depth,
+                        step.memory_id,
+                        step.confidence_delta,
+                        step.link_type,
+                        step.source_backed,
+                    );
+                    if output.verbose > 0 {
+                        if let Some(log) = &step.evidence_log {
+                            println!("      evidence={}", log);
+                        }
+                    }
+                }
+            }
+        }
+        Commands::Procedures {
+            namespace,
+            promote,
+            rollback,
+            note,
+            approved_by,
+            public,
+            output,
+        } => {
+            let ns = NamespaceId::new(namespace)?;
+            let response = procedures_output(
+                &mut store,
+                &ns,
+                promote.as_deref(),
+                rollback.as_deref(),
+                note.as_deref(),
+                approved_by,
+                *public,
+            )?;
+            if output.json {
+                println!("{}", serde_json::to_string_pretty(&response)?);
+            } else {
+                let result = response.result.as_ref().expect("procedures result present");
+                if !output.quiet {
+                    println!(
+                        "Procedures in '{}' → {} entry(s)",
+                        result.namespace,
+                        result.procedures.len(),
+                    );
+                }
+                println!("  trigger: {}", result.extraction_trigger);
+                println!("  reviewed_candidates: {}", result.reviewed_candidate_count);
+                println!("  procedural_count: {}", result.procedural_count);
+                println!(
+                    "  direct_lookup_supported: {}",
+                    result.direct_lookup_supported
+                );
+                for (index, procedure) in result.procedures.iter().enumerate() {
+                    println!(
+                        "  [{}] state={} visibility={} retrieval_kind={} handle={} | {} => {}",
+                        index + 1,
+                        procedure.storage.state,
+                        procedure.recall.visibility,
+                        procedure.recall.retrieval_kind,
+                        procedure.recall.pattern_handle,
+                        procedure.pattern,
+                        procedure.action,
+                    );
+                    if output.verbose > 0 {
+                        println!(
+                            "      accepted_by={} derivation_rule={} source_engram={} lineage={} audit={}#{}",
+                            procedure.review.accepted_by,
+                            procedure.review.derivation_rule,
+                            match &procedure.review.source_engram_id {
+                                FieldPresence::Present(value) => value.to_string(),
+                                FieldPresence::Absent => "absent".to_string(),
+                                FieldPresence::Redacted => "redacted".to_string(),
+                            },
+                            procedure.review.lineage_ancestors.len(),
+                            procedure.audit.event_kind,
+                            procedure.audit.sequence,
                         );
                     }
                 }
@@ -3417,20 +5101,26 @@ async fn main() -> anyhow::Result<()> {
 mod tests {
     use super::{
         build_retrieval_result_set, cli_preflight_allow, cli_preflight_explain,
+        confidence_explain_for_result, dream_skip_reason_label, explain_query,
         filter_audit_rows, inspect_memory, observe_memories, parse_audit_category,
-        parse_audit_kind, print_audit_rows, response_trace_for_result_set, sample_audit_log,
-        share_output, unshare_output, Cli, Commands, LocalMemoryRecord, PreflightCommands,
+        parse_audit_kind, print_audit_rows, procedures_output, query_by_example_memory_ids,
+        response_trace_for_result_set, sample_audit_log, share_output, skills_output,
+        unshare_output, Cli, Commands, DreamOutput, LocalMemoryRecord, PreflightCommands,
         RecallCommandConfig,
     };
     use clap::Parser;
-    use membrain_core::api::{NamespaceId, TraceStage};
-    use membrain_core::engine::observe::ObserveConfig;
-    use membrain_core::{BrainStore, RuntimeConfig};
+    use membrain_core::api::{FieldPresence, NamespaceId, TraceStage};
     use membrain_core::engine::confidence::{ConfidenceInputs, ConfidencePolicy};
-    use membrain_core::engine::ranking::{fuse_scores, RankingInput, RankingProfile};
+    use membrain_core::engine::dream::{DreamEngine, DreamPolicy, DreamTrigger};
+    use membrain_core::engine::observe::ObserveConfig;
+    use membrain_core::engine::ranking::{
+        fuse_scores, ConfidenceDisplayConfig, RankingInput, RankingProfile,
+    };
     use membrain_core::engine::recall::{RecallPlanKind, RecallTraceStage};
-    use membrain_core::engine::result::{AnsweredFrom, ResultBuilder, RetrievalExplain};
+    use membrain_core::engine::result::{AnsweredFrom, EntryLane, ResultBuilder, RetrievalExplain};
+    use membrain_core::graph::{CausalLinkType, EntityId};
     use membrain_core::types::{CanonicalMemoryType, FastPathRouteFamily, MemoryId, SessionId};
+    use membrain_core::{BrainStore, RuntimeConfig};
 
     #[test]
     fn audit_rows_preserve_request_id_in_json_export() {
@@ -3623,20 +5313,203 @@ mod tests {
     }
 
     #[test]
+    fn skills_command_preserves_namespace_and_extract_flag() {
+        let cli = Cli::parse_from([
+            "membrain",
+            "skills",
+            "--namespace",
+            "team.alpha",
+            "--extract",
+        ]);
+
+        match cli.command {
+            Commands::Skills {
+                namespace, extract, ..
+            } => {
+                assert_eq!(namespace, "team.alpha");
+                assert!(extract);
+            }
+            other => panic!("expected skills command, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn dream_command_preserves_scheduler_controls() {
+        let cli = Cli::parse_from([
+            "membrain",
+            "dream",
+            "--namespace",
+            "team.alpha",
+            "--status",
+            "--disable",
+            "--idle-ticks",
+            "42",
+            "--last-run-tick",
+            "9",
+            "--links-created-total",
+            "12",
+        ]);
+
+        match cli.command {
+            Commands::Dream {
+                namespace,
+                status,
+                disable,
+                idle_ticks,
+                last_run_tick,
+                links_created_total,
+                ..
+            } => {
+                assert_eq!(namespace, "team.alpha");
+                assert!(status);
+                assert!(disable);
+                assert_eq!(idle_ticks, 42);
+                assert_eq!(last_run_tick, Some(9));
+                assert_eq!(links_created_total, 12);
+            }
+            other => panic!("expected dream command, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn procedures_command_preserves_promotion_controls() {
+        let cli = Cli::parse_from([
+            "membrain",
+            "procedures",
+            "--namespace",
+            "team.alpha",
+            "--promote",
+            "procedural://team.alpha/000000000000002a",
+            "--note",
+            "approved",
+            "--approved-by",
+            "cli.user",
+            "--public",
+        ]);
+
+        match cli.command {
+            Commands::Procedures {
+                namespace,
+                promote,
+                note,
+                approved_by,
+                public,
+                ..
+            } => {
+                assert_eq!(namespace, "team.alpha");
+                assert_eq!(
+                    promote.as_deref(),
+                    Some("procedural://team.alpha/000000000000002a")
+                );
+                assert_eq!(note.as_deref(), Some("approved"));
+                assert_eq!(approved_by, "cli.user");
+                assert!(public);
+            }
+            other => panic!("expected procedures command, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn skills_output_surfaces_storage_review_and_recall_fields() {
+        let store = BrainStore::new(RuntimeConfig::default());
+        let namespace = NamespaceId::new("team.alpha").unwrap();
+        let response = skills_output(&store, &namespace, true);
+        let result = response.result.as_ref().unwrap();
+
+        assert_eq!(result.outcome, "accepted");
+        assert_eq!(result.namespace, "team.alpha");
+        assert_eq!(result.extraction_trigger, "explicit_skill_extraction");
+        assert!(result.reflection_compiler_active);
+        assert_eq!(result.extracted_count, 1);
+        assert_eq!(result.procedures.len(), 1);
+        assert_eq!(
+            result.procedures[0].storage.storage_class,
+            "derived_durable_artifact"
+        );
+        assert_eq!(
+            result.procedures[0].review.derivation_rule,
+            "skill_extraction"
+        );
+        assert_eq!(
+            result.procedures[0]
+                .review
+                .reflection
+                .as_ref()
+                .expect("reflection metadata")
+                .artifact_class,
+            "procedure"
+        );
+        assert_eq!(result.procedures[0].recall.recall_surface, "skills");
+    }
+
+    #[test]
+    fn procedures_output_surfaces_authoritative_procedural_entries() {
+        let mut store = BrainStore::new(RuntimeConfig::default());
+        let namespace = NamespaceId::new("team.alpha").unwrap();
+        let candidate = store.skill_artifacts(
+            namespace.clone(),
+            membrain_core::engine::consolidation::ConsolidationPolicy {
+                minimum_candidates: 1,
+                batch_size: 2,
+                min_skill_members: 2,
+                ..Default::default()
+            },
+            2,
+            true,
+        );
+        let pattern_handle = BrainStore::skill_candidate_pattern_handle(
+            &namespace,
+            &candidate.procedures[0].content,
+        );
+
+        let response = procedures_output(
+            &mut store,
+            &namespace,
+            Some(&pattern_handle),
+            None,
+            Some("approved by cli"),
+            "cli.tester",
+            false,
+        )
+        .unwrap();
+        let result = response.result.as_ref().unwrap();
+
+        assert_eq!(result.outcome, "accepted");
+        assert_eq!(result.namespace, "team.alpha");
+        assert_eq!(result.procedural_count, 1);
+        assert!(result.direct_lookup_supported);
+        assert_eq!(
+            result.procedures[0].storage.storage_class,
+            "procedural_durable_surface"
+        );
+        assert_eq!(result.procedures[0].review.accepted_by, "cli.tester");
+        assert_eq!(
+            result.procedures[0].recall.recall_surface,
+            "procedural_store"
+        );
+    }
+
+    #[test]
     fn why_command_preserves_explain_surface() {
         let cli = Cli::parse_from([
             "membrain",
             "why",
             "routing details",
+            "--depth",
+            "3",
             "--namespace",
             "team.alpha",
         ]);
 
         match cli.command {
             Commands::Explain {
-                query, namespace, ..
+                query,
+                depth,
+                namespace,
+                ..
             } => {
                 assert_eq!(query, "routing details");
+                assert_eq!(depth, Some(3));
                 assert_eq!(namespace, "team.alpha");
             }
             other => panic!("expected why to parse as explain surface, got {other:?}"),
@@ -3656,8 +5529,7 @@ mod tests {
             context: Some("coding session".to_string()),
             source_label: Some("stdin:test".to_string()),
         };
-        let content =
-            "build stayed green across canary rollout.\n\nuser prefers dark mode in dashboard settings.";
+        let content = "build stayed green across canary rollout.\n\nuser prefers dark mode in dashboard settings.";
 
         let preview = observe_memories(
             &store,
@@ -3676,7 +5548,10 @@ mod tests {
         assert_eq!(preview_result.fragments_previewed, 2);
         assert_eq!(preview_result.observation_source, "stdin:test");
         assert_eq!(local_records.len(), 0);
-        assert_eq!(preview.passive_observation.as_ref().unwrap().source_kind, "observation");
+        assert_eq!(
+            preview.passive_observation.as_ref().unwrap().source_kind,
+            "observation"
+        );
 
         let applied = observe_memories(
             &store,
@@ -3693,14 +5568,12 @@ mod tests {
         assert_eq!(applied_result.memories_created, 2);
         assert_eq!(local_records.len(), 2);
         assert!(local_records.iter().all(|record| {
-            record
-                .passive_observation
-                .as_ref()
-                .and_then(|passive| match &passive.observation_chunk_id {
+            record.passive_observation.as_ref().and_then(|passive| {
+                match &passive.observation_chunk_id {
                     membrain_core::api::FieldPresence::Present(value) => Some(value.as_str()),
                     _ => None,
-                })
-                == Some(applied_result.observation_chunk_id.as_str())
+                }
+            }) == Some(applied_result.observation_chunk_id.as_str())
         }));
 
         let inspected = inspect_memory(&mut hot, &local_records, &namespace, MemoryId(1)).unwrap();
@@ -3714,9 +5587,7 @@ mod tests {
         );
         assert_eq!(
             passive.observation_chunk_id,
-            membrain_core::api::FieldPresence::Present(
-                applied_result.observation_chunk_id.clone()
-            )
+            membrain_core::api::FieldPresence::Present(applied_result.observation_chunk_id.clone())
         );
         assert_eq!(
             passive.retention_marker,
@@ -3881,6 +5752,8 @@ mod tests {
             "small lookup for active session can stay on hot recent window before durable fallback"
                 .to_string(),
             Vec::new(),
+            None,
+            16,
         );
 
         let (_, trace_stages, ..) = response_trace_for_result_set(&result_set);
@@ -3892,6 +5765,299 @@ mod tests {
                 TraceStage::PolicyGate,
                 TraceStage::Packaging
             ]
+        );
+    }
+
+    #[test]
+    fn build_retrieval_result_set_exposes_dual_output_action_pack() {
+        let namespace = NamespaceId::new("team.actions").unwrap();
+        let local_records = vec![LocalMemoryRecord {
+            memory_id: MemoryId(1),
+            namespace: namespace.clone(),
+            session_id: SessionId(2),
+            memory_type: CanonicalMemoryType::Observation,
+            route_family: FastPathRouteFamily::Observation,
+            compact_text: "capital of France".to_string(),
+            provisional_salience: 900,
+            fingerprint: 100,
+            payload_size_bytes: 32,
+            is_landmark: false,
+            landmark_label: None,
+            era_id: None,
+            passive_observation: None,
+            causal_parents: Vec::new(),
+            causal_link_type: None,
+        }];
+        let config = RecallCommandConfig {
+            query: Some("capital".to_string()),
+            context: None,
+            top: 3,
+            kind: None,
+            confidence: "normal".to_string(),
+            explain: "full".to_string(),
+            namespace: namespace.clone(),
+            include_public: false,
+            like: None,
+            unlike: None,
+            graph_expansion: false,
+            as_of: None,
+            at: None,
+            era: None,
+            min_confidence: None,
+            min_strength: None,
+            show_decaying: false,
+            cold_tier: "auto".to_string(),
+        };
+
+        let result_set = build_retrieval_result_set(
+            &local_records,
+            &config,
+            RankingProfile::balanced(),
+            "balanced",
+            "small lookup for active session can stay on hot recent window before durable fallback"
+                .to_string(),
+            vec![MemoryId(1)],
+            None,
+            16,
+        );
+
+        assert_eq!(result_set.output_mode.as_str(), "balanced");
+        assert_eq!(
+            result_set.packaging_metadata.packaging_mode,
+            "evidence_plus_action"
+        );
+        assert_eq!(
+            result_set.action_pack.as_ref().unwrap()[0].action_type,
+            "review_observation"
+        );
+        assert_eq!(
+            result_set.action_pack.as_ref().unwrap()[0].supporting_evidence,
+            vec![MemoryId(1)]
+        );
+    }
+
+    #[test]
+    fn query_by_example_like_seed_orders_similar_memories_first() {
+        let namespace = NamespaceId::new("team.query-by-example").unwrap();
+        let store = BrainStore::new(RuntimeConfig::default());
+        let local_records = vec![
+            LocalMemoryRecord {
+                memory_id: MemoryId(7),
+                namespace: namespace.clone(),
+                session_id: SessionId(2),
+                memory_type: CanonicalMemoryType::Event,
+                route_family: FastPathRouteFamily::Event,
+                compact_text: "deploy pipeline outage on payments".to_string(),
+                provisional_salience: 900,
+                fingerprint: 700,
+                payload_size_bytes: 32,
+                is_landmark: false,
+                landmark_label: None,
+                era_id: None,
+                passive_observation: None,
+                causal_parents: Vec::new(),
+                causal_link_type: None,
+            },
+            LocalMemoryRecord {
+                memory_id: MemoryId(8),
+                namespace: namespace.clone(),
+                session_id: SessionId(2),
+                memory_type: CanonicalMemoryType::Event,
+                route_family: FastPathRouteFamily::Event,
+                compact_text: "deploy pipeline incident in billing".to_string(),
+                provisional_salience: 850,
+                fingerprint: 701,
+                payload_size_bytes: 32,
+                is_landmark: false,
+                landmark_label: None,
+                era_id: None,
+                passive_observation: None,
+                causal_parents: Vec::new(),
+                causal_link_type: None,
+            },
+            LocalMemoryRecord {
+                memory_id: MemoryId(9),
+                namespace: namespace.clone(),
+                session_id: SessionId(2),
+                memory_type: CanonicalMemoryType::Event,
+                route_family: FastPathRouteFamily::Event,
+                compact_text: "garden irrigation reminder for weekend".to_string(),
+                provisional_salience: 500,
+                fingerprint: 702,
+                payload_size_bytes: 32,
+                is_landmark: false,
+                landmark_label: None,
+                era_id: None,
+                passive_observation: None,
+                causal_parents: Vec::new(),
+                causal_link_type: None,
+            },
+        ];
+        let config = RecallCommandConfig {
+            query: None,
+            context: None,
+            top: 2,
+            kind: None,
+            confidence: "normal".to_string(),
+            explain: "full".to_string(),
+            namespace: namespace.clone(),
+            include_public: false,
+            like: Some(MemoryId(7)),
+            unlike: None,
+            graph_expansion: false,
+            as_of: None,
+            at: None,
+            era: None,
+            min_confidence: None,
+            min_strength: None,
+            show_decaying: false,
+            cold_tier: "auto".to_string(),
+        };
+
+        let matched_ids = query_by_example_memory_ids(&store, &local_records, &config);
+        let first_match = *matched_ids.first().expect("query-by-example match");
+        assert_ne!(first_match, MemoryId(7));
+        assert!(!matched_ids.contains(&MemoryId(7)));
+
+        let result_set = build_retrieval_result_set(
+            &local_records,
+            &config,
+            RankingProfile::balanced(),
+            "balanced",
+            "query-by-example seed similarity expanded a bounded hot-window shortlist".to_string(),
+            matched_ids,
+            None,
+            16,
+        );
+        let top_ids = result_set
+            .evidence_pack
+            .iter()
+            .map(|item| item.result.memory_id)
+            .collect::<Vec<_>>();
+
+        assert!(top_ids.contains(&first_match));
+        let query_by_example = result_set.explain.query_by_example.as_ref().unwrap();
+        assert_eq!(query_by_example.primary_cue, "like_id");
+        assert_eq!(query_by_example.requested_seed_descriptors, vec!["like:7"]);
+        assert_eq!(
+            query_by_example.materialized_seed_descriptors,
+            vec!["like:7"]
+        );
+        assert!(result_set.explain.result_reasons.iter().any(|reason| {
+            reason.reason_code == "query_by_example_candidate_expansion"
+                && reason.detail.contains("primary cue like_id expanded")
+        }));
+    }
+
+    #[test]
+    fn query_by_example_unlike_seed_prefers_dissimilar_memories() {
+        let namespace = NamespaceId::new("team.query-by-example").unwrap();
+        let store = BrainStore::new(RuntimeConfig::default());
+        let local_records = vec![
+            LocalMemoryRecord {
+                memory_id: MemoryId(11),
+                namespace: namespace.clone(),
+                session_id: SessionId(2),
+                memory_type: CanonicalMemoryType::Event,
+                route_family: FastPathRouteFamily::Event,
+                compact_text: "deploy pipeline outage on payments".to_string(),
+                provisional_salience: 900,
+                fingerprint: 710,
+                payload_size_bytes: 32,
+                is_landmark: false,
+                landmark_label: None,
+                era_id: None,
+                passive_observation: None,
+                causal_parents: Vec::new(),
+                causal_link_type: None,
+            },
+            LocalMemoryRecord {
+                memory_id: MemoryId(12),
+                namespace: namespace.clone(),
+                session_id: SessionId(2),
+                memory_type: CanonicalMemoryType::Event,
+                route_family: FastPathRouteFamily::Event,
+                compact_text: "deploy pipeline incident in billing".to_string(),
+                provisional_salience: 850,
+                fingerprint: 711,
+                payload_size_bytes: 32,
+                is_landmark: false,
+                landmark_label: None,
+                era_id: None,
+                passive_observation: None,
+                causal_parents: Vec::new(),
+                causal_link_type: None,
+            },
+            LocalMemoryRecord {
+                memory_id: MemoryId(13),
+                namespace: namespace.clone(),
+                session_id: SessionId(2),
+                memory_type: CanonicalMemoryType::Event,
+                route_family: FastPathRouteFamily::Event,
+                compact_text: "weekend trail run with friends".to_string(),
+                provisional_salience: 500,
+                fingerprint: 712,
+                payload_size_bytes: 32,
+                is_landmark: false,
+                landmark_label: None,
+                era_id: None,
+                passive_observation: None,
+                causal_parents: Vec::new(),
+                causal_link_type: None,
+            },
+        ];
+        let config = RecallCommandConfig {
+            query: None,
+            context: None,
+            top: 2,
+            kind: None,
+            confidence: "normal".to_string(),
+            explain: "full".to_string(),
+            namespace: namespace.clone(),
+            include_public: false,
+            like: None,
+            unlike: Some(MemoryId(11)),
+            graph_expansion: false,
+            as_of: None,
+            at: None,
+            era: None,
+            min_confidence: None,
+            min_strength: None,
+            show_decaying: false,
+            cold_tier: "auto".to_string(),
+        };
+
+        let matched_ids = query_by_example_memory_ids(&store, &local_records, &config);
+        let first_match = *matched_ids.first().expect("query-by-example match");
+        assert_ne!(first_match, MemoryId(11));
+        assert!(!matched_ids.contains(&MemoryId(11)));
+
+        let result_set = build_retrieval_result_set(
+            &local_records,
+            &config,
+            RankingProfile::balanced(),
+            "balanced",
+            "query-by-example seed similarity expanded a bounded hot-window shortlist".to_string(),
+            matched_ids,
+            None,
+            16,
+        );
+        let top_ids = result_set
+            .evidence_pack
+            .iter()
+            .map(|item| item.result.memory_id)
+            .collect::<Vec<_>>();
+
+        assert!(top_ids.contains(&first_match));
+        let query_by_example = result_set.explain.query_by_example.as_ref().unwrap();
+        assert_eq!(query_by_example.primary_cue, "unlike_id");
+        assert_eq!(
+            query_by_example.requested_seed_descriptors,
+            vec!["unlike:11"]
+        );
+        assert_eq!(
+            query_by_example.materialized_seed_descriptors,
+            vec!["unlike:11"]
         );
     }
 
@@ -3913,6 +6079,8 @@ mod tests {
                 landmark_label: Some("launch day pivot".to_string()),
                 era_id: Some("era-launch-0042".to_string()),
                 passive_observation: None,
+                causal_parents: Vec::new(),
+                causal_link_type: None,
             },
             LocalMemoryRecord {
                 memory_id: MemoryId(8),
@@ -3928,6 +6096,8 @@ mod tests {
                 landmark_label: None,
                 era_id: Some("era-launch-0042".to_string()),
                 passive_observation: None,
+                causal_parents: Vec::new(),
+                causal_link_type: None,
             },
             LocalMemoryRecord {
                 memory_id: MemoryId(9),
@@ -3943,6 +6113,8 @@ mod tests {
                 landmark_label: Some("older unrelated era".to_string()),
                 era_id: Some("era-older-0001".to_string()),
                 passive_observation: None,
+                causal_parents: Vec::new(),
+                causal_link_type: None,
             },
         ];
         let config = RecallCommandConfig {
@@ -3973,6 +6145,8 @@ mod tests {
             "balanced",
             "temporal recall stayed inside one landmark-defined era".to_string(),
             vec![MemoryId(7), MemoryId(8), MemoryId(9)],
+            None,
+            16,
         );
 
         let returned_ids = result_set
@@ -3992,6 +6166,214 @@ mod tests {
         assert!(era_reason
             .detail
             .contains("2 candidate(s) remained after era scoping"));
+    }
+
+    #[test]
+    fn explain_query_traces_causal_chain_for_numeric_memory_id() {
+        let store = BrainStore::new(RuntimeConfig::default());
+        let namespace = NamespaceId::new("team.causal").unwrap();
+        let local_records = vec![
+            LocalMemoryRecord {
+                memory_id: MemoryId(10),
+                namespace: namespace.clone(),
+                session_id: SessionId(1),
+                memory_type: CanonicalMemoryType::Event,
+                route_family: FastPathRouteFamily::Event,
+                compact_text: "root evidence".to_string(),
+                provisional_salience: 930,
+                fingerprint: 10,
+                payload_size_bytes: 64,
+                is_landmark: false,
+                landmark_label: None,
+                era_id: None,
+                passive_observation: None,
+                causal_parents: Vec::new(),
+                causal_link_type: None,
+            },
+            LocalMemoryRecord {
+                memory_id: MemoryId(20),
+                namespace: namespace.clone(),
+                session_id: SessionId(1),
+                memory_type: CanonicalMemoryType::Observation,
+                route_family: FastPathRouteFamily::Observation,
+                compact_text: "derived intermediate".to_string(),
+                provisional_salience: 840,
+                fingerprint: 20,
+                payload_size_bytes: 48,
+                is_landmark: false,
+                landmark_label: None,
+                era_id: None,
+                passive_observation: None,
+                causal_parents: vec![MemoryId(10)],
+                causal_link_type: Some(CausalLinkType::Reconsolidated),
+            },
+            LocalMemoryRecord {
+                memory_id: MemoryId(30),
+                namespace: namespace.clone(),
+                session_id: SessionId(1),
+                memory_type: CanonicalMemoryType::ToolOutcome,
+                route_family: FastPathRouteFamily::ToolOutcome,
+                compact_text: "final conclusion".to_string(),
+                provisional_salience: 760,
+                fingerprint: 30,
+                payload_size_bytes: 40,
+                is_landmark: false,
+                landmark_label: None,
+                era_id: None,
+                passive_observation: None,
+                causal_parents: vec![MemoryId(20)],
+                causal_link_type: Some(CausalLinkType::Extracted),
+            },
+        ];
+
+        let response = explain_query(&store, &local_records, "30", Some(2), &namespace);
+        let result = response.result.expect("causal explain result");
+
+        assert_eq!(
+            result.explain.recall_plan,
+            RecallPlanKind::Tier2ExactThenGraphExpansion
+        );
+        assert_eq!(result.packaging_metadata.result_budget, 5);
+        assert_eq!(result.evidence_pack.len(), 3);
+        let by_id = result
+            .evidence_pack
+            .iter()
+            .map(|item| (item.result.memory_id, item.result.entry_lane))
+            .collect::<std::collections::HashMap<_, _>>();
+        assert_eq!(by_id.get(&MemoryId(30)), Some(&EntryLane::Exact));
+        assert_eq!(by_id.get(&MemoryId(20)), Some(&EntryLane::Graph));
+        assert_eq!(by_id.get(&MemoryId(10)), Some(&EntryLane::Graph));
+        assert_eq!(result.provenance_summary.graph_seed, Some(EntityId(30)));
+        assert!(result.explain.result_reasons.iter().any(|reason| {
+            reason.reason_code == "query_by_example_seed_materialized"
+                && reason
+                    .detail
+                    .contains("memory #20 entered the bounded causal chain")
+        }));
+        assert_eq!(
+            result.provenance_summary.lineage_ancestors,
+            vec![MemoryId(10)]
+        );
+        assert_eq!(
+            response.route_summary.as_ref().unwrap().route_family,
+            "tier2_exact_then_graph_expansion"
+        );
+        assert_eq!(
+            response.graph_expansion.as_ref().unwrap().graph_seed,
+            FieldPresence::Present(30)
+        );
+        assert_eq!(
+            response
+                .graph_expansion
+                .as_ref()
+                .unwrap()
+                .supporting_memory_ids,
+            vec![10, 20]
+        );
+        assert_eq!(
+            response
+                .provenance_summary
+                .as_ref()
+                .unwrap()
+                .relation_to_seed,
+            FieldPresence::Present("causal")
+        );
+        assert_eq!(
+            response.provenance_summary.as_ref().unwrap().graph_seed,
+            FieldPresence::Present(30)
+        );
+    }
+
+    #[test]
+    fn build_retrieval_result_set_filters_low_confidence_and_exposes_display_details() {
+        let namespace = NamespaceId::new("team.delta").unwrap();
+        let local_records = vec![
+            LocalMemoryRecord {
+                memory_id: MemoryId(1),
+                namespace: namespace.clone(),
+                session_id: SessionId(1),
+                memory_type: CanonicalMemoryType::Event,
+                route_family: FastPathRouteFamily::Event,
+                compact_text: "high confidence item".to_string(),
+                provisional_salience: 900,
+                fingerprint: 10,
+                payload_size_bytes: 64,
+                is_landmark: false,
+                landmark_label: None,
+                era_id: None,
+                passive_observation: None,
+                causal_parents: Vec::new(),
+                causal_link_type: None,
+            },
+            LocalMemoryRecord {
+                memory_id: MemoryId(60),
+                namespace: namespace.clone(),
+                session_id: SessionId(1),
+                memory_type: CanonicalMemoryType::Event,
+                route_family: FastPathRouteFamily::Event,
+                compact_text: "low confidence item".to_string(),
+                provisional_salience: 100,
+                fingerprint: 20,
+                payload_size_bytes: 8192,
+                is_landmark: false,
+                landmark_label: None,
+                era_id: None,
+                passive_observation: None,
+                causal_parents: Vec::new(),
+                causal_link_type: None,
+            },
+        ];
+        let config = RecallCommandConfig {
+            query: Some("confidence".to_string()),
+            context: None,
+            top: 5,
+            kind: None,
+            confidence: "normal".to_string(),
+            explain: "full".to_string(),
+            namespace: namespace.clone(),
+            include_public: false,
+            like: None,
+            unlike: None,
+            graph_expansion: false,
+            as_of: None,
+            at: None,
+            era: None,
+            min_confidence: Some(0.5),
+            min_strength: None,
+            show_decaying: false,
+            cold_tier: "auto".to_string(),
+        };
+
+        let result_set = build_retrieval_result_set(
+            &local_records,
+            &config,
+            RankingProfile::balanced(),
+            "balanced",
+            "confidence-aware ordering".to_string(),
+            vec![MemoryId(1), MemoryId(60)],
+            None,
+            16,
+        );
+
+        assert_eq!(result_set.evidence_pack.len(), 1);
+        assert_eq!(result_set.evidence_pack[0].result.memory_id, MemoryId(1));
+        assert_eq!(result_set.omitted_summary.confidence_filtered, 1);
+        assert_eq!(result_set.omitted_summary.low_confidence_suppressed, 1);
+        assert!(result_set.explain.result_reasons.iter().any(|reason| {
+            reason.reason_code == "confidence_display_rule"
+                && reason
+                    .detail
+                    .contains("confidence changes retrieval ordering")
+        }));
+        let display = confidence_explain_for_result(
+            &result_set.evidence_pack[0].result,
+            ConfidenceDisplayConfig::strict(),
+        );
+        assert!(display.interval.is_some());
+        assert!(display
+            .uncertainty_breakdown
+            .iter()
+            .any(|(name, _)| name == "reconsolidation"));
     }
 
     #[test]
@@ -4019,6 +6401,7 @@ mod tests {
             AnsweredFrom::Tier2Indexed,
             &ConfidenceInputs {
                 corroboration_count: 0,
+                reconsolidation_count: 0,
                 ticks_since_last_access: 128,
                 age_ticks: 256,
                 resolution_state: membrain_core::engine::contradiction::ResolutionState::None,
@@ -4039,6 +6422,7 @@ mod tests {
             time_consumed_ms: Some(5),
             ranking_profile: "balanced".to_string(),
             contradictions_found: 0,
+            historical_context: None,
             query_by_example: None,
             result_reasons: vec![],
         };
@@ -4058,6 +6442,54 @@ mod tests {
             uncertainty_markers[0].detail,
             expected_uncertainty_markers[0].detail
         );
+    }
+
+    #[test]
+    fn dream_status_surface_reports_paused_posture() {
+        let namespace = NamespaceId::new("team.alpha").unwrap();
+        let engine = DreamEngine;
+        let status = engine.status(
+            namespace.clone(),
+            DreamTrigger::IdleWindow,
+            DreamPolicy {
+                enabled: false,
+                ..DreamPolicy::default()
+            },
+            12,
+            Some(7),
+            4,
+        );
+
+        assert!(status.should_skip());
+        let output = DreamOutput {
+            outcome: "blocked",
+            namespace: namespace.as_str().to_string(),
+            enabled: status.enabled,
+            trigger: status.trigger.as_str(),
+            execution_window: "idle_window_only",
+            idle_ticks_observed: status.idle_ticks_observed,
+            idle_threshold_ticks: status.idle_threshold_ticks,
+            polls_consumed: 0,
+            bounded_window_poll_budget: status.bounded_window_poll_budget,
+            batch_size: status.batch_size,
+            max_links_per_run: status.max_links_per_run,
+            links_created: 0,
+            links_created_total: status.links_created_total,
+            candidate_batches_scanned: 0,
+            last_run_tick: status.last_run_tick,
+            paused_reason: dream_skip_reason_label(status.paused_reason),
+            operator_log: vec![
+                "dream status trigger=idle_window enabled=false idle_ticks=12 threshold=100"
+                    .to_string(),
+            ],
+        };
+
+        assert_eq!(output.outcome, "blocked");
+        assert_eq!(output.namespace, "team.alpha");
+        assert_eq!(output.trigger, "idle_window");
+        assert_eq!(output.paused_reason, Some("disabled"));
+        assert_eq!(output.links_created_total, 4);
+        assert_eq!(output.last_run_tick, Some(7));
     }
 
     #[test]

@@ -297,11 +297,43 @@ fn non_landmarks_inherit_the_active_era_without_becoming_landmarks() {
 
     assert!(!prepared.normalized.landmark.is_landmark);
     assert_eq!(prepared.normalized.landmark.landmark_label, None);
-    assert_eq!(prepared.normalized.landmark.era_id.as_deref(), Some("era-launch-0088"));
+    assert_eq!(
+        prepared.normalized.landmark.era_id.as_deref(),
+        Some("era-launch-0088")
+    );
     assert_eq!(prepared.normalized.landmark.era_started_at_tick, None);
     assert_eq!(prepared.normalized.landmark.detection_score, 0);
     assert_eq!(prepared.normalized.landmark.detection_reason, None);
     assert_eq!(prepared.trace.landmark, prepared.normalized.landmark);
+}
+
+#[test]
+fn landmark_uses_current_logical_tick_for_absolute_era_boundaries_when_available() {
+    let engine = test_engine();
+    let prepared = engine.prepare_fast_path(
+        RawEncodeInput::new(
+            RawIntakeKind::Event,
+            "deployment policy changed after incident review",
+        )
+        .with_landmark_signals(LandmarkSignals::new(0.94, 0.88, 0.11, 55))
+        .with_current_tick(233),
+    );
+
+    assert!(prepared.normalized.landmark.is_landmark);
+    assert_eq!(prepared.normalized.landmark.era_started_at_tick, Some(233));
+    assert_eq!(prepared.trace.landmark.era_started_at_tick, Some(233));
+    assert!(prepared
+        .normalized
+        .landmark
+        .era_id
+        .as_deref()
+        .is_some_and(|era| era.ends_with("-0233")));
+    assert!(prepared
+        .normalized
+        .landmark
+        .detection_reason
+        .as_deref()
+        .is_some_and(|reason| reason.contains("gap_ticks=55")));
 }
 
 #[test]

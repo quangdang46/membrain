@@ -1,10 +1,12 @@
 use crate::mcp::{
-    ContextBudgetParams, McpInspectPayload, McpResource, McpResourceListing, McpResourceReadPayload,
-    McpResponse, McpRetrievalPayload, McpStream, McpStreamListing,
+    ContextBudgetParams, McpAuditPayload, McpAuditRow, McpInspectPayload, McpResource,
+    McpResourceListing, McpResourceReadPayload, McpResponse, McpRetrievalPayload, McpStream,
+    McpStreamListing,
 };
 
 const DAEMON_RESOURCE_NAMESPACE: &str = "daemon.runtime";
 const RUNTIME_STATUS_URI: &str = "membrain://daemon/runtime/status";
+const RUNTIME_HEALTH_URI: &str = "membrain://daemon/runtime/health";
 const RUNTIME_DOCTOR_URI: &str = "membrain://daemon/runtime/doctor";
 const RUNTIME_STREAMS_URI: &str = "membrain://daemon/runtime/streams";
 const INSPECT_RESOURCE_URI_TEMPLATE: &str = "membrain://{namespace}/memories/{memory_id}";
@@ -17,9 +19,10 @@ use crate::preflight::{
     PreflightOutcome,
 };
 use crate::rpc::{
-    busy_payload, cancelled_payload, JsonRpcRequest, JsonRpcResponse, RuntimeDoctorIndex,
-    RuntimeDoctorReport, RuntimeMaintenanceAccepted, RuntimeMethodRequest, RuntimeMetrics,
-    RuntimePosture, RuntimeRequest, RuntimeStatus,
+    busy_payload, cancelled_payload, JsonRpcRequest, JsonRpcResponse, RuntimeAvailability,
+    RuntimeDoctorCheck, RuntimeDoctorIndex, RuntimeDoctorReport, RuntimeDoctorRunbookHint,
+    RuntimeDoctorSummary, RuntimeMaintenanceAccepted, RuntimeMethodRequest, RuntimeMetrics,
+    RuntimePosture, RuntimeRemediation, RuntimeRequest, RuntimeStatus,
 };
 use anyhow::Context;
 use membrain_core::api::{
@@ -28,24 +31,170 @@ use membrain_core::api::{
     WorkspaceId,
 };
 use membrain_core::config::RuntimeConfig;
-use membrain_core::engine::forgetting::{ForgettingAction, ForgettingPolicy};
+use membrain_core::engine::confidence::{
+    ConfidenceEngine, ConfidenceInputs, ConfidenceOutput, ConfidencePolicy,
+};
 use membrain_core::engine::context_budget::{ContextBudgetRequest, InjectionFormat};
+use membrain_core::engine::forgetting::{ForgettingAction, ForgettingPolicy};
 use membrain_core::engine::observe::{ObserveConfig, ObserveEngine};
 use membrain_core::engine::ranking::{fuse_scores, RankingInput, RankingProfile};
 use membrain_core::engine::recall::{RecallEngine, RecallRequest, RecallRuntime};
 use membrain_core::engine::result::{
-    AnsweredFrom, QueryByExampleExplain, ResultBuilder, ResultReason, RetrievalExplain,
-    RetrievalResultSet,
+    AnsweredFrom, EntryLane, EvidenceRole, QueryByExampleExplain, ResultBuilder, ResultReason,
+    RetrievalExplain, RetrievalResultSet,
 };
 use membrain_core::engine::retrieval_planner::{QueryByExampleNormalization, RetrievalRequest};
-use membrain_core::observability::OutcomeClass;
+use membrain_core::graph::{
+    CausalEvidenceAttribution, CausalEvidenceKind, CausalLink, CausalLinkType, EntityId,
+    RelationKind,
+};
+use membrain_core::observability::{
+    AuditEventCategory, AuditEventKind, CacheEvalTrace, CacheEventLabel, CacheFamilyLabel,
+    CacheLookupOutcome, CacheReasonLabel, GenerationStatusLabel, OutcomeClass, WarmSourceLabel,
+};
 use membrain_core::policy::{
     PolicyModule, SharingAccessDecision, SharingAccessOutcome, SharingVisibility,
 };
+use membrain_core::store::audit::{AuditLogEntry, AuditLogFilter};
+use membrain_core::store::cache::{
+    CacheEvent, CacheFamily, CacheGenerationAnchors, CacheKey, CacheLookupResult, CacheManager,
+    GenerationStatus, InvalidationTrigger, PrefetchTrigger, WarmSource,
+};
 use membrain_core::store::tier2::Tier2DurableItemLayout;
 use membrain_core::types::{MemoryId, RawEncodeInput, RawIntakeKind, SessionId};
-use serde_json::json;
+use serde_json::{json, Value};
 use std::collections::{HashMap, VecDeque};
+use std::hash::{Hash, Hasher};
+
+fn cache_family_label(family: CacheFamily) -> CacheFamilyLabel {
+    match family {
+        CacheFamily::Tier1Item => CacheFamilyLabel::Tier1Item,
+        CacheFamily::NegativeCache => CacheFamilyLabel::Negative,
+        CacheFamily::ResultCache => CacheFamilyLabel::Result,
+        CacheFamily::EntityNeighborhood => CacheFamilyLabel::Result,
+        CacheFamily::SummaryCache => CacheFamilyLabel::Summary,
+        CacheFamily::AnnProbeCache => CacheFamilyLabel::AnnProbe,
+        CacheFamily::PrefetchHints
+        | CacheFamily::SessionWarmup
+        | CacheFamily::GoalConditioned
+        | CacheFamily::ColdStartMitigation => CacheFamilyLabel::Tier2Query,
+    }
+}
+
+fn cache_event_label(event: CacheEvent) -> CacheEventLabel {
+    match event {
+        CacheEvent::Hit => CacheEventLabel::Hit,
+        CacheEvent::Miss => CacheEventLabel::Miss,
+        CacheEvent::Bypass | CacheEvent::StaleWarning | CacheEvent::Disabled => {
+            CacheEventLabel::Bypass
+        }
+        CacheEvent::Invalidation => CacheEventLabel::Invalidate,
+        CacheEvent::RepairWarmup | CacheEvent::PrefetchDrop | CacheEvent::SessionExpired => {
+            CacheEventLabel::Prefetch
+        }
+    }
+}
+
+fn cache_lookup_outcome(result: &CacheLookupResult) -> CacheLookupOutcome {
+    match result.event {
+        CacheEvent::Hit => CacheLookupOutcome::Hit,
+        CacheEvent::Miss => CacheLookupOutcome::Miss,
+        CacheEvent::Bypass => CacheLookupOutcome::Bypass,
+        CacheEvent::StaleWarning => CacheLookupOutcome::StaleWarning,
+        CacheEvent::Disabled => CacheLookupOutcome::Disabled,
+        CacheEvent::Invalidation
+        | CacheEvent::RepairWarmup
+        | CacheEvent::PrefetchDrop
+        | CacheEvent::SessionExpired => CacheLookupOutcome::Bypass,
+    }
+}
+
+fn cache_reason_label(reason: membrain_core::store::cache::CacheReason) -> CacheReasonLabel {
+    match reason {
+        membrain_core::store::cache::CacheReason::OwnerBoundaryMismatch
+        | membrain_core::store::cache::CacheReason::PolicyDenied
+        | membrain_core::store::cache::CacheReason::ScopeTooBroad
+        | membrain_core::store::cache::CacheReason::PolicyChanged
+        | membrain_core::store::cache::CacheReason::RedactionChanged => {
+            CacheReasonLabel::PolicyBoundary
+        }
+        membrain_core::store::cache::CacheReason::NamespaceMismatch
+        | membrain_core::store::cache::CacheReason::NamespaceNarrowed
+        | membrain_core::store::cache::CacheReason::NamespaceWidened => {
+            CacheReasonLabel::NamespaceMismatch
+        }
+        membrain_core::store::cache::CacheReason::GenerationAnchorMismatch
+        | membrain_core::store::cache::CacheReason::VersionMismatch
+        | membrain_core::store::cache::CacheReason::SchemaChanged
+        | membrain_core::store::cache::CacheReason::IndexChanged
+        | membrain_core::store::cache::CacheReason::EmbeddingChanged
+        | membrain_core::store::cache::CacheReason::RankingChanged
+        | membrain_core::store::cache::CacheReason::RepairIncomplete
+        | membrain_core::store::cache::CacheReason::RecordNotPresent => {
+            CacheReasonLabel::StaleGeneration
+        }
+        membrain_core::store::cache::CacheReason::IntentChanged
+        | membrain_core::store::cache::CacheReason::BudgetExhausted => CacheReasonLabel::ColdStart,
+    }
+}
+
+fn warm_source_label(warm_source: WarmSource) -> WarmSourceLabel {
+    match warm_source {
+        WarmSource::Tier1ItemCache => WarmSourceLabel::Tier1ItemCache,
+        WarmSource::NegativeCache => WarmSourceLabel::Tier2QueryCache,
+        WarmSource::ResultCache => WarmSourceLabel::ResultCache,
+        WarmSource::EntityNeighborhood => WarmSourceLabel::SummaryCache,
+        WarmSource::SummaryCache => WarmSourceLabel::SummaryCache,
+        WarmSource::AnnProbeCache => WarmSourceLabel::AnnProbeCache,
+        WarmSource::PrefetchHints => WarmSourceLabel::PrefetchHints,
+        WarmSource::SessionWarmup | WarmSource::GoalConditioned => WarmSourceLabel::Tier2QueryCache,
+        WarmSource::ColdStartMitigation => WarmSourceLabel::ColdStartMitigation,
+    }
+}
+
+fn generation_status_label(status: GenerationStatus) -> GenerationStatusLabel {
+    match status {
+        GenerationStatus::Valid => GenerationStatusLabel::Valid,
+        GenerationStatus::Stale | GenerationStatus::VersionMismatched => {
+            GenerationStatusLabel::Stale
+        }
+        GenerationStatus::Unknown => GenerationStatusLabel::Unknown,
+    }
+}
+
+fn cache_eval_trace_from_lookup(
+    result: &CacheLookupResult,
+    candidates_before: usize,
+) -> CacheEvalTrace {
+    CacheEvalTrace {
+        cache_family: cache_family_label(result.family),
+        cache_event: cache_event_label(result.event),
+        outcome: cache_lookup_outcome(result),
+        cache_reason: result.reason.map(cache_reason_label),
+        warm_source: result.warm_source.map(warm_source_label),
+        generation_status: generation_status_label(result.generation_status),
+        candidates_before,
+        candidates_after: result.candidates_after,
+        warm_reuse: result.warm_source.is_some(),
+    }
+}
+
+fn cache_metrics_json(
+    cache_traces: Vec<CacheEvalTrace>,
+    cold_fallback_count: usize,
+    prefetch_added_candidates: Option<usize>,
+    prefetch_dropped_count: usize,
+    degraded_mode_served: bool,
+) -> Result<Value, serde_json::Error> {
+    let mut summary = membrain_core::api::CacheMetricsSummary::from_cache_traces(
+        cache_traces,
+        degraded_mode_served,
+    );
+    summary.cold_fallback_count = cold_fallback_count;
+    summary.prefetch_added_candidates = prefetch_added_candidates;
+    summary.prefetch_dropped_count = prefetch_dropped_count;
+    serde_json::to_value(summary)
+}
 use std::os::unix::fs::FileTypeExt;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
@@ -67,7 +216,16 @@ struct NormalizedRecallContract {
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct RuntimeMemoryRecord {
     layout: Tier2DurableItemLayout,
+    confidence_inputs: ConfidenceInputs,
+    confidence_output: ConfidenceOutput,
     passive_observation: Option<PassiveObservationInspectSummary>,
+    causal_parents: Vec<MemoryId>,
+    causal_link_type: Option<CausalLinkType>,
+}
+
+#[derive(Debug, Clone)]
+struct RuntimeAuditState {
+    store: membrain_core::BrainStore,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -115,6 +273,8 @@ struct RuntimeState {
     request_slots: Semaphore,
     maintenance_history: Mutex<VecDeque<u64>>,
     memories: StdMutex<HashMap<u64, RuntimeMemoryRecord>>,
+    audit: StdMutex<RuntimeAuditState>,
+    cache: StdMutex<CacheManager>,
 }
 
 impl RuntimeState {
@@ -134,6 +294,13 @@ impl RuntimeState {
             request_slots: Semaphore::new(config.request_concurrency),
             maintenance_history: Mutex::new(VecDeque::new()),
             memories: StdMutex::new(HashMap::new()),
+            audit: StdMutex::new(RuntimeAuditState {
+                store: membrain_core::BrainStore::new(RuntimeConfig::default()),
+            }),
+            cache: StdMutex::new(CacheManager::new(
+                RuntimeConfig::default().cache_per_family_capacity,
+                RuntimeConfig::default().prefetch_queue_capacity,
+            )),
         }
     }
 
@@ -159,7 +326,8 @@ impl RuntimeState {
 
     async fn doctor_report(&self) -> RuntimeDoctorReport {
         use membrain_core::api::{
-            AvailabilityPosture, AvailabilityReason, AvailabilitySummary, RemediationStep,
+            AvailabilityPosture, AvailabilityReason, AvailabilitySummary, ErrorKind,
+            RemediationStep,
         };
         use membrain_core::engine::maintenance::{
             MaintenanceController, MaintenanceJobHandle, MaintenanceJobState,
@@ -172,17 +340,10 @@ impl RuntimeState {
         let posture = status.posture.clone();
         let degraded_reasons = status.degraded_reasons.clone();
         let metrics = status.metrics.clone();
-        let overall_status = match posture {
+        let posture_status = match posture {
             RuntimePosture::Full => "ok",
             RuntimePosture::Degraded => "warn",
             RuntimePosture::ReadOnly | RuntimePosture::Offline => "fail",
-        };
-        let cache_health = if matches!(posture, RuntimePosture::Offline) {
-            "fail"
-        } else if matches!(posture, RuntimePosture::Degraded | RuntimePosture::ReadOnly) {
-            "warn"
-        } else {
-            "ok"
         };
         let cache_usable = !matches!(posture, RuntimePosture::Offline);
         let warnings = if matches!(posture, RuntimePosture::Full) {
@@ -196,7 +357,8 @@ impl RuntimeState {
         let namespace =
             NamespaceId::new("doctor.system").expect("doctor namespace should be valid");
         let mut repair_handle = MaintenanceJobHandle::new(
-            repair_engine.create_index_rebuild(namespace.clone(), IndexRepairEntrypoint::VerifyOnly),
+            repair_engine
+                .create_index_rebuild(namespace.clone(), IndexRepairEntrypoint::VerifyOnly),
             8,
         );
         repair_handle.start();
@@ -214,16 +376,16 @@ impl RuntimeState {
                                 .operator_reports
                                 .iter()
                                 .find(|report| report.target == result.target)
-                                .expect("repair operator report should exist for each doctor result");
-                            let plan = result
-                                .rebuild_entrypoint
-                                .and_then(|entrypoint| {
-                                    repair_engine.plan_index_rebuild(result.target, entrypoint)
-                                });
-                            let artifact = summary
-                                .verification_artifacts
-                                .get(&result.target)
-                                .expect("verification artifact should exist for each doctor result");
+                                .expect(
+                                    "repair operator report should exist for each doctor result",
+                                );
+                            let plan = result.rebuild_entrypoint.and_then(|entrypoint| {
+                                repair_engine.plan_index_rebuild(result.target, entrypoint)
+                            });
+                            let artifact =
+                                summary.verification_artifacts.get(&result.target).expect(
+                                    "verification artifact should exist for each doctor result",
+                                );
                             crate::rpc::RuntimeRepairReport {
                                 target: result.target.as_str(),
                                 status: result.status.as_str(),
@@ -246,6 +408,15 @@ impl RuntimeState {
                                 error_count: report.error_count,
                                 rebuild_duration_ms: report.rebuild_duration_ms,
                                 rollback_state: report.rollback_state,
+                                degraded_mode: report.degraded_mode.map(|mode| mode.as_str()),
+                                rollback_trigger: report
+                                    .rollback_trigger
+                                    .map(|trigger| trigger.as_str()),
+                                remediation_steps: report
+                                    .remediation_steps
+                                    .iter()
+                                    .map(|step| step.as_str())
+                                    .collect(),
                                 queue_depth_before: report.queue_depth_before,
                                 queue_depth_after: report.queue_depth_after,
                             }
@@ -258,6 +429,10 @@ impl RuntimeState {
                 _ => break,
             }
         }
+
+        use membrain_core::engine::lease::{
+            LeaseMetadata, LeasePolicy, LeaseScanItem, LeaseScanner,
+        };
 
         let index_reports = IndexModule.health_reports();
         let availability_reasons = {
@@ -280,32 +455,71 @@ impl RuntimeState {
             }
             reasons
         };
+        let corruption_reason_present = availability_reasons.iter().any(|reason| {
+            matches!(
+                reason,
+                AvailabilityReason::AuthoritativeInputUnreadable
+                    | AvailabilityReason::RepairRollbackRequired
+                    | AvailabilityReason::RepairRollbackInProgress
+            )
+        });
         let availability = match posture {
             RuntimePosture::Full => None,
             RuntimePosture::Degraded => Some(AvailabilitySummary::degraded(
                 vec!["doctor", "health", "audit"],
                 vec!["encode", "maintenance"],
-                availability_reasons,
+                availability_reasons.clone(),
                 vec![RemediationStep::CheckHealth, RemediationStep::RunRepair],
             )),
             RuntimePosture::ReadOnly => Some(AvailabilitySummary::new(
                 AvailabilityPosture::ReadOnly,
                 vec!["doctor", "health", "audit", "inspect"],
                 vec!["maintenance_preview_only"],
-                availability_reasons,
+                availability_reasons.clone(),
                 vec![RemediationStep::CheckHealth, RemediationStep::RunRepair],
             )),
             RuntimePosture::Offline => Some(AvailabilitySummary::new(
                 AvailabilityPosture::Offline,
                 vec!["doctor", "health", "audit"],
                 Vec::new(),
-                availability_reasons,
+                availability_reasons.clone(),
                 vec![RemediationStep::CheckHealth, RemediationStep::RunRepair],
             )),
         };
+        let runtime_availability = availability
+            .as_ref()
+            .map(|availability| RuntimeAvailability {
+                posture: availability.posture.as_str(),
+                query_capabilities: availability.query_capabilities.clone(),
+                mutation_capabilities: availability.mutation_capabilities.clone(),
+                degraded_reasons: availability.reason_names(),
+                recovery_conditions: availability.recovery_condition_names(),
+            });
+        let error_kind = if matches!(posture, RuntimePosture::ReadOnly | RuntimePosture::Offline)
+            || corruption_reason_present
+        {
+            Some(ErrorKind::CorruptionFailure.as_str())
+        } else {
+            None
+        };
+        let remediation = runtime_availability
+            .as_ref()
+            .map(|availability| RuntimeRemediation {
+                summary: format!(
+                    "runtime posture {} requires operator follow-up before normal service resumes",
+                    availability.posture
+                ),
+                next_steps: availability
+                    .recovery_conditions
+                    .iter()
+                    .map(|step| (*step).to_string())
+                    .collect(),
+            });
 
         let mut cache = membrain_core::store::cache::CacheManager::new(4, 4);
-        cache.result.disable();
+        if !matches!(posture, RuntimePosture::Full) {
+            cache.result.disable();
+        }
         cache.prefetch.submit_hint(
             namespace,
             membrain_core::store::cache::PrefetchTrigger::SessionRecency,
@@ -334,8 +548,8 @@ impl RuntimeState {
                 total_encodes: 12,
                 current_tick: 200,
                 daemon_uptime_ticks: 180,
-                index_reports,
-                availability,
+                index_reports: index_reports.clone(),
+                availability: availability.clone(),
                 feature_availability: vec![FeatureAvailabilityEntry {
                     feature: "health".to_string(),
                     posture: membrain_core::api::AvailabilityPosture::Full,
@@ -344,52 +558,381 @@ impl RuntimeState {
                 previous_total_recalls: Some(44),
                 previous_total_encodes: Some(10),
                 previous_repair_queue_depth: Some(0),
+                previous_hot_memories: Some(70),
+                previous_low_confidence_count: Some(5),
+                previous_unresolved_conflicts: Some(2),
+                previous_uncertain_count: Some(4),
+                previous_cache_hit_count: Some(0),
+                previous_cache_miss_count: Some(0),
+                previous_cache_bypass_count: Some(0),
+                previous_prefetch_queue_depth: Some(0),
+                previous_prefetch_drop_count: Some(0),
+                previous_index_stale_count: Some(1),
+                previous_index_missing_count: Some(0),
+                previous_index_repair_backlog_total: Some(1),
+                previous_availability_posture: Some(membrain_core::api::AvailabilityPosture::Full),
             },
             &cache,
             health_repair_summary.as_ref(),
         );
 
+        let repair_engine_component = repair_engine.component_name();
+        let schema_related_repairs = repair_reports
+            .iter()
+            .filter(|report| {
+                matches!(
+                    report.target,
+                    "hot_store_consistency" | "payload_integrity" | "contradiction_consistency"
+                )
+            })
+            .collect::<Vec<_>>();
+        let index_related_repairs = repair_reports
+            .iter()
+            .filter(|report| {
+                matches!(
+                    report.target,
+                    "lexical_index"
+                        | "metadata_index"
+                        | "semantic_hot_index"
+                        | "semantic_cold_index"
+                        | "engram_index"
+                )
+            })
+            .collect::<Vec<_>>();
+        let graph_related_repairs = repair_reports
+            .iter()
+            .filter(|report| report.target == "graph_consistency")
+            .collect::<Vec<_>>();
+        let cache_related_repairs = repair_reports
+            .iter()
+            .filter(|report| report.target == "cache_warm_state")
+            .collect::<Vec<_>>();
+        let index_state_warn = index_reports
+            .iter()
+            .any(|report| !report.health.is_usable())
+            || degraded_reasons
+                .iter()
+                .any(|reason| reason == "index_bypassed")
+            || index_related_repairs
+                .iter()
+                .any(|report| report.status != "healthy");
+        let graph_state_warn = degraded_reasons
+            .iter()
+            .any(|reason| reason == "graph_unavailable")
+            || graph_related_repairs
+                .iter()
+                .any(|report| !report.verification_passed)
+            || health.repair.as_ref().is_some_and(|summary| {
+                summary.state == membrain_core::health::SubsystemHealthState::Blocked
+            });
+        let cache_state_warn = health.cache.state
+            != membrain_core::health::SubsystemHealthState::Healthy
+            || degraded_reasons
+                .iter()
+                .any(|reason| reason == "cache_invalidated")
+            || cache_related_repairs
+                .iter()
+                .any(|report| !report.verification_passed);
+        let schema_state_warn = schema_related_repairs
+            .iter()
+            .any(|report| !report.verification_passed)
+            || error_kind.is_some();
+
+        let schema_entry_count = schema_related_repairs.len().max(1);
+        let index_entry_count = index_reports.len();
+        let graph_entry_count = health.total_engrams.max(1);
+        let cache_entry_count = health.cache.family_status.len();
+        let graph_generation = graph_related_repairs
+            .first()
+            .map(|report| report.derived_generation)
+            .unwrap_or("durable.v1");
+        let cache_generation = cache_related_repairs
+            .first()
+            .map(|report| report.derived_generation)
+            .unwrap_or("cache.v1");
+        let indexes = vec![
+            RuntimeDoctorIndex {
+                family: "schema",
+                health: if schema_state_warn { "warn" } else { "ok" },
+                usable: error_kind.is_none(),
+                entry_count: schema_entry_count,
+                generation: "schema.v1",
+            },
+            RuntimeDoctorIndex {
+                family: "index",
+                health: if index_state_warn { "warn" } else { "ok" },
+                usable: !index_reports
+                    .iter()
+                    .any(|report| report.health.as_str() == "missing"),
+                entry_count: index_entry_count,
+                generation: index_reports
+                    .iter()
+                    .find(|report| !report.generation.is_empty())
+                    .map(|report| report.generation)
+                    .unwrap_or("durable.v1"),
+            },
+            RuntimeDoctorIndex {
+                family: "graph",
+                health: if graph_state_warn { "warn" } else { "ok" },
+                usable: !degraded_reasons
+                    .iter()
+                    .any(|reason| reason == "graph_unavailable"),
+                entry_count: graph_entry_count,
+                generation: graph_generation,
+            },
+            RuntimeDoctorIndex {
+                family: "cache",
+                health: if cache_state_warn { "warn" } else { "ok" },
+                usable: cache_usable,
+                entry_count: cache_entry_count,
+                generation: cache_generation,
+            },
+        ];
+        let lease_items = if matches!(posture, RuntimePosture::Full) {
+            vec![
+                LeaseScanItem {
+                    memory_id: MemoryId(11),
+                    lease: LeaseMetadata::new(LeasePolicy::Normal, 0),
+                    action_critical: true,
+                },
+                LeaseScanItem {
+                    memory_id: MemoryId(12),
+                    lease: LeaseMetadata::new(LeasePolicy::Volatile, 20),
+                    action_critical: true,
+                },
+                LeaseScanItem {
+                    memory_id: MemoryId(13),
+                    lease: LeaseMetadata::new(LeasePolicy::Durable, 0),
+                    action_critical: false,
+                },
+            ]
+        } else {
+            vec![
+                LeaseScanItem {
+                    memory_id: MemoryId(11),
+                    lease: LeaseMetadata::new(LeasePolicy::Normal, 0),
+                    action_critical: true,
+                },
+                LeaseScanItem {
+                    memory_id: MemoryId(12),
+                    lease: LeaseMetadata::new(LeasePolicy::Volatile, 0),
+                    action_critical: true,
+                },
+                LeaseScanItem {
+                    memory_id: MemoryId(13),
+                    lease: LeaseMetadata::new(LeasePolicy::Durable, 1800),
+                    action_critical: false,
+                },
+            ]
+        };
+        let lease_report = LeaseScanner.scan(
+            &lease_items,
+            if matches!(posture, RuntimePosture::Full) {
+                40
+            } else {
+                400
+            },
+            3,
+        );
+        let index_issue_count = indexes.iter().filter(|index| index.health != "ok").count();
+        let failing_repair_targets = repair_reports
+            .iter()
+            .filter(|report| report.status != "healthy")
+            .count();
+        let stale_action_critical = lease_report.recheck_required_items > 0;
+        let mut warnings = warnings;
+        if stale_action_critical {
+            warnings.push("stale_action_critical_recheck_required");
+        }
+        if error_kind.is_some() {
+            warnings.push("safe_serving_impaired");
+        }
+
+        let checks = vec![
+            RuntimeDoctorCheck {
+                name: "schema_consistency",
+                surface_kind: "schema",
+                status: if schema_state_warn { "warn" } else { "ok" },
+                severity: if schema_state_warn { "warning" } else { "info" },
+                affected_scope: format!(
+                    "schema_generation=schema.v1 integrity_targets={schema_entry_count}"
+                ),
+                degraded_impact: schema_state_warn.then(|| {
+                    "authoritative schema integrity needs review before trusting derived state"
+                        .to_string()
+                }),
+                remediation: schema_state_warn.then(|| RuntimeRemediation {
+                    summary: "inspect authoritative store integrity before attempting repair"
+                        .to_string(),
+                    next_steps: vec!["check_health".to_string(), "run_repair".to_string()],
+                }),
+            },
+            RuntimeDoctorCheck {
+                name: "index_state",
+                surface_kind: "derived_index",
+                status: if index_issue_count > 0 { "warn" } else { "ok" },
+                severity: if index_issue_count > 0 { "warning" } else { "info" },
+                affected_scope: format!("index_families={index_entry_count}"),
+                degraded_impact: (index_issue_count > 0).then(|| {
+                    format!(
+                        "{index_issue_count} derived families show drift, rebuild need, or degraded cache/index state"
+                    )
+                }),
+                remediation: (index_issue_count > 0).then(|| RuntimeRemediation {
+                    summary: "repair derived indexes and verify parity against durable truth"
+                        .to_string(),
+                    next_steps: vec!["check_health".to_string(), "run_repair".to_string()],
+                }),
+            },
+            RuntimeDoctorCheck {
+                name: "graph_health",
+                surface_kind: "graph",
+                status: if graph_state_warn { "warn" } else { "ok" },
+                severity: if graph_state_warn { "warning" } else { "info" },
+                affected_scope: format!("graph_entries={graph_entry_count}"),
+                degraded_impact: graph_state_warn.then(|| {
+                    let failed_targets = graph_related_repairs
+                        .iter()
+                        .filter(|report| !report.verification_passed)
+                        .count();
+                    format!(
+                        "graph consistency degraded; failed_targets={failed_targets} graph_unavailable={} ",
+                        degraded_reasons.iter().any(|reason| reason == "graph_unavailable")
+                    )
+                    .trim()
+                    .to_string()
+                }),
+                remediation: graph_state_warn.then(|| RuntimeRemediation {
+                    summary: "rebuild graph projections from durable truth before trusting traversal state"
+                        .to_string(),
+                    next_steps: vec!["check_health".to_string(), "run_repair".to_string()],
+                }),
+            },
+            RuntimeDoctorCheck {
+                name: "serving_posture",
+                surface_kind: "availability",
+                status: posture_status,
+                severity: match posture_status {
+                    "fail" => "critical",
+                    "warn" => "warning",
+                    _ => "info",
+                },
+                affected_scope: posture.as_str().to_string(),
+                degraded_impact: runtime_availability.as_ref().map(|availability| {
+                    format!(
+                        "query_capabilities={} mutation_capabilities={} cache_state={}",
+                        availability.query_capabilities.join(","),
+                        availability.mutation_capabilities.join(","),
+                        indexes[3].health,
+                    )
+                }),
+                remediation: remediation.clone(),
+            },
+            RuntimeDoctorCheck {
+                name: "lease_freshness",
+                surface_kind: "freshness",
+                status: if stale_action_critical { "warn" } else { "ok" },
+                severity: if stale_action_critical { "warning" } else { "info" },
+                affected_scope: format!("scanned_items={}", lease_report.scanned_items),
+                degraded_impact: stale_action_critical.then(|| {
+                    format!(
+                        "{} action-critical items reached recheck_required; {} volatile items would be withheld",
+                        lease_report.recheck_required_items, lease_report.withheld_items
+                    )
+                }),
+                remediation: stale_action_critical.then(|| RuntimeRemediation {
+                    summary: "inspect stale action-critical evidence before following action guidance"
+                        .to_string(),
+                    next_steps: vec!["inspect_state".to_string(), "check_health".to_string()],
+                }),
+            },
+        ];
+        let status = if stale_action_critical && posture_status == "ok" {
+            "warn"
+        } else {
+            posture_status
+        };
+        let summary = RuntimeDoctorSummary {
+            ok_checks: checks.iter().filter(|check| check.status == "ok").count(),
+            warn_checks: checks.iter().filter(|check| check.status == "warn").count(),
+            fail_checks: checks.iter().filter(|check| check.status == "fail").count(),
+        };
+        let mut runbook_hints = Vec::new();
+        if index_issue_count > 0
+            || degraded_reasons
+                .iter()
+                .any(|reason| reason == "index_bypassed")
+        {
+            runbook_hints.push(RuntimeDoctorRunbookHint {
+                runbook_id: "index_rebuild_operations",
+                source_doc: "docs/OPERATIONS.md",
+                section: "## 5. Index Rebuild Operations",
+                reason: "derived index serving is degraded or bypassed; rebuild and parity proof should be reviewed"
+                    .to_string(),
+            });
+            runbook_hints.push(RuntimeDoctorRunbookHint {
+                runbook_id: "tier2_index_drift",
+                source_doc: "docs/FAILURE_PLAYBOOK.md",
+                section: "## 2. Tier2 index drift",
+                reason: "index-related degraded mode should follow the canonical drift containment matrix"
+                    .to_string(),
+            });
+        }
+        if failing_repair_targets > 0
+            || degraded_reasons.iter().any(|reason| {
+                matches!(
+                    reason.as_str(),
+                    "repair_in_flight" | "repair_rollback_required" | "repair_rollback_in_progress"
+                )
+            })
+        {
+            runbook_hints.push(RuntimeDoctorRunbookHint {
+                runbook_id: "repair_backlog_growth",
+                source_doc: "docs/FAILURE_PLAYBOOK.md",
+                section: "## 9. Repair backlog growth",
+                reason: "repair follow-up is still visible in operator diagnostics and should be drained before declaring recovery"
+                    .to_string(),
+            });
+        }
+        if error_kind.is_some() || stale_action_critical {
+            runbook_hints.push(RuntimeDoctorRunbookHint {
+                runbook_id: "incident_response",
+                source_doc: "docs/OPERATIONS.md",
+                section: "## 7. Incident Response",
+                reason: if error_kind.is_some() {
+                    "safe serving is impaired and incident-response containment should be followed"
+                        .to_string()
+                } else {
+                    "stale action-critical evidence requires explicit recheck/withhold review before acting"
+                        .to_string()
+                },
+            });
+        }
+
         RuntimeDoctorReport {
-            status: overall_status,
+            status,
             action: "doctor",
             posture,
             degraded_reasons,
             metrics,
-            indexes: vec![
-                RuntimeDoctorIndex {
-                    family: "schema",
-                    health: "ok",
-                    usable: true,
-                    entry_count: 1,
-                    generation: "schema.v1",
-                },
-                RuntimeDoctorIndex {
-                    family: "index",
-                    health: "ok",
-                    usable: true,
-                    entry_count: 128,
-                    generation: "durable.v1",
-                },
-                RuntimeDoctorIndex {
-                    family: "graph",
-                    health: "ok",
-                    usable: true,
-                    entry_count: 96,
-                    generation: "durable.v1",
-                },
-                RuntimeDoctorIndex {
-                    family: "cache",
-                    health: cache_health,
-                    usable: cache_usable,
-                    entry_count: 32,
-                    generation: "cache.v1",
-                },
-            ],
+            summary,
+            indexes,
+            repair_engine_component,
             repair_reports,
+            checks,
+            runbook_hints,
             warnings,
+            error_kind,
+            retryable: false,
+            remediation,
+            availability: runtime_availability,
             health: serde_json::to_value(health)
                 .expect("daemon doctor health report should serialize"),
         }
+    }
+
+    async fn health_report(&self) -> serde_json::Value {
+        self.doctor_report().await.health
     }
 
     fn next_request_id(&self) -> u64 {
@@ -437,26 +980,135 @@ impl RuntimeState {
         if let Some(agent_id) = common.agent_id.as_deref() {
             prepared.normalized.sharing.agent_id = Some(AgentId::new(agent_id));
         }
+        let confidence_inputs = Self::build_confidence_inputs(
+            &prepared.normalized,
+            prepared.provisional_salience,
+            None,
+            memory_id,
+            0,
+            None,
+        );
+        let confidence_output =
+            ConfidenceEngine.compute(&confidence_inputs, &ConfidencePolicy::default());
         let layout = store.tier2_store().layout_item(
             namespace,
             memory_id,
             SessionId(1),
             prepared.fingerprint,
             &prepared.normalized,
-            None,
-            None,
+            Some(confidence_inputs.clone()),
+            Some(confidence_output.clone()),
         );
         RuntimeMemoryRecord {
             layout,
+            confidence_inputs,
+            confidence_output,
             passive_observation: None,
+            causal_parents: Vec::new(),
+            causal_link_type: None,
         }
     }
 
     fn store_encoded_memory(&self, record: RuntimeMemoryRecord) {
+        let namespace = record.layout.metadata.namespace.clone();
+        let memory_id = record.layout.metadata.memory_id;
+        let confidence = record.confidence_output.confidence;
+        let strength = confidence.saturating_sub(80);
+        let note = format!(
+            "encoded {} into {}",
+            record.layout.metadata.memory_type.as_str(),
+            record.layout.metadata.route_family.as_str()
+        );
+        let mut cache = self
+            .cache
+            .lock()
+            .expect("runtime cache lock should be available");
+        let _ = cache.handle_invalidation(InvalidationTrigger::MemoryMutation, &namespace);
+        let tier1_key = Self::cache_key_for_memory(CacheFamily::Tier1Item, &record);
         self.memories
             .lock()
             .expect("runtime memory registry lock should be available")
-            .insert(record.layout.metadata.memory_id.0, record);
+            .insert(record.layout.metadata.memory_id.0, record.clone());
+        if let Some(store) = cache.store_for(CacheFamily::Tier1Item) {
+            let _ = store.admit(
+                tier1_key,
+                vec![record.layout.metadata.memory_id],
+                Default::default(),
+            );
+        }
+        self.append_runtime_audit_entry(
+            namespace,
+            AuditLogEntry::new(
+                AuditEventCategory::Encode,
+                AuditEventKind::EncodeAccepted,
+                record.layout.metadata.namespace.clone(),
+                "daemon_encode",
+                note,
+            )
+            .with_memory_id(memory_id)
+            .with_tick(self.runtime_current_tick(&record.layout.metadata.namespace))
+            .with_strength_delta(None, Some(strength))
+            .with_confidence_delta(None, Some(confidence)),
+        );
+    }
+
+    fn build_confidence_inputs(
+        normalized: &membrain_core::types::NormalizedMemoryEnvelope,
+        provisional_salience: u16,
+        passive_observation: Option<&PassiveObservationInspectSummary>,
+        memory_id: MemoryId,
+        causal_parent_count: u32,
+        causal_link_type: Option<CausalLinkType>,
+    ) -> ConfidenceInputs {
+        let recall_count = (memory_id.0 % 6) as u32;
+        let observation_boost = passive_observation
+            .filter(|inspect| inspect.captured_as_observation)
+            .map(|_| 75)
+            .unwrap_or(0);
+        let authoritativeness = provisional_salience
+            .saturating_add(100)
+            .saturating_add(observation_boost)
+            .min(1000);
+        let reconsolidation_count = match causal_link_type {
+            Some(CausalLinkType::Reconsolidated) => 1,
+            _ => (normalized.payload_size_bytes / 512).min(16) as u32,
+        };
+
+        ConfidenceInputs {
+            corroboration_count: u32::from((provisional_salience / 250).min(4)),
+            reconsolidation_count,
+            ticks_since_last_access: u64::from(memory_id.0.saturating_mul(17)),
+            age_ticks: u64::from(memory_id.0.saturating_mul(23)),
+            resolution_state: membrain_core::engine::contradiction::ResolutionState::None,
+            conflict_score: 0,
+            causal_parent_count,
+            authoritativeness,
+            recall_count,
+        }
+    }
+
+    fn append_runtime_audit_entry(
+        &self,
+        _namespace: NamespaceId,
+        entry: AuditLogEntry,
+    ) -> membrain_core::store::audit::AuditLogEntry {
+        let mut audit = self
+            .audit
+            .lock()
+            .expect("runtime audit state lock should be available");
+        let tick = audit.store.current_tick().saturating_add(1);
+        let memory_id = entry.memory_id.unwrap_or(MemoryId(0));
+        let entry = entry.with_tick(tick).with_memory_id(memory_id);
+        audit.store.append_audit_entry(entry)
+    }
+
+    fn runtime_current_tick(&self, _namespace: &NamespaceId) -> u64 {
+        self.audit
+            .lock()
+            .expect("runtime audit state lock should be available")
+            .store
+            .current_tick()
+            .saturating_add(1)
     }
 
     fn update_visibility(
@@ -474,12 +1126,120 @@ impl RuntimeState {
         Some(record.layout.clone())
     }
 
-    fn memory_layout(&self, memory_id: MemoryId) -> Option<Tier2DurableItemLayout> {
+    fn memory_record(&self, memory_id: MemoryId) -> Option<RuntimeMemoryRecord> {
         self.memories
             .lock()
             .expect("runtime memory registry lock should be available")
             .get(&memory_id.0)
-            .map(|record| record.layout.clone())
+            .cloned()
+    }
+
+    fn current_cache_generations() -> CacheGenerationAnchors {
+        CacheGenerationAnchors::default()
+    }
+
+    fn stable_string_key(value: &str) -> u64 {
+        let mut hasher = std::collections::hash_map::DefaultHasher::new();
+        value.hash(&mut hasher);
+        hasher.finish()
+    }
+
+    fn request_shape_hash(
+        request: &RecallRequest,
+        normalized: Option<&QueryByExampleNormalization>,
+        result_budget: usize,
+        output_mode_label: Option<&str>,
+        method_name: &str,
+    ) -> u64 {
+        let mut hasher = std::collections::hash_map::DefaultHasher::new();
+        request.exact_memory_id.hash(&mut hasher);
+        request.session_id.hash(&mut hasher);
+        request.small_lookup.hash(&mut hasher);
+        request.graph_expansion.hash(&mut hasher);
+        request.predictive_preroll.hash(&mut hasher);
+        result_budget.hash(&mut hasher);
+        output_mode_label.unwrap_or("").hash(&mut hasher);
+        method_name.hash(&mut hasher);
+        if let Some(normalized) = normalized {
+            normalized.normalized_query_text.hash(&mut hasher);
+            normalized.primary_cue.as_str().hash(&mut hasher);
+            for descriptor in normalized.seed_descriptors() {
+                descriptor.hash(&mut hasher);
+            }
+        }
+        hasher.finish()
+    }
+
+    fn request_owner_key(common: &crate::rpc::RuntimeCommonFields) -> Option<u64> {
+        common
+            .session_id
+            .as_deref()
+            .and_then(|value| value.parse::<u64>().ok())
+            .or_else(|| common.task_id.as_deref().map(Self::stable_string_key))
+    }
+
+    fn workspace_key(common: &crate::rpc::RuntimeCommonFields) -> Option<u64> {
+        common.workspace_id.as_deref().map(Self::stable_string_key)
+    }
+
+    fn cache_key_for_request(
+        family: CacheFamily,
+        namespace: &NamespaceId,
+        common: &crate::rpc::RuntimeCommonFields,
+        item_key: u64,
+        request_shape_hash: Option<u64>,
+    ) -> CacheKey {
+        CacheKey {
+            family,
+            namespace: namespace.clone(),
+            workspace_key: Self::workspace_key(common),
+            owner_key: match family {
+                CacheFamily::PrefetchHints
+                | CacheFamily::SessionWarmup
+                | CacheFamily::GoalConditioned => Self::request_owner_key(common),
+                _ => None,
+            },
+            request_shape_hash,
+            item_key,
+            generations: Self::current_cache_generations(),
+        }
+    }
+
+    fn cache_key_for_memory(family: CacheFamily, record: &RuntimeMemoryRecord) -> CacheKey {
+        CacheKey {
+            family,
+            namespace: record.layout.metadata.namespace.clone(),
+            workspace_key: record
+                .layout
+                .metadata
+                .workspace_id
+                .as_ref()
+                .map(|workspace_id| Self::stable_string_key(workspace_id.as_str())),
+            owner_key: match family {
+                CacheFamily::PrefetchHints
+                | CacheFamily::SessionWarmup
+                | CacheFamily::GoalConditioned => Some(record.layout.metadata.session_id.0),
+                _ => None,
+            },
+            request_shape_hash: None,
+            item_key: record.layout.metadata.memory_id.0,
+            generations: Self::current_cache_generations(),
+        }
+    }
+
+    fn cache_lookup_result_for_prefetch(
+        hint_memory_ids: Vec<MemoryId>,
+        candidates_before: usize,
+    ) -> CacheLookupResult {
+        CacheLookupResult {
+            family: CacheFamily::PrefetchHints,
+            event: CacheEvent::Hit,
+            reason: None,
+            warm_source: Some(membrain_core::store::cache::WarmSource::PrefetchHints),
+            generation_status: GenerationStatus::Valid,
+            candidates_after: candidates_before + hint_memory_ids.len(),
+            memory_ids: hint_memory_ids,
+        }
     }
 
     fn runtime_request_context(
@@ -591,6 +1351,26 @@ impl RuntimeState {
 }
 
 impl DaemonRuntime {
+    fn current_cache_generations() -> CacheGenerationAnchors {
+        RuntimeState::current_cache_generations()
+    }
+
+    fn request_shape_hash(
+        request: &RecallRequest,
+        normalized: Option<&QueryByExampleNormalization>,
+        result_budget: usize,
+        output_mode_label: Option<&str>,
+        method_name: &str,
+    ) -> u64 {
+        RuntimeState::request_shape_hash(
+            request,
+            normalized,
+            result_budget,
+            output_mode_label,
+            method_name,
+        )
+    }
+
     pub fn new<P: AsRef<Path>>(socket_path: P) -> Self {
         Self::with_config(DaemonRuntimeConfig::new(socket_path))
     }
@@ -839,6 +1619,10 @@ impl DaemonRuntime {
                 let report = state.doctor_report().await;
                 JsonRpcResponse::success(request_id, json!(report))
             }
+            RuntimeRequest::Health => {
+                let report = state.health_report().await;
+                JsonRpcResponse::success(request_id, report)
+            }
             RuntimeRequest::Encode {
                 content,
                 namespace,
@@ -948,6 +1732,19 @@ impl DaemonRuntime {
                             continue;
                         }
                         let memory_id = MemoryId(state.next_request_id());
+                        let passive_observation = PassiveObservationInspectSummary::from_encode(
+                            &fragment.prepared.passive_observation_inspect,
+                        );
+                        let confidence_inputs = RuntimeState::build_confidence_inputs(
+                            &fragment.prepared.normalized,
+                            fragment.prepared.provisional_salience,
+                            Some(&passive_observation),
+                            memory_id,
+                            0,
+                            None,
+                        );
+                        let confidence_output =
+                            ConfidenceEngine.compute(&confidence_inputs, &ConfidencePolicy::default());
                         let layout = membrain_core::BrainStore::new(RuntimeConfig::default())
                             .tier2_store()
                             .layout_item(
@@ -956,14 +1753,16 @@ impl DaemonRuntime {
                                 SessionId(1),
                                 fragment.prepared.fingerprint,
                                 &fragment.prepared.normalized,
-                                None,
-                                None,
+                                Some(confidence_inputs.clone()),
+                                Some(confidence_output.clone()),
                             );
                         state.store_encoded_memory(RuntimeMemoryRecord {
                             layout,
-                            passive_observation: Some(PassiveObservationInspectSummary::from_encode(
-                                &fragment.prepared.passive_observation_inspect,
-                            )),
+                            confidence_inputs,
+                            confidence_output,
+                            passive_observation: Some(passive_observation),
+                            causal_parents: Vec::new(),
+                            causal_link_type: None,
                         });
                     }
                 }
@@ -989,6 +1788,152 @@ impl DaemonRuntime {
                             "fingerprint": fragment.prepared.fingerprint,
                             "route_family": fragment.prepared.classification.route_family.as_str(),
                         })).collect::<Vec<_>>()
+                    }),
+                )
+            }
+            RuntimeRequest::Skills {
+                namespace,
+                extract,
+                common: _,
+            } => {
+                let namespace = match NamespaceId::new(&namespace) {
+                    Ok(namespace) => namespace,
+                    Err(_) => {
+                        return JsonRpcResponse::error(
+                            request_id,
+                            -32602,
+                            "malformed namespace",
+                            Some(json!({"error_kind": "validation_failure"})),
+                        )
+                    }
+                };
+                let result = membrain_core::BrainStore::default().skill_artifacts(
+                    namespace.clone(),
+                    membrain_core::engine::consolidation::ConsolidationPolicy {
+                        minimum_candidates: 1,
+                        batch_size: 2,
+                        min_skill_members: 2,
+                        ..Default::default()
+                    },
+                    2,
+                    extract.unwrap_or(false),
+                );
+                let accepted = extract.unwrap_or(false);
+                JsonRpcResponse::success(
+                    request_id,
+                    json!({
+                        "status": if accepted { "accepted" } else { "review" },
+                        "namespace": result.namespace,
+                        "extraction_trigger": result.extraction_trigger,
+                        "extracted_count": result.extracted_count,
+                        "skipped_count": result.skipped_count,
+                        "reflection_compiler_active": result.procedures.iter().any(|procedure| procedure.review.reflection.is_some()),
+                        "procedures": result.procedures,
+                    }),
+                )
+            }
+            RuntimeRequest::Procedures {
+                namespace,
+                promote,
+                rollback,
+                note,
+                approved_by,
+                public,
+                common,
+            } => {
+                let namespace = match NamespaceId::new(&namespace) {
+                    Ok(namespace) => namespace,
+                    Err(_) => {
+                        return JsonRpcResponse::error(
+                            request_id,
+                            -32602,
+                            "malformed namespace",
+                            Some(json!({"error_kind": "validation_failure"})),
+                        )
+                    }
+                };
+                let mut store = membrain_core::BrainStore::default();
+                let request_context = RuntimeState::runtime_request_context(
+                    namespace.clone(),
+                    &common,
+                    if public.unwrap_or(false) {
+                        SharingVisibility::Public
+                    } else {
+                        SharingVisibility::Shared
+                    },
+                    format!("procedures-{request_correlation_id}"),
+                );
+                let candidate = store.skill_artifacts(
+                    namespace.clone(),
+                    membrain_core::engine::consolidation::ConsolidationPolicy {
+                        minimum_candidates: 1,
+                        batch_size: 2,
+                        min_skill_members: 2,
+                        ..Default::default()
+                    },
+                    2,
+                    true,
+                );
+                let default_pattern_handle = candidate.procedures.first().map(|procedure| {
+                    procedure.recall.pattern_handle.clone()
+                });
+                if let Some(pattern_handle) = promote
+                    .as_deref()
+                    .or(default_pattern_handle.as_deref())
+                {
+                    if let Err(error) = store.promote_skill_to_procedural_with_context(
+                        request_context,
+                        pattern_handle,
+                        approved_by
+                            .clone()
+                            .unwrap_or_else(|| "daemon.operator".to_string()),
+                        note.clone()
+                            .unwrap_or_else(|| "approved via daemon procedures surface".to_string()),
+                    ) {
+                        return JsonRpcResponse::error(
+                            request_id,
+                            -32602,
+                            error.reason.as_str(),
+                            Some(json!({"error_kind": error.reason.as_str()})),
+                        );
+                    }
+                }
+                if let Some(pattern_handle) = rollback.as_deref() {
+                    if let Err(error) = store.rollback_procedural_entry(
+                        namespace.clone(),
+                        pattern_handle,
+                        note.clone()
+                            .unwrap_or_else(|| "rolled back via daemon procedures surface".to_string()),
+                    ) {
+                        return JsonRpcResponse::error(
+                            request_id,
+                            -32602,
+                            error.reason.as_str(),
+                            Some(json!({"error_kind": error.reason.as_str()})),
+                        );
+                    }
+                }
+                let result = store.procedural_store_surface(
+                    namespace.clone(),
+                    membrain_core::engine::consolidation::ConsolidationPolicy {
+                        minimum_candidates: 1,
+                        batch_size: 2,
+                        min_skill_members: 2,
+                        ..Default::default()
+                    },
+                    2,
+                    promote.is_some(),
+                );
+                JsonRpcResponse::success(
+                    request_id,
+                    json!({
+                        "status": result.outcome,
+                        "namespace": result.namespace,
+                        "extraction_trigger": result.extraction_trigger,
+                        "reviewed_candidate_count": result.reviewed_candidate_count,
+                        "procedural_count": result.procedural_count,
+                        "direct_lookup_supported": result.direct_lookup_supported,
+                        "procedures": result.procedures,
                     }),
                 )
             }
@@ -1084,11 +2029,29 @@ impl DaemonRuntime {
                 query,
                 namespace,
                 limit,
+                depth,
                 common,
             } => match Self::handle_explain(
                 &query,
                 &namespace,
                 limit,
+                depth,
+                common,
+                request_correlation_id,
+                &state,
+            ) {
+                Ok(response) => JsonRpcResponse::success(request_id, json!(response)),
+                Err(message) => JsonRpcResponse::error(request_id, -32602, message, None),
+            },
+            RuntimeRequest::Invalidate {
+                id,
+                namespace,
+                dry_run,
+                common,
+            } => match Self::handle_invalidate(
+                MemoryId(id),
+                &namespace,
+                dry_run,
                 common,
                 request_correlation_id,
                 &state,
@@ -1163,6 +2126,18 @@ impl DaemonRuntime {
                                 examples: vec![RUNTIME_STATUS_URI.to_string()],
                             },
                             McpResource {
+                                uri: RUNTIME_HEALTH_URI.to_string(),
+                                name: "runtime-health".to_string(),
+                                mime_type: "application/json".to_string(),
+                                resource_kind: "runtime_health".to_string(),
+                                description: Some(
+                                    "Bounded machine-readable brain health dashboard"
+                                        .to_string(),
+                                ),
+                                uri_template: None,
+                                examples: vec![RUNTIME_HEALTH_URI.to_string()],
+                            },
+                            McpResource {
                                 uri: RUNTIME_DOCTOR_URI.to_string(),
                                 name: "runtime-doctor".to_string(),
                                 mime_type: "application/json".to_string(),
@@ -1235,6 +2210,29 @@ impl DaemonRuntime {
                                 bounded: true,
                                 payload: serde_json::to_value(status)
                                     .expect("runtime status serializes"),
+                            })
+                            .expect("resource read payload serializes")
+                        )),
+                    )
+                }
+                RUNTIME_HEALTH_URI => {
+                    let report = state.health_report().await;
+                    let read_request_id = RequestId::new(format!(
+                        "daemon-resource-read-health-{request_correlation_id}"
+                    ))
+                    .expect("daemon-generated resource read request ids are valid");
+                    JsonRpcResponse::success(
+                        request_id,
+                        json!(McpResponse::success(
+                            serde_json::to_value(McpResourceReadPayload {
+                                request_id: read_request_id,
+                                namespace: NamespaceId::new(DAEMON_RESOURCE_NAMESPACE)
+                                    .expect("static daemon resource namespace is valid"),
+                                uri,
+                                mime_type: "application/json".to_string(),
+                                resource_kind: "runtime_health".to_string(),
+                                bounded: true,
+                                payload: report,
                             })
                             .expect("resource read payload serializes")
                         )),
@@ -1510,6 +2508,60 @@ impl DaemonRuntime {
                     }),
                 )
             }
+            RuntimeRequest::Audit {
+                namespace,
+                memory_id,
+                since_tick,
+                op,
+                limit,
+                common: _,
+            } => {
+                let namespace = match NamespaceId::new(&namespace) {
+                    Ok(namespace) => namespace,
+                    Err(_) => {
+                        return JsonRpcResponse::error(
+                            request_id,
+                            -32602,
+                            "malformed namespace",
+                            Some(json!({"error_kind": "validation_failure"})),
+                        )
+                    }
+                };
+                let audit = state
+                    .audit
+                    .lock()
+                    .expect("runtime audit state lock should be available");
+                let kind = op.as_deref().and_then(|name| {
+                    audit.store
+                        .audit_entries()
+                        .into_iter()
+                        .find(|entry| entry.kind.as_str() == name)
+                        .map(|entry| entry.kind)
+                });
+                let slice = audit.store.audit_log().slice(
+                    &AuditLogFilter {
+                        namespace: Some(namespace.clone()),
+                        memory_id: memory_id.map(MemoryId),
+                        kind,
+                        min_tick: since_tick,
+                        ..AuditLogFilter::default()
+                    },
+                    limit,
+                );
+                let payload = McpAuditPayload {
+                    request_id: RequestId::new(format!("daemon-audit-{request_correlation_id}"))
+                        .expect("daemon-generated audit request ids are valid"),
+                    namespace,
+                    total_matches: slice.total_matches,
+                    returned_rows: slice.returned_rows(),
+                    truncated: slice.truncated,
+                    entries: slice.rows.into_iter().map(McpAuditRow::from).collect(),
+                };
+                JsonRpcResponse::success(
+                    request_id,
+                    serde_json::to_value(payload).expect("audit payload serializes"),
+                )
+            }
             RuntimeRequest::Share {
                 id,
                 namespace_id,
@@ -1738,6 +2790,7 @@ impl DaemonRuntime {
             Some(&normalized.normalized_query_by_example),
             namespace,
             Some(normalized.result_budget),
+            mode.as_deref().or(effort.as_deref()),
             common,
             request_correlation_id,
             "recall",
@@ -1761,7 +2814,11 @@ impl DaemonRuntime {
             "plain" => InjectionFormat::Plain,
             "markdown" => InjectionFormat::Markdown,
             "json" => InjectionFormat::Json,
-            other => return Err(format!("invalid format `{other}`; expected plain, markdown, or json")),
+            other => {
+                return Err(format!(
+                    "invalid format `{other}`; expected plain, markdown, or json"
+                ));
+            }
         };
 
         let query = current_context.clone().unwrap_or_default();
@@ -1824,7 +2881,11 @@ impl DaemonRuntime {
                 .map_err(|err| err.to_string())?,
             budget,
         );
-        if response.result.as_ref().is_some_and(|result| result.partial_success) {
+        if response
+            .result
+            .as_ref()
+            .is_some_and(|result| result.partial_success)
+        {
             response = response.with_partial_success();
             response.warnings.push(ResponseWarning::new(
                 "budget_exhausted",
@@ -1845,14 +2906,16 @@ impl DaemonRuntime {
                     session_id: common.session_id,
                     task_id: common.task_id,
                     time_budget_ms: common.time_budget_ms,
-                    policy_context: common.policy_context.map(|ctx| crate::mcp::PolicyContextHint {
-                        include_public: ctx.include_public,
-                        sharing_visibility: ctx.sharing_visibility,
-                        caller_identity_bound: ctx.caller_identity_bound,
-                        workspace_acl_allowed: ctx.workspace_acl_allowed,
-                        agent_acl_allowed: ctx.agent_acl_allowed,
-                        session_visibility_allowed: ctx.session_visibility_allowed,
-                        legal_hold: ctx.legal_hold,
+                    policy_context: common.policy_context.map(|ctx| {
+                        crate::mcp::PolicyContextHint {
+                            include_public: ctx.include_public,
+                            sharing_visibility: ctx.sharing_visibility,
+                            caller_identity_bound: ctx.caller_identity_bound,
+                            workspace_acl_allowed: ctx.workspace_acl_allowed,
+                            agent_acl_allowed: ctx.agent_acl_allowed,
+                            session_visibility_allowed: ctx.session_visibility_allowed,
+                            legal_hold: ctx.legal_hold,
+                        }
                     }),
                 },
             })
@@ -1862,9 +2925,13 @@ impl DaemonRuntime {
             .map(|mut payload| {
                 payload.insert(
                     "result".to_string(),
-                    serde_json::to_value(response.result).expect("context budget result should serialize"),
+                    serde_json::to_value(response.result)
+                        .expect("context budget result should serialize"),
                 );
-                payload.insert("partial_success".to_string(), json!(response.partial_success));
+                payload.insert(
+                    "partial_success".to_string(),
+                    json!(response.partial_success),
+                );
                 payload.insert("warnings".to_string(), json!(response.warnings));
                 serde_json::Value::Object(payload)
             })
@@ -1883,10 +2950,11 @@ impl DaemonRuntime {
         let request_id = RequestId::new(format!("daemon-inspect-{request_correlation_id}"))
             .map_err(|err| err.to_string())?;
 
-        let Some(layout) = state.memory_layout(MemoryId(id)) else {
+        let Some(record) = state.memory_record(MemoryId(id)) else {
             let mut result = RetrievalResultSet::empty(
                 RetrievalExplain::from_plan(
-                    &RecallEngine.plan_recall(RecallRequest::exact(MemoryId(id)), RuntimeConfig::default()),
+                    &RecallEngine
+                        .plan_recall(RecallRequest::exact(MemoryId(id)), RuntimeConfig::default()),
                     "balanced",
                 ),
                 namespace.clone(),
@@ -1911,6 +2979,7 @@ impl DaemonRuntime {
             ));
         };
 
+        let layout = &record.layout;
         let request = RuntimeState::runtime_request_context(
             namespace.clone(),
             &_common,
@@ -1931,15 +3000,18 @@ impl DaemonRuntime {
 
         let mut result = RetrievalResultSet::empty(
             RetrievalExplain::from_plan(
-                &RecallEngine.plan_recall(RecallRequest::exact(MemoryId(id)), RuntimeConfig::default()),
+                &RecallEngine
+                    .plan_recall(RecallRequest::exact(MemoryId(id)), RuntimeConfig::default()),
                 "balanced",
             ),
             namespace.clone(),
         );
         result.outcome_class = OutcomeClass::Accepted;
         result.policy_summary.outcome_class = OutcomeClass::Accepted;
-        result.policy_summary.redactions_applied = matches!(outcome.decision, SharingAccessDecision::Redact);
-        result.policy_summary.filters = RuntimeState::share_policy_summary(&namespace, &outcome).filters;
+        result.policy_summary.redactions_applied =
+            matches!(outcome.decision, SharingAccessDecision::Redact);
+        result.policy_summary.filters =
+            RuntimeState::share_policy_summary(&namespace, &outcome).filters;
         result.packaging_metadata.result_budget = 1;
         result.packaging_metadata.degraded_summary = None;
 
@@ -1954,8 +3026,9 @@ impl DaemonRuntime {
             "relation_to_seed": "absent",
             "graph_seed": "absent"
         });
-        payload.policy_flags = serde_json::to_value(RuntimeState::share_policy_summary(&namespace, &outcome))
-            .map_err(|err| err.to_string())?;
+        payload.policy_flags =
+            serde_json::to_value(RuntimeState::share_policy_summary(&namespace, &outcome))
+                .map_err(|err| err.to_string())?;
         payload.lifecycle_state = json!({
             "outcome_class": OutcomeClass::Accepted,
             "truncated": false,
@@ -1987,9 +3060,8 @@ impl DaemonRuntime {
             .get(&id)
             .and_then(|record| record.passive_observation.clone())
         {
-            payload.explain_trace.passive_observation = Some(
-                serde_json::to_value(passive).map_err(|err| err.to_string())?,
-            );
+            payload.explain_trace.passive_observation =
+                Some(serde_json::to_value(passive).map_err(|err| err.to_string())?);
         } else {
             let inspect_resource_uri = format!("membrain://{}/memories/{id}", namespace.as_str());
             payload.explain_trace.passive_observation = Some(json!({
@@ -2004,14 +3076,319 @@ impl DaemonRuntime {
         ))
     }
 
+    fn handle_invalidate(
+        memory_id: MemoryId,
+        namespace: &str,
+        dry_run: bool,
+        _common: crate::rpc::RuntimeCommonFields,
+        request_correlation_id: u64,
+        state: &RuntimeState,
+    ) -> Result<serde_json::Value, String> {
+        let namespace = NamespaceId::new(namespace).map_err(|err| err.to_string())?;
+        let links = state
+            .memories
+            .lock()
+            .expect("runtime memory registry lock should be available")
+            .values()
+            .filter(|record| record.layout.metadata.namespace == namespace)
+            .flat_map(|record| {
+                record
+                    .causal_parents
+                    .iter()
+                    .copied()
+                    .map(move |parent_id| CausalLink {
+                        src_memory_id: parent_id,
+                        dst_memory_id: record.layout.metadata.memory_id,
+                        link_type: record.causal_link_type.unwrap_or(CausalLinkType::Derived),
+                        created_at_ms: record.layout.metadata.memory_id.0,
+                        agent_id: record
+                            .layout
+                            .metadata
+                            .agent_id
+                            .as_ref()
+                            .map(|id| id.as_str().to_string()),
+                        evidence: vec![CausalEvidenceAttribution {
+                            evidence_kind: CausalEvidenceKind::DurableMemory,
+                            source_ref: format!(
+                                "memory://{}/{}",
+                                record.layout.metadata.namespace.as_str(),
+                                parent_id.0
+                            ),
+                            supporting_memory_ids: vec![parent_id],
+                            confidence: 800,
+                        }],
+                    })
+            })
+            .collect::<Vec<_>>();
+        let report = membrain_core::BrainStore::new(RuntimeConfig::default())
+            .invalidate_causal_chain(memory_id, &links);
+        let request_id = RequestId::new(format!("daemon-invalidate-{request_correlation_id}"))
+            .map_err(|err| err.to_string())?;
+        Ok(json!({
+            "request_id": request_id.as_str(),
+            "status": if dry_run { "preview" } else { "accepted" },
+            "root_memory_id": memory_id.0,
+            "namespace": namespace.as_str(),
+            "dry_run": dry_run,
+            "chain_length": report.chain_length,
+            "memories_penalized": report.memories_penalized,
+            "avg_confidence_delta": report.avg_confidence_delta,
+            "steps": report.steps.iter().map(|step| json!({
+                "memory_id": step.memory_id.0,
+                "depth": step.depth,
+                "confidence_delta": step.confidence_delta,
+                "link_type": step.link_type.as_str(),
+                "source_backed": step.source_backed,
+                "evidence_log": step.evidence_log,
+            })).collect::<Vec<_>>(),
+            "policy_summary": {
+                "effective_namespace": namespace.as_str(),
+                "policy_family": "causal_invalidation",
+                "outcome_class": "accepted",
+                "blocked_stage": "policy_gate",
+                "redaction_fields": [],
+                "retention_state": "absent",
+                "sharing_scope": "private"
+            },
+            "result_reasons": report.steps.iter().map(|step| {
+                let detail = format!(
+                    "memory #{} receives bounded causal penalty {:.2} at depth {} via {} link",
+                    step.memory_id.0,
+                    step.confidence_delta,
+                    step.depth,
+                    step.link_type.as_str()
+                );
+                json!({
+                    "memory_id": step.memory_id.0,
+                    "reason_code": "causal_chain_invalidated",
+                    "detail": detail,
+                })
+            }).collect::<Vec<_>>(),
+            "trace_stages": ["tier2_exact", "graph_expansion", "packaging"],
+        }))
+    }
+
     fn handle_explain(
         query: &str,
         namespace: &str,
         limit: Option<usize>,
+        depth: Option<usize>,
         common: crate::rpc::RuntimeCommonFields,
         request_correlation_id: u64,
         state: &RuntimeState,
     ) -> Result<McpResponse, String> {
+        if let Ok(memory_id) = query.trim().parse::<u64>() {
+            let namespace = NamespaceId::new(namespace).map_err(|err| err.to_string())?;
+            let request_id = RequestId::new(format!("daemon-explain-{request_correlation_id}"))
+                .map_err(|err| err.to_string())?;
+            let links = state
+                .memories
+                .lock()
+                .expect("runtime memory registry lock should be available")
+                .values()
+                .filter(|record| record.layout.metadata.namespace == namespace)
+                .flat_map(|record| {
+                    record
+                        .causal_parents
+                        .iter()
+                        .copied()
+                        .map(move |parent_id| CausalLink {
+                            src_memory_id: parent_id,
+                            dst_memory_id: record.layout.metadata.memory_id,
+                            link_type: record.causal_link_type.unwrap_or(CausalLinkType::Derived),
+                            created_at_ms: record.layout.metadata.memory_id.0,
+                            agent_id: record
+                                .layout
+                                .metadata
+                                .agent_id
+                                .as_ref()
+                                .map(|id| id.as_str().to_string()),
+                            evidence: vec![CausalEvidenceAttribution {
+                                evidence_kind: CausalEvidenceKind::DurableMemory,
+                                source_ref: format!(
+                                    "memory://{}/{}",
+                                    record.layout.metadata.namespace.as_str(),
+                                    parent_id.0
+                                ),
+                                supporting_memory_ids: vec![parent_id],
+                                confidence: 800,
+                            }],
+                        })
+                })
+                .collect::<Vec<_>>();
+            let requested_depth =
+                depth.unwrap_or(RuntimeConfig::default().graph_max_depth as usize);
+            let trace = membrain_core::BrainStore::new(RuntimeConfig::default())
+                .graph()
+                .trace_causality(
+                    MemoryId(memory_id),
+                    &links,
+                    requested_depth,
+                    RuntimeConfig::default().graph_max_nodes,
+                );
+            let mut explain = RetrievalExplain::from_plan(
+                &RecallEngine.plan_recall(
+                    RecallRequest::exact(MemoryId(memory_id)).with_graph_expansion(true),
+                    RuntimeConfig::default(),
+                ),
+                "balanced",
+            );
+            explain.route_reason =
+                "bounded causal trace walked explicit source-backed links from the target memory"
+                    .to_string();
+            explain.query_by_example = Some(QueryByExampleExplain {
+                primary_cue: "memory_id".to_string(),
+                requested_seed_descriptors: vec![format!("memory:{memory_id}")],
+                materialized_seed_descriptors: trace
+                    .steps
+                    .iter()
+                    .map(|step| format!("memory:{}", step.memory_id.0))
+                    .collect(),
+                missing_seed_descriptors: Vec::new(),
+                expanded_candidate_count: trace.steps.len(),
+                influence_summary: format!(
+                    "memory:{memory_id} expanded {} causal chain step(s) within bounded traversal caps",
+                    trace.steps.len()
+                ),
+            });
+            explain.result_reasons.extend(trace.steps.iter().map(|step| ResultReason {
+                memory_id: Some(step.memory_id),
+                reason_code: "query_by_example_seed_materialized".to_string(),
+                detail: if step.depth == 0 {
+                    format!(
+                        "memory #{} is the causal trace seed; traversal starts here before following bounded parent links",
+                        step.memory_id.0
+                    )
+                } else {
+                    format!(
+                        "memory #{} entered the bounded causal chain at depth {} via {:?}",
+                        step.memory_id.0,
+                        step.depth,
+                        step.link_type
+                    )
+                },
+            }));
+            if trace.all_roots_valid {
+                explain.result_reasons.push(ResultReason {
+                    memory_id: None,
+                    reason_code: "causal_chain_root_validated".to_string(),
+                    detail: format!(
+                        "causal trace resolved to source-backed root evidence {:?}",
+                        trace.root_memory_ids
+                    ),
+                });
+            }
+            for cutoff in &trace.explain.cutoff_reasons {
+                let (reason_code, detail) = match cutoff {
+                    membrain_core::graph::CutoffReason::MaxDepthReached(depth) => (
+                        "graph_cutoff_max_depth",
+                        format!(
+                            "causal traversal stopped at requested depth cap {requested_depth} (effective depth {depth})"
+                        ),
+                    ),
+                    membrain_core::graph::CutoffReason::MaxNodesReached(nodes) => (
+                        "graph_cutoff_budget",
+                        format!(
+                            "causal traversal stopped after reaching declared node cap {nodes}"
+                        ),
+                    ),
+                    membrain_core::graph::CutoffReason::BudgetExhausted => (
+                        "graph_cutoff_budget",
+                        "causal traversal exhausted its bounded traversal budget".to_string(),
+                    ),
+                    membrain_core::graph::CutoffReason::PolicyNamespaceBlocked => (
+                        "graph_cutoff_policy_namespace",
+                        "causal traversal omitted one or more parents because policy blocked them"
+                            .to_string(),
+                    ),
+                };
+                explain.result_reasons.push(ResultReason {
+                    memory_id: None,
+                    reason_code: reason_code.to_string(),
+                    detail,
+                });
+            }
+            let mut result = RetrievalResultSet::empty(explain, namespace.clone());
+            result.outcome_class = OutcomeClass::Accepted;
+            result.policy_summary.outcome_class = OutcomeClass::Accepted;
+            result.packaging_metadata.result_budget = trace.steps.len().max(1);
+            result.packaging_metadata.graph_assistance =
+                "graph_expanded_supporting_neighbors".to_string();
+            result.packaging_metadata.degraded_summary = None;
+            result.provenance_summary.graph_seed = Some(EntityId(memory_id));
+            result.provenance_summary.relation_to_seed = Some(RelationKind::Causal);
+            result.provenance_summary.lineage_ancestors = trace.root_memory_ids.clone();
+
+            let layouts = state
+                .memories
+                .lock()
+                .expect("runtime memory registry lock should be available")
+                .values()
+                .filter(|record| {
+                    trace
+                        .steps
+                        .iter()
+                        .any(|step| step.memory_id == record.layout.metadata.memory_id)
+                })
+                .cloned()
+                .collect::<Vec<_>>();
+            let mut builder = ResultBuilder::new(trace.steps.len().max(1), namespace.clone());
+            for record in &layouts {
+                let entry_lane = if record.layout.metadata.memory_id == MemoryId(memory_id) {
+                    EntryLane::Exact
+                } else {
+                    EntryLane::Graph
+                };
+                let ranking = fuse_scores(
+                    RankingInput {
+                        recency: 900,
+                        salience: 880,
+                        strength: 860,
+                        provenance: 700,
+                        conflict: 500,
+                        confidence: record.confidence_output.confidence,
+                    },
+                    RankingProfile::balanced(),
+                );
+                builder.add_with_confidence(
+                    record.layout.metadata.memory_id,
+                    record.layout.metadata.namespace.clone(),
+                    record.layout.metadata.session_id,
+                    record.layout.metadata.memory_type,
+                    record.layout.metadata.compact_text.clone(),
+                    &ranking,
+                    AnsweredFrom::Tier2Indexed,
+                    &record.confidence_inputs,
+                    &ConfidencePolicy::default(),
+                );
+                let _ = entry_lane;
+            }
+            let mut built = builder.build(result.explain.clone());
+            for item in &mut built.evidence_pack {
+                if item.result.memory_id == MemoryId(memory_id) {
+                    item.result.entry_lane = EntryLane::Exact;
+                    item.result.role = EvidenceRole::Primary;
+                } else {
+                    item.result.entry_lane = EntryLane::Graph;
+                    item.result.role = EvidenceRole::Supporting;
+                }
+                item.provenance_summary.graph_seed = Some(EntityId(memory_id));
+                item.provenance_summary.relation_to_seed = Some(RelationKind::Causal);
+                item.provenance_summary.lineage_ancestors = trace.root_memory_ids.clone();
+            }
+            built.outcome_class = OutcomeClass::Accepted;
+            built.policy_summary.outcome_class = OutcomeClass::Accepted;
+            built.packaging_metadata.graph_assistance =
+                "graph_expanded_supporting_neighbors".to_string();
+            built.packaging_metadata.result_budget = trace.steps.len().max(1);
+            built.provenance_summary.graph_seed = Some(EntityId(memory_id));
+            built.provenance_summary.relation_to_seed = Some(RelationKind::Causal);
+            built.provenance_summary.lineage_ancestors = trace.root_memory_ids.clone();
+            let payload = McpRetrievalPayload::from_result(request_id, namespace, false, built)
+                .map_err(|err| err.to_string())?;
+            return Ok(McpResponse::retrieval_success(payload));
+        }
+
         let normalized = Self::normalize_recall_contract(
             NamespaceId::new(namespace).map_err(|err| err.to_string())?,
             Some(query.to_string()),
@@ -2025,6 +3402,7 @@ impl DaemonRuntime {
             Some(&normalized.normalized_query_by_example),
             namespace,
             Some(normalized.result_budget),
+            None,
             common,
             request_correlation_id,
             "explain",
@@ -2047,7 +3425,10 @@ impl DaemonRuntime {
             ),
             "balanced",
         );
-        let mut builder = ResultBuilder::new(RuntimeConfig::default().tier1_candidate_budget, namespace.clone());
+        let mut builder = ResultBuilder::new(
+            RuntimeConfig::default().tier1_candidate_budget,
+            namespace.clone(),
+        );
 
         if query_by_example.has_example_seeds() {
             let requested_seed_descriptors = query_by_example.seed_descriptors();
@@ -2072,15 +3453,16 @@ impl DaemonRuntime {
             });
         }
 
-        let layouts = state
+        let records = state
             .memories
             .lock()
             .expect("runtime memory registry lock should be available")
             .values()
-            .map(|record| record.layout.clone())
+            .cloned()
             .collect::<Vec<_>>();
 
-        for layout in layouts {
+        for record in records {
+            let layout = &record.layout;
             let request_context = RuntimeState::runtime_request_context(
                 namespace.clone(),
                 common,
@@ -2102,7 +3484,13 @@ impl DaemonRuntime {
             let matched = query_by_example
                 .normalized_query_text
                 .as_deref()
-                .map(|query| layout.metadata.compact_text.to_lowercase().contains(&query.to_lowercase()))
+                .map(|query| {
+                    layout
+                        .metadata
+                        .compact_text
+                        .to_lowercase()
+                        .contains(&query.to_lowercase())
+                })
                 .unwrap_or(true);
             let ranking = fuse_scores(
                 RankingInput {
@@ -2111,11 +3499,11 @@ impl DaemonRuntime {
                     strength: if matched { 820 } else { 520 },
                     provenance: 700,
                     conflict: 500,
-                    confidence: 820,
+                    confidence: record.confidence_output.confidence,
                 },
                 RankingProfile::balanced(),
             );
-            builder.add(
+            builder.add_with_confidence(
                 layout.metadata.memory_id,
                 layout.metadata.namespace.clone(),
                 layout.metadata.session_id,
@@ -2123,10 +3511,17 @@ impl DaemonRuntime {
                 layout.metadata.compact_text.clone(),
                 &ranking,
                 AnsweredFrom::Tier2Indexed,
+                &record.confidence_inputs,
+                &ConfidencePolicy::default(),
             );
             explain.result_reasons.push(ResultReason {
                 memory_id: Some(layout.metadata.memory_id),
-                reason_code: if matched { "score_kept" } else { "fallback_candidate" }.to_string(),
+                reason_code: if matched {
+                    "score_kept"
+                } else {
+                    "fallback_candidate"
+                }
+                .to_string(),
                 detail: if matched {
                     "context budget shortlist matched compact text inside the bounded runtime store"
                         .to_string()
@@ -2170,6 +3565,7 @@ impl DaemonRuntime {
         query_by_example: Option<&QueryByExampleNormalization>,
         namespace: &str,
         limit: Option<usize>,
+        output_mode_label: Option<&str>,
         common: crate::rpc::RuntimeCommonFields,
         request_correlation_id: u64,
         method_name: &str,
@@ -2181,6 +3577,21 @@ impl DaemonRuntime {
             .map_err(|err| err.to_string())?;
         let plan = RecallEngine.plan_recall(request, RuntimeConfig::default());
         let result_budget = Self::canonical_result_budget(&request, limit);
+        let output_mode = output_mode_label
+            .and_then(membrain_core::engine::result::DualOutputMode::from_label)
+            .unwrap_or(membrain_core::engine::result::DualOutputMode::Balanced);
+        let request_shape_hash = Self::request_shape_hash(
+            &request,
+            query_by_example,
+            result_budget,
+            output_mode_label,
+            method_name,
+        );
+        let current_generations = Self::current_cache_generations();
+        let mut cache = state
+            .cache
+            .lock()
+            .expect("runtime cache lock should be available");
         let mut explain = RetrievalExplain::from_plan(&plan, "balanced");
         if let Some(normalized) =
             query_by_example.filter(|normalized| normalized.has_example_seeds())
@@ -2217,29 +3628,86 @@ impl DaemonRuntime {
             });
         }
         let Some(memory_id) = request.exact_memory_id else {
+            let request_key = RuntimeState::cache_key_for_request(
+                CacheFamily::ResultCache,
+                &namespace,
+                &common,
+                request_shape_hash,
+                Some(request_shape_hash),
+            );
+            let request_lookup = cache
+                .store_for(CacheFamily::ResultCache)
+                .expect("result cache store should exist")
+                .lookup(&request_key, &current_generations);
+            let request_trace = cache_eval_trace_from_lookup(&request_lookup, result_budget);
             let mut result = RetrievalResultSet::empty(explain, namespace.clone());
             result.outcome_class = membrain_core::observability::OutcomeClass::Degraded;
-            result.policy_summary.outcome_class = membrain_core::observability::OutcomeClass::Degraded;
+            result.policy_summary.outcome_class =
+                membrain_core::observability::OutcomeClass::Degraded;
             result.packaging_metadata.result_budget = result_budget;
             result.packaging_metadata.degraded_summary = Some(degraded_summary.to_string());
             result.truncated = false;
-            let payload = McpRetrievalPayload::from_result(request_id, namespace, false, result)
-                .map_err(|err| err.to_string())?;
+            let mut payload =
+                McpRetrievalPayload::from_result(request_id, namespace, false, result)
+                    .map_err(|err| err.to_string())?;
+            payload.explain_trace.cache_metrics = cache_metrics_json(
+                vec![request_trace],
+                usize::from(matches!(
+                    request_lookup.event,
+                    CacheEvent::Miss
+                        | CacheEvent::Bypass
+                        | CacheEvent::StaleWarning
+                        | CacheEvent::Disabled
+                )),
+                None,
+                0,
+                true,
+            )
+            .map_err(|err| err.to_string())?;
             return Ok(McpResponse::retrieval_success(payload));
         };
 
-        let Some(layout) = state.memory_layout(memory_id) else {
+        let Some(record) = state.memory_record(memory_id) else {
+            let request_key = RuntimeState::cache_key_for_request(
+                CacheFamily::ResultCache,
+                &namespace,
+                &common,
+                request_shape_hash,
+                Some(request_shape_hash),
+            );
+            let request_lookup = cache
+                .store_for(CacheFamily::ResultCache)
+                .expect("result cache store should exist")
+                .lookup(&request_key, &current_generations);
+            let request_trace = cache_eval_trace_from_lookup(&request_lookup, result_budget);
             let mut result = RetrievalResultSet::empty(explain, namespace.clone());
             result.outcome_class = membrain_core::observability::OutcomeClass::Degraded;
-            result.policy_summary.outcome_class = membrain_core::observability::OutcomeClass::Degraded;
+            result.policy_summary.outcome_class =
+                membrain_core::observability::OutcomeClass::Degraded;
             result.packaging_metadata.result_budget = result_budget;
             result.packaging_metadata.degraded_summary = Some(degraded_summary.to_string());
             result.truncated = false;
-            let payload = McpRetrievalPayload::from_result(request_id, namespace, false, result)
-                .map_err(|err| err.to_string())?;
+            let mut payload =
+                McpRetrievalPayload::from_result(request_id, namespace, false, result)
+                    .map_err(|err| err.to_string())?;
+            payload.explain_trace.cache_metrics = cache_metrics_json(
+                vec![request_trace],
+                usize::from(matches!(
+                    request_lookup.event,
+                    CacheEvent::Miss
+                        | CacheEvent::Bypass
+                        | CacheEvent::StaleWarning
+                        | CacheEvent::Disabled
+                )),
+                None,
+                0,
+                true,
+            )
+            .map_err(|err| err.to_string())?;
             return Ok(McpResponse::retrieval_success(payload));
         };
 
+        let layout = &record.layout;
         let request_context = RuntimeState::runtime_request_context(
             namespace.clone(),
             &common,
@@ -2258,6 +3726,37 @@ impl DaemonRuntime {
             }));
         }
 
+        let confidence_inputs = &record.confidence_inputs;
+        let confidence_output = &record.confidence_output;
+        let prefetch_hint = cache
+            .prefetch
+            .consume_matching_hint(&namespace, |hint| hint.predicted_ids.contains(&memory_id));
+        let mut cache_traces = Vec::new();
+        let mut prefetch_added_candidates = None;
+        if let Some(hint) = prefetch_hint {
+            let prefetch_lookup = RuntimeState::cache_lookup_result_for_prefetch(
+                hint.predicted_ids.clone(),
+                result_budget,
+            );
+            prefetch_added_candidates = Some(hint.predicted_ids.len());
+            cache_traces.push(cache_eval_trace_from_lookup(
+                &prefetch_lookup,
+                result_budget,
+            ));
+        }
+        let tier1_key = RuntimeState::cache_key_for_memory(CacheFamily::Tier1Item, &record);
+        let tier1_lookup = cache
+            .store_for(CacheFamily::Tier1Item)
+            .expect("tier1 cache store should exist")
+            .lookup(&tier1_key, &current_generations);
+        let tier1_candidates_before = cache_traces
+            .last()
+            .map(|trace| trace.candidates_after)
+            .unwrap_or(result_budget);
+        cache_traces.push(cache_eval_trace_from_lookup(
+            &tier1_lookup,
+            tier1_candidates_before,
+        ));
         let ranking = fuse_scores(
             RankingInput {
                 recency: 900,
@@ -2265,12 +3764,13 @@ impl DaemonRuntime {
                 strength: 860,
                 provenance: 700,
                 conflict: 500,
-                confidence: 820,
+                confidence: confidence_output.confidence,
             },
             RankingProfile::balanced(),
         );
-        let mut builder = ResultBuilder::new(result_budget, namespace.clone());
-        builder.add(
+        let mut builder =
+            ResultBuilder::new(result_budget, namespace.clone()).with_output_mode(output_mode);
+        builder.add_with_confidence(
             layout.metadata.memory_id,
             layout.metadata.namespace.clone(),
             layout.metadata.session_id,
@@ -2278,10 +3778,45 @@ impl DaemonRuntime {
             layout.metadata.compact_text.clone(),
             &ranking,
             AnsweredFrom::Tier2Indexed,
+            confidence_inputs,
+            &ConfidencePolicy::default(),
         );
+        builder.action_pack = Some(vec![membrain_core::engine::result::ActionArtifact {
+            action_type: "inspect_runtime_evidence".to_string(),
+            suggestion: format!(
+                "Inspect evidence #{} before taking follow-up action: {}",
+                layout.metadata.memory_id.0, layout.metadata.compact_text
+            ),
+            supporting_evidence: vec![layout.metadata.memory_id],
+            confidence_score: confidence_output.confidence,
+            uncertainty_markers: {
+                let mut markers = Vec::new();
+                if confidence_output.confidence < 500 {
+                    markers.push("low_confidence".to_string());
+                }
+                if confidence_output.reconsolidation_uncertainty >= 500 {
+                    markers.push("reconsolidation_churn".to_string());
+                }
+                if confidence_output.missing_evidence_uncertainty >= 500 {
+                    markers.push("missing_evidence".to_string());
+                }
+                if markers.is_empty() {
+                    markers.push(if confidence_output.uncertainty_score >= 500 {
+                        "high_uncertainty".to_string()
+                    } else {
+                        "low_uncertainty".to_string()
+                    });
+                }
+                markers
+            },
+            policy_caveats: Vec::new(),
+            freshness_caveats: Vec::new(),
+        }]);
         let mut result = builder.build(explain);
-        result.policy_summary.filters = RuntimeState::share_policy_summary(&namespace, &sharing_outcome).filters;
-        result.policy_summary.redactions_applied = matches!(sharing_outcome.decision, SharingAccessDecision::Redact);
+        result.policy_summary.filters =
+            RuntimeState::share_policy_summary(&namespace, &sharing_outcome).filters;
+        result.policy_summary.redactions_applied =
+            matches!(sharing_outcome.decision, SharingAccessDecision::Redact);
         if matches!(sharing_outcome.decision, SharingAccessDecision::Redact) {
             if let Some(item) = result.evidence_pack.first_mut() {
                 item.omitted_fields = sharing_outcome
@@ -2294,8 +3829,111 @@ impl DaemonRuntime {
         result.packaging_metadata.result_budget = result_budget;
         result.packaging_metadata.degraded_summary = None;
         result.policy_summary.outcome_class = result.outcome_class;
-        let payload = McpRetrievalPayload::from_result(request_id, namespace, false, result)
+        let request_key = RuntimeState::cache_key_for_request(
+            CacheFamily::ResultCache,
+            &namespace,
+            &common,
+            request_shape_hash,
+            Some(request_shape_hash),
+        );
+        let result_lookup = cache
+            .store_for(CacheFamily::ResultCache)
+            .expect("result cache store should exist")
+            .lookup(&request_key, &current_generations);
+        let result_candidates_before = cache_traces
+            .last()
+            .map(|trace| trace.candidates_after)
+            .unwrap_or(result_budget);
+        cache_traces.push(cache_eval_trace_from_lookup(
+            &result_lookup,
+            result_candidates_before,
+        ));
+        let result_ids = result
+            .evidence_pack
+            .iter()
+            .map(|item| item.result.memory_id)
+            .collect::<Vec<_>>();
+        let _ = cache
+            .store_for(CacheFamily::ResultCache)
+            .expect("result cache store should exist")
+            .admit(
+                request_key,
+                result_ids,
+                membrain_core::store::cache::CacheAdmissionRequest {
+                    request_shape_hash: Some(request_shape_hash),
+                    ..Default::default()
+                },
+            );
+        if request.session_id.is_some() {
+            let warmup_key = RuntimeState::cache_key_for_request(
+                CacheFamily::SessionWarmup,
+                &namespace,
+                &common,
+                memory_id.0,
+                None,
+            );
+            let _ = cache
+                .store_for(CacheFamily::SessionWarmup)
+                .expect("session warmup cache store should exist")
+                .admit(warmup_key, vec![memory_id], Default::default());
+        }
+        if request.graph_expansion {
+            let ann_key = RuntimeState::cache_key_for_request(
+                CacheFamily::AnnProbeCache,
+                &namespace,
+                &common,
+                request_shape_hash,
+                Some(request_shape_hash),
+            );
+            let ann_lookup = cache
+                .store_for(CacheFamily::AnnProbeCache)
+                .expect("ann probe cache store should exist")
+                .lookup(&ann_key, &current_generations);
+            let ann_candidates_before = cache_traces
+                .last()
+                .map(|trace| trace.candidates_after)
+                .unwrap_or(result_budget);
+            cache_traces.push(cache_eval_trace_from_lookup(
+                &ann_lookup,
+                ann_candidates_before,
+            ));
+            let _ = cache
+                .store_for(CacheFamily::AnnProbeCache)
+                .expect("ann probe cache store should exist")
+                .admit(
+                    ann_key,
+                    vec![memory_id],
+                    membrain_core::store::cache::CacheAdmissionRequest {
+                        request_shape_hash: Some(request_shape_hash),
+                        ..Default::default()
+                    },
+                );
+        } else {
+            let _ = cache.prefetch.submit_hint(
+                namespace.clone(),
+                if request.session_id.is_some() {
+                    PrefetchTrigger::SessionRecency
+                } else {
+                    PrefetchTrigger::TaskIntent
+                },
+                vec![memory_id],
+            );
+        }
+        drop(cache);
+        let mut payload = McpRetrievalPayload::from_result(request_id, namespace, false, result)
             .map_err(|err| err.to_string())?;
+        let cold_fallback_count = usize::from(matches!(
+            tier1_lookup.event,
+            CacheEvent::Miss | CacheEvent::Bypass | CacheEvent::StaleWarning | CacheEvent::Disabled
+        ));
+        payload.explain_trace.cache_metrics = cache_metrics_json(
+            cache_traces,
+            cold_fallback_count,
+            prefetch_added_candidates,
+            0,
+            false,
+        )
+        .map_err(|err| err.to_string())?;
         Ok(McpResponse::retrieval_success(payload))
     }
 
@@ -2933,7 +4571,10 @@ mod tests {
         );
         assert_eq!(
             doctor_response["result"]["warnings"],
-            json!(["operator_review_recommended"])
+            json!([
+                "operator_review_recommended",
+                "stale_action_critical_recheck_required"
+            ])
         );
         assert_eq!(
             doctor_response["result"]["repair_reports"][0]["target"],
@@ -2957,7 +4598,7 @@ mod tests {
         );
         assert_eq!(
             doctor_response["result"]["repair_reports"][0]["queue_depth_before"],
-            json!(2)
+            json!(4)
         );
         assert_eq!(
             doctor_response["result"]["repair_reports"][0]["queue_depth_after"],
@@ -3238,13 +4879,19 @@ mod tests {
             archive["result"]["reversibility"],
             json!("restore_required")
         );
-        assert_eq!(archive["result"]["audit_kind"], json!("maintenance_forgetting_evaluated"));
+        assert_eq!(
+            archive["result"]["audit_kind"],
+            json!("maintenance_forgetting_evaluated")
+        );
         assert_eq!(archive["result"]["operator_review_required"], json!(false));
         assert_eq!(
             archive["result"]["resulting_archive_state"],
             json!("archived")
         );
-        assert_eq!(archive["result"]["reason_code"], json!("below_forget_threshold"));
+        assert_eq!(
+            archive["result"]["reason_code"],
+            json!("below_forget_threshold")
+        );
 
         let restore = send_request(
             &socket_path,
@@ -3262,7 +4909,10 @@ mod tests {
             json!("explicit_restore")
         );
         assert_eq!(restore["result"]["disposition"], json!("explicit"));
-        assert_eq!(restore["result"]["audit_kind"], json!("maintenance_forgetting_evaluated"));
+        assert_eq!(
+            restore["result"]["audit_kind"],
+            json!("maintenance_forgetting_evaluated")
+        );
         assert_eq!(restore["result"]["partial_restore"], json!(true));
         assert_eq!(restore["result"]["prior_archive_state"], json!("archived"));
 
@@ -3279,7 +4929,10 @@ mod tests {
         assert_eq!(delete["result"]["action"], json!("policy_delete"));
         assert_eq!(delete["result"]["policy_surface"], json!("policy_delete"));
         assert_eq!(delete["result"]["disposition"], json!("explicit"));
-        assert_eq!(delete["result"]["audit_kind"], json!("maintenance_forgetting_evaluated"));
+        assert_eq!(
+            delete["result"]["audit_kind"],
+            json!("maintenance_forgetting_evaluated")
+        );
         assert_eq!(delete["result"]["reversibility"], json!("irreversible"));
 
         let shutdown_response = send_request(
@@ -3419,6 +5072,117 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn runtime_skills_returns_typed_payload() {
+        let socket_path = unique_path("skills");
+        let mut config = DaemonRuntimeConfig::new(&socket_path);
+        config.maintenance_interval = Duration::from_secs(3600);
+        let handle = spawn_runtime(config).await;
+
+        timeout(Duration::from_secs(2), async {
+            while tokio::fs::metadata(&socket_path).await.is_err() {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .unwrap();
+
+        let skills_response = send_request(
+            &socket_path,
+            json!({
+                "jsonrpc":"2.0",
+                "method":"skills",
+                "params":{"namespace":"team.alpha","extract":true},
+                "id":"skills"
+            }),
+        )
+        .await;
+
+        assert_eq!(skills_response["result"]["status"], json!("accepted"));
+        assert_eq!(skills_response["result"]["namespace"], json!("team.alpha"));
+        assert_eq!(
+            skills_response["result"]["extraction_trigger"],
+            json!("explicit_skill_extraction")
+        );
+        assert_eq!(
+            skills_response["result"]["reflection_compiler_active"],
+            json!(true)
+        );
+        assert!(
+            skills_response["result"]["extracted_count"]
+                .as_u64()
+                .unwrap()
+                >= 1
+        );
+        assert!(skills_response["result"]["procedures"].is_array());
+        assert_eq!(
+            skills_response["result"]["procedures"][0]["storage"]["storage_class"],
+            json!("derived_durable_artifact")
+        );
+        assert_eq!(
+            skills_response["result"]["procedures"][0]["review"]["derivation_rule"],
+            json!("skill_extraction")
+        );
+        assert_eq!(
+            skills_response["result"]["procedures"][0]["review"]["reflection"]["artifact_class"],
+            json!("procedure")
+        );
+        assert_eq!(
+            skills_response["result"]["procedures"][0]["recall"]["recall_surface"],
+            json!("skills")
+        );
+
+        let procedures_response = send_request(
+            &socket_path,
+            json!({
+                "jsonrpc":"2.0",
+                "method":"procedures",
+                "params":{
+                    "namespace":"team.alpha",
+                    "approved_by":"daemon.tester",
+                    "note":"approved via daemon test"
+                },
+                "id":"procedures"
+            }),
+        )
+        .await;
+
+        assert_eq!(procedures_response["result"]["status"], json!("accepted"));
+        assert_eq!(
+            procedures_response["result"]["namespace"],
+            json!("team.alpha")
+        );
+        assert_eq!(procedures_response["result"]["procedural_count"], json!(1));
+        assert_eq!(
+            procedures_response["result"]["direct_lookup_supported"],
+            json!(true)
+        );
+        assert_eq!(
+            procedures_response["result"]["procedures"][0]["storage"]["storage_class"],
+            json!("procedural_durable_surface")
+        );
+        assert_eq!(
+            procedures_response["result"]["procedures"][0]["review"]["accepted_by"],
+            json!("daemon.tester")
+        );
+        assert_eq!(
+            procedures_response["result"]["procedures"][0]["recall"]["recall_surface"],
+            json!("procedural_store")
+        );
+
+        let shutdown_response = send_request(
+            &socket_path,
+            json!({"jsonrpc":"2.0","method":"shutdown","params":{},"id":"done"}),
+        )
+        .await;
+        assert_eq!(shutdown_response["result"]["shutting_down"], json!(true));
+        timeout(Duration::from_secs(5), handle)
+            .await
+            .unwrap()
+            .unwrap()
+            .unwrap();
+    }
+
+    #[tokio::test]
     async fn runtime_recall_returns_typed_mcp_retrieval_payload() {
         let socket_path = unique_path("recall");
         let mut config = DaemonRuntimeConfig::new(&socket_path);
@@ -3462,6 +5226,31 @@ mod tests {
         assert!(recall_response["result"]["retrieval"]
             .get("explain_trace")
             .is_some());
+        assert!(
+            recall_response["result"]["retrieval"]["result"]["evidence_pack"][0]["result"]
+                ["uncertainty_markers"]["confidence_interval"]
+                .is_array()
+        );
+        assert!(
+            recall_response["result"]["retrieval"]["result"]["evidence_pack"][0]["result"]
+                ["uncertainty_markers"]["corroboration_uncertainty"]
+                .is_number()
+        );
+        assert_eq!(
+            recall_response["result"]["retrieval"]["explain_trace"]["cache_metrics"]
+                ["cache_hit_count"],
+            json!(1)
+        );
+        assert_eq!(
+            recall_response["result"]["retrieval"]["explain_trace"]["cache_metrics"]
+                ["tier1_item_hit_count"],
+            json!(1)
+        );
+        assert_eq!(
+            recall_response["result"]["retrieval"]["explain_trace"]["cache_metrics"]
+                ["cold_fallback_count"],
+            json!(0)
+        );
 
         let shutdown_response = send_request(
             &socket_path,
@@ -3513,6 +5302,8 @@ mod tests {
         assert_eq!(retrieval["partial_success"], json!(false));
         assert!(retrieval["result"].get("evidence_pack").is_some());
         assert!(retrieval["result"].get("action_pack").is_some());
+        assert_eq!(retrieval["result"]["output_mode"], json!("balanced"));
+        assert!(retrieval["result"]["action_pack"].is_null());
         assert!(retrieval["result"].get("deferred_payloads").is_some());
         assert!(retrieval["result"].get("omitted_summary").is_some());
         assert!(retrieval["result"].get("policy_summary").is_some());
@@ -3536,7 +5327,9 @@ mod tests {
             .is_some());
         assert_eq!(
             retrieval["result"]["packaging_metadata"]["degraded_summary"],
-            json!("planner-only recall envelope; evidence hydration not implemented; normalized params: query_text")
+            json!(
+                "planner-only recall envelope; evidence hydration not implemented; normalized params: query_text"
+            )
         );
         assert!(retrieval["result"]["explain"]["query_by_example"].is_null());
 
@@ -3643,8 +5436,14 @@ mod tests {
         .await;
 
         assert_eq!(budget_response["result"]["status"], json!("ok"));
-        assert_eq!(budget_response["result"]["payload"]["namespace"], json!("team.alpha"));
-        assert_eq!(budget_response["result"]["payload"]["partial_success"], json!(false));
+        assert_eq!(
+            budget_response["result"]["payload"]["namespace"],
+            json!("team.alpha")
+        );
+        assert_eq!(
+            budget_response["result"]["payload"]["partial_success"],
+            json!(false)
+        );
         assert!(budget_response["result"]["payload"]["result"]["injections"]
             .as_array()
             .is_some_and(|items| !items.is_empty()));
@@ -3755,13 +5554,90 @@ mod tests {
             json!(3)
         );
         assert_eq!(
-            recall_response["result"]["retrieval"]["result"]["packaging_metadata"]
-                ["degraded_summary"],
-            json!("planner-only recall envelope; evidence hydration not implemented; normalized params: query_text")
+            recall_response["result"]["retrieval"]["result"]["output_mode"],
+            json!("balanced")
+        );
+        assert_eq!(
+            recall_response["result"]["retrieval"]["result"]["packaging_metadata"]["degraded_summary"],
+            json!(
+                "planner-only recall envelope; evidence hydration not implemented; normalized params: query_text"
+            )
+        );
+        assert!(
+            recall_response["result"]["retrieval"]["result"]["evidence_pack"]
+                .as_array()
+                .is_some_and(|items| items.is_empty())
         );
         assert_eq!(
             recall_response["result"]["retrieval"]["result"]["explain"]["recall_plan"],
             json!("RecentTier1ThenTier2Exact")
+        );
+
+        let shutdown_response = send_request(
+            &socket_path,
+            json!({"jsonrpc":"2.0","method":"shutdown","params":{},"id":"done"}),
+        )
+        .await;
+        assert_eq!(shutdown_response["result"]["shutting_down"], json!(true));
+        timeout(Duration::from_secs(5), handle)
+            .await
+            .unwrap()
+            .unwrap()
+            .unwrap();
+    }
+
+    #[tokio::test]
+    async fn runtime_recall_strict_mode_suppresses_action_pack_when_caveats_exist() {
+        let socket_path = unique_path("recall-strict-output-mode");
+        let mut config = DaemonRuntimeConfig::new(&socket_path);
+        config.maintenance_interval = Duration::from_secs(3600);
+        let handle = spawn_runtime(config).await;
+
+        timeout(Duration::from_secs(2), async {
+            while tokio::fs::metadata(&socket_path).await.is_err() {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .unwrap();
+
+        let encode_response = send_request(
+            &socket_path,
+            json!({
+                "jsonrpc":"2.0",
+                "method":"encode",
+                "params":{"content":"deploy checklist for launch day","namespace":"team.alpha"},
+                "id":"encode-strict-output-mode"
+            }),
+        )
+        .await;
+        assert_eq!(encode_response["result"]["status"], json!("ok"));
+
+        let recall_response = send_request(
+            &socket_path,
+            json!({
+                "jsonrpc":"2.0",
+                "method":"recall",
+                "params":{"query_text":"memory:42","namespace":"team.alpha","result_budget":3,"mode":"strict"},
+                "id":"recall-strict-output-mode"
+            }),
+        )
+        .await;
+
+        assert_eq!(recall_response["result"]["status"], json!("ok"));
+        assert_eq!(
+            recall_response["result"]["retrieval"]["result"]["output_mode"],
+            json!("balanced")
+        );
+        assert!(
+            recall_response["result"]["retrieval"]["result"]["action_pack"]
+                .as_array()
+                .is_none_or(|items| items.is_empty())
+        );
+        assert_eq!(
+            recall_response["result"]["retrieval"]["result"]["packaging_metadata"]
+                ["packaging_mode"],
+            json!("evidence_only")
         );
 
         let shutdown_response = send_request(
@@ -3817,6 +5693,10 @@ mod tests {
             json!(4)
         );
         assert_eq!(
+            recall_response["result"]["retrieval"]["result"]["output_mode"],
+            json!("balanced")
+        );
+        assert_eq!(
             recall_response["result"]["retrieval"]["result"]["explain"]["recall_plan"],
             json!("Tier2ExactThenTier3Fallback")
         );
@@ -3829,6 +5709,11 @@ mod tests {
         assert!(degraded_summary.contains("effort"));
         assert!(degraded_summary.contains("include_public"));
         assert!(degraded_summary.contains("min_confidence"));
+        assert!(
+            recall_response["result"]["retrieval"]["result"]["action_pack"]
+                .as_array()
+                .is_none_or(|items| items.is_empty())
+        );
         assert!(degraded_summary.contains("primary_cue=like_id"));
         assert!(degraded_summary.contains("seed_memory_ids=[7]"));
         assert!(degraded_summary.contains("seed_polarities=[like]"));
@@ -4110,9 +5995,10 @@ mod tests {
             json!(10)
         );
         assert_eq!(
-            recall_response["result"]["retrieval"]["result"]["packaging_metadata"]
-                ["degraded_summary"],
-            json!("planner-only recall envelope; evidence hydration not implemented; normalized params: query_text")
+            recall_response["result"]["retrieval"]["result"]["packaging_metadata"]["degraded_summary"],
+            json!(
+                "planner-only recall envelope; evidence hydration not implemented; normalized params: query_text"
+            )
         );
 
         let shutdown_response = send_request(
@@ -4176,7 +6062,9 @@ mod tests {
         );
         assert_eq!(
             explain_response["result"]["policy_context"],
-            json!("namespace team.alpha preflight safeguard evaluation (irreversible mutation; irreversible_mutation)")
+            json!(
+                "namespace team.alpha preflight safeguard evaluation (irreversible mutation; irreversible_mutation)"
+            )
         );
         assert_eq!(
             explain_response["result"]["confirmation"]["required"],
@@ -4713,13 +6601,10 @@ mod tests {
             inspect_response["result"]["payload"]["namespace"],
             json!("team.alpha")
         );
-        assert_eq!(
-            inspect_response["result"]["payload"]["memory_id"],
-            json!(2)
-        );
+        assert_eq!(inspect_response["result"]["payload"]["memory_id"], json!(2));
         assert_eq!(
             inspect_response["result"]["payload"]["tier"],
-            json!("tier1_exact")
+            json!("observation")
         );
         assert_eq!(
             inspect_response["result"]["payload"]["lifecycle_state"]["degraded_summary"],
@@ -4886,7 +6771,10 @@ mod tests {
             payload["explain_trace"]["passive_observation"]["retention_marker"],
             json!({"Present":"volatile_observation"})
         );
-        assert_eq!(payload["lifecycle_state"]["degraded_summary"], serde_json::Value::Null);
+        assert_eq!(
+            payload["lifecycle_state"]["degraded_summary"],
+            serde_json::Value::Null
+        );
         assert_eq!(
             payload["explain_trace"]["policy_summary"]["effective_namespace"],
             json!("team.alpha")
@@ -5455,11 +7343,13 @@ mod tests {
             json!("lexical_index")
         );
         assert_eq!(
-            doctor_resource["result"]["payload"]["payload"]["repair_reports"][0]["rebuild_entrypoint"],
+            doctor_resource["result"]["payload"]["payload"]["repair_reports"][0]
+                ["rebuild_entrypoint"],
             json!(null)
         );
         assert_eq!(
-            doctor_resource["result"]["payload"]["payload"]["repair_reports"][0]["affected_item_count"],
+            doctor_resource["result"]["payload"]["payload"]["repair_reports"][0]
+                ["affected_item_count"],
             json!(128)
         );
         assert!(doctor_resource["result"]["payload"]["payload"]["health"].is_object());

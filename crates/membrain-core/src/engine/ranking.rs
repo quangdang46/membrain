@@ -620,7 +620,13 @@ mod tests {
             ConfidenceDisplayConfig::default(),
             375,
             Some((300, 375, 450)),
-            [(10, None), (20, None), (30, None), (40, Some(25)), (50, None)],
+            [
+                (10, None),
+                (20, None),
+                (30, None),
+                (40, Some(25)),
+                (50, None),
+            ],
         );
 
         assert!(explain.passes_threshold);

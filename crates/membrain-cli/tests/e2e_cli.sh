@@ -4,12 +4,25 @@ set -euo pipefail
 # e2e_cli.sh
 # Logging-heavy CLI parity artifact for the real command surface.
 #
-# This script does two things:
-# 1. runs representative CLI commands and prints the actual human/JSON payloads
-# 2. runs targeted Rust parity tests so policy and envelope drift fail loudly
+# This script is the logging-heavy CLI proof artifact for the major workflows
+# that flywheel-beads expects reviewers to rerun.
+#
+# It covers these workflow families explicitly:
+# 1. retrieval + explain packaging
+# 2. contradiction lifecycle visibility
+# 3. policy denial / share / unshare / redaction safeguards
+# 4. consolidation lineage-preserving maintenance artifacts
+# 5. forgetting eligibility and deterministic retention gates
+# 6. repair / doctor operator-visible verification artifacts
 #
 # Usage:
 #   bash crates/membrain-cli/tests/e2e_cli.sh
+#
+# Acceptance artifacts emitted in this script:
+# - live CLI stdout/stderr logs for human review
+# - deterministic JSON envelope assertions for machine-readable parity
+# - targeted Rust test names for contradiction, forgetting, consolidation, and repair proof
+# - closing workflow checklist that names the proof surfaces covered
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "${SCRIPT_DIR}/../../.." && pwd)"
@@ -152,9 +165,35 @@ assert isinstance(data["route_summary"]["route_reason"], str)
 assert isinstance(data["route_summary"]["tier1_consulted_first"], bool)
 assert isinstance(data["trace_stages"], list)
 assert isinstance(data["result"]["evidence_pack"], list)
+assert data["result"]["output_mode"] == "balanced"
 assert data["result"]["action_pack"] is None
 assert data["result"]["packaging_metadata"]["result_budget"] == 3
+assert data["result"]["packaging_metadata"]["packaging_mode"] == "evidence_only"
+assert data["route_summary"]["route_family"] == "tier2_exact_then_graph_expansion"
+assert data["route_summary"]["fallback_reason"] == "bounded_graph_expansion"
 print("validated recall json envelope")
+PY
+
+run_capture "Recall JSON strict dual-output mode" \
+  "${CLI_BIN}" recall "capital of France" \
+  --namespace test_ns \
+  --top 3 \
+  --confidence high \
+  --include-public \
+  --json
+require_status 0
+JSON_PAYLOAD="${LAST_STDOUT}" "${PYTHON}" - <<'PY'
+import json
+import os
+
+data = json.loads(os.environ["JSON_PAYLOAD"])
+
+assert data["ok"] is True
+assert data["result"]["output_mode"] == "strict"
+assert isinstance(data["result"]["evidence_pack"], list)
+assert data["result"]["action_pack"] is None
+assert data["result"]["packaging_metadata"]["packaging_mode"] == "evidence_only"
+print("validated strict recall json envelope")
 PY
 
 run_capture "Observe JSON passive-observation provenance" \
@@ -378,9 +417,16 @@ import os
 
 data = json.loads(os.environ["JSON_PAYLOAD"])
 
-assert data["status"] == "ok"
+assert data["status"] == "warn"
 assert data["action"] == "doctor"
 assert isinstance(data["metrics"], dict)
+assert data["summary"] == {"ok_checks": 2, "warn_checks": 3, "fail_checks": 0}
+assert data["repair_engine_component"] == "engine.repair"
+assert isinstance(data["checks"], list)
+assert data["checks"][4]["name"] == "lease_freshness"
+assert data["checks"][4]["status"] == "warn"
+assert isinstance(data["runbook_hints"], list)
+assert data["runbook_hints"][0]["runbook_id"] == "incident_response"
 assert isinstance(data["indexes"], list)
 assert isinstance(data["repair_reports"], list)
 assert data["repair_reports"][0]["verification_artifact_name"] == "fts5_lexical_parity"
@@ -389,6 +435,9 @@ assert data["repair_reports"][0]["authoritative_rows"] == 128
 assert data["repair_reports"][0]["derived_rows"] == 128
 assert data["repair_reports"][0]["queue_depth_before"] == 4
 assert data["repair_reports"][3]["target"] == "semantic_cold_index"
+assert data["warnings"] == ["stale_action_critical_recheck_required"]
+assert data["error_kind"] is None
+assert data["availability"] is None
 assert isinstance(data["health"], dict)
 print("validated doctor report")
 PY
@@ -492,12 +541,50 @@ require_status 0
 require_contains "${LAST_STDOUT}" "Preflight allow [accepted] state=ready outcome=force_confirmed"
 require_contains "${LAST_STDOUT}" "confirmation_reason: operator confirmed exact previewed scope"
 
+section "Workflow proof: contradiction"
+echo "Artifact: contradiction lifecycle remains explicit, lineage-preserving, and audit-visible."
+run_check "Contradiction lifecycle golden test" \
+  cargo test -p membrain-core full_golden_contradiction_lifecycle -- --nocapture
+run_check "Contradiction active-marker test" \
+  cargo test -p membrain-core active_contradiction_marker_surfaces_disagreement_without_overwrite -- --nocapture
+
+section "Workflow proof: forgetting"
+echo "Artifact: deterministic forgetting gates stay replayable and never rely on wall-clock sleeps."
+run_check "Forgetting zero-strength eligibility test" \
+  cargo test -p membrain-core zero_strength_memory_is_immediately_forgetting_eligible -- --nocapture
+run_check "Forgetting emotional bypass test" \
+  cargo test -p membrain-core emotional_bypass_prevents_forgetting -- --nocapture
+run_check "Forgetting interference eligibility test" \
+  cargo test -p membrain-core interfered_memories_become_forgetting_eligible -- --nocapture
+
+section "Workflow proof: consolidation"
+echo "Artifact: consolidation emits lineage-preserving derived artifacts and failure handles."
+run_check "Consolidation lineage artifact test" \
+  cargo test -p membrain-core consolidation_runs_emit_lineage_preserving_artifacts_through_maintenance_handle -- --nocapture
+
+section "Workflow proof: repair"
+echo "Artifact: repair and doctor surfaces preserve verification artifacts, queue reports, and operator logs."
+run_check "Repair verification artifact test" \
+  cargo test -p membrain-core repair_runs_expose_verification_artifacts_through_maintenance_handle -- --nocapture
+run_check "Repair doctor-surface full scan test" \
+  cargo test -p membrain-core repair_run_full_scan_reports_doctor_health_surfaces_without_rebuilds -- --nocapture
+
 run_check "CLI command parity integration tests" \
   cargo test -p membrain-cli --test cli_end_to_end -- --nocapture
 
 run_check "CLI governance and denial parity tests" \
   cargo test -p membrain-cli --test core_api_smoke cli_parity_ -- --nocapture
 
+section "Workflow proof summary"
+cat <<'EOF'
+Validated workflow artifacts:
+- retrieval: live encode/recall/explain/audit/share/unshare/preflight CLI logs plus JSON envelope assertions
+- contradiction: explicit contradiction lifecycle and active-marker tests with lineage and audit visibility
+- policy denial: blocked and force-confirmed preflight flows, sharing redaction, and governance parity tests
+- consolidation: lineage-preserving derived-artifact maintenance handle proof
+- forgetting: deterministic zero-strength, emotional-bypass, and interference-sensitive forgetting eligibility proof
+- repair: verification artifacts, queue reports, degraded doctor signals, and operator-log parity
+EOF
+
 printf '\n=== CLI parity artifact completed ===\n'
-echo "Validated live CLI logs for canonical retrieval, audit, sharing, redaction, and doctor surfaces."
-echo "Validated deterministic parity tests for encode/recall pipeline, denial matrices, cross-namespace redaction, and degraded outcomes."
+echo "Validated live CLI logs plus deterministic workflow proofs for retrieval, contradiction, policy denial, consolidation, forgetting, and repair."

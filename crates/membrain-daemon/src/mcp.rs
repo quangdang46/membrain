@@ -3,6 +3,7 @@ use membrain_core::api::{
 };
 use membrain_core::engine::result::RetrievalResultSet;
 use membrain_core::observability::OutcomeClass;
+use membrain_core::store::audit::AuditLogEntry;
 use serde::{Deserialize, Serialize};
 
 pub use crate::preflight::{
@@ -135,6 +136,8 @@ pub enum McpRequest {
     Uncertain(UncertainParams),
     #[serde(rename = "skills")]
     Skills(SkillsParams),
+    #[serde(rename = "procedures")]
+    Procedures(ProceduresParams),
     #[serde(rename = "why")]
     Why(WhyParams),
     #[serde(rename = "invalidate")]
@@ -591,12 +594,33 @@ pub struct SkillsParams {
     pub common: CommonRequestFields,
 }
 
+/// List, promote, or roll back authoritative procedural-store entries.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ProceduresParams {
+    pub namespace: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub promote: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub rollback: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub note: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub approved_by: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub public: Option<bool>,
+    #[serde(flatten)]
+    pub common: CommonRequestFields,
+}
+
 /// Trace causal chain to root evidence.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct WhyParams {
     pub id: u64,
     pub namespace: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub depth: Option<usize>,
     #[serde(flatten)]
     pub common: CommonRequestFields,
 }
@@ -903,10 +927,13 @@ impl McpRetrievalPayload {
                 .collect(),
             result_reasons: serde_json::to_value(&result_reasons)?,
             omitted_summary: serde_json::to_value(&result.omitted_summary)?,
-            cache_metrics: serde_json::to_value(CacheMetricsSummary::from_cache_traces(
-                Vec::new(),
-                false,
-            ))?,
+            cache_metrics: serde_json::to_value(&result)
+                .ok()
+                .and_then(|value| value.get("cache_metrics").cloned())
+                .unwrap_or_else(|| {
+                    serde_json::to_value(CacheMetricsSummary::from_cache_traces(Vec::new(), false))
+                        .expect("cache metrics fallback should serialize")
+                }),
             policy_summary: serde_json::to_value(&policy_summary)?,
             provenance_summary: serde_json::to_value(&provenance_summary)?,
             freshness_markers: serde_json::to_value(&freshness_markers)?,
@@ -951,6 +978,68 @@ pub struct McpAuditView {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub related_run: Option<String>,
     pub redacted: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct McpAuditRow {
+    pub sequence: u64,
+    pub op: String,
+    pub category: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub memory_id: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub session_id: Option<u64>,
+    pub tick: Option<u64>,
+    pub before_strength: Option<u16>,
+    pub after_strength: Option<u16>,
+    pub before_confidence: Option<u16>,
+    pub after_confidence: Option<u16>,
+    pub triggered_by: String,
+    pub note: String,
+    pub namespace: String,
+    pub redaction: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub request_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub related_snapshot: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub related_run: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct McpAuditPayload {
+    pub request_id: RequestId,
+    pub namespace: NamespaceId,
+    pub total_matches: usize,
+    pub returned_rows: usize,
+    pub truncated: bool,
+    pub entries: Vec<McpAuditRow>,
+}
+
+impl From<AuditLogEntry> for McpAuditRow {
+    fn from(entry: AuditLogEntry) -> Self {
+        Self {
+            sequence: entry.sequence,
+            op: entry.kind.as_str().to_string(),
+            category: entry.category.as_str().to_string(),
+            memory_id: entry.memory_id.map(|id| id.0),
+            session_id: entry.session_id.map(|id| id.0),
+            tick: entry.tick,
+            before_strength: entry.before_strength,
+            after_strength: entry.after_strength,
+            before_confidence: entry.before_confidence,
+            after_confidence: entry.after_confidence,
+            triggered_by: entry.actor_source.to_string(),
+            note: entry.detail,
+            namespace: entry.namespace.as_str().to_string(),
+            redaction: entry.redacted,
+            request_id: entry.request_id,
+            related_snapshot: entry.related_snapshot,
+            related_run: entry.related_run,
+        }
+    }
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -1111,11 +1200,11 @@ pub struct McpStreamListing {
 #[cfg(test)]
 mod tests {
     use super::{
-        CommonRequestFields, EncodeParams, ExplainParams, InspectParams, McpAuditView, McpError,
-        ContextBudgetParams, McpInspectExplainTrace, McpInspectPayload, McpRequest, McpResource,
+        CommonRequestFields, ContextBudgetParams, EncodeParams, ExplainParams, InspectParams,
+        McpAuditView, McpError, McpInspectExplainTrace, McpInspectPayload, McpRequest, McpResource,
         McpResourceListing, McpResourceReadPayload, McpResponse, McpRetrievalPayload,
         McpSharePayload, McpStream, McpStreamListing, ObserveParams, PolicyContextHint,
-        RecallParams,
+        ProceduresParams, RecallParams,
     };
     use membrain_core::api::{
         FieldPresence, NamespaceId, PassiveObservationInspectSummary, PolicyFilterSummary,
@@ -1151,7 +1240,15 @@ mod tests {
         RetrievalResultSet {
             outcome_class: OutcomeClass::Accepted,
             evidence_pack: Vec::new(),
-            action_pack: None,
+            action_pack: Some(vec![membrain_core::engine::result::ActionArtifact {
+                action_type: "review_observation".to_string(),
+                suggestion: "Inspect the observation evidence before acting".to_string(),
+                supporting_evidence: vec![membrain_core::types::MemoryId(7)],
+                confidence_score: 720,
+                uncertainty_markers: vec!["low_uncertainty".to_string()],
+                policy_caveats: Vec::new(),
+                freshness_caveats: Vec::new(),
+            }]),
             deferred_payloads: Vec::new(),
             explain: RetrievalExplain {
                 recall_plan: RecallPlanKind::ExactIdTier1,
@@ -1163,6 +1260,7 @@ mod tests {
                 time_consumed_ms: Some(1),
                 ranking_profile: "balanced".to_string(),
                 contradictions_found: 0,
+                historical_context: None,
                 query_by_example: None,
                 result_reasons: Vec::new(),
             },
@@ -1198,6 +1296,8 @@ mod tests {
                 newest_item_days: 0,
                 volatile_items_included: false,
                 stale_warning: false,
+                lease_sensitive: false,
+                recheck_required: false,
                 as_of_tick: None,
             },
             packaging_metadata: PackagingMetadata {
@@ -1205,7 +1305,7 @@ mod tests {
                 token_budget: Some(256),
                 graph_assistance: "none".to_string(),
                 degraded_summary: None,
-                packaging_mode: "bounded".to_string(),
+                packaging_mode: "evidence_plus_action".to_string(),
                 rerank_metadata: None,
             },
             output_mode: DualOutputMode::Balanced,
@@ -1231,7 +1331,15 @@ mod tests {
         assert!(json["result"].get("evidence_pack").is_some());
         assert!(json["result"].get("action_pack").is_some());
         assert!(json["result"].get("deferred_payloads").is_some());
-        assert!(json["result"]["action_pack"].is_null());
+        assert_eq!(json["result"]["output_mode"], "balanced");
+        assert_eq!(
+            json["result"]["action_pack"][0]["action_type"],
+            "review_observation"
+        );
+        assert_eq!(
+            json["result"]["action_pack"][0]["supporting_evidence"][0],
+            7
+        );
         assert!(json["result"].get("omitted_summary").is_some());
         assert!(json["result"].get("policy_summary").is_some());
         assert!(json["result"].get("provenance_summary").is_some());
@@ -1675,16 +1783,25 @@ mod tests {
         assert_eq!(json["payload"]["request_id"], "req-share-42");
         assert_eq!(json["payload"]["namespace"], "team.beta");
         assert_eq!(json["payload"]["outcome_class"], "accepted");
-        assert_eq!(json["payload"]["policy_summary"]["policy_family"], "visibility_sharing");
+        assert_eq!(
+            json["payload"]["policy_summary"]["policy_family"],
+            "visibility_sharing"
+        );
         assert_eq!(json["payload"]["audit"]["event_kind"], "approved_sharing");
         assert_eq!(json["payload"]["audit"]["effective_namespace"], "team.beta");
         assert_eq!(json["payload"]["audit"]["source_namespace"], "team.alpha");
         assert_eq!(json["payload"]["audit"]["target_namespace"], "team.beta");
-        assert_eq!(json["payload"]["audit"]["policy_family"], "visibility_sharing");
+        assert_eq!(
+            json["payload"]["audit"]["policy_family"],
+            "visibility_sharing"
+        );
         assert_eq!(json["payload"]["audit"]["outcome_class"], "accepted");
         assert_eq!(json["payload"]["audit"]["blocked_stage"], "policy_gate");
         assert_eq!(json["payload"]["audit"]["related_run"], "share-run-42");
-        assert_eq!(json["payload"]["audit"]["redaction_summary"], serde_json::json!([]));
+        assert_eq!(
+            json["payload"]["audit"]["redaction_summary"],
+            serde_json::json!([])
+        );
         assert_eq!(json["payload"]["audit"]["redacted"], false);
     }
 
@@ -1831,7 +1948,10 @@ mod tests {
         assert_eq!(json["params"]["context"], "coding session");
         assert_eq!(json["params"]["chunk_size"], 120);
         assert_eq!(json["params"]["source_label"], "stdin:test");
-        assert_eq!(json["params"]["topic_threshold"], 0.4);
+        assert_eq!(
+            json["params"]["topic_threshold"],
+            serde_json::Value::from(0.4_f32)
+        );
         assert_eq!(json["params"]["min_chunk_size"], 24);
         assert_eq!(json["params"]["dry_run"], true);
         assert_eq!(json["params"]["request_id"], "test-req-1");
@@ -1900,7 +2020,10 @@ mod tests {
         assert_eq!(json["params"]["token_budget"], 256);
         assert_eq!(json["params"]["namespace"], "team.alpha");
         assert_eq!(json["params"]["current_context"], "debugging session");
-        assert_eq!(json["params"]["working_memory_ids"], serde_json::json!([7, 8]));
+        assert_eq!(
+            json["params"]["working_memory_ids"],
+            serde_json::json!([7, 8])
+        );
         assert_eq!(json["params"]["format"], "markdown");
         assert_eq!(json["params"]["request_id"], "test-req-1");
 
@@ -1911,6 +2034,46 @@ mod tests {
                 assert_eq!(params.current_context.as_deref(), Some("debugging session"));
                 assert_eq!(params.working_memory_ids, Some(vec![7, 8]));
                 assert_eq!(params.format.as_deref(), Some("markdown"));
+                assert_eq!(params.common, sample_common());
+            }
+            _ => std::process::abort(),
+        }
+    }
+
+    #[test]
+    fn procedures_request_round_trips_with_mutation_fields() {
+        let request = McpRequest::Procedures(ProceduresParams {
+            namespace: "team.alpha".to_string(),
+            promote: Some("procedural://team.alpha/000000000000002a".to_string()),
+            rollback: None,
+            note: Some("approved".to_string()),
+            approved_by: Some("mcp.user".to_string()),
+            public: Some(true),
+            common: sample_common(),
+        });
+
+        let json = serde_json::to_value(&request).unwrap();
+        assert_eq!(json["method"], "procedures");
+        assert_eq!(json["params"]["namespace"], "team.alpha");
+        assert_eq!(
+            json["params"]["promote"],
+            "procedural://team.alpha/000000000000002a"
+        );
+        assert_eq!(json["params"]["note"], "approved");
+        assert_eq!(json["params"]["approved_by"], "mcp.user");
+        assert_eq!(json["params"]["public"], true);
+        assert_eq!(json["params"]["request_id"], "test-req-1");
+
+        let decoded: McpRequest = serde_json::from_value(json).unwrap();
+        match decoded {
+            McpRequest::Procedures(params) => {
+                assert_eq!(
+                    params.promote.as_deref(),
+                    Some("procedural://team.alpha/000000000000002a")
+                );
+                assert_eq!(params.note.as_deref(), Some("approved"));
+                assert_eq!(params.approved_by.as_deref(), Some("mcp.user"));
+                assert_eq!(params.public, Some(true));
                 assert_eq!(params.common, sample_common());
             }
             _ => std::process::abort(),
@@ -2013,7 +2176,9 @@ mod tests {
                 assert_eq!(params.result_budget, Some(5));
                 assert_eq!(params.like_id, Some(42));
                 assert_eq!(params.mood_congruent, Some(true));
-                assert_eq!(params.common, sample_common());
+                let mut expected = sample_common();
+                expected.time_budget_ms = Some(100);
+                assert_eq!(params.common, expected);
             }
             _ => std::process::abort(),
         }
@@ -2063,6 +2228,32 @@ mod tests {
         assert_eq!(forget_json["method"], "forget");
         assert_eq!(forget_json["params"]["mode"], "archive");
 
+        // Why
+        let why_json = serde_json::to_value(McpRequest::Why(
+            serde_json::from_value(serde_json::json!({
+                "id": 42,
+                "namespace": "team.alpha",
+                "depth": 3
+            }))
+            .unwrap(),
+        ))
+        .unwrap();
+        assert_eq!(why_json["method"], "why");
+        assert_eq!(why_json["params"]["depth"], 3);
+
+        // Invalidate
+        let invalidate_json = serde_json::to_value(McpRequest::Invalidate(
+            serde_json::from_value(serde_json::json!({
+                "id": 42,
+                "namespace": "team.alpha",
+                "dry_run": true
+            }))
+            .unwrap(),
+        ))
+        .unwrap();
+        assert_eq!(invalidate_json["method"], "invalidate");
+        assert_eq!(invalidate_json["params"]["dry_run"], true);
+
         // Share
         let share_json = serde_json::to_value(McpRequest::Share(
             serde_json::from_value(serde_json::json!({
@@ -2096,6 +2287,25 @@ mod tests {
         assert_eq!(unshare_json["method"], "unshare");
         assert_eq!(unshare_json["params"]["request_id"], "req-unshare-42");
         assert_eq!(unshare_json["params"]["session_id"], "session-9");
+
+        // Audit
+        let audit_json = serde_json::to_value(McpRequest::Audit(
+            serde_json::from_value(serde_json::json!({
+                "namespace": "team.alpha",
+                "memory_id": 42,
+                "since_tick": 7,
+                "op": "maintenance",
+                "limit": 3
+            }))
+            .unwrap(),
+        ))
+        .unwrap();
+        assert_eq!(audit_json["method"], "audit");
+        assert_eq!(audit_json["params"]["namespace"], "team.alpha");
+        assert_eq!(audit_json["params"]["memory_id"], 42);
+        assert_eq!(audit_json["params"]["since_tick"], 7);
+        assert_eq!(audit_json["params"]["op"], "maintenance");
+        assert_eq!(audit_json["params"]["limit"], 3);
 
         // Consolidate
         let consolidate_json = serde_json::to_value(McpRequest::Consolidate(
@@ -2146,7 +2356,10 @@ mod tests {
         ))
         .unwrap();
         assert_eq!(preflight_explain_json["method"], "preflight.explain");
-        assert_eq!(preflight_explain_json["params"]["proposed_action"], "purge namespace audit history");
+        assert_eq!(
+            preflight_explain_json["params"]["proposed_action"],
+            "purge namespace audit history"
+        );
 
         // Preflight allow
         let preflight_allow_json = serde_json::to_value(McpRequest::PreflightAllow(
@@ -2161,7 +2374,10 @@ mod tests {
         ))
         .unwrap();
         assert_eq!(preflight_allow_json["method"], "preflight.allow");
-        assert_eq!(preflight_allow_json["params"]["bypass_flags"], serde_json::json!(["manual_override"]));
+        assert_eq!(
+            preflight_allow_json["params"]["bypass_flags"],
+            serde_json::json!(["manual_override"])
+        );
     }
 
     #[test]

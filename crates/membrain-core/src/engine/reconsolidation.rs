@@ -897,6 +897,15 @@ impl ReconsolidationRun {
                     detail,
                 )
                 .with_memory_id(record.memory_id)
+                .with_tick(record.tick)
+                .with_strength_delta(
+                    record
+                        .strength_before
+                        .map(|value| Self::quantize_millis_u32(value) as u16),
+                    record
+                        .strength_after
+                        .map(|value| Self::quantize_millis_u32(value) as u16),
+                )
                 .with_related_run(format!("reconsolidation-tick-{}", record.tick))
             })
             .collect()

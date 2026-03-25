@@ -1,4 +1,7 @@
 use membrain_core::api::{AgentId, NamespaceId, WorkspaceId};
+use membrain_core::engine::lease::{
+    FreshnessState, LeaseAction, LeaseMetadata, LeasePolicy, LeaseScanItem, LeaseScanner,
+};
 use membrain_core::migrate::DurableSchemaObject;
 use membrain_core::store::tier2::Tier2Store;
 use membrain_core::store::Tier2StoreApi;
@@ -90,6 +93,8 @@ fn normalized_envelope(
         landmark,
         observation_source: observation_source.map(str::to_string),
         observation_chunk_id: observation_chunk_id.map(str::to_string),
+        has_causal_parents: false,
+        has_causal_children: false,
         sharing: SharingMetadata::default(),
     }
 }
@@ -120,6 +125,8 @@ fn tier2_layout_separates_metadata_from_raw_payload_body_and_preserves_namespace
     assert_eq!(layout.metadata.workspace_id, None);
     assert_eq!(layout.metadata.agent_id, None);
     assert_eq!(layout.metadata.compact_text, "compact prefilter text");
+    assert_eq!(layout.metadata.lease.lease_policy, LeasePolicy::Normal);
+    assert_eq!(layout.metadata.lease.freshness_state, FreshnessState::Fresh);
     assert_eq!(
         layout.metadata.payload_size_bytes,
         envelope.payload_size_bytes
@@ -154,7 +161,9 @@ fn tier2_layout_separates_metadata_from_raw_payload_body_and_preserves_namespace
 fn tier2_prefilter_view_exposes_namespace_safe_metadata_fields() {
     let store = Tier2Store;
     let namespace = NamespaceId::new("team.alpha").unwrap();
-    let envelope = shared_envelope("raw source evidence", "compact summary");
+    let mut envelope = shared_envelope("raw source evidence", "compact summary");
+    envelope.has_causal_parents = true;
+    envelope.has_causal_children = true;
     let confidence_inputs = sample_confidence_inputs();
     let confidence_output = sample_confidence_output();
 
@@ -177,6 +186,10 @@ fn tier2_prefilter_view_exposes_namespace_safe_metadata_fields() {
     assert_eq!(prefilter.fingerprint, 12345);
     assert_eq!(prefilter.payload_size_bytes, "raw source evidence".len());
     assert_eq!(prefilter.visibility().as_str(), "shared");
+    assert_eq!(prefilter.lease_policy(), LeasePolicy::Normal);
+    assert_eq!(prefilter.freshness_state(), FreshnessState::Fresh);
+    assert!(prefilter.has_causal_parents);
+    assert!(prefilter.has_causal_children);
     assert_eq!(prefilter.workspace_id(), Some("ws.alpha"));
     assert_eq!(prefilter.agent_id(), Some("agent.writer"));
     assert_eq!(prefilter.confidence_inputs, Some(&confidence_inputs));
@@ -192,7 +205,8 @@ fn tier2_prefilter_view_exposes_namespace_safe_metadata_fields() {
 fn tier2_metadata_index_key_matches_namespace_safe_identity_fields() {
     let store = Tier2Store;
     let namespace = NamespaceId::new("team.alpha").unwrap();
-    let envelope = shared_envelope("raw source evidence", "compact summary");
+    let mut envelope = shared_envelope("raw source evidence", "compact summary");
+    envelope.has_causal_parents = true;
     let confidence_inputs = sample_confidence_inputs();
     let confidence_output = sample_confidence_output();
 
@@ -215,6 +229,10 @@ fn tier2_metadata_index_key_matches_namespace_safe_identity_fields() {
     assert_eq!(key.fingerprint, layout.metadata.fingerprint);
     assert_eq!(key.compact_text, layout.metadata.compact_text);
     assert_eq!(key.visibility().as_str(), "shared");
+    assert_eq!(key.lease_policy(), LeasePolicy::Normal);
+    assert_eq!(key.freshness_state(), FreshnessState::Fresh);
+    assert!(key.has_causal_parents);
+    assert!(!key.has_causal_children);
     assert_eq!(key.workspace_id(), Some("ws.alpha"));
     assert_eq!(key.agent_id(), Some("agent.writer"));
     assert_eq!(key.confidence_inputs, Some(&confidence_inputs));
@@ -275,7 +293,15 @@ fn tier2_payload_hydration_path_escapes_namespace_separators() {
     let namespace = NamespaceId::new("team/alpha").unwrap();
     let envelope = normalized_event("raw source evidence", "compact summary");
 
-    let layout = store.layout_item(namespace, MemoryId(41), SessionId(7), 991, &envelope, None, None);
+    let layout = store.layout_item(
+        namespace,
+        MemoryId(41),
+        SessionId(7),
+        991,
+        &envelope,
+        None,
+        None,
+    );
 
     assert_eq!(
         layout.payload.payload_locator.namespace.as_str(),
@@ -319,6 +345,47 @@ fn tier2_payload_body_stays_outside_prefilter_and_index_views() {
     assert_ne!(payload.raw_text, prefilter.compact_text);
     assert_ne!(payload.raw_text, key.compact_text);
     assert_eq!(layout.prefilter_trace().payload_fetch_count, 0);
+}
+
+#[test]
+fn lease_scanner_reports_stale_action_critical_transitions_without_full_scan() {
+    let scanner = LeaseScanner;
+    let items = vec![
+        LeaseScanItem {
+            memory_id: MemoryId(11),
+            lease: LeaseMetadata::new(LeasePolicy::Normal, 0),
+            action_critical: false,
+        },
+        LeaseScanItem {
+            memory_id: MemoryId(12),
+            lease: LeaseMetadata::new(LeasePolicy::Volatile, 0),
+            action_critical: true,
+        },
+        LeaseScanItem {
+            memory_id: MemoryId(13),
+            lease: LeaseMetadata::pinned(0),
+            action_critical: true,
+        },
+    ];
+
+    let report = scanner.scan(&items, 400, 2);
+
+    assert_eq!(report.scanned_items, 2);
+    assert_eq!(report.transitioned_items, 2);
+    assert_eq!(report.recheck_required_items, 1);
+    assert_eq!(report.withheld_items, 1);
+    assert_eq!(report.queue_report.queue_family, "lease_scanner");
+    assert_eq!(report.queue_report.queue_depth_before, 3);
+    assert_eq!(report.queue_report.queue_depth_after, 1);
+    assert!(report.queue_report.partial_run);
+    assert_eq!(report.transitions[0].next_state, FreshnessState::Stale);
+    assert_eq!(report.transitions[0].action, LeaseAction::LowerConfidence);
+    assert_eq!(
+        report.transitions[1].next_state,
+        FreshnessState::RecheckRequired
+    );
+    assert_eq!(report.transitions[1].action, LeaseAction::Withhold);
+    assert_eq!(report.transitions[1].confidence_cap, Some(250));
 }
 
 #[test]
@@ -473,7 +540,10 @@ fn tier2_metadata_preserves_active_era_for_non_landmarks() {
     let landmark_record = layout.landmark_record();
 
     assert!(!layout.metadata.landmark.is_landmark);
-    assert_eq!(layout.metadata.landmark.era_id.as_deref(), Some("era-launch-0088"));
+    assert_eq!(
+        layout.metadata.landmark.era_id.as_deref(),
+        Some("era-launch-0088")
+    );
     assert_eq!(landmark_record.era_id(), Some("era-launch-0088"));
     assert_eq!(landmark_record.era_started_at_tick(), None);
     assert_eq!(prefilter.era_id(), Some("era-launch-0088"));
@@ -624,11 +694,13 @@ fn tier2_store_schema_objects_match_split_durable_layout_contract() {
             DurableSchemaObject::MemoryItemsTable,
             DurableSchemaObject::MemoryPayloadsTable,
             DurableSchemaObject::MemoryLineageEdgesTable,
+            DurableSchemaObject::CausalLinksTable,
             DurableSchemaObject::MemoryEntityRefsTable,
             DurableSchemaObject::MemoryRelationRefsTable,
             DurableSchemaObject::MemoryTagsTable,
             DurableSchemaObject::ConflictRecordsTable,
             DurableSchemaObject::DurableMemoryRecords,
+            DurableSchemaObject::SnapshotMetadataTable,
             DurableSchemaObject::LandmarksTable,
         ]
     );

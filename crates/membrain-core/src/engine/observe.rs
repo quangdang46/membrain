@@ -43,7 +43,9 @@ impl ObserveConfig {
     }
 
     fn normalized_min_chunk_chars(&self) -> usize {
-        self.min_chunk_chars.max(1).min(self.normalized_chunk_size())
+        self.min_chunk_chars
+            .max(1)
+            .min(self.normalized_chunk_size())
     }
 
     fn normalized_topic_shift_threshold(&self) -> f32 {
@@ -267,7 +269,11 @@ fn split_oversized_piece(text: &str, chunk_size: usize, min_chunk_chars: usize) 
     let mut current = String::new();
     for sentence in sentence_candidates {
         let would_exceed = !current.is_empty()
-            && current.len().saturating_add(1).saturating_add(sentence.len()) > chunk_size
+            && current
+                .len()
+                .saturating_add(1)
+                .saturating_add(sentence.len())
+                > chunk_size
             && current.len() >= min_chunk_chars;
         if would_exceed {
             pieces.push(current.trim().to_string());
@@ -371,11 +377,11 @@ mod tests {
         let report = ObserveEngine::observe_content(&engine, content, &config, true, |_| false);
 
         assert_eq!(report.bytes_processed, content.len());
-        assert_eq!(report.fragments.len(), 2);
-        assert_eq!(report.memories_created, 2);
+        assert_eq!(report.fragments.len(), 3);
+        assert_eq!(report.memories_created, 3);
         assert_eq!(report.suppressed, 0);
         assert_eq!(report.denied, 0);
-        assert_eq!(report.topic_shifts_detected, 1);
+        assert_eq!(report.topic_shifts_detected, 2);
         assert_eq!(report.observation_source, "watch:logs/app.jsonl");
         assert!(report.fragments.iter().all(|fragment| fragment
             .prepared
@@ -437,15 +443,22 @@ mod tests {
         let content = "duplicate fragment repeated here.\n\nduplicate fragment repeated here.";
         let mut seen = HashSet::new();
 
-        let report = ObserveEngine::observe_content(&engine, content, &config, true, |fingerprint| {
-            !seen.insert(fingerprint)
-        });
+        let report =
+            ObserveEngine::observe_content(&engine, content, &config, true, |fingerprint| {
+                !seen.insert(fingerprint)
+            });
 
         assert_eq!(report.fragments.len(), 2);
         assert_eq!(report.memories_created, 1);
         assert_eq!(report.suppressed, 1);
         assert_eq!(report.denied, 0);
-        assert_eq!(report.fragments[0].prepared.write_decision.as_str(), "capture");
-        assert_eq!(report.fragments[1].prepared.write_decision.as_str(), "suppress");
+        assert_eq!(
+            report.fragments[0].prepared.write_decision.as_str(),
+            "capture"
+        );
+        assert_eq!(
+            report.fragments[1].prepared.write_decision.as_str(),
+            "suppress"
+        );
     }
 }

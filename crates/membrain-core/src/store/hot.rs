@@ -58,9 +58,24 @@ impl Tier1HotMetadataStore {
         self.exact.len()
     }
 
+    /// Returns the current resident Tier1 metadata entry count as an explicit capacity signal.
+    pub fn resident_count(&self) -> usize {
+        self.len()
+    }
+
     /// Returns the configured hard cap for Tier1 metadata entries.
     pub fn capacity(&self) -> usize {
         self.capacity
+    }
+
+    /// Returns how many additional metadata entries Tier1 can admit before eviction starts.
+    pub fn remaining_capacity(&self) -> usize {
+        self.capacity.saturating_sub(self.resident_count())
+    }
+
+    /// Returns whether Tier1 is currently full and the next new seed will trigger eviction.
+    pub fn at_capacity(&self) -> bool {
+        self.resident_count() >= self.capacity
     }
 
     /// Returns whether the Tier1 metadata store is empty.
@@ -270,6 +285,9 @@ mod tests {
         let store = Tier1HotMetadataStore::new(7);
 
         assert_eq!(store.capacity(), 7);
+        assert_eq!(store.resident_count(), 0);
+        assert_eq!(store.remaining_capacity(), 7);
+        assert!(!store.at_capacity());
     }
 
     #[test]
@@ -286,6 +304,9 @@ mod tests {
             exact.record.as_ref().map(|record| record.memory_id),
             Some(MemoryId(1))
         );
+        assert!(store.at_capacity());
+        assert_eq!(store.resident_count(), 2);
+        assert_eq!(store.remaining_capacity(), 0);
         assert!(store.exact_lookup(&namespace, MemoryId(1)).record.is_some());
         assert!(store.exact_lookup(&namespace, MemoryId(2)).record.is_none());
         assert!(store.exact_lookup(&namespace, MemoryId(3)).record.is_some());
@@ -307,7 +328,7 @@ mod tests {
     }
 
     #[test]
-    fn zero_budget_lookups_leave_capacity_and_resident_count_unchanged() {
+    fn zero_budget_lookups_leave_capacity_and_introspection_unchanged() {
         let namespace = NamespaceId::new("team.alpha").unwrap();
         let mut store = Tier1HotMetadataStore::new(3);
         store.seed(seed_record("team.alpha", 1, 10, "older"));
@@ -315,6 +336,9 @@ mod tests {
 
         assert_eq!(store.capacity(), 3);
         assert_eq!(store.len(), 2);
+        assert_eq!(store.resident_count(), 2);
+        assert_eq!(store.remaining_capacity(), 1);
+        assert!(!store.at_capacity());
         assert!(!store.is_empty());
 
         let exact = store.exact_lookup_with_budget(&namespace, MemoryId(1), 0);
@@ -324,6 +348,9 @@ mod tests {
         assert_eq!(recent.trace.outcome, Tier1LookupOutcome::Bypass);
         assert_eq!(store.capacity(), 3);
         assert_eq!(store.len(), 2);
+        assert_eq!(store.resident_count(), 2);
+        assert_eq!(store.remaining_capacity(), 1);
+        assert!(!store.at_capacity());
         assert!(!store.is_empty());
     }
 

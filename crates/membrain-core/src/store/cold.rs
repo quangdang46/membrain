@@ -475,8 +475,7 @@ impl ColdStore {
                 .join(",");
             format!(
                 "hard delete denied for memory {} ({})",
-                record.memory_id.0,
-                reasons,
+                record.memory_id.0, reasons,
             )
         }
     }
@@ -601,7 +600,10 @@ impl ColdStore {
             },
             request_id,
             actor_source: "cold_store_hard_delete",
-            related_run: safeguard.audit.related_run.unwrap_or("irreversible-mutation-run"),
+            related_run: safeguard
+                .audit
+                .related_run
+                .unwrap_or("irreversible-mutation-run"),
             detail,
             redacted: !allowed,
         };
@@ -818,7 +820,11 @@ mod tests {
         archived.requested_by = Some("agent.retention");
         archived.destructive_confirmation = true;
 
-        let plan = store.plan_hard_delete(&archived, "req-hard-delete-hold", &crate::policy::PolicyModule);
+        let plan = store.plan_hard_delete(
+            &archived,
+            "req-hard-delete-hold",
+            &crate::policy::PolicyModule,
+        );
 
         assert!(!plan.allowed);
         assert_eq!(plan.policy_surface, "hard_delete");
@@ -837,7 +843,11 @@ mod tests {
         let store = ColdStore;
         let archived = record(ArchiveState::Archived);
 
-        let plan = store.plan_hard_delete(&archived, "req-hard-delete-missing", &crate::policy::PolicyModule);
+        let plan = store.plan_hard_delete(
+            &archived,
+            "req-hard-delete-missing",
+            &crate::policy::PolicyModule,
+        );
 
         assert!(!plan.allowed);
         assert!(plan
@@ -861,7 +871,11 @@ mod tests {
         deleted.requested_by = Some("operator.cli");
         deleted.destructive_confirmation = true;
 
-        let plan = store.plan_hard_delete(&deleted, "req-hard-delete-active", &crate::policy::PolicyModule);
+        let plan = store.plan_hard_delete(
+            &deleted,
+            "req-hard-delete-active",
+            &crate::policy::PolicyModule,
+        );
 
         assert!(!plan.allowed);
         assert!(plan
@@ -877,7 +891,11 @@ mod tests {
         archived.requested_by = Some("retention.job");
         archived.destructive_confirmation = true;
 
-        let plan = store.plan_hard_delete(&archived, "req-hard-delete-ok", &crate::policy::PolicyModule);
+        let plan = store.plan_hard_delete(
+            &archived,
+            "req-hard-delete-ok",
+            &crate::policy::PolicyModule,
+        );
 
         assert!(plan.allowed);
         assert_eq!(plan.authority, Some("retention_expiry"));

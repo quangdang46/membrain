@@ -14,13 +14,14 @@ use crate::observability::OutcomeClass;
 use crate::observability::{
     ExplainResultReason, ObservabilityModule, TracePolicySummary, TraceProvenanceSummary,
 };
-use crate::types::{CanonicalMemoryType, MemoryId, SessionId};
+use crate::types::{CanonicalMemoryType, MemoryId, SessionId, SnapshotId};
 use serde::{Deserialize, Serialize};
 
 // ── Result envelope ──────────────────────────────────────────────────────────
 
 /// Which retrieval role an evidence item plays inside the bounded result set.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
 pub enum EvidenceRole {
     Primary,
     Supporting,
@@ -38,6 +39,7 @@ impl EvidenceRole {
 
 /// Inline vs deferred payload state preserved across wrappers.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
 pub enum PayloadState {
     Inline,
     PreviewOnly,
@@ -59,6 +61,7 @@ impl PayloadState {
 
 /// Lane by which an item entered the bounded shortlist.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
 pub enum EntryLane {
     Exact,
     Recent,
@@ -180,6 +183,7 @@ pub struct RetrievalResult {
 
 /// Which storage tier serviced this result.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
 pub enum AnsweredFrom {
     Tier1Hot,
     Tier2Indexed,
@@ -230,7 +234,54 @@ pub struct FreshnessMarkers {
     pub newest_item_days: u32,
     pub volatile_items_included: bool,
     pub stale_warning: bool,
+    pub lease_sensitive: bool,
+    pub recheck_required: bool,
     pub as_of_tick: Option<u64>,
+}
+
+impl FreshnessMarkers {
+    /// Builds the canonical fresh marker set used when no special freshness policy applies.
+    pub const fn fresh(as_of_tick: Option<u64>) -> Self {
+        Self {
+            oldest_item_days: 0,
+            newest_item_days: 0,
+            volatile_items_included: false,
+            stale_warning: false,
+            lease_sensitive: false,
+            recheck_required: false,
+            as_of_tick,
+        }
+    }
+
+    /// Builds freshness markers for a snapshot-anchored historical result set.
+    pub const fn snapshot_scoped(as_of_tick: u64) -> Self {
+        Self {
+            oldest_item_days: 0,
+            newest_item_days: 0,
+            volatile_items_included: false,
+            stale_warning: false,
+            lease_sensitive: false,
+            recheck_required: false,
+            as_of_tick: Some(as_of_tick),
+        }
+    }
+
+    /// Builds freshness markers for a lease-sensitive candidate.
+    pub const fn lease_sensitive(
+        volatile_items_included: bool,
+        recheck_required: bool,
+        as_of_tick: Option<u64>,
+    ) -> Self {
+        Self {
+            oldest_item_days: 0,
+            newest_item_days: 0,
+            volatile_items_included,
+            stale_warning: recheck_required,
+            lease_sensitive: true,
+            recheck_required,
+            as_of_tick,
+        }
+    }
 }
 
 /// Provenance trace for an item.
@@ -270,6 +321,31 @@ pub struct ActionArtifact {
     pub freshness_caveats: Vec<String>,
 }
 
+impl ActionArtifact {
+    /// Returns whether this derived suggestion is safe to surface in a strict output mode.
+    pub fn allowed_in_mode(&self, mode: DualOutputMode) -> bool {
+        let blocking_uncertainty = self.uncertainty_markers.iter().any(|marker| {
+            matches!(
+                marker.as_str(),
+                "low_confidence"
+                    | "high_uncertainty"
+                    | "missing_evidence"
+                    | "reconsolidation_churn"
+            )
+        });
+        match mode {
+            DualOutputMode::Strict => {
+                self.confidence_score >= 700
+                    && self.policy_caveats.is_empty()
+                    && self.freshness_caveats.is_empty()
+                    && !blocking_uncertainty
+            }
+            DualOutputMode::Balanced => self.confidence_score >= 500,
+            DualOutputMode::Fast => true,
+        }
+    }
+}
+
 /// Handle for a payload intentionally deferred past the final bounded cut.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct DeferredPayload {
@@ -292,6 +368,7 @@ pub struct PackagingMetadata {
 
 /// Operating mode for dual memory output.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
 pub enum DualOutputMode {
     Strict,
     Balanced,
@@ -305,6 +382,16 @@ impl DualOutputMode {
             Self::Strict => "strict",
             Self::Balanced => "balanced",
             Self::Fast => "fast",
+        }
+    }
+
+    /// Parses user-facing mode labels into the canonical dual-output mode.
+    pub fn from_label(label: &str) -> Option<Self> {
+        match label.trim().to_ascii_lowercase().as_str() {
+            "strict" | "high" => Some(Self::Strict),
+            "balanced" | "normal" => Some(Self::Balanced),
+            "fast" => Some(Self::Fast),
+            _ => None,
         }
     }
 }
@@ -378,13 +465,7 @@ impl RetrievalResultSet {
                 stale_bypassed: 0,
                 confidence_filtered: 0,
             },
-            freshness_markers: FreshnessMarkers {
-                oldest_item_days: 0,
-                newest_item_days: 0,
-                volatile_items_included: false,
-                stale_warning: false,
-                as_of_tick: None,
-            },
+            freshness_markers: FreshnessMarkers::fresh(None),
             packaging_metadata: PackagingMetadata {
                 result_budget: 0,
                 token_budget: None,
@@ -454,6 +535,23 @@ pub struct QueryByExampleExplain {
     pub influence_summary: String,
 }
 
+/// Historical explain artifact describing how time-travel retrieval selected one boundary.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct HistoricalExplainContext {
+    /// Stable machine-readable selected historical window kind.
+    pub window_kind: String,
+    /// Stable reason describing how the historical boundary was selected.
+    pub selection_reason: String,
+    /// Inclusive selected tick window, when historical retrieval used one.
+    pub selected_tick_window: Option<(u64, u64)>,
+    /// Applied as-of tick for historical scoring and filtering.
+    pub as_of_tick: Option<u64>,
+    /// Resolved snapshot identifier, when one anchored the result.
+    pub snapshot_id: Option<SnapshotId>,
+    /// Resolved snapshot name, when one anchored the result.
+    pub snapshot_name: Option<String>,
+}
+
 /// Top-level explain payload for the full retrieval operation.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct RetrievalExplain {
@@ -475,6 +573,8 @@ pub struct RetrievalExplain {
     pub ranking_profile: String,
     /// Number of contradictions encountered.
     pub contradictions_found: usize,
+    /// Historical context summary when time-travel retrieval shaped the result.
+    pub historical_context: Option<HistoricalExplainContext>,
     /// Query-by-example explain artifact when example seeds participate in retrieval.
     pub query_by_example: Option<QueryByExampleExplain>,
     /// Why concrete results appeared or alternatives were omitted.
@@ -548,9 +648,61 @@ impl RetrievalExplain {
             time_consumed_ms: None,
             ranking_profile: ranking_profile.to_string(),
             contradictions_found: 0,
+            historical_context: None,
             query_by_example: None,
             result_reasons: Vec::new(),
         }
+    }
+
+    /// Attaches canonical historical explain artifacts derived from the planner trace.
+    pub fn set_historical_trace(&mut self, trace: &RetrievalPlanTrace) {
+        let Some(historical_lookup) = &trace.historical_lookup else {
+            self.historical_context = None;
+            return;
+        };
+
+        let snapshot_id = trace
+            .resolved_snapshot
+            .as_ref()
+            .map(|snapshot| snapshot.snapshot_id);
+        let snapshot_name = trace
+            .resolved_snapshot
+            .as_ref()
+            .map(|snapshot| snapshot.snapshot_name.clone())
+            .or_else(|| trace.snapshot_name.clone());
+        let historical_context = HistoricalExplainContext {
+            window_kind: historical_lookup.window_kind.as_str().to_string(),
+            selection_reason: historical_lookup.selection_reason.to_string(),
+            selected_tick_window: historical_lookup.selected_tick_window,
+            as_of_tick: trace.as_of_tick,
+            snapshot_id,
+            snapshot_name,
+        };
+
+        self.result_reasons.push(ResultReason {
+            memory_id: None,
+            reason_code: "historical_window_selected".to_string(),
+            detail: format!(
+                "historical retrieval used {} via {} with tick_window={:?} and as_of_tick={:?}",
+                historical_context.window_kind,
+                historical_context.selection_reason,
+                historical_context.selected_tick_window,
+                historical_context.as_of_tick
+            ),
+        });
+        if let Some(snapshot_name) = &historical_context.snapshot_name {
+            self.result_reasons.push(ResultReason {
+                memory_id: None,
+                reason_code: "historical_snapshot_selected".to_string(),
+                detail: format!(
+                    "historical retrieval resolved snapshot {:?} at snapshot_id={:?} and as_of_tick={:?}",
+                    snapshot_name,
+                    historical_context.snapshot_id.map(|snapshot_id| snapshot_id.0),
+                    historical_context.as_of_tick
+                ),
+            });
+        }
+        self.historical_context = Some(historical_context);
     }
 
     /// Attaches canonical query-by-example explain artifacts derived from the planner trace.
@@ -686,6 +838,7 @@ pub struct ResultBuilder {
     evidence_pack: Vec<EvidenceItem>,
     deferred_payloads: Vec<DeferredPayload>,
     pub action_pack: Option<Vec<ActionArtifact>>,
+    output_mode: DualOutputMode,
     max_results: usize,
     total_candidates: usize,
     namespace_applied: NamespaceId,
@@ -698,10 +851,17 @@ impl ResultBuilder {
             evidence_pack: Vec::new(),
             deferred_payloads: Vec::new(),
             action_pack: None,
+            output_mode: DualOutputMode::Balanced,
             max_results,
             total_candidates: 0,
             namespace_applied,
         }
+    }
+
+    /// Applies the requested dual-output mode before packaging.
+    pub fn with_output_mode(mut self, output_mode: DualOutputMode) -> Self {
+        self.output_mode = output_mode;
+        self
     }
 
     /// Adds a candidate to the result set.
@@ -808,15 +968,16 @@ impl ResultBuilder {
         self.evidence_pack.push(EvidenceItem {
             result,
             provenance_summary,
-            freshness_markers: FreshnessMarkers {
-                oldest_item_days: 0,
-                newest_item_days: 0,
-                volatile_items_included: false,
-                stale_warning: false,
-                as_of_tick: None,
-            },
+            freshness_markers: FreshnessMarkers::fresh(None),
             omitted_fields: Vec::new(),
         });
+    }
+
+    /// Applies as-of freshness markers across all retained evidence items.
+    pub fn apply_as_of_tick(&mut self, as_of_tick: u64) {
+        for item in &mut self.evidence_pack {
+            item.freshness_markers = FreshnessMarkers::fresh(Some(as_of_tick));
+        }
     }
 
     /// Adds a candidate with full confidence computation from evidence inputs.
@@ -932,13 +1093,7 @@ impl ResultBuilder {
         self.evidence_pack.push(EvidenceItem {
             result,
             provenance_summary,
-            freshness_markers: FreshnessMarkers {
-                oldest_item_days: 0,
-                newest_item_days: 0,
-                volatile_items_included: false,
-                stale_warning: false,
-                as_of_tick: None,
-            },
+            freshness_markers: FreshnessMarkers::fresh(None),
             omitted_fields: Vec::new(),
         });
     }
@@ -952,11 +1107,6 @@ impl ResultBuilder {
             OutcomeClass::Partial
         } else {
             OutcomeClass::Accepted
-        };
-        let packaging_mode = if self.action_pack.is_some() {
-            "evidence_plus_action"
-        } else {
-            "evidence_only"
         };
         self.evidence_pack.truncate(self.max_results);
         let rerank_metadata = self.evidence_pack.first().and_then(|first| {
@@ -972,10 +1122,39 @@ impl ResultBuilder {
             .map(|item| item.result.contradiction_explains.len())
             .sum();
 
+        let output_mode = self.output_mode;
+        let action_pack = self
+            .action_pack
+            .clone()
+            .map(|actions| {
+                actions
+                    .into_iter()
+                    .filter(|action| action.allowed_in_mode(output_mode))
+                    .collect::<Vec<_>>()
+            })
+            .filter(|actions| !actions.is_empty());
+        let packaging_mode = if action_pack.is_some() {
+            "evidence_plus_action"
+        } else {
+            "evidence_only"
+        };
+        let historical_as_of_tick = explain
+            .historical_context
+            .as_ref()
+            .and_then(|ctx| ctx.as_of_tick);
+        if let Some(as_of_tick) = historical_as_of_tick {
+            self.apply_as_of_tick(as_of_tick);
+        }
+        let freshness_markers = self
+            .evidence_pack
+            .first()
+            .map(|item| item.freshness_markers.clone())
+            .unwrap_or_else(|| FreshnessMarkers::fresh(historical_as_of_tick));
+
         RetrievalResultSet {
             outcome_class,
             evidence_pack: self.evidence_pack,
-            action_pack: self.action_pack,
+            action_pack,
             deferred_payloads: self.deferred_payloads,
             explain: RetrievalExplain {
                 contradictions_found,
@@ -1016,13 +1195,7 @@ impl ResultBuilder {
                 stale_bypassed: 0,
                 confidence_filtered: 0,
             },
-            freshness_markers: FreshnessMarkers {
-                oldest_item_days: 0,
-                newest_item_days: 0,
-                volatile_items_included: false,
-                stale_warning: false,
-                as_of_tick: None,
-            },
+            freshness_markers,
             packaging_metadata: PackagingMetadata {
                 result_budget: self.max_results,
                 token_budget: None,
@@ -1031,7 +1204,7 @@ impl ResultBuilder {
                 packaging_mode: packaging_mode.to_string(),
                 rerank_metadata,
             },
-            output_mode: DualOutputMode::Balanced,
+            output_mode,
             truncated,
             total_candidates: self.total_candidates,
         }
@@ -1086,11 +1259,6 @@ impl ResultBuilder {
         } else {
             OutcomeClass::Accepted
         };
-        let packaging_mode = if self.action_pack.is_some() {
-            "evidence_plus_action"
-        } else {
-            "evidence_only"
-        };
         self.evidence_pack.truncate(self.max_results);
         let rerank_metadata = self.evidence_pack.first().and_then(|first| {
             self.evidence_pack
@@ -1105,10 +1273,39 @@ impl ResultBuilder {
             .map(|item| item.result.contradiction_explains.len())
             .sum();
 
+        let output_mode = self.output_mode;
+        let action_pack = self
+            .action_pack
+            .clone()
+            .map(|actions| {
+                actions
+                    .into_iter()
+                    .filter(|action| action.allowed_in_mode(output_mode))
+                    .collect::<Vec<_>>()
+            })
+            .filter(|actions| !actions.is_empty());
+        let packaging_mode = if action_pack.is_some() {
+            "evidence_plus_action"
+        } else {
+            "evidence_only"
+        };
+        let historical_as_of_tick = explain
+            .historical_context
+            .as_ref()
+            .and_then(|ctx| ctx.as_of_tick);
+        if let Some(as_of_tick) = historical_as_of_tick {
+            self.apply_as_of_tick(as_of_tick);
+        }
+        let freshness_markers = self
+            .evidence_pack
+            .first()
+            .map(|item| item.freshness_markers.clone())
+            .unwrap_or_else(|| FreshnessMarkers::fresh(historical_as_of_tick));
+
         RetrievalResultSet {
             outcome_class,
             evidence_pack: self.evidence_pack,
-            action_pack: self.action_pack,
+            action_pack,
             deferred_payloads: self.deferred_payloads,
             explain: RetrievalExplain {
                 contradictions_found,
@@ -1149,13 +1346,7 @@ impl ResultBuilder {
                 stale_bypassed: 0,
                 confidence_filtered: filtered_count,
             },
-            freshness_markers: FreshnessMarkers {
-                oldest_item_days: 0,
-                newest_item_days: 0,
-                volatile_items_included: false,
-                stale_warning: false,
-                as_of_tick: None,
-            },
+            freshness_markers,
             packaging_metadata: PackagingMetadata {
                 result_budget: self.max_results,
                 token_budget: None,
@@ -1164,7 +1355,7 @@ impl ResultBuilder {
                 packaging_mode: packaging_mode.to_string(),
                 rerank_metadata,
             },
-            output_mode: DualOutputMode::Balanced,
+            output_mode,
             truncated,
             total_candidates: self.total_candidates,
         }
@@ -1263,6 +1454,7 @@ mod tests {
             time_consumed_ms: None,
             ranking_profile: "balanced".to_string(),
             contradictions_found: 0,
+            historical_context: None,
             query_by_example: None,
             result_reasons: vec![ResultReason {
                 memory_id: Some(MemoryId(2)),
@@ -1380,6 +1572,7 @@ mod tests {
             time_consumed_ms: Some(5),
             ranking_profile: "balanced".to_string(),
             contradictions_found: 0,
+            historical_context: None,
             query_by_example: None,
             result_reasons: vec![ResultReason {
                 memory_id: None,
@@ -1533,6 +1726,7 @@ mod tests {
             time_consumed_ms: Some(9),
             ranking_profile: "balanced".to_string(),
             contradictions_found: 0,
+            historical_context: None,
             query_by_example: None,
             result_reasons: vec![ResultReason {
                 memory_id: Some(MemoryId(44)),
@@ -1618,6 +1812,7 @@ mod tests {
             time_consumed_ms: Some(9),
             ranking_profile: "balanced".to_string(),
             contradictions_found: 0,
+            historical_context: None,
             query_by_example: None,
             result_reasons: vec![ResultReason {
                 memory_id: Some(MemoryId(44)),
@@ -1679,6 +1874,7 @@ mod tests {
             time_consumed_ms: Some(12),
             ranking_profile: "balanced".to_string(),
             contradictions_found: 0,
+            historical_context: None,
             query_by_example: None,
             result_reasons: vec![ResultReason {
                 memory_id: Some(MemoryId(7)),
@@ -1763,6 +1959,7 @@ mod tests {
             time_consumed_ms: Some(9),
             ranking_profile: "balanced".to_string(),
             contradictions_found: 0,
+            historical_context: None,
             query_by_example: None,
             result_reasons: vec![ResultReason {
                 memory_id: Some(MemoryId(12)),
@@ -1788,7 +1985,8 @@ mod tests {
             MemoryId(21),
             SessionId(8),
             RawEncodeInput::new(RawIntakeKind::Event, "Launch day")
-                .with_landmark_signals(LandmarkSignals::new(0.95, 0.91, 0.12, 88)),
+                .with_landmark_signals(LandmarkSignals::new(0.95, 0.91, 0.12, 88))
+                .with_current_tick(144),
         );
         let mut explain = RetrievalExplain {
             recall_plan: RecallPlanKind::Tier2ExactThenTier3Fallback,
@@ -1800,6 +1998,7 @@ mod tests {
             time_consumed_ms: None,
             ranking_profile: "balanced".to_string(),
             contradictions_found: 0,
+            historical_context: None,
             query_by_example: None,
             result_reasons: Vec::new(),
         };
@@ -1827,7 +2026,7 @@ mod tests {
             "temporal_landmark_selected"
         );
         assert!(explain.result_reasons[2].detail.contains("launch"));
-        assert!(explain.result_reasons[2].detail.contains("tick 88"));
+        assert!(explain.result_reasons[2].detail.contains("tick 144"));
         assert!(explain.result_reasons[2]
             .detail
             .contains("detection_score="));
@@ -1856,6 +2055,7 @@ mod tests {
             time_consumed_ms: None,
             ranking_profile: "balanced".to_string(),
             contradictions_found: 0,
+            historical_context: None,
             query_by_example: None,
             result_reasons: Vec::new(),
         };
@@ -1951,6 +2151,7 @@ mod tests {
             time_consumed_ms: Some(3),
             ranking_profile: "balanced".to_string(),
             contradictions_found: 0,
+            historical_context: None,
             query_by_example: None,
             result_reasons: vec![],
         });
@@ -1996,6 +2197,7 @@ mod tests {
             time_consumed_ms: Some(250),
             ranking_profile: "balanced".to_string(),
             contradictions_found: 0,
+            historical_context: None,
             query_by_example: None,
             result_reasons: vec![ResultReason {
                 memory_id: None,
@@ -2051,6 +2253,7 @@ mod tests {
             time_consumed_ms: Some(2),
             ranking_profile: "balanced".to_string(),
             contradictions_found: 0,
+            historical_context: None,
             query_by_example: None,
             result_reasons: vec![ResultReason {
                 memory_id: None,
@@ -2075,7 +2278,8 @@ mod tests {
 
     #[test]
     fn action_pack_present_when_builder_attaches_actions() {
-        let mut builder = ResultBuilder::new(5, ns("actions"));
+        let mut builder =
+            ResultBuilder::new(5, ns("actions")).with_output_mode(DualOutputMode::Fast);
         let scored = fuse_scores(
             RankingInput {
                 recency: 700,
@@ -2115,10 +2319,12 @@ mod tests {
             time_consumed_ms: Some(10),
             ranking_profile: "balanced".to_string(),
             contradictions_found: 0,
+            historical_context: None,
             query_by_example: None,
             result_reasons: vec![],
         });
 
+        assert_eq!(result_set.output_mode, DualOutputMode::Fast);
         assert!(result_set.action_pack.is_some());
         assert_eq!(result_set.action_pack.as_ref().unwrap().len(), 1);
         assert_eq!(
@@ -2184,10 +2390,77 @@ mod tests {
             time_consumed_ms: Some(2),
             ranking_profile: "balanced".to_string(),
             contradictions_found: 0,
+            historical_context: None,
             query_by_example: None,
             result_reasons: vec![],
         });
 
+        assert_eq!(result_set.output_mode, DualOutputMode::Balanced);
+        assert!(result_set.action_pack.is_none());
+        assert_eq!(
+            result_set.packaging_metadata.packaging_mode,
+            "evidence_only"
+        );
+    }
+
+    #[test]
+    fn high_label_maps_to_strict_dual_output_mode() {
+        assert_eq!(
+            DualOutputMode::from_label("high"),
+            Some(DualOutputMode::Strict)
+        );
+    }
+
+    #[test]
+    fn strict_output_mode_suppresses_action_pack_with_blocking_uncertainty() {
+        let mut builder =
+            ResultBuilder::new(2, ns("strict_actions")).with_output_mode(DualOutputMode::Strict);
+        let scored = fuse_scores(
+            RankingInput {
+                recency: 800,
+                salience: 700,
+                strength: 650,
+                provenance: 600,
+                conflict: 500,
+                confidence: 800,
+            },
+            RankingProfile::balanced(),
+        );
+        builder.add(
+            MemoryId(44),
+            ns("strict_actions"),
+            SessionId(2),
+            CanonicalMemoryType::ToolOutcome,
+            "restart runbook".into(),
+            &scored,
+            AnsweredFrom::Tier2Indexed,
+        );
+        builder.action_pack = Some(vec![ActionArtifact {
+            action_type: "restart_service".to_string(),
+            suggestion: "Restart the service using the last known good runbook".to_string(),
+            supporting_evidence: vec![MemoryId(44)],
+            confidence_score: 820,
+            uncertainty_markers: vec!["missing_evidence".to_string()],
+            policy_caveats: Vec::new(),
+            freshness_caveats: Vec::new(),
+        }]);
+
+        let result_set = builder.build(RetrievalExplain {
+            recall_plan: RecallPlanKind::Tier2ExactThenTier3Fallback,
+            route_reason: "strict output mode".to_string(),
+            tiers_consulted: vec!["tier2_exact".to_string()],
+            trace_stages: vec![RecallTraceStage::Tier2Exact],
+            tier1_answered_directly: false,
+            candidate_budget: 2,
+            time_consumed_ms: Some(3),
+            ranking_profile: "balanced".to_string(),
+            contradictions_found: 0,
+            historical_context: None,
+            query_by_example: None,
+            result_reasons: vec![],
+        });
+
+        assert_eq!(result_set.output_mode, DualOutputMode::Strict);
         assert!(result_set.action_pack.is_none());
         assert_eq!(
             result_set.packaging_metadata.packaging_mode,
@@ -2240,6 +2513,7 @@ mod tests {
             time_consumed_ms: Some(42),
             ranking_profile: "recency_biased".to_string(),
             contradictions_found: 2,
+            historical_context: None,
             query_by_example: None,
             result_reasons: vec![
                 ResultReason {
@@ -2273,20 +2547,21 @@ mod tests {
         assert_eq!(DualOutputMode::Balanced.as_str(), "balanced");
         assert_eq!(DualOutputMode::Fast.as_str(), "fast");
 
-        for mode in [
-            DualOutputMode::Strict,
-            DualOutputMode::Balanced,
-            DualOutputMode::Fast,
+        for (mode, json) in [
+            (DualOutputMode::Strict, "\"strict\""),
+            (DualOutputMode::Balanced, "\"balanced\""),
+            (DualOutputMode::Fast, "\"fast\""),
         ] {
-            let json = serde_json::to_string(&mode).unwrap();
-            let decoded: DualOutputMode = serde_json::from_str(&json).unwrap();
+            assert_eq!(serde_json::to_string(&mode).unwrap(), json);
+            let decoded: DualOutputMode = serde_json::from_str(json).unwrap();
             assert_eq!(decoded, mode);
         }
     }
 
     #[test]
     fn evidence_item_fields_preserved_through_serialization() {
-        let mut builder = ResultBuilder::new(1, ns("serialize"));
+        let mut builder =
+            ResultBuilder::new(1, ns("serialize")).with_output_mode(DualOutputMode::Fast);
         let ranked = fuse_scores(
             RankingInput {
                 recency: 800,
@@ -2317,6 +2592,7 @@ mod tests {
             time_consumed_ms: Some(50),
             ranking_profile: "balanced".to_string(),
             contradictions_found: 0,
+            historical_context: None,
             query_by_example: None,
             result_reasons: vec![],
         });
@@ -2325,6 +2601,7 @@ mod tests {
         let decoded: RetrievalResultSet = serde_json::from_str(&json).unwrap();
 
         assert_eq!(decoded.count(), 1);
+        assert_eq!(decoded.output_mode, DualOutputMode::Fast);
         let item = &decoded.evidence_pack[0];
         assert_eq!(item.result.memory_id, MemoryId(42));
         assert_eq!(item.result.entry_lane.as_str(), "cold_fallback");
@@ -2418,6 +2695,7 @@ mod tests {
             time_consumed_ms: Some(2),
             ranking_profile: "balanced".to_string(),
             contradictions_found: 0,
+            historical_context: None,
             query_by_example: None,
             result_reasons: vec![
                 ResultReason {
@@ -2474,6 +2752,7 @@ mod tests {
             time_consumed_ms: Some(1),
             ranking_profile: "balanced".to_string(),
             contradictions_found: 0,
+            historical_context: None,
             query_by_example: None,
             result_reasons: vec![],
         };
@@ -2518,6 +2797,7 @@ mod tests {
             time_consumed_ms: Some(5),
             ranking_profile: "balanced".to_string(),
             contradictions_found: 0,
+            historical_context: None,
             query_by_example: None,
             result_reasons: vec![],
         };
@@ -2611,6 +2891,7 @@ mod tests {
                 time_consumed_ms: Some(7),
                 ranking_profile: "balanced".to_string(),
                 contradictions_found: 0,
+                historical_context: None,
                 query_by_example: None,
                 result_reasons: vec![],
             },

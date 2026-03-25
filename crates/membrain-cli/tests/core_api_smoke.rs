@@ -9,6 +9,7 @@ use membrain_core::engine::maintenance::{
     MaintenanceController, MaintenanceJobHandle, MaintenanceJobState,
 };
 use membrain_core::engine::ranking::RankingRuntime;
+use membrain_core::engine::ranking::{ConfidenceDisplayConfig, ConfidenceExplain};
 use membrain_core::engine::recall::{RecallRuntime, RecallTraceStage};
 use membrain_core::engine::repair::{IndexRepairEntrypoint, RepairTarget};
 use membrain_core::engine::result::RetrievalExplain;
@@ -393,6 +394,33 @@ fn cli_rejects_duplicate_query_by_example_cues() {
 }
 
 #[test]
+fn cli_confidence_display_explain_surfaces_reconsolidation_and_intervals() {
+    let explain = ConfidenceExplain::new(
+        ConfidenceDisplayConfig::strict(),
+        640,
+        Some((580, 640, 700)),
+        [(10, None), (20, None), (30, None), (40, None), (550, None)],
+    );
+
+    assert!(explain.passes_threshold);
+    assert!(!explain.low_confidence_tagged);
+    assert_eq!(
+        explain.uncertainty_breakdown,
+        vec![
+            ("freshness".to_string(), 10),
+            ("contradiction".to_string(), 20),
+            ("missing_evidence".to_string(), 30),
+            ("corroboration".to_string(), 40),
+            ("reconsolidation".to_string(), 550),
+        ]
+    );
+    assert_eq!(
+        explain.interval.as_ref().map(|interval| interval.width),
+        Some(120)
+    );
+}
+
+#[test]
 fn cli_query_by_example_explain_names_source_mode_and_materialization_gaps() {
     let namespace = NamespaceId::new("cli.team").unwrap();
     let request = RetrievalRequest::hybrid(namespace, "  release blocker  ", 4)
@@ -571,7 +599,10 @@ fn cli_can_surface_repair_reports_through_shared_core_repair_engine() {
     assert_eq!(
         store
             .repair_engine()
-            .plan_index_rebuild(RepairTarget::SemanticHotIndex, IndexRepairEntrypoint::RebuildIfNeeded)
+            .plan_index_rebuild(
+                RepairTarget::SemanticHotIndex,
+                IndexRepairEntrypoint::RebuildIfNeeded
+            )
             .expect("semantic hot index plan should exist")
             .durable_sources,
         vec![

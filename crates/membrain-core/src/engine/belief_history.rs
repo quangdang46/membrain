@@ -1240,7 +1240,7 @@ mod tests {
         let open = engine.open_conflicts();
         assert_eq!(open.len(), 1);
         assert_eq!(open[0].chain_id, cid);
-        assert_eq!(open[0].resolution_state, "unresolved");
+        assert_eq!(open[0].resolution_state, "coexistence");
         assert!(open[0].has_unresolved);
         assert_eq!(open[0].conflicts, 1);
         assert_eq!(open[0].versions[1].conflict_state, "coexistence");
@@ -1248,7 +1248,7 @@ mod tests {
         let by_query = engine.belief_history_for_query("weekends").unwrap();
         assert_eq!(by_query.chain_id, cid);
         assert_eq!(by_query.preferred_memory_id, MemoryId(2));
-        assert_eq!(by_query.resolution_state, "unresolved");
+        assert_eq!(by_query.resolution_state, "coexistence");
     }
 
     #[test]

@@ -16,7 +16,7 @@
 
 use crate::api::NamespaceId;
 use crate::index::{CandidateSet, EntityQuery, Fts5Query, TemporalQuery};
-use crate::types::{CanonicalMemoryType, MemoryId, SessionId};
+use crate::types::{CanonicalMemoryType, MemoryId, SessionId, SnapshotMetadata};
 use std::ops::RangeInclusive;
 
 // ── Planner input ─────────────────────────────────────────────────────────────
@@ -717,20 +717,20 @@ impl RetrievalRequest {
             || self.era_id.is_some()
             || self.as_of_tick_range.is_some()
             || self.session_filter.is_some())
-            .then(|| {
-                let mut query = TemporalQuery::new(self.namespace.clone(), self.limit)
-                    .with_budget(self.candidate_budget);
-                if let Some(session_id) = self.session_filter {
-                    query = query.with_session(session_id);
-                }
-                if let Some(range) = &self.as_of_tick_range {
-                    query = query.with_tick_range(*range.start(), *range.end());
-                }
-                if let Some(era_id) = &self.era_id {
-                    query = query.with_era_id(era_id.clone());
-                }
-                query
-            })
+        .then(|| {
+            let mut query = TemporalQuery::new(self.namespace.clone(), self.limit)
+                .with_budget(self.candidate_budget);
+            if let Some(session_id) = self.session_filter {
+                query = query.with_session(session_id);
+            }
+            if let Some(range) = &self.as_of_tick_range {
+                query = query.with_tick_range(*range.start(), *range.end());
+            }
+            if let Some(era_id) = &self.era_id {
+                query = query.with_era_id(era_id.clone());
+            }
+            query
+        })
     }
 
     /// Builds the bounded entity prefilter query when this request uses the entity-heavy lane.
@@ -1053,6 +1053,41 @@ impl StageTrace {
     }
 }
 
+/// Machine-readable window-selection strategy for historical retrieval.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
+pub enum HistoricalWindowKind {
+    /// Historical lookup uses one explicit named snapshot.
+    Snapshot,
+    /// Historical lookup uses one inclusive tick window.
+    TickWindow,
+    /// Historical lookup uses the live present-state route.
+    Present,
+}
+
+impl HistoricalWindowKind {
+    /// Returns the stable machine-readable name.
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Snapshot => "snapshot",
+            Self::TickWindow => "tick_window",
+            Self::Present => "present",
+        }
+    }
+}
+
+/// Machine-readable summary of how historical retrieval selected its time boundary.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct HistoricalLookupTrace {
+    /// Whether the request resolved to present-state or historical retrieval.
+    pub window_kind: HistoricalWindowKind,
+    /// Stable reason describing why this historical window was selected.
+    pub selection_reason: &'static str,
+    /// Inclusive selected tick window, if one was applied.
+    pub selected_tick_window: Option<(u64, u64)>,
+    /// Resolved snapshot tick when a named snapshot anchored the request.
+    pub snapshot_as_of_tick: Option<u64>,
+}
+
 /// Complete retrieval plan trace.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RetrievalPlanTrace {
@@ -1068,6 +1103,10 @@ pub struct RetrievalPlanTrace {
     pub context_text: Option<String>,
     /// Optional as-of tick upper bound anchored from the request.
     pub as_of_tick: Option<u64>,
+    /// Optional named snapshot metadata resolved for this request.
+    pub resolved_snapshot: Option<SnapshotMetadata>,
+    /// Optional historical lookup selection summary for this request.
+    pub historical_lookup: Option<HistoricalLookupTrace>,
     /// Optional era filter anchored from the request.
     pub era_id: Option<String>,
     /// Optional minimum retained confidence.
@@ -1124,6 +1163,32 @@ impl RetrievalPlanTrace {
     /// Creates a new empty trace.
     pub fn new(request: &RetrievalRequest) -> Self {
         let query_by_example = request.normalize_query_by_example().ok();
+        let historical_lookup = if let Some(range) = &request.as_of_tick_range {
+            Some(HistoricalLookupTrace {
+                window_kind: HistoricalWindowKind::TickWindow,
+                selection_reason: if request.snapshot_name.is_some() {
+                    "explicit_snapshot_and_tick_window"
+                } else {
+                    "explicit_tick_window"
+                },
+                selected_tick_window: Some((*range.start(), *range.end())),
+                snapshot_as_of_tick: request.as_of_tick_range.as_ref().map(|range| *range.end()),
+            })
+        } else if request.snapshot_name.is_some() {
+            Some(HistoricalLookupTrace {
+                window_kind: HistoricalWindowKind::Snapshot,
+                selection_reason: "snapshot_anchor_pending_resolution",
+                selected_tick_window: None,
+                snapshot_as_of_tick: None,
+            })
+        } else {
+            Some(HistoricalLookupTrace {
+                window_kind: HistoricalWindowKind::Present,
+                selection_reason: "present_state_default",
+                selected_tick_window: None,
+                snapshot_as_of_tick: None,
+            })
+        };
 
         Self {
             query_path: request.query_path,
@@ -1132,6 +1197,8 @@ impl RetrievalPlanTrace {
             candidate_budget: request.candidate_budget,
             context_text: request.context_text.clone(),
             as_of_tick: request.as_of_tick_range.as_ref().map(|range| *range.end()),
+            resolved_snapshot: None,
+            historical_lookup,
             era_id: request.era_id.clone(),
             min_confidence: request.min_confidence,
             min_strength: request.min_strength,
@@ -1195,6 +1262,30 @@ impl RetrievalPlanTrace {
         self.escalation_reason = reason;
     }
 
+    /// Attaches resolved snapshot metadata and derives the final historical lookup window.
+    pub fn set_resolved_snapshot(&mut self, snapshot: SnapshotMetadata) {
+        self.as_of_tick = Some(snapshot.as_of_tick);
+        self.resolved_snapshot = Some(snapshot.clone());
+        self.historical_lookup = Some(HistoricalLookupTrace {
+            window_kind: HistoricalWindowKind::Snapshot,
+            selection_reason: if self
+                .historical_lookup
+                .as_ref()
+                .and_then(|trace| trace.selected_tick_window)
+                .is_some()
+            {
+                "snapshot_anchor_overrides_tick_window_end"
+            } else {
+                "named_snapshot_resolved"
+            },
+            selected_tick_window: Some((0, snapshot.as_of_tick)),
+            snapshot_as_of_tick: Some(snapshot.as_of_tick),
+        });
+        if let Some(query) = &mut self.temporal_query {
+            query.tick_range = Some((0, snapshot.as_of_tick));
+        }
+    }
+
     /// Marks graph expansion as triggered.
     pub fn set_graph_expansion_triggered(&mut self) {
         self.graph_expansion_triggered = true;
@@ -1218,6 +1309,25 @@ impl RetrievalPlanTrace {
         }
         if let Some(as_of_tick) = self.as_of_tick {
             lines.push(format!("  as_of_tick: {as_of_tick}"));
+        }
+        if let Some(snapshot) = &self.resolved_snapshot {
+            lines.push(format!(
+                "  resolved_snapshot: id={}, name={:?}, as_of_tick={}, created_at_tick={}, retention_class={}",
+                snapshot.snapshot_id.0,
+                snapshot.snapshot_name,
+                snapshot.as_of_tick,
+                snapshot.created_at_tick,
+                snapshot.retention_class.as_str()
+            ));
+        }
+        if let Some(historical_lookup) = &self.historical_lookup {
+            lines.push(format!(
+                "  historical_lookup: window_kind={}, selection_reason={}, tick_window={:?}, snapshot_as_of_tick={:?}",
+                historical_lookup.window_kind.as_str(),
+                historical_lookup.selection_reason,
+                historical_lookup.selected_tick_window,
+                historical_lookup.snapshot_as_of_tick
+            ));
         }
         if let Some(era_id) = &self.era_id {
             lines.push(format!("  era_id: {era_id:?}"));
@@ -1459,7 +1569,7 @@ impl RetrievalPlanner {
 mod tests {
     use super::*;
     use crate::index::{CandidateSet, IndexFamily};
-    use crate::types::{CanonicalMemoryType, MemoryId, SessionId};
+    use crate::types::{CanonicalMemoryType, MemoryId, SessionId, SnapshotId};
 
     fn test_namespace() -> NamespaceId {
         NamespaceId::new("test.namespace").unwrap()
@@ -1686,16 +1796,40 @@ mod tests {
         assert!(temporal_trace.lexical_query.is_none());
         assert!(temporal_trace.temporal_query.is_some());
         assert_eq!(
-            temporal_trace.temporal_query.as_ref().and_then(|query| query.era_id.as_deref()),
+            temporal_trace
+                .temporal_query
+                .as_ref()
+                .and_then(|query| query.era_id.as_deref()),
             Some("era-incident-baseline")
         );
         assert_eq!(
             temporal_trace.snapshot_name.as_deref(),
             Some("incident_baseline")
         );
+        assert_eq!(
+            temporal_trace
+                .historical_lookup
+                .as_ref()
+                .map(|trace| trace.window_kind),
+            Some(HistoricalWindowKind::TickWindow)
+        );
+        assert_eq!(
+            temporal_trace
+                .historical_lookup
+                .as_ref()
+                .and_then(|trace| trace.selected_tick_window),
+            Some((40, 75))
+        );
         assert!(entity_trace.lexical_query.is_none());
         assert!(entity_trace.entity_query.is_some());
         assert_eq!(entity_trace.snapshot_name, None);
+        assert_eq!(
+            entity_trace
+                .historical_lookup
+                .as_ref()
+                .map(|trace| trace.window_kind),
+            Some(HistoricalWindowKind::Present)
+        );
     }
 
     #[test]
@@ -1939,7 +2073,7 @@ mod tests {
         let ns = test_namespace();
         let request = RetrievalRequest {
             query_path: QueryPath::Temporal,
-            ..RetrievalRequest::hybrid(ns, "test", 10)
+            ..RetrievalRequest::hybrid(ns.clone(), "test", 10)
                 .with_context_text("incident response")
                 .with_session(SessionId(5))
                 .with_as_of_tick_range(12, 34)
@@ -1957,7 +2091,18 @@ mod tests {
                 .with_time_budget_ms(1200)
         };
         let mut trace = RetrievalPlanTrace::new(&request);
+        let snapshot = SnapshotMetadata::captured(
+            SnapshotId(4),
+            ns,
+            "pre_patch",
+            30,
+            31,
+            Some("before patch deploy".to_string()),
+            8,
+            crate::types::SnapshotRetentionClass::Restorable,
+        );
 
+        trace.set_resolved_snapshot(snapshot);
         trace.add_stage(StageTrace::executed(
             PlannerStage::LexicalPrefilter,
             1000,
@@ -1982,7 +2127,12 @@ mod tests {
         let summary = trace.summary();
         assert!(summary.contains("temporal"));
         assert!(summary.contains("context_text: \"incident response\""));
-        assert!(summary.contains("as_of_tick: 34"));
+        assert!(summary.contains("as_of_tick: 30"));
+        assert!(summary.contains("resolved_snapshot: id=4, name=\"pre_patch\", as_of_tick=30"));
+        assert!(summary.contains("historical_lookup: window_kind=snapshot"));
+        assert!(summary.contains("selection_reason=snapshot_anchor_overrides_tick_window_end"));
+        assert!(summary.contains("tick_window=Some((0, 30))"));
+        assert!(summary.contains("snapshot_as_of_tick=Some(30)"));
         assert!(summary.contains("era_id: \"era-pre-patch\""));
         assert!(summary.contains("min_confidence: 700"));
         assert!(summary.contains("min_strength: 450"));
@@ -1996,7 +2146,7 @@ mod tests {
         assert!(summary.contains("time_budget_ms: 1200"));
         assert!(summary.contains("lexical_prefilter"));
         assert!(summary
-            .contains("temporal_query: session=Some(SessionId(5)), tick_range=Some((12, 34))"));
+            .contains("temporal_query: session=Some(SessionId(5)), tick_range=Some((0, 30))"));
         assert!(summary.contains("snapshot_anchor: name=\"pre_patch\""));
         assert!(summary.contains("budget cap 5000"));
         assert!(summary.contains("budget cap 100"));

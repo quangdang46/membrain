@@ -171,8 +171,54 @@ pub struct RuntimeRepairReport {
     pub error_count: u32,
     pub rebuild_duration_ms: u64,
     pub rollback_state: Option<&'static str>,
+    pub degraded_mode: Option<&'static str>,
+    pub rollback_trigger: Option<&'static str>,
+    pub remediation_steps: Vec<&'static str>,
     pub queue_depth_before: u32,
     pub queue_depth_after: u32,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct RuntimeAvailability {
+    pub posture: &'static str,
+    pub query_capabilities: Vec<&'static str>,
+    pub mutation_capabilities: Vec<&'static str>,
+    pub degraded_reasons: Vec<&'static str>,
+    pub recovery_conditions: Vec<&'static str>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct RuntimeRemediation {
+    pub summary: String,
+    pub next_steps: Vec<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct RuntimeDoctorCheck {
+    pub name: &'static str,
+    pub surface_kind: &'static str,
+    pub status: &'static str,
+    pub severity: &'static str,
+    pub affected_scope: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub degraded_impact: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub remediation: Option<RuntimeRemediation>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct RuntimeDoctorSummary {
+    pub ok_checks: usize,
+    pub warn_checks: usize,
+    pub fail_checks: usize,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct RuntimeDoctorRunbookHint {
+    pub runbook_id: &'static str,
+    pub source_doc: &'static str,
+    pub section: &'static str,
+    pub reason: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -182,9 +228,20 @@ pub struct RuntimeDoctorReport {
     pub posture: RuntimePosture,
     pub degraded_reasons: Vec<String>,
     pub metrics: RuntimeMetrics,
+    pub summary: RuntimeDoctorSummary,
     pub indexes: Vec<RuntimeDoctorIndex>,
+    pub repair_engine_component: &'static str,
     pub repair_reports: Vec<RuntimeRepairReport>,
+    pub checks: Vec<RuntimeDoctorCheck>,
+    pub runbook_hints: Vec<RuntimeDoctorRunbookHint>,
     pub warnings: Vec<&'static str>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub error_kind: Option<&'static str>,
+    pub retryable: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub remediation: Option<RuntimeRemediation>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub availability: Option<RuntimeAvailability>,
     pub health: Value,
 }
 
@@ -413,7 +470,7 @@ fn parse_optional_budget(params: &Value) -> Result<Option<usize>, JsonRpcError> 
                         code: -32602,
                         message: "result_budget must be at least 1".to_string(),
                         data: None,
-                    })
+                    });
                 }
                 Some(value) => Some(value),
                 None => {
@@ -421,7 +478,7 @@ fn parse_optional_budget(params: &Value) -> Result<Option<usize>, JsonRpcError> 
                         code: -32602,
                         message: "result_budget must be a positive integer".to_string(),
                         data: None,
-                    })
+                    });
                 }
             }
         }
@@ -430,7 +487,7 @@ fn parse_optional_budget(params: &Value) -> Result<Option<usize>, JsonRpcError> 
                 code: -32602,
                 message: "result_budget must be a positive integer".to_string(),
                 data: None,
-            })
+            });
         }
     };
 
@@ -559,6 +616,12 @@ impl RuntimeMethodRequest {
                 let _ = _common;
                 Ok(RuntimeRequest::Doctor)
             }
+            "health" => {
+                reject_unknown_fields(&self.params, COMMON_ENVELOPE_FIELDS)?;
+                let _common = parse_common_fields(&self.params)?;
+                let _ = _common;
+                Ok(RuntimeRequest::Health)
+            }
             "encode" => {
                 let mut allowed = vec!["content", "namespace", "memory_type", "visibility"];
                 allowed.extend_from_slice(COMMON_ENVELOPE_FIELDS);
@@ -600,8 +663,7 @@ impl RuntimeMethodRequest {
                 let chunk_size = parse_optional_positive_usize(&self.params, "chunk_size")?;
                 let source_label = parse_optional_string(&self.params, "source_label")?;
                 let topic_threshold = parse_optional_f64(&self.params, "topic_threshold")?;
-                let min_chunk_size =
-                    parse_optional_positive_usize(&self.params, "min_chunk_size")?;
+                let min_chunk_size = parse_optional_positive_usize(&self.params, "min_chunk_size")?;
                 let dry_run = parse_optional_bool(&self.params, "dry_run")?;
                 Ok(RuntimeRequest::Observe {
                     content,
@@ -612,6 +674,47 @@ impl RuntimeMethodRequest {
                     topic_threshold: topic_threshold.map(|value| value as f32),
                     min_chunk_size,
                     dry_run,
+                    common,
+                })
+            }
+            "skills" => {
+                let mut allowed = vec!["namespace", "extract"];
+                allowed.extend_from_slice(COMMON_ENVELOPE_FIELDS);
+                reject_unknown_fields(&self.params, &allowed)?;
+                let common = parse_common_fields(&self.params)?;
+                let namespace = parse_required_string(&self.params, "namespace")?;
+                let extract = parse_optional_bool(&self.params, "extract")?;
+                Ok(RuntimeRequest::Skills {
+                    namespace,
+                    extract,
+                    common,
+                })
+            }
+            "procedures" => {
+                let mut allowed = vec![
+                    "namespace",
+                    "promote",
+                    "rollback",
+                    "note",
+                    "approved_by",
+                    "public",
+                ];
+                allowed.extend_from_slice(COMMON_ENVELOPE_FIELDS);
+                reject_unknown_fields(&self.params, &allowed)?;
+                let common = parse_common_fields(&self.params)?;
+                let namespace = parse_required_string(&self.params, "namespace")?;
+                let promote = parse_optional_string(&self.params, "promote")?;
+                let rollback = parse_optional_string(&self.params, "rollback")?;
+                let note = parse_optional_string(&self.params, "note")?;
+                let approved_by = parse_optional_string(&self.params, "approved_by")?;
+                let public = parse_optional_bool(&self.params, "public")?;
+                Ok(RuntimeRequest::Procedures {
+                    namespace,
+                    promote,
+                    rollback,
+                    note,
+                    approved_by,
+                    public,
                     common,
                 })
             }
@@ -730,7 +833,13 @@ impl RuntimeMethodRequest {
                 })
             }
             "context_budget" => {
-                let allowed = ["token_budget", "namespace", "current_context", "working_memory_ids", "format"];
+                let allowed = [
+                    "token_budget",
+                    "namespace",
+                    "current_context",
+                    "working_memory_ids",
+                    "format",
+                ];
                 let mut allowed_fields = allowed.to_vec();
                 allowed_fields.extend_from_slice(COMMON_ENVELOPE_FIELDS);
                 reject_unknown_fields(&self.params, &allowed_fields)?;
@@ -747,7 +856,9 @@ impl RuntimeMethodRequest {
                             .map(|value| {
                                 value.as_u64().ok_or_else(|| JsonRpcError {
                                     code: -32602,
-                                    message: "working_memory_ids must be an array of positive integers".to_string(),
+                                    message:
+                                        "working_memory_ids must be an array of positive integers"
+                                            .to_string(),
                                     data: None,
                                 })
                             })
@@ -756,9 +867,10 @@ impl RuntimeMethodRequest {
                     Some(_) => {
                         return Err(JsonRpcError {
                             code: -32602,
-                            message: "working_memory_ids must be an array of positive integers".to_string(),
+                            message: "working_memory_ids must be an array of positive integers"
+                                .to_string(),
                             data: None,
-                        })
+                        });
                     }
                 };
                 Ok(RuntimeRequest::ContextBudget {
@@ -792,7 +904,7 @@ impl RuntimeMethodRequest {
                 })
             }
             "explain" => {
-                let mut allowed = vec!["query", "namespace", "limit"];
+                let mut allowed = vec!["query", "namespace", "limit", "depth"];
                 allowed.extend_from_slice(COMMON_ENVELOPE_FIELDS);
                 reject_unknown_fields(&self.params, &allowed)?;
                 let _common = parse_common_fields(&self.params)?;
@@ -815,11 +927,91 @@ impl RuntimeMethodRequest {
                         data: None,
                     })?;
                 let limit = parse_optional_limit(&self.params)?;
+                let depth = parse_optional_positive_usize(&self.params, "depth")?;
                 Ok(RuntimeRequest::Explain {
                     query: query.to_string(),
                     namespace: namespace.to_string(),
                     limit,
+                    depth,
                     common: _common,
+                })
+            }
+            "why" => {
+                let mut allowed = vec!["query", "id", "namespace", "limit", "depth"];
+                allowed.extend_from_slice(COMMON_ENVELOPE_FIELDS);
+                reject_unknown_fields(&self.params, &allowed)?;
+                let common = parse_common_fields(&self.params)?;
+                let query = self
+                    .params
+                    .get("query")
+                    .and_then(Value::as_str)
+                    .map(ToOwned::to_owned)
+                    .or_else(|| {
+                        self.params
+                            .get("id")
+                            .and_then(Value::as_u64)
+                            .map(|id| id.to_string())
+                    })
+                    .ok_or_else(|| JsonRpcError {
+                        code: -32602,
+                        message: "missing query".to_string(),
+                        data: None,
+                    })?;
+                let namespace = self
+                    .params
+                    .get("namespace")
+                    .and_then(Value::as_str)
+                    .ok_or_else(|| JsonRpcError {
+                        code: -32602,
+                        message: "missing namespace".to_string(),
+                        data: None,
+                    })?;
+                let limit = parse_optional_limit(&self.params)?;
+                let depth = parse_optional_positive_usize(&self.params, "depth")?;
+                Ok(RuntimeRequest::Explain {
+                    query,
+                    namespace: namespace.to_string(),
+                    limit,
+                    depth,
+                    common,
+                })
+            }
+            "audit" => {
+                let mut allowed = vec!["namespace", "memory_id", "since_tick", "op", "limit"];
+                allowed.extend_from_slice(COMMON_ENVELOPE_FIELDS);
+                reject_unknown_fields(&self.params, &allowed)?;
+                let common = parse_common_fields(&self.params)?;
+                let namespace = parse_required_string(&self.params, "namespace")?;
+                let memory_id = parse_optional_positive_u64(&self.params, "memory_id")?;
+                let since_tick = parse_optional_u64(&self.params, "since_tick")?;
+                let op = parse_optional_string(&self.params, "op")?;
+                let limit = parse_optional_limit(&self.params)?;
+                Ok(RuntimeRequest::Audit {
+                    namespace,
+                    memory_id,
+                    since_tick,
+                    op,
+                    limit,
+                    common,
+                })
+            }
+            "invalidate" => {
+                let mut allowed = vec!["id", "namespace", "dry_run"];
+                allowed.extend_from_slice(COMMON_ENVELOPE_FIELDS);
+                reject_unknown_fields(&self.params, &allowed)?;
+                let common = parse_common_fields(&self.params)?;
+                let id = parse_required_u64(&self.params, "id")?;
+                let namespace = parse_required_string(&self.params, "namespace")?;
+                let dry_run = self
+                    .params
+                    .get("dry_run")
+                    .and_then(Value::as_bool)
+                    .unwrap_or(false);
+                Ok(RuntimeRequest::Invalidate {
+                    id,
+                    namespace,
+                    dry_run,
+                    common,
                 })
             }
             "preflight.run" => {
@@ -1054,6 +1246,7 @@ pub enum RuntimeRequest {
     Ping,
     Status,
     Doctor,
+    Health,
     Encode {
         content: String,
         namespace: String,
@@ -1070,6 +1263,20 @@ pub enum RuntimeRequest {
         topic_threshold: Option<f32>,
         min_chunk_size: Option<usize>,
         dry_run: Option<bool>,
+        common: RuntimeCommonFields,
+    },
+    Skills {
+        namespace: String,
+        extract: Option<bool>,
+        common: RuntimeCommonFields,
+    },
+    Procedures {
+        namespace: String,
+        promote: Option<String>,
+        rollback: Option<String>,
+        note: Option<String>,
+        approved_by: Option<String>,
+        public: Option<bool>,
         common: RuntimeCommonFields,
     },
     Recall {
@@ -1117,6 +1324,21 @@ pub enum RuntimeRequest {
         query: String,
         namespace: String,
         limit: Option<usize>,
+        depth: Option<usize>,
+        common: RuntimeCommonFields,
+    },
+    Audit {
+        namespace: String,
+        memory_id: Option<u64>,
+        since_tick: Option<u64>,
+        op: Option<String>,
+        limit: Option<usize>,
+        common: RuntimeCommonFields,
+    },
+    Invalidate {
+        id: u64,
+        namespace: String,
+        dry_run: bool,
         common: RuntimeCommonFields,
     },
     Forget {
@@ -1492,7 +1714,10 @@ mod tests {
         };
         let error = bad_ids.parse_method().unwrap_err();
         assert_eq!(error.code, -32602);
-        assert_eq!(error.message, "working_memory_ids must be an array of positive integers");
+        assert_eq!(
+            error.message,
+            "working_memory_ids must be an array of positive integers"
+        );
     }
 
     #[test]
@@ -1631,6 +1856,48 @@ mod tests {
                 query: "memory:42".to_string(),
                 namespace: "team.alpha".to_string(),
                 limit: Some(2),
+                depth: None,
+                common: RuntimeCommonFields::default(),
+            }
+        );
+    }
+
+    #[test]
+    fn parse_method_accepts_why_alias_and_optional_depth() {
+        let request = RuntimeMethodRequest {
+            jsonrpc: "2.0".to_string(),
+            method: "why".to_string(),
+            params: json!({ "id": 42, "namespace": "team.alpha", "depth": 3 }),
+            id: Some(json!(81)),
+        };
+
+        assert_eq!(
+            request.parse_method().unwrap(),
+            RuntimeRequest::Explain {
+                query: "42".to_string(),
+                namespace: "team.alpha".to_string(),
+                limit: None,
+                depth: Some(3),
+                common: RuntimeCommonFields::default(),
+            }
+        );
+    }
+
+    #[test]
+    fn parse_method_accepts_invalidate_with_optional_dry_run() {
+        let request = RuntimeMethodRequest {
+            jsonrpc: "2.0".to_string(),
+            method: "invalidate".to_string(),
+            params: json!({ "id": 42, "namespace": "team.alpha", "dry_run": true }),
+            id: Some(json!(82)),
+        };
+
+        assert_eq!(
+            request.parse_method().unwrap(),
+            RuntimeRequest::Invalidate {
+                id: 42,
+                namespace: "team.alpha".to_string(),
+                dry_run: true,
                 common: RuntimeCommonFields::default(),
             }
         );
@@ -1970,7 +2237,7 @@ mod tests {
                 show_decaying: Some(true),
                 mood_congruent: Some(true),
                 common: RuntimeCommonFields {
-                    request_id: Some("req-common".to_string()),
+                    request_id: Some("req-recall-18".to_string()),
                     workspace_id: Some("ws-7".to_string()),
                     agent_id: Some("agent-3".to_string()),
                     session_id: Some("session-9".to_string()),
@@ -2237,6 +2504,73 @@ mod tests {
                 assert_eq!(min_chunk_size, Some(24));
                 assert_eq!(dry_run, Some(true));
                 assert_eq!(common.request_id.as_deref(), Some("req-observe"));
+            }
+            _ => std::process::abort(),
+        }
+    }
+
+    #[test]
+    fn parse_method_skills_accepts_namespace_extract_and_common_fields() {
+        let request = RuntimeMethodRequest {
+            jsonrpc: "2.0".to_string(),
+            method: "skills".to_string(),
+            params: json!({
+                "namespace": "team.alpha",
+                "extract": true,
+                "request_id": "req-skills"
+            }),
+            id: Some(json!(291)),
+        };
+
+        match request.parse_method().unwrap() {
+            RuntimeRequest::Skills {
+                namespace,
+                extract,
+                common,
+            } => {
+                assert_eq!(namespace, "team.alpha");
+                assert_eq!(extract, Some(true));
+                assert_eq!(common.request_id.as_deref(), Some("req-skills"));
+            }
+            _ => std::process::abort(),
+        }
+    }
+
+    #[test]
+    fn parse_method_procedures_accepts_mutation_and_common_fields() {
+        let request = RuntimeMethodRequest {
+            jsonrpc: "2.0".to_string(),
+            method: "procedures".to_string(),
+            params: json!({
+                "namespace": "team.alpha",
+                "promote": "procedural://team.alpha/000000000000002a",
+                "note": "approved",
+                "approved_by": "daemon.user",
+                "public": true,
+                "request_id": "req-procedures"
+            }),
+            id: Some(json!(292)),
+        };
+
+        match request.parse_method().unwrap() {
+            RuntimeRequest::Procedures {
+                namespace,
+                promote,
+                note,
+                approved_by,
+                public,
+                common,
+                ..
+            } => {
+                assert_eq!(namespace, "team.alpha");
+                assert_eq!(
+                    promote.as_deref(),
+                    Some("procedural://team.alpha/000000000000002a")
+                );
+                assert_eq!(note.as_deref(), Some("approved"));
+                assert_eq!(approved_by.as_deref(), Some("daemon.user"));
+                assert_eq!(public, Some(true));
+                assert_eq!(common.request_id.as_deref(), Some("req-procedures"));
             }
             _ => std::process::abort(),
         }
