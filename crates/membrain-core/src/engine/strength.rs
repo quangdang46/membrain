@@ -271,6 +271,8 @@ impl StrengthEngine {
             in_contradiction: false,
             emotional_arousal: state.emotional_arousal,
             bypass_decay: state.bypass_decay,
+            idle_days: current_tick.saturating_sub(state.last_accessed_tick) as u32,
+            guards: crate::engine::forgetting::EligibilityGuards::default(),
         }
     }
 

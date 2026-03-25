@@ -7,8 +7,9 @@ use membrain_core::engine::consolidation::{
 };
 use membrain_core::engine::maintenance::{
     DurableStateToken, InterruptedMaintenance, InterruptionReason, LogicalClock,
-    MaintenanceController, MaintenanceJobHandle, MaintenanceJobState, MaintenanceOperation,
-    MaintenanceProgress, MaintenanceStep, TickScenarioArtifact, TickSequenceFixture,
+    MaintenanceController, MaintenanceFailureArtifact, MaintenanceJobHandle, MaintenanceJobState,
+    MaintenanceOperation, MaintenanceProgress, MaintenanceStep, TickScenarioArtifact,
+    TickSequenceFixture,
 };
 use membrain_core::engine::repair::{
     IndexRepairEntrypoint, RepairEngine, RepairStatus, RepairTarget,
@@ -69,6 +70,7 @@ impl MaintenanceOperation for ScriptedMaintenance {
         InterruptedMaintenance {
             reason,
             preserved_durable_state: self.preserved,
+            artifact: None,
         }
     }
 }
@@ -99,6 +101,7 @@ fn cancel_before_start_preserves_prior_durable_state() {
         MaintenanceJobState::Cancelled(InterruptedMaintenance {
             reason: InterruptionReason::Cancelled,
             preserved_durable_state: DurableStateToken(41),
+            artifact: None,
         })
     );
     assert_eq!(cancelled.polls_used, 0);
@@ -139,6 +142,7 @@ fn cancel_during_run_finishes_as_cancelled_on_next_poll() {
         MaintenanceJobState::Cancelled(InterruptedMaintenance {
             reason: InterruptionReason::Cancelled,
             preserved_durable_state: DurableStateToken(52),
+            artifact: None,
         })
     );
     assert_eq!(cancelled.polls_used, 1);
@@ -175,6 +179,7 @@ fn timeout_escalation_preserves_prior_durable_state() {
         MaintenanceJobState::TimedOut(InterruptedMaintenance {
             reason: InterruptionReason::TimedOut,
             preserved_durable_state: DurableStateToken(63),
+            artifact: None,
         })
     );
     assert_eq!(timed_out.polls_used, 2);
@@ -244,6 +249,7 @@ fn cancel_after_explicit_start_preserves_prior_durable_state_without_polling_wor
         MaintenanceJobState::Cancelled(InterruptedMaintenance {
             reason: InterruptionReason::Cancelled,
             preserved_durable_state: DurableStateToken(72),
+            artifact: None,
         })
     );
     assert_eq!(cancelled.polls_used, 0);
@@ -293,6 +299,7 @@ fn scripted_maintenance_exposes_named_tick_artifacts_for_replayable_failure_repo
         MaintenanceJobState::TimedOut(InterruptedMaintenance {
             reason: InterruptionReason::TimedOut,
             preserved_durable_state: DurableStateToken(91),
+            artifact: None,
         })
     );
 
@@ -389,6 +396,7 @@ fn interrupted_terminal_states_remain_stable_across_repeated_control_calls() {
         MaintenanceJobState::Cancelled(InterruptedMaintenance {
             reason: InterruptionReason::Cancelled,
             preserved_durable_state: DurableStateToken(75),
+            artifact: None,
         })
     );
     assert_eq!(cancelled_handle.start(), cancelled);
@@ -406,6 +414,7 @@ fn interrupted_terminal_states_remain_stable_across_repeated_control_calls() {
         MaintenanceJobState::TimedOut(InterruptedMaintenance {
             reason: InterruptionReason::TimedOut,
             preserved_durable_state: DurableStateToken(76),
+            artifact: None,
         })
     );
     assert_eq!(timed_out_handle.start(), timed_out);
@@ -448,9 +457,125 @@ fn repeated_cancel_requests_stay_stable_until_poll_finalizes_cancellation() {
         MaintenanceJobState::Cancelled(InterruptedMaintenance {
             reason: InterruptionReason::Cancelled,
             preserved_durable_state: DurableStateToken(74),
+            artifact: None,
         })
     );
     assert_eq!(cancelled.polls_used, 1);
+}
+
+#[test]
+fn consolidation_interruption_exposes_resume_artifact() {
+    let namespace = NamespaceId::new("test.consolidation.cancel").unwrap();
+    let engine = ConsolidationEngine;
+    let run = engine.create_run(
+        namespace,
+        ConsolidationPolicy {
+            minimum_candidates: 1,
+            batch_size: 2,
+            max_queue_jobs: 3,
+            max_retry_attempts: 2,
+            ..Default::default()
+        },
+        5,
+    );
+    let mut handle = MaintenanceJobHandle::new(run, 10);
+
+    let running = handle.poll();
+    assert_eq!(
+        running.state,
+        MaintenanceJobState::Running {
+            progress: Some(MaintenanceProgress::new(2, 5)),
+        }
+    );
+
+    let requested = handle.cancel();
+    assert!(matches!(
+        requested.state,
+        MaintenanceJobState::CancelRequested { .. }
+    ));
+
+    let cancelled = handle.poll();
+    let MaintenanceJobState::Cancelled(interrupted) = cancelled.state else {
+        panic!("expected cancelled consolidation snapshot");
+    };
+    assert_eq!(interrupted.reason, InterruptionReason::Cancelled);
+    assert_eq!(interrupted.preserved_durable_state, DurableStateToken(2));
+    assert_eq!(
+        interrupted.artifact,
+        Some(MaintenanceFailureArtifact {
+            artifact_name: "consolidation_interruption",
+            object_handle: "consolidation://test.consolidation.cancel".to_string(),
+            scope: "test.consolidation.cancel".to_string(),
+            attempted_edge: "scheduler_drain",
+            affected_item_count: 2,
+            pending_item_count: 3,
+            failure_family: "transient_failure",
+            retryable: false,
+            escalation_boundary: "resume_from_durable_checkpoint",
+        })
+    );
+}
+
+#[test]
+fn consolidation_partial_failures_consume_retry_budget_and_expose_escalation() {
+    let namespace = NamespaceId::new("test.consolidation.retry-budget").unwrap();
+    let engine = ConsolidationEngine;
+    let run = engine.create_run(
+        namespace,
+        ConsolidationPolicy {
+            minimum_candidates: 1,
+            batch_size: 1,
+            max_queue_jobs: 2,
+            max_retry_attempts: 1,
+            ..Default::default()
+        },
+        2,
+    );
+    let mut handle = MaintenanceJobHandle::new(run, 10);
+
+    let first = handle.poll();
+    assert_eq!(
+        first.state,
+        MaintenanceJobState::Running {
+            progress: Some(MaintenanceProgress::new(1, 2)),
+        }
+    );
+
+    let second = handle.poll();
+    let MaintenanceJobState::Completed(summary) = second.state else {
+        panic!("expected bounded completion after retry-budget exhaustion");
+    };
+
+    assert_eq!(summary.groups_evaluated, 2);
+    assert_eq!(summary.derivation_partial_failures, 2);
+    assert_eq!(summary.queue_report.retry_attempts, 1);
+    assert_eq!(summary.failure_artifacts.len(), 2);
+    assert_eq!(
+        summary.failure_artifacts[0].artifact_name,
+        "consolidation_partial_derivation"
+    );
+    assert_eq!(
+        summary.failure_artifacts[0].failure_family,
+        "transient_failure"
+    );
+    assert!(summary.failure_artifacts[0].retryable);
+    assert_eq!(
+        summary.failure_artifacts[0].escalation_boundary,
+        "retry_budget_remaining"
+    );
+    assert_eq!(
+        summary.failure_artifacts[1].artifact_name,
+        "consolidation_partial_derivation"
+    );
+    assert_eq!(
+        summary.failure_artifacts[1].failure_family,
+        "internal_failure"
+    );
+    assert!(!summary.failure_artifacts[1].retryable);
+    assert_eq!(
+        summary.failure_artifacts[1].escalation_boundary,
+        "retry_budget_exhausted"
+    );
 }
 
 #[test]
@@ -476,9 +601,9 @@ fn consolidation_runs_emit_lineage_preserving_artifacts_through_maintenance_hand
 
     assert_eq!(summary.groups_evaluated, 3);
     assert_eq!(summary.episode_source_sets, 2);
-    assert_eq!(summary.derivations_emitted, 3);
+    assert_eq!(summary.derivations_emitted, 5);
     assert_eq!(summary.derivation_partial_failures, 1);
-    assert_eq!(summary.derived_artifacts.len(), 3);
+    assert_eq!(summary.derived_artifacts.len(), 5);
     assert_eq!(summary.derivation_failures.len(), 1);
     assert_eq!(
         summary.derived_artifacts[0].kind,
@@ -508,28 +633,122 @@ fn consolidation_runs_emit_lineage_preserving_artifacts_through_maintenance_hand
             "entity_overlap"
         ]
     );
-    assert_eq!(summary.derived_artifacts[1].kind, DerivedArtifactKind::Gist);
+    assert_eq!(
+        summary.derived_artifacts[0].provenance.source_kind,
+        "consolidation"
+    );
+    assert_eq!(
+        summary.derived_artifacts[0].provenance.source_ref,
+        "consolidation://test.consolidation/episode_1_session_cluster_1_2#summary"
+    );
+    assert_eq!(summary.derived_artifacts[1].kind, DerivedArtifactKind::Fact);
     assert_eq!(summary.derived_artifacts[1].namespace, namespace);
     assert_eq!(
         summary.derived_artifacts[1].source_ids,
         vec![MemoryId(1), MemoryId(2)]
     );
     assert_eq!(
-        summary.derived_artifacts[1].source_time_range_ms,
+        summary.derived_artifacts[1].source_citations,
+        vec![
+            membrain_core::engine::consolidation::DerivedSourceCitation {
+                memory_id: MemoryId(1),
+                source_ref: "memory://test.consolidation/1".to_string(),
+                timestamp_ms: 900_000,
+            },
+            membrain_core::engine::consolidation::DerivedSourceCitation {
+                memory_id: MemoryId(2),
+                source_ref: "memory://test.consolidation/2".to_string(),
+                timestamp_ms: 1_020_000,
+            }
+        ]
+    );
+    assert_eq!(
+        summary.derived_artifacts[1].provenance.source_kind,
+        "consolidation"
+    );
+    assert_eq!(
+        summary.derived_artifacts[1].explain.derivation_rule,
+        "fact_extraction"
+    );
+    assert_eq!(summary.derived_artifacts[1].explain.status, "complete");
+    assert!(summary.derived_artifacts[1]
+        .content
+        .contains("fact(session_cluster): namespace=test.consolidation canonical_claim=episode:1"));
+    assert!(summary.derived_artifacts[1]
+        .content
+        .contains("citations=memory://test.consolidation/1,memory://test.consolidation/2"));
+    assert_eq!(summary.derived_artifacts[2].kind, DerivedArtifactKind::Gist);
+    assert_eq!(summary.derived_artifacts[2].namespace, namespace);
+    assert_eq!(
+        summary.derived_artifacts[2].source_ids,
+        vec![MemoryId(1), MemoryId(2)]
+    );
+    assert_eq!(
+        summary.derived_artifacts[2].source_time_range_ms,
         (900_000, 1_020_000)
     );
-    assert_eq!(summary.derived_artifacts[2].source_ids, vec![MemoryId(3)]);
+    assert_eq!(
+        summary.derived_artifacts[3].kind,
+        DerivedArtifactKind::Relation
+    );
+    assert_eq!(summary.derived_artifacts[3].namespace, namespace);
+    assert_eq!(
+        summary.derived_artifacts[3].provenance.relation_to_seed,
+        Some(membrain_core::graph::RelationKind::SharedTopic)
+    );
+    assert_eq!(
+        summary.derived_artifacts[3].explain.derivation_rule,
+        "relation_reinforcement"
+    );
+    assert_eq!(summary.derived_artifacts[3].explain.status, "reinforced");
+    assert!(summary.derived_artifacts[3]
+        .content
+        .contains("relation(session_cluster): namespace=test.consolidation relation=shared_topic"));
+    assert!(summary.derived_artifacts[3]
+        .content
+        .contains("status=reinforced"));
+    assert_eq!(summary.derived_artifacts[4].source_ids, vec![MemoryId(3)]);
     assert_eq!(summary.derivation_failures[0].source_ids, vec![MemoryId(3)]);
     assert_eq!(
         summary.derivation_failures[0].continuity_keys,
         vec!["singleton"]
     );
+    assert_eq!(
+        summary.derivation_failures[0].source_citations,
+        vec![
+            membrain_core::engine::consolidation::DerivedSourceCitation {
+                memory_id: MemoryId(3),
+                source_ref: "memory://test.consolidation/3".to_string(),
+                timestamp_ms: 1_800_000,
+            }
+        ]
+    );
+    assert_eq!(
+        summary.derivation_failures[0].explain.derivation_rule,
+        "gist_compaction"
+    );
+    assert_eq!(summary.derivation_failures[0].explain.status, "partial");
     assert_eq!(summary.derivation_failures[0].stage, "gist_compaction");
     assert_eq!(
         summary.derivation_failures[0].reason,
         "single_source_group_kept_evidence_only"
     );
     assert!(summary.derivation_failures[0].lineage_preserved);
+    assert_eq!(summary.failure_artifacts.len(), 1);
+    assert_eq!(
+        summary.failure_artifacts[0],
+        MaintenanceFailureArtifact {
+            artifact_name: "consolidation_partial_derivation",
+            object_handle: "consolidation://test.consolidation".to_string(),
+            scope: "test.consolidation".to_string(),
+            attempted_edge: "gist_compaction",
+            affected_item_count: 1,
+            pending_item_count: 0,
+            failure_family: "transient_failure",
+            retryable: true,
+            escalation_boundary: "retry_budget_remaining",
+        }
+    );
     assert_eq!(summary.grouping_logs.len(), 2);
     assert_eq!(summary.queue_report.queue_family, "consolidation");
     assert_eq!(
@@ -540,7 +759,7 @@ fn consolidation_runs_emit_lineage_preserving_artifacts_through_maintenance_hand
     assert_eq!(summary.queue_report.queue_depth_after, 0);
     assert_eq!(summary.queue_report.jobs_processed, 1);
     assert_eq!(summary.queue_report.affected_item_count, 3);
-    assert_eq!(summary.queue_report.retry_attempts, 0);
+    assert_eq!(summary.queue_report.retry_attempts, 1);
     assert_eq!(summary.queue_report.duration_ms, 14);
     assert!(summary.queue_report.partial_run);
 
@@ -577,6 +796,7 @@ fn consolidation_runs_respect_minimum_candidate_gate() {
     assert!(summary.derived_artifacts.is_empty());
     assert!(summary.derivation_failures.is_empty());
     assert!(summary.grouping_logs.is_empty());
+    assert!(summary.failure_artifacts.is_empty());
     assert_eq!(
         summary.queue_report.queue_status,
         MaintenanceQueueStatus::Idle
@@ -620,7 +840,7 @@ fn consolidation_runs_stop_after_queue_budget_and_report_partial_status() {
     };
 
     assert_eq!(summary.groups_evaluated, 2);
-    assert_eq!(summary.derivation_partial_failures, 2);
+    assert_eq!(summary.derivation_partial_failures, 0);
     assert_eq!(
         summary.queue_report.queue_status,
         MaintenanceQueueStatus::Partial
@@ -629,9 +849,24 @@ fn consolidation_runs_stop_after_queue_budget_and_report_partial_status() {
     assert_eq!(summary.queue_report.queue_depth_after, 2);
     assert_eq!(summary.queue_report.jobs_processed, 1);
     assert_eq!(summary.queue_report.affected_item_count, 2);
-    assert_eq!(summary.queue_report.retry_attempts, 1);
-    assert_eq!(summary.queue_report.duration_ms, 14);
+    assert_eq!(summary.queue_report.retry_attempts, 0);
+    assert_eq!(summary.queue_report.duration_ms, 7);
     assert!(summary.queue_report.partial_run);
+    assert_eq!(summary.failure_artifacts.len(), 1);
+    assert_eq!(
+        summary.failure_artifacts[0],
+        MaintenanceFailureArtifact {
+            artifact_name: "consolidation_queue_budget_boundary",
+            object_handle: "consolidation://test.consolidation.partial".to_string(),
+            scope: "test.consolidation.partial".to_string(),
+            attempted_edge: "scheduler_drain",
+            affected_item_count: 2,
+            pending_item_count: 3,
+            failure_family: "timeout_failure",
+            retryable: true,
+            escalation_boundary: "queue_budget_exhausted",
+        }
+    );
     assert_eq!(second.polls_used, 2);
 }
 
@@ -657,6 +892,18 @@ fn repair_runs_expose_verification_artifacts_through_maintenance_handle() {
             MaintenanceJobState::Completed(ref summary) => {
                 assert_eq!(summary.targets_checked, 3);
                 assert_eq!(summary.healthy, 3);
+                assert_eq!(summary.affected_item_count, 216);
+                assert_eq!(summary.error_count, 0);
+                assert_eq!(summary.rebuild_duration_ms, 61);
+                assert_eq!(summary.rollback_state, None);
+                assert_eq!(summary.queue_report.queue_family, "repair");
+                assert_eq!(summary.queue_report.queue_depth_before, 3);
+                assert_eq!(summary.queue_report.queue_depth_after, 0);
+                assert_eq!(summary.queue_report.jobs_processed, 3);
+                assert_eq!(summary.queue_report.affected_item_count, 216);
+                assert_eq!(summary.queue_report.retry_attempts, 0);
+                assert_eq!(summary.queue_report.duration_ms, 61);
+                assert!(!summary.queue_report.partial_run);
                 assert_eq!(summary.verification_artifacts.len(), 3);
                 assert_eq!(summary.operator_reports.len(), 3);
                 assert!(summary.operator_reports.iter().all(|report| {
@@ -749,6 +996,18 @@ fn repair_runs_preserve_index_rebuild_entrypoint_contracts_in_verification_artif
     assert_eq!(summary.targets_checked, 2);
     assert_eq!(summary.healthy, 0);
     assert_eq!(summary.rebuilt, 2);
+    assert_eq!(summary.affected_item_count, 192);
+    assert_eq!(summary.error_count, 0);
+    assert_eq!(summary.rebuild_duration_ms, 40);
+    assert_eq!(summary.rollback_state, None);
+    assert_eq!(summary.queue_report.queue_family, "repair");
+    assert_eq!(summary.queue_report.queue_depth_before, 2);
+    assert_eq!(summary.queue_report.queue_depth_after, 0);
+    assert_eq!(summary.queue_report.jobs_processed, 2);
+    assert_eq!(summary.queue_report.affected_item_count, 192);
+    assert_eq!(summary.queue_report.retry_attempts, 0);
+    assert_eq!(summary.queue_report.duration_ms, 40);
+    assert!(!summary.queue_report.partial_run);
     assert_eq!(summary.results.len(), 2);
     assert_eq!(summary.operator_reports.len(), 2);
     assert!(summary.results.iter().all(|result| {
@@ -775,6 +1034,10 @@ fn repair_runs_preserve_index_rebuild_entrypoint_contracts_in_verification_artif
         semantic_cold_report.verification_artifact_name,
         "usearch_cold_parity"
     );
+    assert_eq!(semantic_cold_report.affected_item_count, 64);
+    assert_eq!(semantic_cold_report.error_count, 0);
+    assert_eq!(semantic_cold_report.rebuild_duration_ms, 23);
+    assert_eq!(semantic_cold_report.rollback_state, None);
     assert!(semantic_cold_report
         .operator_log
         .contains("target=semantic_cold_index"));
@@ -839,6 +1102,10 @@ fn repair_runs_preserve_index_rebuild_entrypoint_contracts_in_verification_artif
         metadata_report.verification_artifact_name,
         "tier2_metadata_parity"
     );
+    assert_eq!(metadata_report.affected_item_count, 128);
+    assert_eq!(metadata_report.error_count, 0);
+    assert_eq!(metadata_report.rebuild_duration_ms, 17);
+    assert_eq!(metadata_report.rollback_state, None);
 
     let metadata = summary
         .verification_artifacts
@@ -907,6 +1174,18 @@ fn repair_run_full_scan_reports_doctor_health_surfaces_without_rebuilds() {
     assert_eq!(summary.degraded, 1);
     assert_eq!(summary.corrupt, 0);
     assert_eq!(summary.rebuilt, 0);
+    assert_eq!(summary.affected_item_count, 626);
+    assert_eq!(summary.error_count, 1);
+    assert_eq!(summary.rebuild_duration_ms, 201);
+    assert_eq!(summary.rollback_state, Some("rollback_required"));
+    assert_eq!(summary.queue_report.queue_family, "repair");
+    assert_eq!(summary.queue_report.queue_depth_before, 10);
+    assert_eq!(summary.queue_report.queue_depth_after, 1);
+    assert_eq!(summary.queue_report.jobs_processed, 10);
+    assert_eq!(summary.queue_report.affected_item_count, 626);
+    assert_eq!(summary.queue_report.retry_attempts, 1);
+    assert_eq!(summary.queue_report.duration_ms, 201);
+    assert!(summary.queue_report.partial_run);
     assert_eq!(summary.results.len(), 10);
     assert_eq!(summary.operator_reports.len(), 10);
     assert_eq!(summary.verification_artifacts.len(), 10);
@@ -934,13 +1213,14 @@ fn repair_run_full_scan_reports_doctor_health_surfaces_without_rebuilds() {
         } else {
             "verified_against_durable_truth"
         };
+        let expected_verification_passed = target != RepairTarget::GraphConsistency;
         let result = summary
             .results
             .iter()
             .find(|result| result.target == target)
             .unwrap_or_else(|| panic!("missing result for {}", target.as_str()));
         assert_eq!(result.status, expected_status);
-        assert!(result.verification_passed);
+        assert_eq!(result.verification_passed, expected_verification_passed);
         assert_eq!(result.detail, expected_detail);
         assert!(result.rebuild_entrypoint.is_none());
         assert!(result.rebuilt_outputs.is_empty());
@@ -951,13 +1231,21 @@ fn repair_run_full_scan_reports_doctor_health_surfaces_without_rebuilds() {
             .find(|report| report.target == target)
             .unwrap_or_else(|| panic!("missing operator report for {}", target.as_str()));
         assert_eq!(report.status, expected_status);
-        assert!(report.verification_passed);
+        assert_eq!(report.verification_passed, expected_verification_passed);
         assert!(report.rebuild_entrypoint.is_none());
         assert!(report.rebuilt_outputs.is_empty());
         assert_eq!(
             report.verification_artifact_name,
             target.verification_artifact_name()
         );
+        assert!(report.affected_item_count > 0);
+        assert_eq!(
+            report.error_count,
+            u32::from(target == RepairTarget::GraphConsistency)
+        );
+        assert!(report.rebuild_duration_ms > 0);
+        assert_eq!(report.queue_depth_before, 10);
+        assert_eq!(report.queue_depth_after, 1);
 
         let artifact = summary
             .verification_artifacts
@@ -1006,6 +1294,18 @@ fn repair_run_full_scan_rebuild_if_needed_keeps_doctor_surfaces_explainable() {
     assert_eq!(summary.degraded, 0);
     assert_eq!(summary.corrupt, 0);
     assert_eq!(summary.rebuilt, 7);
+    assert_eq!(summary.affected_item_count, 626);
+    assert_eq!(summary.error_count, 0);
+    assert_eq!(summary.rebuild_duration_ms, 201);
+    assert_eq!(summary.rollback_state, None);
+    assert_eq!(summary.queue_report.queue_family, "repair");
+    assert_eq!(summary.queue_report.queue_depth_before, 10);
+    assert_eq!(summary.queue_report.queue_depth_after, 0);
+    assert_eq!(summary.queue_report.jobs_processed, 10);
+    assert_eq!(summary.queue_report.affected_item_count, 626);
+    assert_eq!(summary.queue_report.retry_attempts, 0);
+    assert_eq!(summary.queue_report.duration_ms, 201);
+    assert!(!summary.queue_report.partial_run);
     assert_eq!(summary.results.len(), 10);
     assert_eq!(summary.operator_reports.len(), 10);
     assert_eq!(summary.verification_artifacts.len(), 10);
@@ -1050,6 +1350,11 @@ fn repair_run_full_scan_rebuild_if_needed_keeps_doctor_surfaces_explainable() {
             target.verification_artifact_name()
         );
         assert!(!report.rebuilt_outputs.is_empty());
+        assert!(report.affected_item_count > 0);
+        assert_eq!(report.error_count, 0);
+        assert!(report.rebuild_duration_ms > 0);
+        assert_eq!(report.queue_depth_before, 10);
+        assert_eq!(report.queue_depth_after, 0);
     }
 
     for target in [
@@ -1081,6 +1386,11 @@ fn repair_run_full_scan_rebuild_if_needed_keeps_doctor_surfaces_explainable() {
             report.verification_artifact_name,
             target.verification_artifact_name()
         );
+        assert!(report.affected_item_count > 0);
+        assert_eq!(report.error_count, 0);
+        assert!(report.rebuild_duration_ms > 0);
+        assert_eq!(report.queue_depth_before, 10);
+        assert_eq!(report.queue_depth_after, 0);
     }
 
     for target in [
@@ -1165,6 +1475,11 @@ fn completed_repair_snapshots_keep_verification_artifacts_and_operator_reports_s
         };
         assert_eq!(terminal_summary.targets_checked, 2);
         assert_eq!(terminal_summary.rebuilt, 2);
+        assert_eq!(terminal_summary.affected_item_count, 256);
+        assert_eq!(terminal_summary.error_count, 0);
+        assert_eq!(terminal_summary.rebuild_duration_ms, 34);
+        assert_eq!(terminal_summary.queue_report.queue_depth_before, 2);
+        assert_eq!(terminal_summary.queue_report.queue_depth_after, 0);
         assert_eq!(
             terminal_summary
                 .verification_artifacts

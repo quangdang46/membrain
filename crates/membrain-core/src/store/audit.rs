@@ -68,6 +68,7 @@ impl AuditLogStore {
             AuditEventKind::MaintenanceReconsolidationDiscarded,
             AuditEventKind::MaintenanceReconsolidationDeferred,
             AuditEventKind::MaintenanceReconsolidationBlocked,
+            AuditEventKind::MaintenanceForgettingEvaluated,
             AuditEventKind::IncidentRecorded,
             AuditEventKind::ArchiveRecorded,
         ]
@@ -516,6 +517,7 @@ mod tests {
         assert!(kinds.contains(&AuditEventKind::MaintenanceReconsolidationDiscarded));
         assert!(kinds.contains(&AuditEventKind::MaintenanceReconsolidationDeferred));
         assert!(kinds.contains(&AuditEventKind::MaintenanceReconsolidationBlocked));
+        assert!(kinds.contains(&AuditEventKind::MaintenanceForgettingEvaluated));
         assert!(kinds.contains(&AuditEventKind::ArchiveRecorded));
         assert_eq!(taxonomy.len(), kinds.len());
         assert_eq!(
@@ -565,6 +567,9 @@ mod tests {
         assert!(taxonomy
             .iter()
             .any(|row| row.kind_name == "maintenance_reconsolidation_blocked"));
+        assert!(taxonomy
+            .iter()
+            .any(|row| row.kind_name == "maintenance_forgetting_evaluated"));
     }
 
     #[test]

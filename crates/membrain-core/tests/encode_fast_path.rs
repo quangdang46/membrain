@@ -287,6 +287,24 @@ fn landmark_era_slug_falls_back_when_text_has_no_ascii_alphanumerics() {
 }
 
 #[test]
+fn non_landmarks_inherit_the_active_era_without_becoming_landmarks() {
+    let engine = test_engine();
+    let prepared = engine.prepare_fast_path(
+        RawEncodeInput::new(RawIntakeKind::Event, "routine follow-up after launch")
+            .with_landmark_signals(LandmarkSignals::new(0.42, 0.51, 0.33, 12))
+            .with_active_era_id("era-launch-0088"),
+    );
+
+    assert!(!prepared.normalized.landmark.is_landmark);
+    assert_eq!(prepared.normalized.landmark.landmark_label, None);
+    assert_eq!(prepared.normalized.landmark.era_id.as_deref(), Some("era-launch-0088"));
+    assert_eq!(prepared.normalized.landmark.era_started_at_tick, None);
+    assert_eq!(prepared.normalized.landmark.detection_score, 0);
+    assert_eq!(prepared.normalized.landmark.detection_reason, None);
+    assert_eq!(prepared.trace.landmark, prepared.normalized.landmark);
+}
+
+#[test]
 fn contradiction_branching_records_an_explicit_artifact_instead_of_overwrite() {
     let mut store = BrainStore::default();
     let namespace = NamespaceId::new("tests/contradictions").unwrap();

@@ -22,8 +22,9 @@ use membrain_core::policy::{
 use membrain_core::store::hot::Tier1HotMetadataStore;
 use membrain_core::store::{ColdStoreApi, HotStoreApi, Tier2StoreApi};
 use membrain_core::types::{
-    CanonicalMemoryType, FastPathRouteFamily, MemoryId, RawEncodeInput, RawIntakeKind, SessionId,
-    Tier1HotRecord, Tier1PayloadState, WorkingMemoryId, WorkingMemoryItem,
+    CanonicalMemoryType, FastPathRouteFamily, LandmarkSignals, MemoryId, RawEncodeInput,
+    RawIntakeKind, SessionId, Tier1HotRecord, Tier1PayloadState, WorkingMemoryId,
+    WorkingMemoryItem,
 };
 use membrain_core::{BrainStore, RuntimeConfig};
 
@@ -437,8 +438,50 @@ fn cli_query_by_example_explain_names_source_mode_and_materialization_gaps() {
     }));
     assert!(explain.result_reasons.iter().any(|reason| {
         reason.reason_code == "query_by_example_candidate_expansion"
-            && reason.detail.contains("primary cue query_text expanded 3 candidate(s)")
+            && reason
+                .detail
+                .contains("primary cue query_text expanded 3 candidate(s)")
     }));
+}
+
+#[test]
+fn cli_landmark_fast_path_keeps_active_era_for_non_landmarks_and_opens_new_eras_for_landmarks() {
+    let store = BrainStore::new(RuntimeConfig::default());
+
+    let anchored = store.encode_engine().prepare_fast_path(
+        RawEncodeInput::new(
+            RawIntakeKind::Observation,
+            "routine follow-up in the same era",
+        )
+        .with_active_era_id("era-incident-0042"),
+    );
+    let opened = store.encode_engine().prepare_fast_path(
+        RawEncodeInput::new(RawIntakeKind::Event, "launch day pivot")
+            .with_active_era_id("era-incident-0042")
+            .with_landmark_signals(LandmarkSignals::new(0.95, 0.91, 0.12, 88)),
+    );
+
+    assert!(!anchored.normalized.landmark.is_landmark);
+    assert_eq!(
+        anchored.normalized.landmark.era_id.as_deref(),
+        Some("era-incident-0042")
+    );
+    assert_eq!(anchored.normalized.landmark.landmark_label, None);
+    assert_eq!(anchored.normalized.landmark.era_started_at_tick, None);
+
+    assert!(opened.normalized.landmark.is_landmark);
+    assert_eq!(
+        opened.normalized.landmark.landmark_label.as_deref(),
+        Some("launch day pivot")
+    );
+    assert_eq!(
+        opened.normalized.landmark.era_id.as_deref(),
+        Some("era-launchdaypiv-0088")
+    );
+    assert_ne!(
+        opened.normalized.landmark.era_id.as_deref(),
+        Some("era-incident-0042")
+    );
 }
 
 #[test]
@@ -471,11 +514,9 @@ fn cli_keeps_non_observation_inspect_fields_explicitly_absent() {
 fn cli_can_surface_repair_reports_through_shared_core_repair_engine() {
     let store = BrainStore::new(RuntimeConfig::default());
     let namespace = NamespaceId::new("cli.team").unwrap();
-    let run = store.repair_engine().create_targeted(
-        namespace,
-        vec![RepairTarget::LexicalIndex, RepairTarget::MetadataIndex],
-        IndexRepairEntrypoint::RebuildIfNeeded,
-    );
+    let run = store
+        .repair_engine()
+        .create_index_rebuild(namespace, IndexRepairEntrypoint::RebuildIfNeeded);
     let mut handle = MaintenanceJobHandle::new(run, 8);
 
     handle.start();
@@ -493,8 +534,13 @@ fn cli_can_surface_repair_reports_through_shared_core_repair_engine() {
     }
 
     let summary = completed_summary.expect("repair run should complete within bounded polls");
-    assert_eq!(summary.targets_checked, 2);
-    assert_eq!(summary.rebuilt, 2);
+    assert_eq!(summary.targets_checked, 4);
+    assert_eq!(summary.rebuilt, 4);
+    assert_eq!(summary.affected_item_count, 384);
+    assert_eq!(summary.error_count, 0);
+    assert_eq!(summary.rebuild_duration_ms, 80);
+    assert_eq!(summary.queue_report.queue_depth_before, 4);
+    assert_eq!(summary.queue_report.queue_depth_after, 0);
     assert!(summary
         .results
         .iter()
@@ -504,6 +550,8 @@ fn cli_can_surface_repair_reports_through_shared_core_repair_engine() {
     }));
     assert_eq!(summary.results[0].target, RepairTarget::LexicalIndex);
     assert_eq!(summary.results[1].target, RepairTarget::MetadataIndex);
+    assert_eq!(summary.results[2].target, RepairTarget::SemanticHotIndex);
+    assert_eq!(summary.results[3].target, RepairTarget::SemanticColdIndex);
     assert_eq!(
         summary.results[0].rebuilt_outputs,
         vec!["fts5_lexical_projection", "lexical_lookup_table"]
@@ -511,6 +559,26 @@ fn cli_can_surface_repair_reports_through_shared_core_repair_engine() {
     assert_eq!(
         summary.results[1].rebuilt_outputs,
         vec!["tier2_metadata_projection", "namespace_lookup_table"]
+    );
+    assert_eq!(
+        summary.results[2].rebuilt_outputs,
+        vec!["usearch_hot_ann", "hot_embedding_lookup"]
+    );
+    assert_eq!(
+        summary.results[3].rebuilt_outputs,
+        vec!["usearch_cold_ann", "cold_embedding_lookup"]
+    );
+    assert_eq!(
+        store
+            .repair_engine()
+            .plan_index_rebuild(RepairTarget::SemanticHotIndex, IndexRepairEntrypoint::RebuildIfNeeded)
+            .expect("semantic hot index plan should exist")
+            .durable_sources,
+        vec![
+            "durable_memory_records",
+            "canonical_embeddings",
+            "namespace_policy_metadata",
+        ]
     );
 }
 
@@ -724,22 +792,22 @@ fn cli_parity_repair_engine_produces_deterministic_results() {
 
     // Run repair twice and verify identical results
     for _ in 0..2 {
-        let run = store.repair_engine().create_targeted(
-            namespace.clone(),
-            vec![RepairTarget::LexicalIndex, RepairTarget::MetadataIndex],
-            IndexRepairEntrypoint::RebuildIfNeeded,
-        );
+        let run = store
+            .repair_engine()
+            .create_index_rebuild(namespace.clone(), IndexRepairEntrypoint::RebuildIfNeeded);
         let mut handle = MaintenanceJobHandle::new(run, 8);
         handle.start();
         let mut completed = false;
         for _ in 0..8 {
             let snapshot = handle.poll();
             if let MaintenanceJobState::Completed(summary) = snapshot.state {
-                assert_eq!(summary.targets_checked, 2);
-                assert_eq!(summary.rebuilt, 2);
+                assert_eq!(summary.targets_checked, 4);
+                assert_eq!(summary.rebuilt, 4);
                 assert!(summary.results.iter().all(|r| r.verification_passed));
                 assert_eq!(summary.results[0].target, RepairTarget::LexicalIndex);
                 assert_eq!(summary.results[1].target, RepairTarget::MetadataIndex);
+                assert_eq!(summary.results[2].target, RepairTarget::SemanticHotIndex);
+                assert_eq!(summary.results[3].target, RepairTarget::SemanticColdIndex);
                 completed = true;
                 break;
             }

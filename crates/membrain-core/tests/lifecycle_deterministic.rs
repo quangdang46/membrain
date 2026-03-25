@@ -14,7 +14,7 @@ use membrain_core::engine::maintenance::{
 use membrain_core::engine::reconsolidation::{
     LabileMemory, LabileState, PendingUpdate, PreReopenState, ReconsolidationEngine,
     ReconsolidationOutcome, ReconsolidationPolicy, ReconsolidationRun, RefreshReadiness,
-    UpdateSource,
+    ReopenStableState, UpdateSource,
 };
 use membrain_core::engine::strength::{
     DecayDecision, StrengthEngine, StrengthPolicy, StrengthState,
@@ -126,10 +126,10 @@ fn zero_strength_memory_is_immediately_forgetting_eligible() {
     let (action, _) =
         forgetting.evaluate_memory_with_factors(mid(1), &factors, &ForgettingPolicy::default());
 
-    // Zero strength should be eligible for forgetting
+    // Zero strength should be eligible for bounded utility forgetting or demotion.
     assert!(matches!(
         action,
-        ForgettingAction::SoftForget | ForgettingAction::Demote { .. }
+        ForgettingAction::Archive | ForgettingAction::Demote { .. }
     ));
 }
 
@@ -257,11 +257,13 @@ fn stale_reconsolidation_tick_records_update_source_without_mutation() {
         &result,
         Some(0.6),
         Some(0.55),
+        Some(ReopenStableState::Consolidated),
         Some(UpdateSource::System),
     );
 
     assert_eq!(audit.outcome, ReconsolidationOutcome::DiscardedStale);
     assert_eq!(audit.update_source, Some(UpdateSource::System));
+    assert_eq!(audit.preserved_state, Some(ReopenStableState::Consolidated));
     assert_eq!(audit.strength_after, None);
     assert!(audit.pending_update_cleared);
     assert!(!audit.authoritative_state_mutated);
@@ -344,6 +346,7 @@ fn reconsolidation_run_audit_entries_include_refresh_trigger_details() {
                 stability_at_reopen: 3.0,
                 access_count_at_reopen: 5,
             },
+            restabilize_to: ReopenStableState::Consolidated,
             refresh_readiness: RefreshReadiness::Ready,
         },
         LabileMemory {
@@ -361,6 +364,7 @@ fn reconsolidation_run_audit_entries_include_refresh_trigger_details() {
                 stability_at_reopen: 4.0,
                 access_count_at_reopen: 6,
             },
+            restabilize_to: ReopenStableState::SynapticDone,
             refresh_readiness: RefreshReadiness::Ready,
         },
         LabileMemory {
@@ -378,6 +382,7 @@ fn reconsolidation_run_audit_entries_include_refresh_trigger_details() {
                 stability_at_reopen: 5.0,
                 access_count_at_reopen: 7,
             },
+            restabilize_to: ReopenStableState::Consolidated,
             refresh_readiness: RefreshReadiness::Deferred,
         },
     ];
@@ -402,6 +407,9 @@ fn reconsolidation_run_audit_entries_include_refresh_trigger_details() {
 
     let entries = completed_run.append_only_audit_entries();
     assert_eq!(entries.len(), 3);
+    assert!(entries[0].detail.contains("preserved_state=consolidated"));
+    assert!(entries[1].detail.contains("preserved_state=synaptic_done"));
+    assert!(entries[2].detail.contains("preserved_state=consolidated"));
     assert!(entries[0]
         .detail
         .contains("refresh_triggers=embedding_refresh,index_refresh,cache_invalidate"));
@@ -460,6 +468,8 @@ fn interfered_memories_become_forgetting_eligible() {
         in_contradiction: false,
         emotional_arousal: 0.0,
         bypass_decay: false,
+        idle_days: 0,
+        guards: Default::default(),
     };
     let (_, score_before) =
         forgetting.evaluate_memory_with_factors(mid(1), &factors_no_interference, &forget_policy);
@@ -475,6 +485,8 @@ fn interfered_memories_become_forgetting_eligible() {
         in_contradiction: false,
         emotional_arousal: 0.0,
         bypass_decay: false,
+        idle_days: 0,
+        guards: Default::default(),
     };
     let (_, score_after) =
         forgetting.evaluate_memory_with_factors(mid(1), &factors_with_interference, &forget_policy);

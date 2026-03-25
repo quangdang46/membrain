@@ -65,6 +65,11 @@ impl WorkspaceId {
     pub fn new(raw: impl Into<String>) -> Self {
         Self(raw.into())
     }
+
+    /// Returns the machine-readable workspace identifier.
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
 }
 
 /// Stable agent identifier preserved in shared request envelopes.
@@ -76,6 +81,11 @@ impl AgentId {
     pub fn new(raw: impl Into<String>) -> Self {
         Self(raw.into())
     }
+
+    /// Returns the machine-readable agent identifier.
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
 }
 
 /// Stable task or governing work-item identifier preserved in request envelopes.
@@ -86,6 +96,11 @@ impl TaskId {
     /// Builds a new task identifier.
     pub fn new(raw: impl Into<String>) -> Self {
         Self(raw.into())
+    }
+
+    /// Returns the machine-readable task identifier.
+    pub fn as_str(&self) -> &str {
+        &self.0
     }
 }
 
@@ -208,6 +223,7 @@ impl BoundRequestContext {
 
 /// Machine-readable failure family for shared core response envelopes.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
+#[serde(rename_all = "snake_case")]
 pub enum ErrorKind {
     ValidationFailure,
     PolicyDenied,
@@ -253,6 +269,7 @@ impl ErrorKind {
 
 /// Stable machine-readable next-step hint shared across interfaces.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
+#[serde(rename_all = "snake_case")]
 pub enum RemediationStep {
     FixRequest,
     ChangeScope,
@@ -872,6 +889,7 @@ impl ResultReason {
             "temporal_payload_deferred" => "temporal_payload_deferred",
             "temporal_landmark_selected" => "temporal_landmark_selected",
             "temporal_landmark_not_selected" => "temporal_landmark_not_selected",
+            "era_filter_applied" => "era_filter_applied",
             "contradiction_selected" => "contradiction_selected",
             "contradiction_visible" => "contradiction_visible",
             "contradiction_retained_under_legal_hold" => "contradiction_retained_under_legal_hold",
@@ -888,7 +906,8 @@ impl ResultReason {
             "temporal_prefilter_metadata_only"
             | "temporal_payload_deferred"
             | "temporal_landmark_selected"
-            | "temporal_landmark_not_selected" => "temporal",
+            | "temporal_landmark_not_selected"
+            | "era_filter_applied" => "temporal",
             "contradiction_selected"
             | "contradiction_visible"
             | "contradiction_retained_under_legal_hold" => "conflict",
@@ -908,6 +927,7 @@ impl ResultReason {
             | "temporal_payload_deferred"
             | "temporal_landmark_selected"
             | "temporal_landmark_not_selected"
+            | "era_filter_applied"
             | "contradiction_selected"
             | "contradiction_visible"
             | "contradiction_retained_under_legal_hold" => TraceStage::Tier2Exact,
@@ -1395,13 +1415,13 @@ impl ApiModule {
 #[cfg(test)]
 mod tests {
     use super::{
-        ApiModule, AvailabilityPosture, AvailabilityReason, AvailabilitySummary,
+        AgentId, ApiModule, AvailabilityPosture, AvailabilityReason, AvailabilitySummary,
         CacheMetricsSummary, ConflictMarker, ContextValidationError, ErrorKind, ExplainTraceSchema,
         FieldPresence, FreshnessMarker, GraphExpansionSummary, NamespaceId,
         PassiveObservationInspectSummary, PolicyContext, PolicyFilterSummary, RemediationHint,
         RemediationStep, RequestContext, RequestId, ResponseContext, ResponseWarning, ResultReason,
         RouteSummary, TraceOmissionSummary, TracePolicySummary, TraceProvenanceSummary,
-        TraceScoreComponent, TraceStage, UncertaintyMarker,
+        TraceScoreComponent, TraceStage, UncertaintyMarker, WorkspaceId,
     };
     use crate::engine::ranking::{RankingExplain, RerankMetadata};
     use crate::engine::recall::{RecallPlanKind, RecallTraceStage};
@@ -1651,6 +1671,38 @@ mod tests {
             .denial_reasons
             .iter()
             .any(|reason| reason.as_str() == "approved_scope_required"));
+    }
+
+    #[test]
+    fn sharing_access_redacts_cross_namespace_public_reads_when_include_public_is_enabled() {
+        let request = RequestContext {
+            namespace: Some(NamespaceId::new("team.alpha").unwrap()),
+            workspace_id: Some(WorkspaceId::new("ws.alpha")),
+            agent_id: Some(AgentId::new("agent.alpha")),
+            session_id: None,
+            task_id: None,
+            request_id: RequestId::new("req-share-public").unwrap(),
+            policy_context: PolicyContext {
+                include_public: true,
+                sharing_visibility: SharingVisibility::Public,
+                caller_identity_bound: true,
+                workspace_acl_allowed: true,
+                agent_acl_allowed: true,
+                session_visibility_allowed: true,
+                legal_hold: false,
+            },
+            time_budget_ms: None,
+        };
+
+        let bound = request.bind_namespace(None).unwrap();
+        let outcome = bound.evaluate_cross_namespace_sharing_access(
+            &PolicyModule,
+            &NamespaceId::new("team.public").unwrap(),
+        );
+
+        assert_eq!(outcome.decision, SharingAccessDecision::Redact);
+        assert_eq!(outcome.sharing_scope.unwrap().as_str(), "approved_public");
+        assert_eq!(outcome.redaction_fields, vec!["workspace_id", "session_id"]);
     }
 
     #[test]
@@ -2006,6 +2058,7 @@ mod tests {
                         contradiction_uncertainty: None,
                         missing_evidence_uncertainty: None,
                         corroboration_uncertainty: None,
+                        reconsolidation_uncertainty: None,
                         confidence_interval: None,
                     },
                     answered_from: AnsweredFrom::Tier2Indexed,
@@ -2152,6 +2205,7 @@ mod tests {
                         contradiction_uncertainty: None,
                         missing_evidence_uncertainty: None,
                         corroboration_uncertainty: None,
+                        reconsolidation_uncertainty: None,
                         confidence_interval: None,
                     },
                     answered_from: AnsweredFrom::Tier2Indexed,
@@ -2314,6 +2368,23 @@ mod tests {
         assert_eq!(mapped.route_stage, TraceStage::Tier2Exact);
         assert!(!mapped.policy_filter_applied);
         assert!(mapped.detail.contains("launch milestone"));
+    }
+
+    #[test]
+    fn result_reason_from_era_filter_reason_maps_temporal_family_and_stage() {
+        let reason = crate::engine::result::ResultReason {
+            memory_id: None,
+            reason_code: "era_filter_applied".to_string(),
+            detail: "bounded retrieval stayed inside era `era-launch-0042` opened by landmark(s) launch day pivot (#7)".to_string(),
+        };
+
+        let mapped = ResultReason::from_result_reason(&reason);
+
+        assert_eq!(mapped.memory_id, None);
+        assert_eq!(mapped.reason_code, "era_filter_applied");
+        assert_eq!(mapped.reason_family, "temporal");
+        assert_eq!(mapped.route_stage, TraceStage::Tier2Exact);
+        assert!(mapped.detail.contains("era-launch-0042"));
     }
 
     #[test]
@@ -2862,16 +2933,16 @@ mod tests {
         let cache_metrics_json = &value["cache_metrics"];
         let cache_traces = cache_metrics_json["cache_traces"].as_array().unwrap();
         assert_eq!(cache_traces.len(), 3);
-        assert_eq!(cache_traces[0]["cache_family"], "Tier1Item");
-        assert_eq!(cache_traces[0]["cache_event"], "Hit");
-        assert_eq!(cache_traces[0]["outcome"], "Hit");
-        assert_eq!(cache_traces[0]["warm_source"], "Tier1ItemCache");
-        assert_eq!(cache_traces[1]["cache_family"], "Summary");
-        assert_eq!(cache_traces[1]["cache_event"], "Bypass");
-        assert_eq!(cache_traces[1]["cache_reason"], "PolicyBoundary");
-        assert_eq!(cache_traces[2]["cache_family"], "AnnProbe");
-        assert_eq!(cache_traces[2]["cache_event"], "Miss");
-        assert_eq!(cache_traces[2]["cache_reason"], "StaleGeneration");
+        assert_eq!(cache_traces[0]["cache_family"], "tier1_item");
+        assert_eq!(cache_traces[0]["cache_event"], "hit");
+        assert_eq!(cache_traces[0]["outcome"], "hit");
+        assert_eq!(cache_traces[0]["warm_source"], "tier1_item_cache");
+        assert_eq!(cache_traces[1]["cache_family"], "summary");
+        assert_eq!(cache_traces[1]["cache_event"], "bypass");
+        assert_eq!(cache_traces[1]["cache_reason"], "policy_boundary");
+        assert_eq!(cache_traces[2]["cache_family"], "ann_probe");
+        assert_eq!(cache_traces[2]["cache_event"], "miss");
+        assert_eq!(cache_traces[2]["cache_reason"], "stale_generation");
         assert_eq!(cache_traces[2]["generation_status"], "Stale");
         assert_eq!(cache_metrics_json["cache_hit_count"], 1);
         assert_eq!(cache_metrics_json["cache_miss_count"], 1);
@@ -3125,6 +3196,72 @@ mod tests {
         assert!(degraded.ok);
         assert_eq!(degraded.error_kind, None);
         assert_eq!(degraded.outcome_class, OutcomeClass::Degraded);
+    }
+
+    #[test]
+    fn error_taxonomy_machine_names_and_retryability_stay_stable() {
+        let cases = [
+            (
+                ErrorKind::ValidationFailure,
+                "validation_failure",
+                false,
+                RemediationStep::FixRequest,
+            ),
+            (
+                ErrorKind::PolicyDenied,
+                "policy_denied",
+                false,
+                RemediationStep::ChangeScope,
+            ),
+            (
+                ErrorKind::UnsupportedFeature,
+                "unsupported_feature",
+                false,
+                RemediationStep::CheckHealth,
+            ),
+            (
+                ErrorKind::TransientFailure,
+                "transient_failure",
+                true,
+                RemediationStep::RetryWithBackoff,
+            ),
+            (
+                ErrorKind::TimeoutFailure,
+                "timeout_failure",
+                true,
+                RemediationStep::RetryWithHigherBudget,
+            ),
+            (
+                ErrorKind::CorruptionFailure,
+                "corruption_failure",
+                false,
+                RemediationStep::RunDoctor,
+            ),
+            (
+                ErrorKind::InternalFailure,
+                "internal_failure",
+                false,
+                RemediationStep::InspectState,
+            ),
+        ];
+
+        for (error_kind, machine_name, retryable, remediation_step) in cases {
+            assert_eq!(error_kind.as_str(), machine_name, "{machine_name}");
+            assert_eq!(error_kind.retryable(), retryable, "{machine_name}");
+            assert_eq!(
+                error_kind.primary_remediation(),
+                remediation_step,
+                "{machine_name}"
+            );
+            assert_eq!(
+                RemediationHint::for_error(error_kind, machine_name)
+                    .step_names()
+                    .first()
+                    .copied(),
+                Some(remediation_step.as_str()),
+                "{machine_name}"
+            );
+        }
     }
 
     #[test]

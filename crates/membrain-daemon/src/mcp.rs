@@ -1,7 +1,13 @@
-use membrain_core::api::{CacheMetricsSummary, NamespaceId, RequestId};
+use membrain_core::api::{
+    CacheMetricsSummary, NamespaceId, PolicyFilterSummary, RequestId, TracePolicySummary,
+};
 use membrain_core::engine::result::RetrievalResultSet;
 use membrain_core::observability::OutcomeClass;
 use serde::{Deserialize, Serialize};
+
+pub use crate::preflight::{
+    PreflightAllowRequest, PreflightExplainResponse, PreflightOutcome, PreflightRunRequest,
+};
 
 // ---------------------------------------------------------------------------
 // Common request envelope fields
@@ -9,7 +15,7 @@ use serde::{Deserialize, Serialize};
 
 /// Shared envelope fields carried by every MCP method request.
 /// These are execution context, not authorization shortcuts.
-#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+#[derive(Debug, Clone, Serialize, Deserialize, Default, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 pub struct CommonRequestFields {
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -28,14 +34,28 @@ pub struct CommonRequestFields {
     pub policy_context: Option<PolicyContextHint>,
 }
 
+const fn default_true() -> bool {
+    true
+}
+
 /// Policy hints carried by the request envelope before core policy evaluation.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 pub struct PolicyContextHint {
     #[serde(default)]
     pub include_public: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub sharing_visibility: Option<String>,
+    #[serde(default = "default_true")]
+    pub caller_identity_bound: bool,
+    #[serde(default = "default_true")]
+    pub workspace_acl_allowed: bool,
+    #[serde(default = "default_true")]
+    pub agent_acl_allowed: bool,
+    #[serde(default = "default_true")]
+    pub session_visibility_allowed: bool,
+    #[serde(default)]
+    pub legal_hold: bool,
 }
 
 // ---------------------------------------------------------------------------
@@ -81,6 +101,12 @@ pub enum McpRequest {
     Share(ShareParams),
     #[serde(rename = "unshare")]
     Unshare(UnshareParams),
+    #[serde(rename = "preflight.run")]
+    PreflightRun(PreflightRunRequest),
+    #[serde(rename = "preflight.explain")]
+    PreflightExplain(PreflightRunRequest),
+    #[serde(rename = "preflight.allow")]
+    PreflightAllow(PreflightAllowRequest),
 
     // -- Operator surfaces -------------------------------------------------
     #[serde(rename = "stats")]
@@ -533,6 +559,12 @@ pub struct ObserveParams {
     pub chunk_size: Option<usize>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub source_label: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub topic_threshold: Option<f32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub min_chunk_size: Option<usize>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub dry_run: Option<bool>,
     #[serde(flatten)]
     pub common: CommonRequestFields,
 }
@@ -901,6 +933,38 @@ pub struct McpError {
     pub is_policy_denial: bool,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct McpAuditView {
+    pub event_kind: String,
+    pub actor_source: String,
+    pub request_id: String,
+    pub effective_namespace: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub source_namespace: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub target_namespace: Option<String>,
+    pub policy_family: String,
+    pub outcome_class: String,
+    pub blocked_stage: String,
+    pub redaction_summary: Vec<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub related_run: Option<String>,
+    pub redacted: bool,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct McpSharePayload {
+    pub request_id: RequestId,
+    pub namespace: NamespaceId,
+    pub outcome_class: OutcomeClass,
+    pub result: serde_json::Value,
+    pub policy_filters_applied: Vec<PolicyFilterSummary>,
+    pub policy_summary: TracePolicySummary,
+    pub audit: McpAuditView,
+}
+
 /// Typed inspect payload that reuses the canonical explain families instead of inventing an
 /// inspect-only wrapper-local schema.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -1047,12 +1111,16 @@ pub struct McpStreamListing {
 #[cfg(test)]
 mod tests {
     use super::{
-        CommonRequestFields, EncodeParams, ExplainParams, InspectParams, McpError,
-        McpInspectExplainTrace, McpInspectPayload, McpRequest, McpResource, McpResourceListing,
-        McpResourceReadPayload, McpResponse, McpRetrievalPayload, McpStream, McpStreamListing,
+        CommonRequestFields, EncodeParams, ExplainParams, InspectParams, McpAuditView, McpError,
+        ContextBudgetParams, McpInspectExplainTrace, McpInspectPayload, McpRequest, McpResource,
+        McpResourceListing, McpResourceReadPayload, McpResponse, McpRetrievalPayload,
+        McpSharePayload, McpStream, McpStreamListing, ObserveParams, PolicyContextHint,
         RecallParams,
     };
-    use membrain_core::api::{NamespaceId, RequestId};
+    use membrain_core::api::{
+        FieldPresence, NamespaceId, PassiveObservationInspectSummary, PolicyFilterSummary,
+        RequestId, TracePolicySummary,
+    };
     use membrain_core::engine::recall::RecallPlanKind;
     use membrain_core::engine::result::RetrievalExplain;
     use membrain_core::engine::result::RetrievalResultSet;
@@ -1062,12 +1130,20 @@ mod tests {
     fn sample_common() -> CommonRequestFields {
         CommonRequestFields {
             request_id: Some("test-req-1".to_string()),
-            workspace_id: None,
-            agent_id: None,
-            session_id: None,
-            task_id: None,
-            time_budget_ms: None,
-            policy_context: None,
+            workspace_id: Some("ws-7".to_string()),
+            agent_id: Some("agent-3".to_string()),
+            session_id: Some("session-9".to_string()),
+            task_id: Some("task-2".to_string()),
+            time_budget_ms: Some(75),
+            policy_context: Some(PolicyContextHint {
+                include_public: true,
+                sharing_visibility: Some("public".to_string()),
+                caller_identity_bound: true,
+                workspace_acl_allowed: true,
+                agent_acl_allowed: true,
+                session_visibility_allowed: true,
+                legal_hold: false,
+            }),
         }
     }
 
@@ -1539,6 +1615,80 @@ mod tests {
     }
 
     #[test]
+    fn share_payload_can_preserve_required_policy_and_audit_fields() {
+        let payload = McpSharePayload {
+            request_id: RequestId::new("req-share-42").unwrap(),
+            namespace: NamespaceId::new("team.beta").unwrap(),
+            outcome_class: OutcomeClass::Accepted,
+            result: serde_json::json!({
+                "status": "accepted",
+                "id": 42,
+                "namespace": "team.beta",
+                "visibility": "shared"
+            }),
+            policy_filters_applied: vec![PolicyFilterSummary::new(
+                "team.beta",
+                "visibility_sharing",
+                OutcomeClass::Accepted,
+                "policy_gate",
+                FieldPresence::Present("shared".to_string()),
+                FieldPresence::Absent,
+                Vec::new(),
+            )],
+            policy_summary: TracePolicySummary {
+                effective_namespace: "team.beta".to_string(),
+                policy_family: "visibility_sharing",
+                outcome_class: OutcomeClass::Accepted,
+                blocked_stage: "policy_gate",
+                redaction_fields: Vec::new(),
+                retention_state: FieldPresence::Absent,
+                sharing_scope: FieldPresence::Present("shared"),
+                filters: vec![PolicyFilterSummary::new(
+                    "team.beta",
+                    "visibility_sharing",
+                    OutcomeClass::Accepted,
+                    "policy_gate",
+                    FieldPresence::Present("shared".to_string()),
+                    FieldPresence::Absent,
+                    Vec::new(),
+                )],
+            },
+            audit: McpAuditView {
+                event_kind: "approved_sharing".to_string(),
+                actor_source: "mcp_share".to_string(),
+                request_id: "req-share-42".to_string(),
+                effective_namespace: "team.beta".to_string(),
+                source_namespace: Some("team.alpha".to_string()),
+                target_namespace: Some("team.beta".to_string()),
+                policy_family: "visibility_sharing".to_string(),
+                outcome_class: "accepted".to_string(),
+                blocked_stage: "policy_gate".to_string(),
+                redaction_summary: Vec::new(),
+                related_run: Some("share-run-42".to_string()),
+                redacted: false,
+            },
+        };
+
+        let response = McpResponse::success(serde_json::to_value(&payload).unwrap());
+        let json = serde_json::to_value(&response).unwrap();
+        assert_eq!(json["status"], "ok");
+        assert_eq!(json["payload"]["request_id"], "req-share-42");
+        assert_eq!(json["payload"]["namespace"], "team.beta");
+        assert_eq!(json["payload"]["outcome_class"], "accepted");
+        assert_eq!(json["payload"]["policy_summary"]["policy_family"], "visibility_sharing");
+        assert_eq!(json["payload"]["audit"]["event_kind"], "approved_sharing");
+        assert_eq!(json["payload"]["audit"]["effective_namespace"], "team.beta");
+        assert_eq!(json["payload"]["audit"]["source_namespace"], "team.alpha");
+        assert_eq!(json["payload"]["audit"]["target_namespace"], "team.beta");
+        assert_eq!(json["payload"]["audit"]["policy_family"], "visibility_sharing");
+        assert_eq!(json["payload"]["audit"]["outcome_class"], "accepted");
+        assert_eq!(json["payload"]["audit"]["blocked_stage"], "policy_gate");
+        assert_eq!(json["payload"]["audit"]["related_run"], "share-run-42");
+        assert_eq!(json["payload"]["audit"]["redaction_summary"], serde_json::json!([]));
+        assert_eq!(json["payload"]["audit"]["redacted"], false);
+    }
+
+    #[test]
     fn mcp_response_rejects_unknown_top_level_fields() {
         let result = serde_json::from_value::<McpResponse>(serde_json::json!({
             "status": "ok",
@@ -1661,6 +1811,113 @@ mod tests {
     }
 
     #[test]
+    fn observe_request_round_trips_with_extended_fields() {
+        let request = McpRequest::Observe(ObserveParams {
+            content: "streamed content".to_string(),
+            namespace: "team.alpha".to_string(),
+            context: Some("coding session".to_string()),
+            chunk_size: Some(120),
+            source_label: Some("stdin:test".to_string()),
+            topic_threshold: Some(0.4),
+            min_chunk_size: Some(24),
+            dry_run: Some(true),
+            common: sample_common(),
+        });
+
+        let json = serde_json::to_value(&request).unwrap();
+        assert_eq!(json["method"], "observe");
+        assert_eq!(json["params"]["content"], "streamed content");
+        assert_eq!(json["params"]["namespace"], "team.alpha");
+        assert_eq!(json["params"]["context"], "coding session");
+        assert_eq!(json["params"]["chunk_size"], 120);
+        assert_eq!(json["params"]["source_label"], "stdin:test");
+        assert_eq!(json["params"]["topic_threshold"], 0.4);
+        assert_eq!(json["params"]["min_chunk_size"], 24);
+        assert_eq!(json["params"]["dry_run"], true);
+        assert_eq!(json["params"]["request_id"], "test-req-1");
+
+        let decoded: McpRequest = serde_json::from_value(json).unwrap();
+        match decoded {
+            McpRequest::Observe(params) => {
+                assert_eq!(params.content, "streamed content");
+                assert_eq!(params.context.as_deref(), Some("coding session"));
+                assert_eq!(params.chunk_size, Some(120));
+                assert_eq!(params.source_label.as_deref(), Some("stdin:test"));
+                assert_eq!(params.topic_threshold, Some(0.4));
+                assert_eq!(params.min_chunk_size, Some(24));
+                assert_eq!(params.dry_run, Some(true));
+                assert_eq!(params.common, sample_common());
+            }
+            _ => std::process::abort(),
+        }
+    }
+
+    #[test]
+    fn inspect_payload_can_embed_passive_observation_summary() {
+        let mut payload = McpInspectPayload::from_result(
+            RequestId::new("req-observe-inspect").unwrap(),
+            NamespaceId::new("mcp.team").unwrap(),
+            7,
+            &sample_result_set(),
+        )
+        .unwrap();
+        payload.explain_trace.passive_observation = Some(
+            serde_json::to_value(PassiveObservationInspectSummary {
+                source_kind: "observation",
+                write_decision: "capture",
+                captured_as_observation: true,
+                observation_source: FieldPresence::Present("stdin:test".to_string()),
+                observation_chunk_id: FieldPresence::Present("obs-0000000000000042".to_string()),
+                retention_marker: FieldPresence::Present("volatile_observation"),
+            })
+            .unwrap(),
+        );
+
+        let json = serde_json::to_value(&payload).unwrap();
+        assert_eq!(
+            json["explain_trace"]["passive_observation"]["source_kind"],
+            "observation"
+        );
+        assert_eq!(
+            json["explain_trace"]["passive_observation"]["observation_chunk_id"],
+            serde_json::json!({"Present":"obs-0000000000000042"})
+        );
+    }
+
+    #[test]
+    fn context_budget_request_round_trips_optional_fields() {
+        let request = McpRequest::ContextBudget(ContextBudgetParams {
+            token_budget: 256,
+            namespace: "team.alpha".to_string(),
+            current_context: Some("debugging session".to_string()),
+            working_memory_ids: Some(vec![7, 8]),
+            format: Some("markdown".to_string()),
+            common: sample_common(),
+        });
+
+        let json = serde_json::to_value(&request).unwrap();
+        assert_eq!(json["method"], "context_budget");
+        assert_eq!(json["params"]["token_budget"], 256);
+        assert_eq!(json["params"]["namespace"], "team.alpha");
+        assert_eq!(json["params"]["current_context"], "debugging session");
+        assert_eq!(json["params"]["working_memory_ids"], serde_json::json!([7, 8]));
+        assert_eq!(json["params"]["format"], "markdown");
+        assert_eq!(json["params"]["request_id"], "test-req-1");
+
+        let decoded: McpRequest = serde_json::from_value(json).unwrap();
+        match decoded {
+            McpRequest::ContextBudget(params) => {
+                assert_eq!(params.token_budget, 256);
+                assert_eq!(params.current_context.as_deref(), Some("debugging session"));
+                assert_eq!(params.working_memory_ids, Some(vec![7, 8]));
+                assert_eq!(params.format.as_deref(), Some("markdown"));
+                assert_eq!(params.common, sample_common());
+            }
+            _ => std::process::abort(),
+        }
+    }
+
+    #[test]
     fn encode_request_round_trips_with_common_envelope_fields() {
         let request = McpRequest::Encode(EncodeParams {
             content: "user prefers dark mode".to_string(),
@@ -1674,7 +1931,7 @@ mod tests {
             entity_refs: None,
             relation_refs: None,
             retention_hint: None,
-            visibility: None,
+            visibility: Some("shared".to_string()),
             common: sample_common(),
         });
 
@@ -1683,16 +1940,29 @@ mod tests {
         assert_eq!(json["params"]["content"], "user prefers dark mode");
         assert_eq!(json["params"]["namespace"], "team.alpha");
         assert_eq!(json["params"]["memory_type"], "user_preference");
+        assert_eq!(json["params"]["visibility"], "shared");
         assert_eq!(json["params"]["salience"], 500);
         assert_eq!(json["params"]["tags"], serde_json::json!(["preference"]));
         assert_eq!(json["params"]["request_id"], "test-req-1");
+        assert_eq!(json["params"]["workspace_id"], "ws-7");
+        assert_eq!(json["params"]["agent_id"], "agent-3");
+        assert_eq!(json["params"]["session_id"], "session-9");
+        assert_eq!(json["params"]["task_id"], "task-2");
+        assert_eq!(json["params"]["time_budget_ms"], 75);
+        assert_eq!(json["params"]["policy_context"]["include_public"], true);
+        assert_eq!(
+            json["params"]["policy_context"]["sharing_visibility"],
+            "public"
+        );
 
         let decoded: McpRequest = serde_json::from_value(json).unwrap();
         match decoded {
             McpRequest::Encode(params) => {
                 assert_eq!(params.content, "user prefers dark mode");
                 assert_eq!(params.salience, Some(500));
+                assert_eq!(params.visibility.as_deref(), Some("shared"));
                 assert!(params.source_metadata.is_none());
+                assert_eq!(params.common, sample_common());
             }
             _ => std::process::abort(),
         }
@@ -1733,6 +2003,9 @@ mod tests {
         assert_eq!(json["params"]["token_budget"], 512);
         assert_eq!(json["params"]["like_id"], 42);
         assert_eq!(json["params"]["mood_congruent"], true);
+        assert_eq!(json["params"]["request_id"], "test-req-1");
+        assert_eq!(json["params"]["workspace_id"], "ws-7");
+        assert_eq!(json["params"]["policy_context"]["include_public"], true);
 
         let decoded: McpRequest = serde_json::from_value(json).unwrap();
         match decoded {
@@ -1740,6 +2013,7 @@ mod tests {
                 assert_eq!(params.result_budget, Some(5));
                 assert_eq!(params.like_id, Some(42));
                 assert_eq!(params.mood_congruent, Some(true));
+                assert_eq!(params.common, sample_common());
             }
             _ => std::process::abort(),
         }
@@ -1793,24 +2067,35 @@ mod tests {
         let share_json = serde_json::to_value(McpRequest::Share(
             serde_json::from_value(serde_json::json!({
                 "id": 42,
-                "namespace_id": "team.beta"
+                "namespace_id": "team.beta",
+                "request_id": "req-share-42",
+                "policy_context": {"include_public": false, "sharing_visibility": "shared"}
             }))
             .unwrap(),
         ))
         .unwrap();
         assert_eq!(share_json["method"], "share");
         assert_eq!(share_json["params"]["namespace_id"], "team.beta");
+        assert_eq!(share_json["params"]["request_id"], "req-share-42");
+        assert_eq!(
+            share_json["params"]["policy_context"]["sharing_visibility"],
+            "shared"
+        );
 
         // Unshare
         let unshare_json = serde_json::to_value(McpRequest::Unshare(
             serde_json::from_value(serde_json::json!({
                 "id": 42,
-                "namespace": "team.alpha"
+                "namespace": "team.alpha",
+                "request_id": "req-unshare-42",
+                "session_id": "session-9"
             }))
             .unwrap(),
         ))
         .unwrap();
         assert_eq!(unshare_json["method"], "unshare");
+        assert_eq!(unshare_json["params"]["request_id"], "req-unshare-42");
+        assert_eq!(unshare_json["params"]["session_id"], "session-9");
 
         // Consolidate
         let consolidate_json = serde_json::to_value(McpRequest::Consolidate(
@@ -1836,6 +2121,47 @@ mod tests {
         .unwrap();
         assert_eq!(repair_json["method"], "repair");
         assert_eq!(repair_json["params"]["dry_run"], true);
+
+        // Preflight run
+        let preflight_run_json = serde_json::to_value(McpRequest::PreflightRun(
+            serde_json::from_value(serde_json::json!({
+                "namespace": "team.alpha",
+                "original_query": "delete prior audit events",
+                "proposed_action": "purge namespace audit history"
+            }))
+            .unwrap(),
+        ))
+        .unwrap();
+        assert_eq!(preflight_run_json["method"], "preflight.run");
+        assert_eq!(preflight_run_json["params"]["namespace"], "team.alpha");
+
+        // Preflight explain
+        let preflight_explain_json = serde_json::to_value(McpRequest::PreflightExplain(
+            serde_json::from_value(serde_json::json!({
+                "namespace": "team.alpha",
+                "original_query": "delete prior audit events",
+                "proposed_action": "purge namespace audit history"
+            }))
+            .unwrap(),
+        ))
+        .unwrap();
+        assert_eq!(preflight_explain_json["method"], "preflight.explain");
+        assert_eq!(preflight_explain_json["params"]["proposed_action"], "purge namespace audit history");
+
+        // Preflight allow
+        let preflight_allow_json = serde_json::to_value(McpRequest::PreflightAllow(
+            serde_json::from_value(serde_json::json!({
+                "namespace": "team.alpha",
+                "original_query": "delete prior audit events",
+                "proposed_action": "purge namespace audit history",
+                "authorization_token": "allow-123",
+                "bypass_flags": ["manual_override"]
+            }))
+            .unwrap(),
+        ))
+        .unwrap();
+        assert_eq!(preflight_allow_json["method"], "preflight.allow");
+        assert_eq!(preflight_allow_json["params"]["bypass_flags"], serde_json::json!(["manual_override"]));
     }
 
     #[test]
@@ -1912,6 +2238,18 @@ mod tests {
     }
 
     // ── Goal management round-trip tests ─────────────────────────────────
+
+    #[test]
+    fn policy_context_hint_rejects_unknown_fields() {
+        let error = serde_json::from_value::<PolicyContextHint>(serde_json::json!({
+            "include_public": true,
+            "sharing_visibility": "public",
+            "unexpected": true
+        }))
+        .unwrap_err();
+        assert!(error.to_string().contains("unknown field"));
+        assert!(error.to_string().contains("unexpected"));
+    }
 
     #[test]
     fn goal_methods_round_trip() {

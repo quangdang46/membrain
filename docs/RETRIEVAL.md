@@ -118,6 +118,11 @@ When present, `action_pack` is the only stable home for synthesized answer text,
 - uncertainty markers that qualify the synthesis,
 - any policy or freshness caveats that materially constrain safe use.
 
+`output_mode` controls whether the action pack survives packaging:
+- `strict` keeps the evidence pack authoritative and suppresses derived actions when they carry blocking uncertainty markers (`low_confidence`, `high_uncertainty`, `missing_evidence`, `reconsolidation_churn`) or any policy/freshness caveat.
+- `balanced` permits derived actions only when their confidence remains at least medium and leaves lower-confidence guidance in the evidence pack/explain surfaces instead of foregrounding it as action output.
+- `fast` preserves any derived action artifact that survived earlier policy filtering so interfaces can optimize for speed over conservatism.
+
 ### `omitted_summary` contract
 
 `omitted_summary` must preserve counts and reasons for at least these families when relevant:
@@ -152,8 +157,11 @@ When present, `action_pack` is the only stable home for synthesized answer text,
 - `snapshot_scoped`
 - `as_of_scoped`
 - `lease_sensitive`
+- `recheck_required`
 - `stale_derived`
 - `archival_recovery_partial`
+
+When lease-sensitive evidence is action-critical, the packaged result must disclose that the item requires re-check or withholding instead of silently keeping a high-confidence answer surface.
 
 ### `conflict_markers` contract
 
@@ -446,13 +454,13 @@ fn compute_confidence_interval(
 - inspect, explain, ranking, and repair flows must be able to reconstruct contradiction state from durable conflict artifacts plus preserved lineage and provenance
 
 ## Explain and inspect surface contract
-- `explain=summary` is the default result-consumption surface: it should say why returned items appeared, which major route choices fired, which policy or budget boundaries mattered, and which freshness or conflict markers affect use of the result
+- `explain=summary` is the default result-consumption surface: it should say why returned items appeared, which major route choices fired, which policy or budget boundaries mattered, which historical boundary was selected for time-travel retrieval, and which freshness or conflict markers affect use of the result
 - `explain=full` or explicit inspect mode should add stage-by-stage routing traces, including candidate entry reasons, exclusion reasons, candidate counts, graph hops, cache and tier decisions, baseline score families, rerank deltas, and final packaging reasons
 - `explain=none` may suppress embedded explanation in the main response, but it must not change retrieval semantics or prevent later inspection through an explanation handle or equivalent trace reference
 - explanation surfaces must distinguish why an item appeared from why alternatives did not, including policy-filtered, budget-capped, duplicate-collapsed, low-confidence, superseded, stale-bypassed, or conflict-suppressed outcomes while respecting redaction boundaries
 - provenance summaries should identify source kind, source reference or opaque handle, lineage ancestry, and any summary or consolidation ancestry needed to inspect the returned item without treating derived artifacts as sole truth
-- freshness markers should surface decaying-soon, snapshot or as-of scoping, stale-derived warnings, and other time-sensitivity signals; conflict markers should surface open disagreement, supersession lineage, override reason, and omitted-sibling notes when applicable
-- CLI, daemon or JSON-RPC, and MCP surfaces may format explanations differently for humans, but the machine-readable field families should stay equivalent across interfaces, including `route_summary`, `result_reasons`, `omitted_summary`, `policy_summary`, `provenance_summary`, `freshness_markers`, `conflict_markers`, and `trace_stages` when full traces are requested
+- freshness markers should surface decaying-soon, snapshot or as-of scoping, stale-derived warnings, and other time-sensitivity signals; historical retrieval should preserve a machine-readable `historical_context` block naming the selected `window_kind`, `selection_reason`, optional `selected_tick_window`, applied `as_of_tick`, and resolved snapshot identity when one anchored the request; conflict markers should surface open disagreement, supersession lineage, override reason, and omitted-sibling notes when applicable
+- CLI, daemon or JSON-RPC, and MCP surfaces may format explanations differently for humans, but the machine-readable field families should stay equivalent across interfaces, including `route_summary`, `historical_context`, `result_reasons`, `omitted_summary`, `policy_summary`, `provenance_summary`, `freshness_markers`, `conflict_markers`, and `trace_stages` when full traces are requested
 - intent-routed `ask` surfaces must preserve the chosen or overridden intent class, classifier confidence, and any low-confidence fallback or safer-route downgrade in machine-readable explanation metadata; these route-plan changes are explanation facts, not human-only formatting details
 
 ## Pattern-completion contract

@@ -51,6 +51,7 @@ pub enum AuditEventKind {
     MaintenanceReconsolidationDiscarded,
     MaintenanceReconsolidationDeferred,
     MaintenanceReconsolidationBlocked,
+    MaintenanceForgettingEvaluated,
     IncidentRecorded,
     ArchiveRecorded,
 }
@@ -80,6 +81,7 @@ impl AuditEventKind {
             Self::MaintenanceReconsolidationDiscarded => "maintenance_reconsolidation_discarded",
             Self::MaintenanceReconsolidationDeferred => "maintenance_reconsolidation_deferred",
             Self::MaintenanceReconsolidationBlocked => "maintenance_reconsolidation_blocked",
+            Self::MaintenanceForgettingEvaluated => "maintenance_forgetting_evaluated",
             Self::IncidentRecorded => "incident_recorded",
             Self::ArchiveRecorded => "archive_recorded",
         }
@@ -107,6 +109,7 @@ impl AuditEventKind {
             | Self::MaintenanceReconsolidationDiscarded
             | Self::MaintenanceReconsolidationDeferred
             | Self::MaintenanceReconsolidationBlocked
+            | Self::MaintenanceForgettingEvaluated
             | Self::IncidentRecorded => AuditEventCategory::Maintenance,
             Self::ArchiveRecorded => AuditEventCategory::Archive,
         }
@@ -666,6 +669,7 @@ fn sharing_scope(policy: &PolicySummary) -> &'static str {
     match scope {
         "namespace_only" => "namespace_only",
         "approved_shared" => "approved_shared",
+        "approved_public" => "approved_public",
         "same_namespace" => "same_namespace",
         _ => "custom_sharing_scope",
     }
@@ -701,6 +705,7 @@ fn reason_code_label(reason_code: &str) -> &'static str {
         "temporal_payload_deferred" => "temporal_payload_deferred",
         "temporal_landmark_selected" => "temporal_landmark_selected",
         "temporal_landmark_not_selected" => "temporal_landmark_not_selected",
+        "era_filter_applied" => "era_filter_applied",
         "contradiction_selected" => "contradiction_selected",
         "contradiction_visible" => "contradiction_visible",
         "contradiction_retained_under_legal_hold" => "contradiction_retained_under_legal_hold",
@@ -741,10 +746,18 @@ fn uncertainty_marker(markers: &crate::engine::result::UncertaintyMarkers) -> Un
         };
     }
 
+    if markers.reconsolidation_uncertainty.unwrap_or(0) >= 500 {
+        return UncertaintyMarker {
+            code: "reconsolidation_churn",
+            detail: "bounded evidence shows elevated reconsolidation churn and reduced reliability",
+        };
+    }
+
     if markers.missing_evidence_uncertainty.unwrap_or(0) >= 500 {
         return UncertaintyMarker {
             code: "missing_evidence",
-            detail: "bounded evidence is missing corroborating support needed to reduce uncertainty",
+            detail:
+                "bounded evidence is missing corroborating support needed to reduce uncertainty",
         };
     }
 
@@ -1091,6 +1104,14 @@ mod tests {
         );
         assert_eq!(
             AuditEventKind::MaintenanceReconsolidationBlocked.category(),
+            AuditEventCategory::Maintenance
+        );
+        assert_eq!(
+            AuditEventKind::MaintenanceForgettingEvaluated.as_str(),
+            "maintenance_forgetting_evaluated"
+        );
+        assert_eq!(
+            AuditEventKind::MaintenanceForgettingEvaluated.category(),
             AuditEventCategory::Maintenance
         );
         assert_eq!(AuditEventKind::ApprovedSharing.as_str(), "approved_sharing");
@@ -1632,6 +1653,26 @@ mod tests {
                     .to_string(),
             }]
         );
+
+        let era_scoped = RetrievalResultSet {
+            explain: RetrievalExplain {
+                result_reasons: vec![ResultReason {
+                    memory_id: None,
+                    reason_code: "era_filter_applied".to_string(),
+                    detail: "bounded retrieval stayed inside era `era-launch-0042` opened by landmark(s) launch day pivot (#7)".to_string(),
+                }],
+                ..selected.explain.clone()
+            },
+            ..selected.clone()
+        };
+        assert_eq!(
+            ObservabilityModule.explain_result_reasons(&era_scoped),
+            vec![ExplainResultReason {
+                memory_id: None,
+                reason_code: "era_filter_applied",
+                detail: "bounded retrieval stayed inside era `era-launch-0042` opened by landmark(s) launch day pivot (#7)".to_string(),
+            }]
+        );
     }
 
     #[test]
@@ -1734,6 +1775,89 @@ mod tests {
                 "contradiction_retained_under_legal_hold",
             ]
         );
+    }
+
+    #[test]
+    fn explain_policy_summary_preserves_approved_public_sharing_scope() {
+        let result_set = RetrievalResultSet {
+            outcome_class: OutcomeClass::Accepted,
+            evidence_pack: Vec::new(),
+            action_pack: None,
+            deferred_payloads: Vec::new(),
+            explain: RetrievalExplain {
+                recall_plan: RecallPlanKind::ExactIdTier1,
+                route_reason: "public widening approved".to_string(),
+                tiers_consulted: vec!["tier1_exact".to_string()],
+                trace_stages: vec![RecallTraceStage::Tier1ExactHandle],
+                tier1_answered_directly: true,
+                candidate_budget: 1,
+                time_consumed_ms: Some(1),
+                ranking_profile: "balanced".to_string(),
+                contradictions_found: 0,
+                query_by_example: None,
+                result_reasons: Vec::new(),
+            },
+            policy_summary: PolicySummary {
+                namespace_applied: NamespaceId::new("team.public")
+                    .unwrap_or_else(|_| std::process::abort()),
+                outcome_class: OutcomeClass::Accepted,
+                redactions_applied: true,
+                restrictions_active: Vec::new(),
+                filters: vec![crate::api::PolicyFilterSummary::new(
+                    "team.public",
+                    "namespace",
+                    OutcomeClass::Accepted,
+                    "not_blocked",
+                    crate::api::FieldPresence::Present("approved_public".to_string()),
+                    crate::api::FieldPresence::Absent,
+                    vec!["workspace_id".to_string(), "session_id".to_string()],
+                )],
+            },
+            provenance_summary: ProvenanceSummary {
+                source_kind: "memory".to_string(),
+                source_reference: "memory_id".to_string(),
+                source_agent: "core_engine".to_string(),
+                original_namespace: NamespaceId::new("team.public")
+                    .unwrap_or_else(|_| std::process::abort()),
+                derived_from: None,
+                lineage_ancestors: Vec::new(),
+                relation_to_seed: None,
+                graph_seed: None,
+            },
+            omitted_summary: OmissionSummary {
+                policy_redacted: 1,
+                threshold_dropped: 0,
+                dedup_dropped: 0,
+                budget_capped: 0,
+                duplicate_collapsed: 0,
+                low_confidence_suppressed: 0,
+                stale_bypassed: 0,
+                confidence_filtered: 0,
+            },
+            freshness_markers: FreshnessMarkers {
+                oldest_item_days: 0,
+                newest_item_days: 0,
+                volatile_items_included: false,
+                stale_warning: false,
+                as_of_tick: Some(9),
+            },
+            packaging_metadata: PackagingMetadata {
+                result_budget: 1,
+                token_budget: None,
+                graph_assistance: "none".to_string(),
+                degraded_summary: None,
+                packaging_mode: "evidence_only".to_string(),
+                rerank_metadata: None,
+            },
+            output_mode: crate::engine::result::DualOutputMode::Balanced,
+            truncated: false,
+            total_candidates: 1,
+        };
+
+        let (policy, _) = ObservabilityModule.explain_policy_and_provenance(&result_set);
+
+        assert_eq!(policy.sharing_scope, "approved_public");
+        assert_eq!(policy.redaction_fields, vec!["workspace_id", "session_id"]);
     }
 
     #[test]

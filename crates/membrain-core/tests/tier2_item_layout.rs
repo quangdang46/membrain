@@ -1,9 +1,10 @@
-use membrain_core::api::NamespaceId;
+use membrain_core::api::{AgentId, NamespaceId, WorkspaceId};
 use membrain_core::migrate::DurableSchemaObject;
 use membrain_core::store::tier2::Tier2Store;
 use membrain_core::store::Tier2StoreApi;
 use membrain_core::types::{
     LandmarkMetadata, MemoryId, NormalizedMemoryEnvelope, RawEncodeInput, RawIntakeKind, SessionId,
+    SharingMetadata,
 };
 
 fn normalized_event(raw_text: &str, compact_text: &str) -> NormalizedMemoryEnvelope {
@@ -41,6 +42,35 @@ fn normalized_observation(
     )
 }
 
+fn shared_envelope(raw_text: &str, compact_text: &str) -> NormalizedMemoryEnvelope {
+    let mut envelope = normalized_event(raw_text, compact_text);
+    envelope.sharing = SharingMetadata::new(membrain_core::policy::SharingVisibility::Shared)
+        .with_workspace_id(WorkspaceId::new("ws.alpha"))
+        .with_agent_id(AgentId::new("agent.writer"));
+    envelope
+}
+
+fn sample_confidence_inputs() -> membrain_core::engine::confidence::ConfidenceInputs {
+    membrain_core::engine::confidence::ConfidenceInputs {
+        corroboration_count: 3,
+        reconsolidation_count: 2,
+        ticks_since_last_access: 42,
+        age_ticks: 84,
+        resolution_state: membrain_core::engine::contradiction::ResolutionState::None,
+        conflict_score: 0,
+        causal_parent_count: 2,
+        authoritativeness: 720,
+        recall_count: 4,
+    }
+}
+
+fn sample_confidence_output() -> membrain_core::engine::confidence::ConfidenceOutput {
+    membrain_core::engine::confidence::ConfidenceEngine.compute(
+        &sample_confidence_inputs(),
+        &membrain_core::engine::confidence::ConfidencePolicy::default(),
+    )
+}
+
 fn normalized_envelope(
     kind: RawIntakeKind,
     raw_text: &str,
@@ -60,6 +90,7 @@ fn normalized_envelope(
         landmark,
         observation_source: observation_source.map(str::to_string),
         observation_chunk_id: observation_chunk_id.map(str::to_string),
+        sharing: SharingMetadata::default(),
     }
 }
 
@@ -78,11 +109,16 @@ fn tier2_layout_separates_metadata_from_raw_payload_body_and_preserves_namespace
         SessionId(7),
         991,
         &envelope,
+        None,
+        None,
     );
 
     assert_eq!(layout.metadata.namespace, namespace);
     assert_eq!(layout.metadata.memory_id, MemoryId(41));
     assert_eq!(layout.metadata.session_id, SessionId(7));
+    assert_eq!(layout.metadata.visibility.as_str(), "private");
+    assert_eq!(layout.metadata.workspace_id, None);
+    assert_eq!(layout.metadata.agent_id, None);
     assert_eq!(layout.metadata.compact_text, "compact prefilter text");
     assert_eq!(
         layout.metadata.payload_size_bytes,
@@ -118,9 +154,19 @@ fn tier2_layout_separates_metadata_from_raw_payload_body_and_preserves_namespace
 fn tier2_prefilter_view_exposes_namespace_safe_metadata_fields() {
     let store = Tier2Store;
     let namespace = NamespaceId::new("team.alpha").unwrap();
-    let envelope = normalized_event("raw source evidence", "compact summary");
+    let envelope = shared_envelope("raw source evidence", "compact summary");
+    let confidence_inputs = sample_confidence_inputs();
+    let confidence_output = sample_confidence_output();
 
-    let layout = store.layout_item(namespace, MemoryId(99), SessionId(13), 12345, &envelope);
+    let layout = store.layout_item(
+        namespace,
+        MemoryId(99),
+        SessionId(13),
+        12345,
+        &envelope,
+        Some(confidence_inputs.clone()),
+        Some(confidence_output.clone()),
+    );
     let prefilter = layout.prefilter_view();
     let trace = layout.prefilter_trace();
 
@@ -130,6 +176,11 @@ fn tier2_prefilter_view_exposes_namespace_safe_metadata_fields() {
     assert_eq!(prefilter.compact_text, "compact summary");
     assert_eq!(prefilter.fingerprint, 12345);
     assert_eq!(prefilter.payload_size_bytes, "raw source evidence".len());
+    assert_eq!(prefilter.visibility().as_str(), "shared");
+    assert_eq!(prefilter.workspace_id(), Some("ws.alpha"));
+    assert_eq!(prefilter.agent_id(), Some("agent.writer"));
+    assert_eq!(prefilter.confidence_inputs, Some(&confidence_inputs));
+    assert_eq!(prefilter.confidence_output, Some(&confidence_output));
     assert_eq!(prefilter.payload_locator, layout.metadata.payload_locator);
     assert!(layout.prefilter_stays_metadata_only());
     assert_eq!(trace.metadata_candidate_count, 1);
@@ -141,9 +192,19 @@ fn tier2_prefilter_view_exposes_namespace_safe_metadata_fields() {
 fn tier2_metadata_index_key_matches_namespace_safe_identity_fields() {
     let store = Tier2Store;
     let namespace = NamespaceId::new("team.alpha").unwrap();
-    let envelope = normalized_event("raw source evidence", "compact summary");
+    let envelope = shared_envelope("raw source evidence", "compact summary");
+    let confidence_inputs = sample_confidence_inputs();
+    let confidence_output = sample_confidence_output();
 
-    let layout = store.layout_item(namespace, MemoryId(99), SessionId(13), 12345, &envelope);
+    let layout = store.layout_item(
+        namespace,
+        MemoryId(99),
+        SessionId(13),
+        12345,
+        &envelope,
+        Some(confidence_inputs.clone()),
+        Some(confidence_output.clone()),
+    );
     let key = layout.metadata_index_key();
 
     assert_eq!(key.namespace.as_str(), layout.metadata.namespace.as_str());
@@ -153,6 +214,11 @@ fn tier2_metadata_index_key_matches_namespace_safe_identity_fields() {
     assert_eq!(key.route_family, layout.metadata.route_family);
     assert_eq!(key.fingerprint, layout.metadata.fingerprint);
     assert_eq!(key.compact_text, layout.metadata.compact_text);
+    assert_eq!(key.visibility().as_str(), "shared");
+    assert_eq!(key.workspace_id(), Some("ws.alpha"));
+    assert_eq!(key.agent_id(), Some("agent.writer"));
+    assert_eq!(key.confidence_inputs, Some(&confidence_inputs));
+    assert_eq!(key.confidence_output, Some(&confidence_output));
     assert_eq!(
         key.normalization_generation,
         layout.metadata.normalization_generation
@@ -176,6 +242,8 @@ fn tier2_payload_locator_changes_with_namespace_for_same_memory_id() {
         SessionId(13),
         12345,
         &envelope,
+        None,
+        None,
     );
     let beta = store.layout_item(
         NamespaceId::new("team.beta").unwrap(),
@@ -183,6 +251,8 @@ fn tier2_payload_locator_changes_with_namespace_for_same_memory_id() {
         SessionId(13),
         12345,
         &envelope,
+        None,
+        None,
     );
 
     assert_ne!(
@@ -205,7 +275,7 @@ fn tier2_payload_hydration_path_escapes_namespace_separators() {
     let namespace = NamespaceId::new("team/alpha").unwrap();
     let envelope = normalized_event("raw source evidence", "compact summary");
 
-    let layout = store.layout_item(namespace, MemoryId(41), SessionId(7), 991, &envelope);
+    let layout = store.layout_item(namespace, MemoryId(41), SessionId(7), 991, &envelope, None, None);
 
     assert_eq!(
         layout.payload.payload_locator.namespace.as_str(),
@@ -235,6 +305,8 @@ fn tier2_payload_body_stays_outside_prefilter_and_index_views() {
         SessionId(2),
         88,
         &envelope,
+        None,
+        None,
     );
     let prefilter = layout.prefilter_view();
     let key = layout.metadata_index_key();
@@ -274,6 +346,8 @@ fn tier2_metadata_preserves_landmark_and_era_fields_for_durable_recall() {
         SessionId(4),
         123,
         &envelope,
+        None,
+        None,
     );
 
     let prefilter = layout.prefilter_view();
@@ -291,7 +365,10 @@ fn tier2_metadata_preserves_landmark_and_era_fields_for_durable_recall() {
         landmark_record.landmark_label.as_deref(),
         Some("project launch deadline was moved")
     );
-    assert_eq!(landmark_record.landmark_label(), Some("project launch deadline was moved"));
+    assert_eq!(
+        landmark_record.landmark_label(),
+        Some("project launch deadline was moved")
+    );
     assert_eq!(
         landmark_record.era_id.as_deref(),
         Some("era-projectlaunc-0088")
@@ -341,6 +418,8 @@ fn tier2_non_landmarks_remain_explicitly_non_landmarks_in_metadata_views() {
         SessionId(5),
         124,
         &envelope,
+        None,
+        None,
     );
     let prefilter = layout.prefilter_view();
     let index_key = layout.metadata_index_key();
@@ -369,6 +448,41 @@ fn tier2_non_landmarks_remain_explicitly_non_landmarks_in_metadata_views() {
 }
 
 #[test]
+fn tier2_metadata_preserves_active_era_for_non_landmarks() {
+    let store = Tier2Store;
+    let envelope = normalized_event_with_landmark(
+        "routine follow-up note",
+        "routine follow-up note",
+        LandmarkMetadata {
+            era_id: Some("era-launch-0088".to_string()),
+            ..LandmarkMetadata::non_landmark()
+        },
+    );
+
+    let layout = store.layout_item(
+        NamespaceId::new("team.alpha").unwrap(),
+        MemoryId(79),
+        SessionId(6),
+        125,
+        &envelope,
+        None,
+        None,
+    );
+    let prefilter = layout.prefilter_view();
+    let index_key = layout.metadata_index_key();
+    let landmark_record = layout.landmark_record();
+
+    assert!(!layout.metadata.landmark.is_landmark);
+    assert_eq!(layout.metadata.landmark.era_id.as_deref(), Some("era-launch-0088"));
+    assert_eq!(landmark_record.era_id(), Some("era-launch-0088"));
+    assert_eq!(landmark_record.era_started_at_tick(), None);
+    assert_eq!(prefilter.era_id(), Some("era-launch-0088"));
+    assert_eq!(index_key.era_id(), Some("era-launch-0088"));
+    assert_eq!(landmark_record.landmark_detection_score(), 0);
+    assert_eq!(landmark_record.landmark_detection_reason(), None);
+}
+
+#[test]
 fn tier2_metadata_preserves_passive_observation_provenance_without_payload_fetches() {
     let store = Tier2Store;
     let envelope = normalized_observation(
@@ -384,6 +498,8 @@ fn tier2_metadata_preserves_passive_observation_provenance_without_payload_fetch
         SessionId(6),
         125,
         &envelope,
+        None,
+        None,
     );
     let prefilter = layout.prefilter_view();
 
@@ -418,6 +534,8 @@ fn tier2_observation_layout_keeps_provenance_in_metadata_and_raw_body_detached()
         SessionId(9),
         127,
         &envelope,
+        None,
+        None,
     );
     let payload = layout.payload_record();
 
@@ -460,6 +578,8 @@ fn tier2_landmark_prefilter_trace_stays_metadata_first_for_temporal_recall_consu
         SessionId(8),
         126,
         &envelope,
+        None,
+        None,
     );
     let prefilter = layout.prefilter_view();
     let trace = layout.prefilter_trace();

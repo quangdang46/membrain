@@ -1,3 +1,6 @@
+use crate::api::{AgentId, NamespaceId, WorkspaceId};
+use crate::policy::SharingVisibility;
+
 /// Version of the shared core API consumed by wrapper crates.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct CoreApiVersion {
@@ -9,7 +12,7 @@ pub struct CoreApiVersion {
 
 impl CoreApiVersion {
     pub(crate) const fn current() -> Self {
-        Self { major: 0, minor: 1 }
+        Self { major: 0, minor: 2 }
     }
 }
 
@@ -174,6 +177,8 @@ pub struct RawEncodeInput {
     pub raw_text: String,
     /// Optional bounded temporal-landmark signals supplied by the caller.
     pub landmark_signals: Option<LandmarkSignals>,
+    /// Optional currently active era carried by the caller for non-landmark memories.
+    pub active_era_id: Option<String>,
 }
 
 impl RawEncodeInput {
@@ -183,12 +188,52 @@ impl RawEncodeInput {
             kind,
             raw_text: raw_text.into(),
             landmark_signals: None,
+            active_era_id: None,
         }
     }
 
     /// Attaches bounded landmark signals for additive temporal enrichment.
     pub fn with_landmark_signals(mut self, landmark_signals: LandmarkSignals) -> Self {
         self.landmark_signals = Some(landmark_signals);
+        self
+    }
+
+    /// Attaches the caller's currently active era for additive temporal anchoring.
+    pub fn with_active_era_id(mut self, active_era_id: impl Into<String>) -> Self {
+        self.active_era_id = Some(active_era_id.into());
+        self
+    }
+}
+
+/// Cross-agent sharing metadata preserved with a durable memory record.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct SharingMetadata {
+    /// Canonical visibility governing cross-agent reuse.
+    pub visibility: SharingVisibility,
+    /// Optional workspace scope preserved for audit and redaction.
+    pub workspace_id: Option<WorkspaceId>,
+    /// Optional producing agent identity preserved for provenance and policy scope.
+    pub agent_id: Option<AgentId>,
+}
+
+impl SharingMetadata {
+    /// Builds a sharing envelope with one explicit visibility level.
+    pub fn new(visibility: SharingVisibility) -> Self {
+        Self {
+            visibility,
+            ..Self::default()
+        }
+    }
+
+    /// Attaches one workspace scope to the sharing envelope.
+    pub fn with_workspace_id(mut self, workspace_id: WorkspaceId) -> Self {
+        self.workspace_id = Some(workspace_id);
+        self
+    }
+
+    /// Attaches one producing agent identity to the sharing envelope.
+    pub fn with_agent_id(mut self, agent_id: AgentId) -> Self {
+        self.agent_id = Some(agent_id);
         self
     }
 }
@@ -214,6 +259,8 @@ pub struct NormalizedMemoryEnvelope {
     pub observation_source: Option<String>,
     /// Optional passive-observation batch grouping preserved for inspect and repair.
     pub observation_chunk_id: Option<String>,
+    /// Cross-agent sharing envelope preserved for later namespace and visibility mediation.
+    pub sharing: SharingMetadata,
 }
 
 /// Stable identifier for persisted memories used by exact and recent Tier1 lookups.
@@ -311,12 +358,11 @@ impl SnapshotMetadata {
     }
 }
 
-use crate::api::NamespaceId;
-
 #[cfg(test)]
 mod tests {
-    use super::{SnapshotAnchor, SnapshotId, SnapshotMetadata};
-    use crate::api::NamespaceId;
+    use super::{SharingMetadata, SnapshotAnchor, SnapshotId, SnapshotMetadata};
+    use crate::api::{AgentId, NamespaceId, WorkspaceId};
+    use crate::policy::SharingVisibility;
 
     #[test]
     fn named_snapshot_anchor_preserves_tick_and_label() {
@@ -348,6 +394,17 @@ mod tests {
         assert_eq!(anchor.kind(), "tick");
         assert_eq!(anchor.as_of_tick(), 99);
         assert_eq!(anchor.snapshot_name(), None);
+    }
+
+    #[test]
+    fn sharing_metadata_preserves_visibility_workspace_and_agent_scope() {
+        let sharing = SharingMetadata::new(SharingVisibility::Shared)
+            .with_workspace_id(WorkspaceId::new("ws.alpha"))
+            .with_agent_id(AgentId::new("agent.writer"));
+
+        assert_eq!(sharing.visibility.as_str(), "shared");
+        assert_eq!(sharing.workspace_id.unwrap().as_str(), "ws.alpha");
+        assert_eq!(sharing.agent_id.unwrap().as_str(), "agent.writer");
     }
 }
 

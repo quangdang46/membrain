@@ -56,6 +56,58 @@ impl JsonRpcResponse {
     }
 }
 
+const COMMON_ENVELOPE_FIELDS: &[&str] = &[
+    "request_id",
+    "workspace_id",
+    "agent_id",
+    "session_id",
+    "task_id",
+    "time_budget_ms",
+    "policy_context",
+];
+
+const fn default_true() -> bool {
+    true
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct RuntimePolicyContextHint {
+    #[serde(default)]
+    pub include_public: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub sharing_visibility: Option<String>,
+    #[serde(default = "default_true")]
+    pub caller_identity_bound: bool,
+    #[serde(default = "default_true")]
+    pub workspace_acl_allowed: bool,
+    #[serde(default = "default_true")]
+    pub agent_acl_allowed: bool,
+    #[serde(default = "default_true")]
+    pub session_visibility_allowed: bool,
+    #[serde(default)]
+    pub legal_hold: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
+#[serde(deny_unknown_fields)]
+pub struct RuntimeCommonFields {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub request_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub workspace_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub agent_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub session_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub task_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub time_budget_ms: Option<u32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub policy_context: Option<RuntimePolicyContextHint>,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub enum RuntimePosture {
@@ -102,6 +154,28 @@ pub struct RuntimeDoctorIndex {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct RuntimeRepairReport {
+    pub target: &'static str,
+    pub status: &'static str,
+    pub verification_passed: bool,
+    pub rebuild_entrypoint: Option<&'static str>,
+    pub rebuilt_outputs: Vec<&'static str>,
+    pub durable_sources: Vec<&'static str>,
+    pub verification_artifact_name: &'static str,
+    pub parity_check: &'static str,
+    pub authoritative_rows: u64,
+    pub derived_rows: u64,
+    pub authoritative_generation: &'static str,
+    pub derived_generation: &'static str,
+    pub affected_item_count: u32,
+    pub error_count: u32,
+    pub rebuild_duration_ms: u64,
+    pub rollback_state: Option<&'static str>,
+    pub queue_depth_before: u32,
+    pub queue_depth_after: u32,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct RuntimeDoctorReport {
     pub status: &'static str,
     pub action: &'static str,
@@ -109,7 +183,9 @@ pub struct RuntimeDoctorReport {
     pub degraded_reasons: Vec<String>,
     pub metrics: RuntimeMetrics,
     pub indexes: Vec<RuntimeDoctorIndex>,
+    pub repair_reports: Vec<RuntimeRepairReport>,
     pub warnings: Vec<&'static str>,
+    pub health: Value,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -170,6 +246,19 @@ fn parse_optional_positive_usize(
 
 fn parse_optional_limit(params: &Value) -> Result<Option<usize>, JsonRpcError> {
     parse_optional_positive_usize(params, "limit")
+}
+
+fn parse_session_handle(params: &Value) -> Result<Option<String>, JsonRpcError> {
+    match params.get("session_id") {
+        None | Some(Value::Null) => Ok(None),
+        Some(Value::String(value)) => Ok(Some(value.clone())),
+        Some(Value::Number(value)) => Ok(Some(value.to_string())),
+        Some(_) => Err(JsonRpcError {
+            code: -32602,
+            message: "session_id must be a string or positive integer".to_string(),
+            data: None,
+        }),
+    }
 }
 
 fn parse_required_u64(params: &Value, field: &'static str) -> Result<u64, JsonRpcError> {
@@ -411,6 +500,38 @@ fn reject_unknown_fields(params: &Value, allowed: &[&str]) -> Result<(), JsonRpc
     Ok(())
 }
 
+fn parse_policy_context(params: &Value) -> Result<Option<RuntimePolicyContextHint>, JsonRpcError> {
+    match params.get("policy_context") {
+        None | Some(Value::Null) => Ok(None),
+        Some(value @ Value::Object(_)) => {
+            serde_json::from_value(value.clone())
+                .map(Some)
+                .map_err(|err| JsonRpcError {
+                    code: -32602,
+                    message: err.to_string(),
+                    data: None,
+                })
+        }
+        Some(_) => Err(JsonRpcError {
+            code: -32602,
+            message: "policy_context must be a JSON object".to_string(),
+            data: None,
+        }),
+    }
+}
+
+fn parse_common_fields(params: &Value) -> Result<RuntimeCommonFields, JsonRpcError> {
+    Ok(RuntimeCommonFields {
+        request_id: parse_optional_string(params, "request_id")?,
+        workspace_id: parse_optional_string(params, "workspace_id")?,
+        agent_id: parse_optional_string(params, "agent_id")?,
+        session_id: parse_session_handle(params)?,
+        task_id: parse_optional_string(params, "task_id")?,
+        time_budget_ms: parse_optional_u32(params, "time_budget_ms")?,
+        policy_context: parse_policy_context(params)?,
+    })
+}
+
 impl RuntimeMethodRequest {
     pub fn parse_method(&self) -> Result<RuntimeRequest, JsonRpcError> {
         if self.jsonrpc != "2.0" {
@@ -433,11 +554,16 @@ impl RuntimeMethodRequest {
             "ping" => Ok(RuntimeRequest::Ping),
             "status" => Ok(RuntimeRequest::Status),
             "doctor" => {
-                reject_unknown_fields(&self.params, &[])?;
+                reject_unknown_fields(&self.params, COMMON_ENVELOPE_FIELDS)?;
+                let _common = parse_common_fields(&self.params)?;
+                let _ = _common;
                 Ok(RuntimeRequest::Doctor)
             }
             "encode" => {
-                reject_unknown_fields(&self.params, &["content", "namespace", "memory_type"])?;
+                let mut allowed = vec!["content", "namespace", "memory_type", "visibility"];
+                allowed.extend_from_slice(COMMON_ENVELOPE_FIELDS);
+                reject_unknown_fields(&self.params, &allowed)?;
+                let common = parse_common_fields(&self.params)?;
                 let content = parse_required_string(&self.params, "content")?;
                 let namespace = parse_required_string(&self.params, "namespace")?;
                 let memory_type = self
@@ -445,45 +571,79 @@ impl RuntimeMethodRequest {
                     .get("memory_type")
                     .and_then(Value::as_str)
                     .map(ToOwned::to_owned);
+                let visibility = parse_optional_string(&self.params, "visibility")?;
                 Ok(RuntimeRequest::Encode {
                     content,
                     namespace,
                     memory_type,
+                    visibility,
+                    common,
+                })
+            }
+            "observe" => {
+                let mut allowed = vec![
+                    "content",
+                    "namespace",
+                    "context",
+                    "chunk_size",
+                    "source_label",
+                    "topic_threshold",
+                    "min_chunk_size",
+                    "dry_run",
+                ];
+                allowed.extend_from_slice(COMMON_ENVELOPE_FIELDS);
+                reject_unknown_fields(&self.params, &allowed)?;
+                let common = parse_common_fields(&self.params)?;
+                let content = parse_required_string(&self.params, "content")?;
+                let namespace = parse_required_string(&self.params, "namespace")?;
+                let context = parse_optional_string(&self.params, "context")?;
+                let chunk_size = parse_optional_positive_usize(&self.params, "chunk_size")?;
+                let source_label = parse_optional_string(&self.params, "source_label")?;
+                let topic_threshold = parse_optional_f64(&self.params, "topic_threshold")?;
+                let min_chunk_size =
+                    parse_optional_positive_usize(&self.params, "min_chunk_size")?;
+                let dry_run = parse_optional_bool(&self.params, "dry_run")?;
+                Ok(RuntimeRequest::Observe {
+                    content,
+                    namespace,
+                    context,
+                    chunk_size,
+                    source_label,
+                    topic_threshold: topic_threshold.map(|value| value as f32),
+                    min_chunk_size,
+                    dry_run,
+                    common,
                 })
             }
             "recall" => {
-                reject_unknown_fields(
-                    &self.params,
-                    &[
-                        "query",
-                        "query_text",
-                        "namespace",
-                        "mode",
-                        "limit",
-                        "result_budget",
-                        "token_budget",
-                        "time_budget_ms",
-                        "context_text",
-                        "effort",
-                        "include_public",
-                        "like_id",
-                        "unlike_id",
-                        "graph_mode",
-                        "cold_tier",
-                        "workspace_id",
-                        "agent_id",
-                        "session_id",
-                        "task_id",
-                        "memory_kinds",
-                        "era_id",
-                        "as_of_tick",
-                        "at_snapshot",
-                        "min_strength",
-                        "min_confidence",
-                        "show_decaying",
-                        "mood_congruent",
-                    ],
-                )?;
+                let recall_allowed = [
+                    "query",
+                    "query_text",
+                    "namespace",
+                    "mode",
+                    "limit",
+                    "result_budget",
+                    "token_budget",
+                    "context_text",
+                    "effort",
+                    "include_public",
+                    "like_id",
+                    "unlike_id",
+                    "graph_mode",
+                    "cold_tier",
+                    "memory_kinds",
+                    "era_id",
+                    "as_of_tick",
+                    "at_snapshot",
+                    "min_strength",
+                    "min_confidence",
+                    "show_decaying",
+                    "mood_congruent",
+                ];
+                let mut allowed = recall_allowed.to_vec();
+                allowed.extend_from_slice(COMMON_ENVELOPE_FIELDS);
+                reject_unknown_fields(&self.params, &allowed)?;
+                let _common = parse_common_fields(&self.params)?;
                 let query = parse_optional_string(&self.params, "query")?;
                 let query_text = parse_optional_string(&self.params, "query_text")?;
                 let namespace = self
@@ -508,7 +668,7 @@ impl RuntimeMethodRequest {
                 let cold_tier = parse_optional_bool(&self.params, "cold_tier")?;
                 let workspace_id = parse_optional_string(&self.params, "workspace_id")?;
                 let agent_id = parse_optional_string(&self.params, "agent_id")?;
-                let session_id = parse_optional_string(&self.params, "session_id")?;
+                let session_id = parse_session_handle(&self.params)?;
                 let task_id = parse_optional_string(&self.params, "task_id")?;
                 let memory_kinds = match self.params.get("memory_kinds") {
                     None | Some(Value::Null) => None,
@@ -566,10 +726,55 @@ impl RuntimeMethodRequest {
                     min_confidence,
                     show_decaying,
                     mood_congruent,
+                    common: _common,
+                })
+            }
+            "context_budget" => {
+                let allowed = ["token_budget", "namespace", "current_context", "working_memory_ids", "format"];
+                let mut allowed_fields = allowed.to_vec();
+                allowed_fields.extend_from_slice(COMMON_ENVELOPE_FIELDS);
+                reject_unknown_fields(&self.params, &allowed_fields)?;
+                let common = parse_common_fields(&self.params)?;
+                let token_budget = parse_required_u64(&self.params, "token_budget")? as usize;
+                let namespace = parse_required_string(&self.params, "namespace")?;
+                let current_context = parse_optional_string(&self.params, "current_context")?;
+                let format = parse_optional_string(&self.params, "format")?;
+                let working_memory_ids = match self.params.get("working_memory_ids") {
+                    None | Some(Value::Null) => None,
+                    Some(Value::Array(values)) => Some(
+                        values
+                            .iter()
+                            .map(|value| {
+                                value.as_u64().ok_or_else(|| JsonRpcError {
+                                    code: -32602,
+                                    message: "working_memory_ids must be an array of positive integers".to_string(),
+                                    data: None,
+                                })
+                            })
+                            .collect::<Result<Vec<_>, _>>()?,
+                    ),
+                    Some(_) => {
+                        return Err(JsonRpcError {
+                            code: -32602,
+                            message: "working_memory_ids must be an array of positive integers".to_string(),
+                            data: None,
+                        })
+                    }
+                };
+                Ok(RuntimeRequest::ContextBudget {
+                    token_budget,
+                    namespace,
+                    current_context,
+                    working_memory_ids,
+                    format,
+                    common,
                 })
             }
             "inspect" => {
-                reject_unknown_fields(&self.params, &["id", "namespace"])?;
+                let mut allowed = vec!["id", "namespace"];
+                allowed.extend_from_slice(COMMON_ENVELOPE_FIELDS);
+                reject_unknown_fields(&self.params, &allowed)?;
+                let _common = parse_common_fields(&self.params)?;
                 let id = parse_required_u64(&self.params, "id")?;
                 let namespace = self
                     .params
@@ -583,10 +788,14 @@ impl RuntimeMethodRequest {
                 Ok(RuntimeRequest::Inspect {
                     id,
                     namespace: namespace.to_string(),
+                    common: _common,
                 })
             }
             "explain" => {
-                reject_unknown_fields(&self.params, &["query", "namespace", "limit"])?;
+                let mut allowed = vec!["query", "namespace", "limit"];
+                allowed.extend_from_slice(COMMON_ENVELOPE_FIELDS);
+                reject_unknown_fields(&self.params, &allowed)?;
+                let _common = parse_common_fields(&self.params)?;
                 let query = self
                     .params
                     .get("query")
@@ -610,6 +819,7 @@ impl RuntimeMethodRequest {
                     query: query.to_string(),
                     namespace: namespace.to_string(),
                     limit,
+                    common: _common,
                 })
             }
             "preflight.run" => {
@@ -637,10 +847,18 @@ impl RuntimeMethodRequest {
             "preflight.allow" => {
                 reject_unknown_fields(
                     &self.params,
-                    &["namespace", "authorization_token", "bypass_flags"],
+                    &[
+                        "namespace",
+                        "original_query",
+                        "proposed_action",
+                        "authorization_token",
+                        "bypass_flags",
+                    ],
                 )?;
                 Ok(RuntimeRequest::PreflightAllow {
                     namespace: parse_required_string(&self.params, "namespace")?,
+                    original_query: parse_required_string(&self.params, "original_query")?,
+                    proposed_action: parse_required_string(&self.params, "proposed_action")?,
                     authorization_token: parse_required_string(
                         &self.params,
                         "authorization_token",
@@ -649,17 +867,25 @@ impl RuntimeMethodRequest {
                 })
             }
             "resources.list" => {
-                reject_unknown_fields(&self.params, &[])?;
+                reject_unknown_fields(&self.params, COMMON_ENVELOPE_FIELDS)?;
+                let _common = parse_common_fields(&self.params)?;
+                let _ = _common;
                 Ok(RuntimeRequest::ResourcesList)
             }
             "resource.read" => {
-                reject_unknown_fields(&self.params, &["uri"])?;
+                let mut allowed = vec!["uri"];
+                allowed.extend_from_slice(COMMON_ENVELOPE_FIELDS);
+                reject_unknown_fields(&self.params, &allowed)?;
+                let _common = parse_common_fields(&self.params)?;
+                let _ = _common;
                 Ok(RuntimeRequest::ResourceRead {
                     uri: parse_required_string(&self.params, "uri")?,
                 })
             }
             "streams.list" => {
-                reject_unknown_fields(&self.params, &[])?;
+                reject_unknown_fields(&self.params, COMMON_ENVELOPE_FIELDS)?;
+                let _common = parse_common_fields(&self.params)?;
+                let _ = _common;
                 Ok(RuntimeRequest::StreamsList)
             }
             "sleep" => {
@@ -767,22 +993,36 @@ impl RuntimeMethodRequest {
                 Ok(RuntimeRequest::Consolidate { namespace, scope })
             }
             "share" => {
-                reject_unknown_fields(&self.params, &["id", "namespace_id"])?;
+                let mut allowed = vec!["id", "namespace_id"];
+                allowed.extend_from_slice(COMMON_ENVELOPE_FIELDS);
+                reject_unknown_fields(&self.params, &allowed)?;
+                let _common = parse_common_fields(&self.params)?;
                 let id = parse_required_u64(&self.params, "id")?;
                 let namespace_id = parse_required_string(&self.params, "namespace_id")?;
-                Ok(RuntimeRequest::Share { id, namespace_id })
+                Ok(RuntimeRequest::Share {
+                    id,
+                    namespace_id,
+                    common: _common,
+                })
             }
             "unshare" => {
-                reject_unknown_fields(&self.params, &["id", "namespace"])?;
+                let mut allowed = vec!["id", "namespace"];
+                allowed.extend_from_slice(COMMON_ENVELOPE_FIELDS);
+                reject_unknown_fields(&self.params, &allowed)?;
+                let _common = parse_common_fields(&self.params)?;
                 let id = parse_required_u64(&self.params, "id")?;
                 let namespace = parse_required_string(&self.params, "namespace")?;
-                Ok(RuntimeRequest::Unshare { id, namespace })
+                Ok(RuntimeRequest::Unshare {
+                    id,
+                    namespace,
+                    common: _common,
+                })
             }
             "link" => {
-                reject_unknown_fields(
-                    &self.params,
-                    &["source_id", "target_id", "namespace", "link_type"],
-                )?;
+                let mut allowed = vec!["source_id", "target_id", "namespace", "link_type"];
+                allowed.extend_from_slice(COMMON_ENVELOPE_FIELDS);
+                reject_unknown_fields(&self.params, &allowed)?;
+                let _common = parse_common_fields(&self.params)?;
                 let source_id = parse_required_u64(&self.params, "source_id")?;
                 let target_id = parse_required_u64(&self.params, "target_id")?;
                 let namespace = parse_required_string(&self.params, "namespace")?;
@@ -796,6 +1036,7 @@ impl RuntimeMethodRequest {
                     target_id,
                     namespace,
                     link_type,
+                    common: _common,
                 })
             }
             _ => Err(JsonRpcError {
@@ -817,6 +1058,19 @@ pub enum RuntimeRequest {
         content: String,
         namespace: String,
         memory_type: Option<String>,
+        visibility: Option<String>,
+        common: RuntimeCommonFields,
+    },
+    Observe {
+        content: String,
+        namespace: String,
+        context: Option<String>,
+        chunk_size: Option<usize>,
+        source_label: Option<String>,
+        topic_threshold: Option<f32>,
+        min_chunk_size: Option<usize>,
+        dry_run: Option<bool>,
+        common: RuntimeCommonFields,
     },
     Recall {
         query_text: Option<String>,
@@ -844,15 +1098,26 @@ pub enum RuntimeRequest {
         min_confidence: Option<f64>,
         show_decaying: Option<bool>,
         mood_congruent: Option<bool>,
+        common: RuntimeCommonFields,
+    },
+    ContextBudget {
+        token_budget: usize,
+        namespace: String,
+        current_context: Option<String>,
+        working_memory_ids: Option<Vec<u64>>,
+        format: Option<String>,
+        common: RuntimeCommonFields,
     },
     Inspect {
         id: u64,
         namespace: String,
+        common: RuntimeCommonFields,
     },
     Explain {
         query: String,
         namespace: String,
         limit: Option<usize>,
+        common: RuntimeCommonFields,
     },
     Forget {
         id: u64,
@@ -872,16 +1137,19 @@ pub enum RuntimeRequest {
     Share {
         id: u64,
         namespace_id: String,
+        common: RuntimeCommonFields,
     },
     Unshare {
         id: u64,
         namespace: String,
+        common: RuntimeCommonFields,
     },
     Link {
         source_id: u64,
         target_id: u64,
         namespace: String,
         link_type: Option<String>,
+        common: RuntimeCommonFields,
     },
     PreflightRun {
         namespace: String,
@@ -895,6 +1163,8 @@ pub enum RuntimeRequest {
     },
     PreflightAllow {
         namespace: String,
+        original_query: String,
+        proposed_action: String,
         authorization_token: String,
         bypass_flags: Vec<String>,
     },
@@ -934,6 +1204,26 @@ pub fn cancelled_payload() -> Value {
 mod tests {
     use super::*;
     use serde_json::json;
+
+    fn sample_common_fields() -> RuntimeCommonFields {
+        RuntimeCommonFields {
+            request_id: Some("req-common".to_string()),
+            workspace_id: Some("ws-7".to_string()),
+            agent_id: Some("agent-3".to_string()),
+            session_id: Some("session-9".to_string()),
+            task_id: Some("task-2".to_string()),
+            time_budget_ms: Some(75),
+            policy_context: Some(RuntimePolicyContextHint {
+                include_public: true,
+                sharing_visibility: Some("public".to_string()),
+                caller_identity_bound: true,
+                workspace_acl_allowed: true,
+                agent_acl_allowed: true,
+                session_visibility_allowed: true,
+                legal_hold: false,
+            }),
+        }
+    }
 
     #[test]
     fn parse_method_rejects_non_jsonrpc_2_0_requests() {
@@ -1110,6 +1400,7 @@ mod tests {
                 unlike_id: None,
                 graph_mode: None,
                 cold_tier: None,
+                common: RuntimeCommonFields::default(),
                 workspace_id: None,
                 agent_id: None,
                 session_id: None,
@@ -1147,6 +1438,61 @@ mod tests {
         let error = missing_namespace.parse_method().unwrap_err();
         assert_eq!(error.code, -32602);
         assert_eq!(error.message, "missing namespace");
+    }
+
+    #[test]
+    fn parse_method_accepts_context_budget_params() {
+        let request = RuntimeMethodRequest {
+            jsonrpc: "2.0".to_string(),
+            method: "context_budget".to_string(),
+            params: json!({
+                "token_budget": 256,
+                "namespace": "team.alpha",
+                "current_context": "debugging session",
+                "working_memory_ids": [7, 8],
+                "format": "markdown"
+            }),
+            id: Some(json!(9)),
+        };
+
+        assert_eq!(
+            request.parse_method().unwrap(),
+            RuntimeRequest::ContextBudget {
+                token_budget: 256,
+                namespace: "team.alpha".to_string(),
+                current_context: Some("debugging session".to_string()),
+                working_memory_ids: Some(vec![7, 8]),
+                format: Some("markdown".to_string()),
+                common: RuntimeCommonFields::default(),
+            }
+        );
+    }
+
+    #[test]
+    fn parse_method_context_budget_rejects_missing_namespace_and_bad_working_memory_ids() {
+        let missing_namespace = RuntimeMethodRequest {
+            jsonrpc: "2.0".to_string(),
+            method: "context_budget".to_string(),
+            params: json!({ "token_budget": 64 }),
+            id: Some(json!(10)),
+        };
+        let error = missing_namespace.parse_method().unwrap_err();
+        assert_eq!(error.code, -32602);
+        assert_eq!(error.message, "missing namespace");
+
+        let bad_ids = RuntimeMethodRequest {
+            jsonrpc: "2.0".to_string(),
+            method: "context_budget".to_string(),
+            params: json!({
+                "token_budget": 64,
+                "namespace": "team.alpha",
+                "working_memory_ids": [1, "two"]
+            }),
+            id: Some(json!(11)),
+        };
+        let error = bad_ids.parse_method().unwrap_err();
+        assert_eq!(error.code, -32602);
+        assert_eq!(error.message, "working_memory_ids must be an array of positive integers");
     }
 
     #[test]
@@ -1222,6 +1568,7 @@ mod tests {
             RuntimeRequest::Inspect {
                 id: 42,
                 namespace: "team.alpha".to_string(),
+                common: RuntimeCommonFields::default(),
             }
         );
     }
@@ -1284,6 +1631,7 @@ mod tests {
                 query: "memory:42".to_string(),
                 namespace: "team.alpha".to_string(),
                 limit: Some(2),
+                common: RuntimeCommonFields::default(),
             }
         );
     }
@@ -1346,6 +1694,8 @@ mod tests {
             method: "preflight.allow".to_string(),
             params: json!({
                 "namespace": "team.alpha",
+                "original_query": "delete prior audit events",
+                "proposed_action": "purge namespace audit history",
                 "authorization_token": "token-123",
                 "bypass_flags": ["manual_override"]
             }),
@@ -1355,6 +1705,8 @@ mod tests {
             allow.parse_method().unwrap(),
             RuntimeRequest::PreflightAllow {
                 namespace: "team.alpha".to_string(),
+                original_query: "delete prior audit events".to_string(),
+                proposed_action: "purge namespace audit history".to_string(),
                 authorization_token: "token-123".to_string(),
                 bypass_flags: vec!["manual_override".to_string()],
             }
@@ -1413,6 +1765,8 @@ mod tests {
             method: "preflight.allow".to_string(),
             params: json!({
                 "namespace": "team.alpha",
+                "original_query": "delete prior audit events",
+                "proposed_action": "purge namespace audit history",
                 "authorization_token": "token-123",
                 "bypass_flags": ["manual_override", 7]
             }),
@@ -1460,6 +1814,8 @@ mod tests {
             method: "preflight.allow".to_string(),
             params: json!({
                 "namespace": "team.alpha",
+                "original_query": "delete prior audit events",
+                "proposed_action": "purge namespace audit history",
                 "authorization_token": "token-123",
                 "bypass_flags": ["manual_override"],
                 "unexpected": true
@@ -1505,6 +1861,45 @@ mod tests {
     }
 
     #[test]
+    fn parse_method_common_fields_round_trip_through_helper() {
+        let params = json!({
+            "request_id": "req-common",
+            "workspace_id": "ws-7",
+            "agent_id": "agent-3",
+            "session_id": "session-9",
+            "task_id": "task-2",
+            "time_budget_ms": 75,
+            "policy_context": {
+                "include_public": true,
+                "sharing_visibility": "public"
+            }
+        });
+
+        assert_eq!(
+            parse_common_fields(&params).unwrap(),
+            sample_common_fields()
+        );
+        assert_eq!(
+            parse_session_handle(&json!({"session_id": 9})).unwrap(),
+            Some("9".to_string())
+        );
+    }
+
+    #[test]
+    fn parse_method_common_fields_reject_invalid_policy_context_shapes() {
+        let error = parse_common_fields(&json!({"policy_context": true})).unwrap_err();
+        assert_eq!(error.code, -32602);
+        assert_eq!(error.message, "policy_context must be a JSON object");
+
+        let error = parse_common_fields(&json!({
+            "policy_context": {"include_public": true, "unexpected": true}
+        }))
+        .unwrap_err();
+        assert!(error.message.contains("unknown field"));
+        assert!(error.message.contains("unexpected"));
+    }
+
+    #[test]
     fn parse_method_recall_accepts_query_by_example_and_richer_contract_fields() {
         let request = RuntimeMethodRequest {
             jsonrpc: "2.0".to_string(),
@@ -1527,6 +1922,11 @@ mod tests {
                 "agent_id": "agent-3",
                 "session_id": "session-9",
                 "task_id": "task-2",
+                "request_id": "req-recall-18",
+                "policy_context": {
+                    "include_public": true,
+                    "sharing_visibility": "public"
+                },
                 "memory_kinds": ["user_preference", "session_note"],
                 "era_id": "incident-2026",
                 "as_of_tick": 42,
@@ -1569,6 +1969,23 @@ mod tests {
                 min_confidence: Some(0.8),
                 show_decaying: Some(true),
                 mood_congruent: Some(true),
+                common: RuntimeCommonFields {
+                    request_id: Some("req-common".to_string()),
+                    workspace_id: Some("ws-7".to_string()),
+                    agent_id: Some("agent-3".to_string()),
+                    session_id: Some("session-9".to_string()),
+                    task_id: Some("task-2".to_string()),
+                    time_budget_ms: Some(75),
+                    policy_context: Some(RuntimePolicyContextHint {
+                        include_public: true,
+                        sharing_visibility: Some("public".to_string()),
+                        caller_identity_bound: true,
+                        workspace_acl_allowed: true,
+                        agent_acl_allowed: true,
+                        session_visibility_allowed: true,
+                        legal_hold: false,
+                    }),
+                },
             }
         );
 
@@ -1578,7 +1995,8 @@ mod tests {
             params: json!({
                 "namespace": "team.alpha",
                 "like_id": 99,
-                "result_budget": 2
+                "result_budget": 2,
+                "session_id": 9
             }),
             id: Some(json!(19)),
         };
@@ -1601,7 +2019,7 @@ mod tests {
                 cold_tier: None,
                 workspace_id: None,
                 agent_id: None,
-                session_id: None,
+                session_id: Some("9".to_string()),
                 task_id: None,
                 memory_kinds: None,
                 era_id: None,
@@ -1611,6 +2029,15 @@ mod tests {
                 min_confidence: None,
                 show_decaying: None,
                 mood_congruent: None,
+                common: RuntimeCommonFields {
+                    request_id: None,
+                    workspace_id: None,
+                    agent_id: None,
+                    session_id: Some("9".to_string()),
+                    task_id: None,
+                    time_budget_ms: None,
+                    policy_context: None,
+                },
             }
         );
     }
@@ -1708,6 +2135,114 @@ mod tests {
     }
 
     #[test]
+    fn parse_method_retrieval_methods_accept_common_envelope_fields() {
+        let common = sample_common_fields();
+        let recall = RuntimeMethodRequest {
+            jsonrpc: "2.0".to_string(),
+            method: "recall".to_string(),
+            params: json!({
+                "query_text": "memory:42",
+                "namespace": "team.alpha",
+                "result_budget": 3,
+                "request_id": common.request_id,
+                "workspace_id": common.workspace_id,
+                "agent_id": common.agent_id,
+                "session_id": common.session_id,
+                "task_id": common.task_id,
+                "time_budget_ms": common.time_budget_ms,
+                "policy_context": common.policy_context,
+            }),
+            id: Some(json!(181)),
+        };
+        match recall.parse_method().unwrap() {
+            RuntimeRequest::Recall { common, .. } => assert_eq!(common, sample_common_fields()),
+            _ => std::process::abort(),
+        }
+
+        let inspect = RuntimeMethodRequest {
+            jsonrpc: "2.0".to_string(),
+            method: "inspect".to_string(),
+            params: json!({
+                "id": 42,
+                "namespace": "team.alpha",
+                "request_id": "req-common",
+                "policy_context": {"include_public": false}
+            }),
+            id: Some(json!(182)),
+        };
+        match inspect.parse_method().unwrap() {
+            RuntimeRequest::Inspect { common, .. } => {
+                assert_eq!(common.request_id.as_deref(), Some("req-common"));
+                assert_eq!(common.policy_context.unwrap().include_public, false);
+            }
+            _ => std::process::abort(),
+        }
+
+        let explain = RuntimeMethodRequest {
+            jsonrpc: "2.0".to_string(),
+            method: "explain".to_string(),
+            params: json!({
+                "query": "memory:42",
+                "namespace": "team.alpha",
+                "limit": 2,
+                "agent_id": "agent-7"
+            }),
+            id: Some(json!(183)),
+        };
+        match explain.parse_method().unwrap() {
+            RuntimeRequest::Explain { common, .. } => {
+                assert_eq!(common.agent_id.as_deref(), Some("agent-7"));
+            }
+            _ => std::process::abort(),
+        }
+    }
+
+    #[test]
+    fn parse_method_observe_accepts_required_and_optional_fields() {
+        let request = RuntimeMethodRequest {
+            jsonrpc: "2.0".to_string(),
+            method: "observe".to_string(),
+            params: json!({
+                "content": "streamed content",
+                "namespace": "team.alpha",
+                "context": "coding session",
+                "chunk_size": 120,
+                "source_label": "stdin:test",
+                "topic_threshold": 0.4,
+                "min_chunk_size": 24,
+                "dry_run": true,
+                "request_id": "req-observe"
+            }),
+            id: Some(json!(29)),
+        };
+
+        match request.parse_method().unwrap() {
+            RuntimeRequest::Observe {
+                content,
+                namespace,
+                context,
+                chunk_size,
+                source_label,
+                topic_threshold,
+                min_chunk_size,
+                dry_run,
+                common,
+            } => {
+                assert_eq!(content, "streamed content");
+                assert_eq!(namespace, "team.alpha");
+                assert_eq!(context.as_deref(), Some("coding session"));
+                assert_eq!(chunk_size, Some(120));
+                assert_eq!(source_label.as_deref(), Some("stdin:test"));
+                assert_eq!(topic_threshold, Some(0.4));
+                assert_eq!(min_chunk_size, Some(24));
+                assert_eq!(dry_run, Some(true));
+                assert_eq!(common.request_id.as_deref(), Some("req-observe"));
+            }
+            _ => std::process::abort(),
+        }
+    }
+
+    #[test]
     fn parse_method_encode_accepts_required_and_optional_fields() {
         let request = RuntimeMethodRequest {
             jsonrpc: "2.0".to_string(),
@@ -1715,7 +2250,9 @@ mod tests {
             params: json!({
                 "content": "user prefers dark mode",
                 "namespace": "team.alpha",
-                "memory_type": "user_preference"
+                "memory_type": "user_preference",
+                "visibility": "shared",
+                "request_id": "req-encode"
             }),
             id: Some(json!(30)),
         };
@@ -1725,10 +2262,14 @@ mod tests {
                 content,
                 namespace,
                 memory_type,
+                visibility,
+                common,
             } => {
                 assert_eq!(content, "user prefers dark mode");
                 assert_eq!(namespace, "team.alpha");
                 assert_eq!(memory_type, Some("user_preference".to_string()));
+                assert_eq!(visibility, Some("shared".to_string()));
+                assert_eq!(common.request_id.as_deref(), Some("req-encode"));
             }
             _ => std::process::abort(),
         }
@@ -1745,7 +2286,16 @@ mod tests {
         };
 
         match minimal.parse_method().unwrap() {
-            RuntimeRequest::Encode { memory_type, .. } => assert!(memory_type.is_none()),
+            RuntimeRequest::Encode {
+                memory_type,
+                visibility,
+                common,
+                ..
+            } => {
+                assert!(memory_type.is_none());
+                assert!(visibility.is_none());
+                assert_eq!(common, RuntimeCommonFields::default());
+            }
             _ => std::process::abort(),
         }
     }
@@ -1864,9 +2414,14 @@ mod tests {
         };
 
         match share.parse_method().unwrap() {
-            RuntimeRequest::Share { id, namespace_id } => {
+            RuntimeRequest::Share {
+                id,
+                namespace_id,
+                common,
+            } => {
                 assert_eq!(id, 42);
                 assert_eq!(namespace_id, "team.beta");
+                assert_eq!(common, RuntimeCommonFields::default());
             }
             _ => std::process::abort(),
         }
@@ -1882,9 +2437,14 @@ mod tests {
         };
 
         match unshare.parse_method().unwrap() {
-            RuntimeRequest::Unshare { id, namespace } => {
+            RuntimeRequest::Unshare {
+                id,
+                namespace,
+                common,
+            } => {
                 assert_eq!(id, 42);
                 assert_eq!(namespace, "team.alpha");
+                assert_eq!(common, RuntimeCommonFields::default());
             }
             _ => std::process::abort(),
         }
@@ -1922,6 +2482,53 @@ mod tests {
     }
 
     #[test]
+    fn parse_method_mutation_methods_accept_common_envelope_fields() {
+        let common = sample_common_fields();
+        let share = RuntimeMethodRequest {
+            jsonrpc: "2.0".to_string(),
+            method: "share".to_string(),
+            params: json!({
+                "id": 42,
+                "namespace_id": "team.beta",
+                "request_id": common.request_id,
+                "workspace_id": common.workspace_id,
+                "agent_id": common.agent_id,
+                "session_id": common.session_id,
+                "task_id": common.task_id,
+                "time_budget_ms": common.time_budget_ms,
+                "policy_context": common.policy_context,
+            }),
+            id: Some(json!(391)),
+        };
+        match share.parse_method().unwrap() {
+            RuntimeRequest::Share { common, .. } => assert_eq!(common, sample_common_fields()),
+            _ => std::process::abort(),
+        }
+
+        let unshare = RuntimeMethodRequest {
+            jsonrpc: "2.0".to_string(),
+            method: "unshare".to_string(),
+            params: json!({
+                "id": 42,
+                "namespace": "team.alpha",
+                "request_id": "req-unshare",
+                "policy_context": {"include_public": false, "sharing_visibility": "private"}
+            }),
+            id: Some(json!(392)),
+        };
+        match unshare.parse_method().unwrap() {
+            RuntimeRequest::Unshare { common, .. } => {
+                assert_eq!(common.request_id.as_deref(), Some("req-unshare"));
+                assert_eq!(
+                    common.policy_context.unwrap().sharing_visibility.as_deref(),
+                    Some("private")
+                );
+            }
+            _ => std::process::abort(),
+        }
+    }
+
+    #[test]
     fn parse_method_link_accepts_canonical_fields() {
         let request = RuntimeMethodRequest {
             jsonrpc: "2.0".to_string(),
@@ -1941,11 +2548,38 @@ mod tests {
                 target_id,
                 namespace,
                 link_type,
+                common,
             } => {
                 assert_eq!(source_id, 42);
                 assert_eq!(target_id, 99);
                 assert_eq!(namespace, "team.alpha");
                 assert_eq!(link_type, Some("supports".to_string()));
+                assert_eq!(common, RuntimeCommonFields::default());
+            }
+            _ => std::process::abort(),
+        }
+    }
+
+    #[test]
+    fn parse_method_link_accepts_common_envelope_fields() {
+        let request = RuntimeMethodRequest {
+            jsonrpc: "2.0".to_string(),
+            method: "link".to_string(),
+            params: json!({
+                "source_id": 42,
+                "target_id": 99,
+                "namespace": "team.alpha",
+                "link_type": "supports",
+                "request_id": "req-link",
+                "task_id": "task-99"
+            }),
+            id: Some(json!(399)),
+        };
+
+        match request.parse_method().unwrap() {
+            RuntimeRequest::Link { common, .. } => {
+                assert_eq!(common.request_id.as_deref(), Some("req-link"));
+                assert_eq!(common.task_id.as_deref(), Some("task-99"));
             }
             _ => std::process::abort(),
         }
@@ -1992,6 +2626,27 @@ mod tests {
         };
         let error = encode.parse_method().unwrap_err();
         assert_eq!(error.code, -32602);
+
+        let encode_visibility = RuntimeMethodRequest {
+            jsonrpc: "2.0".to_string(),
+            method: "encode".to_string(),
+            params: json!({
+                "content": "hello",
+                "namespace": "team.alpha",
+                "visibility": "shared",
+                "request_id": "req-encode-visibility"
+            }),
+            id: Some(json!(420)),
+        };
+        match encode_visibility.parse_method().unwrap() {
+            RuntimeRequest::Encode {
+                visibility, common, ..
+            } => {
+                assert_eq!(visibility.as_deref(), Some("shared"));
+                assert_eq!(common.request_id.as_deref(), Some("req-encode-visibility"));
+            }
+            _ => std::process::abort(),
+        }
 
         let link = RuntimeMethodRequest {
             jsonrpc: "2.0".to_string(),

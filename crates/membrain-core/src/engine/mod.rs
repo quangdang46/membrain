@@ -10,6 +10,8 @@ pub mod context_budget;
 pub mod contradiction;
 /// Encode-path orchestration surfaces.
 pub mod encode;
+/// Passive-observation segmentation and bounded intake surfaces.
+pub mod observe;
 /// Episode formation and grouping rules.
 pub mod episode;
 /// Forgetting and demotion maintenance surfaces.

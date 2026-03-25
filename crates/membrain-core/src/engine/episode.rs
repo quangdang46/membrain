@@ -86,8 +86,17 @@ pub struct EpisodeFormationExplain {
     pub end_timestamp_ms: u64,
     pub time_span_ms: u64,
     pub matching_fields: Vec<&'static str>,
+    pub common_goal_context: Option<&'static str>,
+    pub common_tool_chain_context: Option<&'static str>,
     pub anchor_memory_id: MemoryId,
     pub terminal_memory_id: MemoryId,
+}
+
+/// Stable per-source citation preserved for grouped source sets.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct EpisodeSourceCitation {
+    pub memory_id: MemoryId,
+    pub timestamp_ms: u64,
 }
 
 /// Explicit lineage payload preserved for grouped source sets.
@@ -95,6 +104,7 @@ pub struct EpisodeFormationExplain {
 pub struct EpisodeLineage {
     pub source_memory_ids: Vec<MemoryId>,
     pub continuity_keys: Vec<&'static str>,
+    pub source_citations: Vec<EpisodeSourceCitation>,
 }
 
 /// A formed episode or source set.
@@ -266,6 +276,13 @@ impl EpisodeGroupingModule {
         );
         let continuity_keys = matching_fields.clone();
         let source_memory_ids = members.iter().map(|c| c.memory_id).collect();
+        let source_citations = members
+            .iter()
+            .map(|candidate| EpisodeSourceCitation {
+                memory_id: candidate.memory_id,
+                timestamp_ms: candidate.timestamp_ms,
+            })
+            .collect();
 
         SourceGroup {
             episode_id,
@@ -275,6 +292,7 @@ impl EpisodeGroupingModule {
             lineage: EpisodeLineage {
                 source_memory_ids,
                 continuity_keys,
+                source_citations,
             },
             explain: EpisodeFormationExplain {
                 primary_reason,
@@ -282,6 +300,18 @@ impl EpisodeGroupingModule {
                 end_timestamp_ms: last.timestamp_ms,
                 time_span_ms,
                 matching_fields,
+                common_goal_context: members
+                    .iter()
+                    .all(|m| m.goal_context == first.goal_context && m.goal_context.is_some())
+                    .then_some(first.goal_context)
+                    .flatten(),
+                common_tool_chain_context: members
+                    .iter()
+                    .all(|m| {
+                        m.tool_chain_context == first.tool_chain_context && m.tool_chain_context.is_some()
+                    })
+                    .then_some(first.tool_chain_context)
+                    .flatten(),
                 anchor_memory_id: first.memory_id,
                 terminal_memory_id: last.memory_id,
             },
@@ -521,6 +551,19 @@ mod tests {
         assert_eq!(
             report.groups[0].lineage.continuity_keys,
             vec!["task_cluster", "task_id", "entity_overlap"]
+        );
+        assert_eq!(
+            report.groups[0].lineage.source_citations,
+            vec![
+                EpisodeSourceCitation {
+                    memory_id: MemoryId(1),
+                    timestamp_ms: 1000,
+                },
+                EpisodeSourceCitation {
+                    memory_id: MemoryId(2),
+                    timestamp_ms: 1100,
+                }
+            ]
         );
         assert_eq!(
             report.sample_logs[0],

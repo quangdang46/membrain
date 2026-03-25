@@ -7,7 +7,8 @@ use membrain_core::engine::result::{
     RetrievalExplain, RetrievalResultSet,
 };
 use membrain_core::engine::retrieval_planner::{
-    QueryPath, RetrievalPlanTrace, RetrievalRequest, RetrievalRequestValidationError,
+    ColdTierPolicy, ExplainLevel, GraphMode, QueryPath, RetrievalEffort, RetrievalPlanTrace,
+    RetrievalRequest, RetrievalRequestValidationError,
 };
 use membrain_core::observability::{OutcomeClass, Tier1LookupLane, Tier1LookupOutcome, TraceStage};
 use membrain_core::store::hot::Tier1HotMetadataStore;
@@ -35,9 +36,21 @@ fn temporal_snapshot_trace_request() -> RetrievalRequest {
     RetrievalRequest {
         query_path: QueryPath::Temporal,
         ..RetrievalRequest::hybrid(namespace, "recent deploys", 8)
+            .with_context_text("incident triage")
             .with_session(SessionId(33))
             .with_as_of_tick_range(40, 75)
             .with_snapshot_name("incident_baseline")
+            .with_era_id("era-incident-baseline")
+            .with_min_confidence(650)
+            .with_min_strength(500)
+            .with_show_decaying(true)
+            .with_include_public(true)
+            .with_graph_mode(GraphMode::Expand)
+            .with_cold_tier_policy(ColdTierPolicy::Allow)
+            .with_explain_level(ExplainLevel::Full)
+            .with_effort(RetrievalEffort::High)
+            .with_token_budget(256)
+            .with_time_budget_ms(1200)
             .with_budget(77)
     }
 }
@@ -342,6 +355,19 @@ fn retrieval_planner_trace_preserves_temporal_tick_window_and_snapshot_anchor() 
     let trace = RetrievalPlanTrace::new(&request);
 
     assert!(trace.lexical_query.is_none());
+    assert_eq!(trace.context_text.as_deref(), Some("incident triage"));
+    assert_eq!(trace.as_of_tick, Some(75));
+    assert_eq!(trace.era_id.as_deref(), Some("era-incident-baseline"));
+    assert_eq!(trace.min_confidence, Some(650));
+    assert_eq!(trace.min_strength, Some(500));
+    assert!(trace.show_decaying);
+    assert!(trace.include_public);
+    assert_eq!(trace.graph_mode, GraphMode::Expand);
+    assert_eq!(trace.cold_tier_policy, ColdTierPolicy::Allow);
+    assert_eq!(trace.explain_level, ExplainLevel::Full);
+    assert_eq!(trace.effort, RetrievalEffort::High);
+    assert_eq!(trace.token_budget, Some(256));
+    assert_eq!(trace.time_budget_ms, Some(1200));
     assert_eq!(trace.snapshot_name.as_deref(), Some("incident_baseline"));
     let temporal = trace.temporal_query.expect("temporal query");
     assert_eq!(temporal.session_filter, Some(SessionId(33)));

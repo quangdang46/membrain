@@ -79,13 +79,24 @@ async fn runtime_share_and_unshare_preserve_sharing_scope_contract() {
         json!({
             "jsonrpc":"2.0",
             "method":"share",
-            "params":{"id":42,"namespace_id":"team.beta"},
+            "params":{
+                "id":42,
+                "namespace_id":"team.beta",
+                "request_id":"req-share-transport",
+                "workspace_id":"ws-7",
+                "agent_id":"agent-3",
+                "session_id":"session-9",
+                "task_id":"task-2",
+                "time_budget_ms":75,
+                "policy_context":{"include_public":false,"sharing_visibility":"shared"}
+            },
             "id":"share"
         }),
     )
     .await;
     assert_eq!(share_response["result"]["status"], json!("accepted"));
     assert_eq!(share_response["result"]["visibility"], json!("shared"));
+    assert!(share_response["error"].is_null());
     assert_eq!(
         share_response["result"]["policy_summary"]["sharing_scope"],
         json!("shared")
@@ -102,6 +113,7 @@ async fn runtime_share_and_unshare_preserve_sharing_scope_contract() {
         share_response["result"]["audit"]["request_id"],
         json!("req-share-42")
     );
+    assert_eq!(share_response["result"]["id"], json!(42));
     assert_eq!(
         share_response["result"]["audit"]["event_kind"],
         json!("approved_sharing")
@@ -113,13 +125,20 @@ async fn runtime_share_and_unshare_preserve_sharing_scope_contract() {
         json!({
             "jsonrpc":"2.0",
             "method":"unshare",
-            "params":{"id":42,"namespace":"team.alpha"},
+            "params":{
+                "id":42,
+                "namespace":"team.alpha",
+                "request_id":"req-unshare-transport",
+                "session_id":9,
+                "policy_context":{"include_public":false,"sharing_visibility":"private"}
+            },
             "id":"unshare"
         }),
     )
     .await;
     assert_eq!(unshare_response["result"]["status"], json!("accepted"));
     assert_eq!(unshare_response["result"]["visibility"], json!("private"));
+    assert!(unshare_response["error"].is_null());
     assert_eq!(
         unshare_response["result"]["policy_summary"]["sharing_scope"],
         json!("private")
@@ -140,6 +159,7 @@ async fn runtime_share_and_unshare_preserve_sharing_scope_contract() {
         unshare_response["result"]["audit"]["request_id"],
         json!("req-unshare-42")
     );
+    assert_eq!(unshare_response["result"]["id"], json!(42));
     assert_eq!(
         unshare_response["result"]["audit"]["event_kind"],
         json!("policy_redacted")

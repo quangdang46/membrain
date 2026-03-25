@@ -1,3 +1,10 @@
+use membrain_core::api::NamespaceId;
+use membrain_core::observability::OutcomeClass;
+use membrain_core::policy::PolicyGateway;
+use membrain_core::policy::{
+    OperationClass, PolicyDecision, PolicyModule, PreflightCheck, PreflightCheckStatus,
+    PreflightState, SafeguardOutcome, SafeguardReasonCode, SafeguardRequest,
+};
 use serde::{Deserialize, Serialize};
 
 /// Preflight safeguard contract and API (`mb-23u.7.4`)
@@ -74,6 +81,8 @@ pub struct PreflightExplainResponse {
 #[serde(deny_unknown_fields)]
 pub struct PreflightAllowRequest {
     pub namespace: String,
+    pub original_query: String,
+    pub proposed_action: String,
     pub authorization_token: String,
     pub bypass_flags: Vec<String>,
 }
@@ -99,6 +108,404 @@ pub struct PreflightOutcome {
     pub degraded: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub confirmation_reason: Option<String>,
+}
+
+#[derive(Debug, Clone)]
+pub struct EvaluatedPreflight {
+    pub request_id: String,
+    pub preflight_id: String,
+    pub execution_id: Option<String>,
+    pub outcome: SafeguardOutcome,
+}
+
+pub fn validate_preflight_namespace(namespace: &str) -> Result<(), String> {
+    NamespaceId::new(namespace)
+        .map(|_| ())
+        .map_err(|err| err.to_string())
+}
+
+pub fn preflight_request(
+    namespace: &str,
+    original_query: &str,
+    proposed_action: &str,
+    local_confirmation: bool,
+    confirmed_generation: Option<u64>,
+) -> SafeguardRequest {
+    let namespace_bound = NamespaceId::new(namespace).is_ok();
+    let query = format!("{original_query} {proposed_action}").to_ascii_lowercase();
+    let is_destructive = query.contains("delete") || query.contains("purge");
+    let legal_hold = query.contains("legal hold");
+    let snapshot_required = query.contains("snapshot") || query.contains("archive");
+    let stale = query.contains("stale");
+    let missing_scope = query.contains("ambiguous") || query.contains("all namespaces");
+    let maintenance_window_required = query.contains("rewrite") || query.contains("reindex");
+    let maintenance_window_active = !query.contains("window closed");
+    let dependencies_ready = !query.contains("dependency pending");
+    let confidence_ready = !query.contains("low confidence");
+    let authoritative_input_readable = !query.contains("input unreadable");
+    let can_degrade = query.contains("degraded") || query.contains("fallback");
+
+    SafeguardRequest {
+        operation_class: if legal_hold || query.contains("contradiction") {
+            OperationClass::ContradictionArchive
+        } else if is_destructive {
+            OperationClass::IrreversibleMutation
+        } else if maintenance_window_required {
+            OperationClass::AuthoritativeRewrite
+        } else {
+            OperationClass::ReadOnlyAssessment
+        },
+        preview_only: false,
+        namespace_bound,
+        policy_allowed: namespace_bound && !legal_hold,
+        requires_confirmation: is_destructive,
+        local_confirmation,
+        force_allowed: is_destructive,
+        generation_bound: confirmed_generation,
+        generation_matches: !stale,
+        snapshot_required,
+        snapshot_available: !query.contains("snapshot missing"),
+        maintenance_window_required,
+        maintenance_window_active,
+        dependencies_ready,
+        scope_precise: !missing_scope,
+        authoritative_input_readable,
+        confidence_ready,
+        can_degrade,
+        legal_hold,
+    }
+}
+
+pub fn evaluate_preflight(
+    namespace: &str,
+    original_query: &str,
+    proposed_action: &str,
+    request_correlation_id: u64,
+    local_confirmation: bool,
+    preview_only: bool,
+    actor_source: &'static str,
+    request_prefix: &str,
+) -> Result<EvaluatedPreflight, String> {
+    validate_preflight_namespace(namespace)?;
+    let _request = PreflightRunRequest {
+        namespace: namespace.to_string(),
+        original_query: original_query.to_string(),
+        proposed_action: proposed_action.to_string(),
+    };
+    let request_id = if preview_only {
+        format!("{request_prefix}-preflight-explain-{request_correlation_id}")
+    } else if local_confirmation {
+        format!("{request_prefix}-preflight-allow-{request_correlation_id}")
+    } else {
+        format!("{request_prefix}-preflight-run-{request_correlation_id}")
+    };
+    let preflight_id = format!("preflight-{request_correlation_id}");
+    let mut request = preflight_request(
+        namespace,
+        original_query,
+        proposed_action,
+        local_confirmation,
+        Some(request_correlation_id),
+    );
+    request.preview_only = preview_only;
+    let mut outcome = PolicyModule.evaluate_safeguard(request);
+    outcome.audit.actor_source = actor_source;
+    outcome.audit.request_id = Box::leak(request_id.clone().into_boxed_str());
+    outcome.audit.preview_id = Some(Box::leak(preflight_id.clone().into_boxed_str()));
+    Ok(EvaluatedPreflight {
+        request_id,
+        preflight_id,
+        execution_id: (!preview_only
+            && matches!(
+                outcome.outcome_class,
+                OutcomeClass::Accepted
+                    | OutcomeClass::Degraded
+            ))
+        .then(|| format!("exec-{request_correlation_id}")),
+        outcome,
+    })
+}
+
+pub fn check_status_label(status: PreflightCheckStatus) -> String {
+    match status {
+        PreflightCheckStatus::Passed => "passed",
+        PreflightCheckStatus::Blocked => "blocked",
+        PreflightCheckStatus::Degraded => "degraded",
+        PreflightCheckStatus::Rejected => "rejected",
+    }
+    .to_string()
+}
+
+pub fn reason_code_label(reason: SafeguardReasonCode) -> String {
+    match reason {
+        SafeguardReasonCode::ConfirmationRequired => "confirmation_required",
+        SafeguardReasonCode::StalePreflight => "stale_preflight",
+        SafeguardReasonCode::GenerationMismatch => "generation_mismatch",
+        SafeguardReasonCode::SnapshotRequired => "snapshot_required",
+        SafeguardReasonCode::MaintenanceWindowRequired => "maintenance_window_required",
+        SafeguardReasonCode::DependencyPending => "dependency_pending",
+        SafeguardReasonCode::ScopeAmbiguous => "scope_ambiguous",
+        SafeguardReasonCode::AuthoritativeInputUnreadable => "authoritative_input_unreadable",
+        SafeguardReasonCode::ConfidenceTooLow => "confidence_too_low",
+        SafeguardReasonCode::PolicyDenied => "policy_denied",
+        SafeguardReasonCode::LegalHold => "legal_hold",
+    }
+    .to_string()
+}
+
+pub fn check_view(check: &PreflightCheck) -> PreflightCheckView {
+    PreflightCheckView {
+        check_name: check.check_name.to_string(),
+        status: check_status_label(check.status),
+        reason_codes: check
+            .reason_codes
+            .iter()
+            .copied()
+            .map(reason_code_label)
+            .collect(),
+        checked_scope: check.checked_scope.to_string(),
+    }
+}
+
+pub fn preflight_state_label(state: PreflightState) -> &'static str {
+    match state {
+        PreflightState::Ready => "ready",
+        PreflightState::Blocked => "blocked",
+        PreflightState::MissingData => "missing_data",
+        PreflightState::StaleKnowledge => "stale_knowledge",
+    }
+}
+
+pub fn policy_decision_label(decision: PolicyDecision) -> &'static str {
+    match decision {
+        PolicyDecision::Allow => "allow",
+        PolicyDecision::Deny => "deny",
+    }
+}
+
+pub fn preflight_outcome_label(
+    outcome: &SafeguardOutcome,
+    local_confirmation: bool,
+) -> &'static str {
+    if local_confirmation
+        && matches!(
+            outcome.outcome_class,
+            OutcomeClass::Accepted
+                | OutcomeClass::Degraded
+        )
+    {
+        "force_confirmed"
+    } else {
+        match outcome.outcome_class {
+            OutcomeClass::Preview => "preview_only",
+            OutcomeClass::Blocked => "blocked",
+            OutcomeClass::Degraded => "degraded",
+            OutcomeClass::Accepted => "ready",
+            OutcomeClass::Rejected => "blocked",
+            OutcomeClass::Partial => "degraded",
+        }
+    }
+}
+
+pub fn confirmation_reason(outcome: &SafeguardOutcome, local_confirmation: bool) -> Option<String> {
+    (local_confirmation
+        && matches!(
+            outcome.outcome_class,
+            OutcomeClass::Accepted
+                | OutcomeClass::Degraded
+        ))
+    .then_some("operator confirmed exact previewed scope".to_string())
+}
+
+pub fn blocked_reason_message(reasons: &[String]) -> Option<String> {
+    reasons.first().map(|reason| {
+        match reason.as_str() {
+            "confirmation_required" => "destructive action requires explicit confirmation",
+            "policy_denied" => "policy denied the requested action",
+            "legal_hold" => "legal hold blocks the requested action",
+            "snapshot_required" => "snapshot is required before this action can proceed",
+            "stale_preflight" | "generation_mismatch" => {
+                "preflight confirmation is stale for the requested scope"
+            }
+            "scope_ambiguous" => "requested scope is ambiguous",
+            "maintenance_window_required" => "maintenance window is required",
+            "dependency_pending" => "operation dependencies are not ready",
+            "confidence_too_low" => "confidence is too low for this action",
+            "authoritative_input_unreadable" => "authoritative inputs are unreadable",
+            _ => "preflight blocked the requested action",
+        }
+        .to_string()
+    })
+}
+
+pub fn required_overrides(outcome: &SafeguardOutcome) -> Vec<String> {
+    let mut overrides = Vec::new();
+    if outcome
+        .blocked_reasons
+        .contains(&SafeguardReasonCode::ConfirmationRequired)
+    {
+        overrides.push("human_confirmation".to_string());
+    }
+    overrides
+}
+
+pub fn policy_context(namespace: &str, outcome: &SafeguardOutcome) -> String {
+    let action = match outcome.operation_class {
+        OperationClass::ReadOnlyAssessment => "read-only assessment",
+        OperationClass::DerivedSurfaceMutation => "derived surface mutation",
+        OperationClass::AuthoritativeRewrite => "authoritative rewrite",
+        OperationClass::IrreversibleMutation => "irreversible mutation",
+        OperationClass::ContradictionArchive => "contradiction archive",
+    };
+    format!(
+        "namespace {namespace} preflight safeguard evaluation ({action}; {})",
+        outcome.impact_summary
+    )
+}
+
+pub fn to_preflight_outcome(
+    evaluated: EvaluatedPreflight,
+    local_confirmation: bool,
+) -> PreflightOutcome {
+    let outcome = evaluated.outcome;
+    let blocked_reasons = outcome
+        .blocked_reasons
+        .iter()
+        .copied()
+        .map(reason_code_label)
+        .collect::<Vec<_>>();
+    let outcome_class = outcome.outcome_class.as_str().to_string();
+    let degraded = matches!(
+        outcome.outcome_class,
+        OutcomeClass::Degraded
+    );
+    let success = matches!(
+        outcome.outcome_class,
+        OutcomeClass::Accepted
+            | OutcomeClass::Degraded
+    );
+    PreflightOutcome {
+        success,
+        preflight_state: preflight_state_label(outcome.preflight_state).to_string(),
+        preflight_outcome: preflight_outcome_label(&outcome, local_confirmation).to_string(),
+        outcome_class,
+        blocked_reasons,
+        check_results: outcome.check_results.iter().map(check_view).collect(),
+        confirmation: ConfirmationView {
+            required: outcome.confirmation.required,
+            force_allowed: outcome.confirmation.force_allowed,
+            confirmed: outcome.confirmation.confirmed,
+            generation_bound: outcome.confirmation.generation_bound,
+        },
+        audit: AuditView {
+            event_kind: outcome.audit.event_kind.to_string(),
+            actor_source: outcome.audit.actor_source.to_string(),
+            request_id: outcome.audit.request_id.to_string(),
+            preview_id: outcome.audit.preview_id.map(str::to_string),
+            related_run: outcome.audit.related_run.map(str::to_string),
+            scope_handle: outcome.audit.scope_handle.to_string(),
+        },
+        policy_summary: PolicySummaryView {
+            decision: policy_decision_label(outcome.policy_summary.decision).to_string(),
+            namespace_bound: outcome.policy_summary.namespace_bound,
+            outcome_class: outcome.policy_summary.outcome_class.as_str().to_string(),
+        },
+        request_id: Some(evaluated.request_id),
+        preflight_id: Some(evaluated.preflight_id),
+        execution_id: evaluated.execution_id,
+        degraded,
+        confirmation_reason: confirmation_reason(&outcome, local_confirmation),
+    }
+}
+
+pub fn to_preflight_explain_response(
+    namespace: &str,
+    evaluated: EvaluatedPreflight,
+) -> PreflightExplainResponse {
+    let outcome = evaluated.outcome;
+    let mut blocked_reasons = outcome
+        .blocked_reasons
+        .iter()
+        .copied()
+        .map(reason_code_label)
+        .collect::<Vec<_>>();
+    if outcome.confirmation.required && !outcome.confirmation.confirmed {
+        blocked_reasons.push("confirmation_required".to_string());
+    }
+    let allowed = false;
+    let preflight_state = if blocked_reasons.is_empty() {
+        preflight_state_label(outcome.preflight_state).to_string()
+    } else {
+        "blocked".to_string()
+    };
+    PreflightExplainResponse {
+        allowed,
+        preflight_state,
+        preflight_outcome: preflight_outcome_label(&outcome, false).to_string(),
+        blocked_reasons: blocked_reasons.clone(),
+        blocked_reason: blocked_reason_message(&blocked_reasons),
+        required_overrides: if outcome.confirmation.required && !outcome.confirmation.confirmed {
+            vec!["human_confirmation".to_string()]
+        } else {
+            required_overrides(&outcome)
+        },
+        policy_context: policy_context(namespace, &outcome),
+        check_results: outcome.check_results.iter().map(check_view).collect(),
+        confirmation: ConfirmationView {
+            required: outcome.confirmation.required,
+            force_allowed: outcome.confirmation.force_allowed,
+            confirmed: outcome.confirmation.confirmed,
+            generation_bound: outcome.confirmation.generation_bound,
+        },
+        audit: AuditView {
+            event_kind: outcome.audit.event_kind.to_string(),
+            actor_source: outcome.audit.actor_source.to_string(),
+            request_id: outcome.audit.request_id.to_string(),
+            preview_id: outcome.audit.preview_id.map(str::to_string),
+            related_run: outcome.audit.related_run.map(str::to_string),
+            scope_handle: outcome.audit.scope_handle.to_string(),
+        },
+        policy_summary: PolicySummaryView {
+            decision: policy_decision_label(outcome.policy_summary.decision).to_string(),
+            namespace_bound: outcome.policy_summary.namespace_bound,
+            outcome_class: outcome.policy_summary.outcome_class.as_str().to_string(),
+        },
+        request_id: Some(evaluated.request_id),
+        preflight_id: Some(evaluated.preflight_id),
+    }
+}
+
+pub fn preflight_allow(
+    namespace: &str,
+    original_query: &str,
+    proposed_action: &str,
+    authorization_token: &str,
+    bypass_flags: &[String],
+    request_correlation_id: u64,
+    actor_source: &'static str,
+    request_prefix: &str,
+) -> Result<PreflightOutcome, String> {
+    validate_preflight_namespace(namespace)?;
+    let _request = PreflightAllowRequest {
+        namespace: namespace.to_string(),
+        original_query: original_query.to_string(),
+        proposed_action: proposed_action.to_string(),
+        authorization_token: authorization_token.to_string(),
+        bypass_flags: bypass_flags.to_vec(),
+    };
+    let confirmed = authorization_token.starts_with("allow-")
+        && bypass_flags.iter().any(|flag| flag == "manual_override");
+    let evaluated = evaluate_preflight(
+        namespace,
+        original_query,
+        proposed_action,
+        request_correlation_id,
+        confirmed,
+        false,
+        actor_source,
+        request_prefix,
+    )?;
+    Ok(to_preflight_outcome(evaluated, confirmed))
 }
 
 #[cfg(test)]
@@ -327,6 +734,8 @@ mod tests {
     fn preflight_allow_and_outcome_round_trip_optional_fields() {
         let allow_request = PreflightAllowRequest {
             namespace: "tenant.alpha".to_string(),
+            original_query: "delete stale archive".to_string(),
+            proposed_action: "hard_delete".to_string(),
             authorization_token: "token-123".to_string(),
             bypass_flags: vec!["manual_override".to_string()],
         };
@@ -355,6 +764,8 @@ mod tests {
             allow_value,
             json!({
                 "namespace": "tenant.alpha",
+                "original_query": "delete stale archive",
+                "proposed_action": "hard_delete",
                 "authorization_token": "token-123",
                 "bypass_flags": ["manual_override"]
             })
@@ -405,6 +816,8 @@ mod tests {
         let decoded_outcome: PreflightOutcome = serde_json::from_value(outcome_value).unwrap();
 
         assert_eq!(decoded_allow.namespace, "tenant.alpha");
+        assert_eq!(decoded_allow.original_query, "delete stale archive");
+        assert_eq!(decoded_allow.proposed_action, "hard_delete");
         assert_eq!(decoded_allow.authorization_token, "token-123");
         assert_eq!(decoded_allow.bypass_flags, vec!["manual_override"]);
         assert!(decoded_outcome.success);
@@ -826,6 +1239,8 @@ mod tests {
 
         let allow_error = serde_json::from_value::<PreflightAllowRequest>(json!({
             "namespace": "tenant.alpha",
+            "original_query": "delete stale archive",
+            "proposed_action": "hard_delete",
             "authorization_token": "allow-123",
             "bypass_flags": ["manual_override"],
             "unexpected": true

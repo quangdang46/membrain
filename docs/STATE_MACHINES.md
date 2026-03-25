@@ -66,8 +66,18 @@ This section binds the major workflows called out in the canonical plan to the l
 | encode | create new durable object in `Labile` only; never a direct jump into `SynapticDone`, `Consolidated`, `Superseded`, or `Archived` | namespace access control; policy pinning / legal hold / retention rule; lineage preservation; endpoint / durable-reference integrity for referenced entities; controller scope binding when a background ingest job performs the write | failures emit an auditable artifact that names the rejected create or edge attempt, failed guard family, and why the object was not admitted into the durable lifecycle |
 | consolidation | `Labile -> SynapticDone`; `SynapticDone -> Consolidating`; `Consolidating -> Consolidated` | namespace access control; policy pinning / legal hold / retention rule; lineage preservation; repair-job lock; endpoint / durable-reference integrity; controller scope binding | failures must show which stage of the consolidation pipeline was attempted, whether prior durable state remained authoritative, and whether derived refresh was queued for repair |
 | forgetting | `SynapticDone -> Archived`; `Consolidated -> Archived`; `Superseded -> Archived` only when retention policy allows | policy pinning / legal hold / retention rule; contradiction / supersession compatibility; lineage preservation; repair-job lock; controller scope binding for batch forgetting jobs | failures must name whether forgetting was blocked by legal hold, retention class, unresolved contradiction, or controller-scope mismatch rather than silently leaving the object half-archived |
+| lease scan | no durable lifecycle edge by itself; bounded freshness transitions only (`fresh -> lease_sensitive -> stale -> recheck_required`) | deterministic logical clock, explicit lease policy, controller scope binding, repair-job lock if derived freshness indexes are rewritten | failures must preserve the prior freshness state, avoid request-path full scans, and surface whether stale action-critical evidence was downgraded, recheck-flagged, or withheld |
 | explicit archive | `SynapticDone -> Archived`; `Consolidated -> Archived`; `Superseded -> Archived` when an operator or policy action requests archival | namespace access control; policy pinning / legal hold / retention rule; contradiction / supersession compatibility; lineage preservation; repair-job lock | failures must preserve the prior stable state and expose the denied archive request, requesting actor or controller, and blocking policy or validation cause |
 | restore | `Archived -> Labile` only through an explicit restore, replay, or policy-approved maintenance path; ordinary recall is not a restore path | namespace access control; policy pinning / legal hold / retention rule; lineage preservation; endpoint / durable-reference integrity; repair-job lock; controller scope binding | failures must show that restore was explicitly requested, why ordinary recall was insufficient, and which guard prevented reopening the archived durable row |
+
+Restore execution order is fixed and inspectable:
+1. `validate_restore_request`
+2. `load_durable_metadata`
+3. `rehydrate_available_payload`
+4. `commit_durable_state`
+5. `refresh_derived_state`
+
+If `rehydrate_available_payload` encounters tombstoned or unavailable cold payload state, the workflow still may complete as a degraded `partially_restored` reopen so long as durable identity, lineage, policy state, and bounded inspect surfaces remain intact.
 
 ### Workflow-specific guard notes
 

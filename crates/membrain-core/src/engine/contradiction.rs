@@ -491,6 +491,18 @@ impl ContradictionEngine {
             .map_or(0, |entries| entries.len())
     }
 
+    /// Returns the indexed compact text for one memory when present.
+    pub fn indexed_memory_text(
+        &self,
+        namespace: &NamespaceId,
+        memory_id: MemoryId,
+    ) -> Option<&str> {
+        self.memory_index
+            .get(namespace)
+            .and_then(|entries| entries.iter().find(|entry| entry.memory_id == memory_id))
+            .map(|entry| entry.compact_text.as_str())
+    }
+
     /// Detects potential contradictions for an incoming memory candidate.
     pub fn detect(&self, candidate: &ContradictionCandidate) -> DetectionResult {
         let Some(entries) = self.memory_index.get(&candidate.namespace) else {

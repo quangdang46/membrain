@@ -142,13 +142,17 @@ When degraded or repair-aware serving changes what can still be queried or mutat
 
 When an operation returns embedded explanation rather than only an `explain_handle`, the machine-readable explanation contract should reuse the canonical field families from `docs/RETRIEVAL.md` where relevant rather than inventing per-tool envelopes. The stable families are `route_summary`, `result_reasons`, `omitted_summary`, `policy_summary`, `provenance_summary`, `freshness_markers`, `conflict_markers`, and `trace_stages` when full routing detail is requested.
 
-For recall-facing operations, the tool-specific `result` payload should reuse one canonical `RetrievalResult` envelope rather than inventing separate MCP-only answer shapes. That shared object carries `outcome_class`, bounded `evidence_pack`, optional `action_pack`, omission/deferred-payload state, policy/provenance/freshness/conflict summaries, packaging metadata, and either embedded explanation families or an `explain_handle`.
+For recall-facing operations, the tool-specific `result` payload should reuse one canonical `RetrievalResult` envelope rather than inventing separate MCP-only answer shapes. That shared object carries `outcome_class`, bounded `evidence_pack`, optional `action_pack`, explicit `output_mode`, omission/deferred-payload state, policy/provenance/freshness/conflict summaries, packaging metadata, and either embedded explanation families or an `explain_handle`.
+
+When MCP callers provide `mode` or `effort`, implementations may map those labels onto the dual-output packaging modes from Section 10.1: `strict`/`high` suppresses unsafe derived actions, `balanced`/`normal` preserves ordinary evidence-plus-action packaging, and `fast` keeps action suggestions available unless other policy gates remove them.
 
 MCP regression coverage for future implementation beads must prove that accepted, partial, preview, blocked, degraded, and rejected retrieval outcomes preserve the same top-level field families and semantic meaning as CLI and daemon/JSON-RPC, including the sample accepted and partial/deferred/conflict-bearing shapes defined in `docs/RETRIEVAL.md`.
 
 CLI JSON output for equivalent operations may package these fields differently for command ergonomics, but it should preserve the same effective namespace, policy, explanation, warning, and degraded-serving meaning rather than inventing a separate semantic contract.
 
 For risky or mutating operations whose blast radius can rewrite authoritative state, widen namespace scope, emit irreversible-loss records, or require high-stakes action gating, MCP responses should also reuse the shared safeguard contract from `docs/OPERATIONS.md`. That means preview, blocked, degraded, rejected, and accepted responses for those tools should expose the same machine-readable safeguard fields for `operation_class`, `preflight_state`, `affected_scope`, `impact_summary`, `blocked_reasons`, `preflight_checks`, `warnings`, `confidence_constraints`, `reversibility`, `confirmation`, and `audit`, even when the tool-specific `result` payload carries additional domain data.
+
+The minimum explicit preflight wrapper surface is `preflight.run`, `preflight.explain`, and `preflight.allow`. These wrapper names may contain dots even on MCP because they are transport labels for the shared safeguard contract, not separate wrapper-local semantics. Their request and response bodies must round-trip with the same machine-readable fields used by JSON-RPC and any equivalent CLI `preflight` command.
 
 Read-only operator and data-mobility surfaces such as `stats`, `health`, `doctor`, `audit`, `export`, and `import` should likewise preserve semantic parity with CLI and daemon/JSON-RPC around counters, warnings, remediation hints, availability posture, and data-manifest meaning instead of introducing MCP-only interpretations.
 
@@ -262,6 +266,7 @@ Task-oriented bounded retrieval for context construction. The primary retrieval 
 - `explain`
 - `namespace` plus optional `include_public`
 - optional scoped filters (`workspace_id`, `agent_id`, `session_id`, `task_id`, `memory_kinds`, `era_id`, `as_of_tick`, `at_snapshot`, `min_strength`, `min_confidence`, `show_decaying`, `mood_congruent`)
+- when confidence-aware filtering is active, explain surfaces must preserve that confidence still influenced ordering before post-ranking suppression, and omission/explain payloads must expose `confidence_filtered`, `low_confidence_suppressed`, and any surviving uncertainty markers such as reconsolidation churn
 - optional `like_id` / `unlike_id` query-by-example cues
 - optional `graph_mode` and `cold_tier`
 
@@ -338,6 +343,12 @@ Controlled forgetting: suppress, decay, demote, compact, summarize, archive, red
 
 **Rules**: distinguish utility-driven forgetting from compliance deletion; preserve lineage; enforce retention and legal-hold denial paths explicitly; never remove last authoritative evidence unless policy allows; archive-by-default forgetting remains inspectable and recoverable only through explicit restore paths rather than implicit recall
 
+**Should return**:
+- `action`, `reason_code`, `disposition`, `policy_surface`, and `reversibility`
+- `prior_archive_state`, `resulting_archive_state`, and `partial_restore` when relevant
+- `audit_kind` plus either embedded audit rows or an audit handle for later review
+- operator-review markers such as `review_required`, `operator_review_required`, or equivalent summary counts when near-threshold items were retained for human inspection
+
 ### `memory_repair`
 
 Run or schedule repair: indexes, graph, lineage, summaries, shards.
@@ -351,6 +362,9 @@ Run or schedule repair: indexes, graph, lineage, summaries, shards.
 - unresolved items still queued for repair
 - prior-state, stale-result, or degraded-serving markers when they materially affected the repair window
 - explicit loss records when only degraded fidelity could be restored
+- for index repair specifically, per-target rebuilt outputs plus verification artifacts (`verification_artifact_name`, `parity_check`, authoritative/derived row counts, authoritative/derived generations) so MCP, CLI, and daemon surfaces can prove the rebuilt view matches durable truth
+- for graph repair, authoritative inputs should name durable memory rows plus canonical relation and lineage tables, and verification should prove the rebuilt projection still satisfies `graph_projection_matches_durable_edges` before the graph surface is reported healthy
+- for cache repair, authoritative inputs should name durable rows, namespace/policy metadata, and current generation anchors; responses should show invalidation plus repair-warmup events by family so callers can tell that stale warm state was dropped before bounded rewarm
 
 ### `stats()`
 
@@ -367,12 +381,15 @@ Return the bounded operator summary shared with CLI `membrain stats`.
 
 Diagnose corruption, stale derived state, and degraded-serving posture.
 
-**Returns**: `{ checks: [{name, surface_kind, status, severity, affected_scope, note?, remediation?}], summary, availability? }`
+**Returns**: `{ checks: [{name, surface_kind, status, severity, affected_scope, degraded_impact?, remediation?}], summary, repair_engine_component, runbook_hints, availability?, remediation?, error_kind? }`
 
 **Rules**:
 - `doctor()` is a read-only diagnostic surface; repair remains an explicit `memory_repair` or CLI `membrain repair ...` flow.
 - Per-check machine-readable results should stay stable enough that CLI text, daemon/JSON-RPC, and MCP can agree on what failed, which scope is affected, and what remediation comes next.
+- `summary` should count ok/warn/fail check totals, and `runbook_hints[*]` should point to the canonical docs section operators should follow for the surfaced degraded-mode or incident class.
 - When authoritative inputs are unreadable or corruption blocks safe serving, the response should use the shared `error_kind`, `remediation`, and `availability` semantics rather than burying the state in prose only.
+- If stale action-critical evidence reaches `recheck_required` or `withhold` handling, `doctor()` should expose that through freshness-oriented checks and warnings instead of silently presenting a fully healthy surface.
+- The canonical logging-heavy daemon/MCP proof artifact for these runtime workflows is `crates/membrain-daemon/tests/e2e_mcp.sh`. It should emit human-readable logs plus deterministic parity checks for retrieval envelopes, preflight/policy denial, share/unshare redaction, forgetting archive/restore/delete flows, repair/doctor diagnostics, and observe/inspect provenance.
 
 ### `export(format?, include_cold?, include_archive?, kind?, min_strength?, at_snapshot?)`
 
@@ -489,7 +506,14 @@ Segment content into memories via topic boundary detection.
 
 ### `skills()` / `extract_skills()` — Feature 8
 
-**Returns**: `{ procedures: [{id, content, source_engram_id, confidence, member_count}] }`
+**Returns**: `{ namespace, extraction_trigger, extracted_count, skipped_count, reflection_compiler_active, procedures: [{ namespace, fixture_name, content, confidence, storage: { storage_class, authority_class, acceptance_state, review_status, durable, rebuildable, canonical_rebuild_source, freshness_status, repair_status }, review: { derivation_rule, tentative, accepted, supporting_memory_count, source_citation_count, supporting_fields, operator_review_required, review_reason, reflection: { artifact_class, source_outcome, checklist_items, advisory, trusted_by_default, release_rule, promotion_basis } | null }, recall: { recall_surface, retrievable_as_procedural_hint, retrieval_kind, query_cues, source_engram_id, member_count } }] }`
+
+**Rules**:
+- `skills()` is the review/list surface for already stored derived skill artifacts; `extract_skills()` runs a bounded extraction pass first, then returns the same artifact family.
+- Returned procedures remain explicitly derived durable artifacts until a separate acceptance path promotes them. The payload must keep tentative/non-authoritative state visible rather than implying implicit promotion.
+- Each procedure should expose storage, review, and recall semantics directly so operators and wrappers can inspect whether the artifact is rebuildable, still requires review, and which cues make it retrievable as a procedural hint.
+- When the reflection-compiler contract is active, `review.reflection` should make advisory status explicit by carrying the artifact class (`procedure` vs `anti_pattern`), source outcome (`successful_episode` vs `failed_episode`), bounded checklist items, and the release rule showing that promotion still requires explicit acceptance or repeated usefulness with lineage.
+- `source_engram_id` may be absent when the bounded source set does not resolve to one stable seed, but the recall surface must still preserve `member_count` and query cues derived from the supporting evidence.
 
 ### `share(id, namespace_id)` / `unshare(id)` — Feature 9
 
@@ -513,15 +537,15 @@ Adjust visibility for cross-agent access without changing the memory's canonical
 
 **Rules**:
 - `health()` is the bounded machine-readable operator dashboard shared with CLI `membrain health`; transport-specific rendering may differ, but the underlying report semantics must not.
-- The report should preserve tier and capacity counters, quality/conflict/uncertainty signals, runtime activity, repair/backpressure indicators, availability posture, and feature-availability facts strongly enough that automation can make the same decisions a human operator would make from the CLI dashboard.
-- The machine-readable view should expose enough detail to distinguish healthy service from degraded-but-servable posture, including repair-queue growth or backlog signals, backpressure state, and which feature surfaces are unavailable or maturity-gated.
+- The report should preserve tier and capacity counters, quality/conflict/uncertainty signals, runtime activity, repair/backpressure indicators, availability posture, explicit degraded-status guidance, and feature-availability facts strongly enough that automation can make the same decisions a human operator would make from the CLI dashboard.
+- The machine-readable view should expose enough detail to distinguish healthy service from degraded-but-servable posture, including repair-queue growth or backlog signals, backpressure state, which read or write paths still survive, and which feature surfaces are unavailable or maturity-gated.
 - When policy scope, historical anchors, or degraded serving limit visibility, `health()` should return explicit warnings or `availability` state instead of silently fabricating a fully healthy view.
 
 ### `why(id)` — Feature 11
 
 Trace causal chain to root evidence.
 
-**Returns**: `{ chain: [{memory_id, content, link_type, tick, confidence}], depth, all_roots_valid }`
+**Returns**: canonical retrieval/explain envelope families for the targeted memory, including causal-chain ancestry in `result_reasons`, `provenance_summary`, `graph_expansion`, and bounded cutoff metadata rather than a transport-only bespoke trace blob.
 
 ### `invalidate(id, dry_run?)` — Feature 11
 
@@ -603,7 +627,7 @@ Manage later-stage resumable goal-stack state for long-running work without turn
 
 ### `audit(memory_id?, since_tick?, op?, limit?)` — Feature 19
 
-**Returns**: `{ entries: [{op, memory_id, tick, before_strength, after_strength, triggered_by, note, namespace, redaction, related_snapshot, related_run}] }`
+**Returns**: `{ entries: [{op, memory_id, tick, before_strength, after_strength, before_confidence, after_confidence, triggered_by, note, namespace, redaction, related_snapshot, related_run}] }`
 
 **Rules**:
 - audit is a read-only forensic surface for memory and operation history; it does not authorize replay, restore, or mutation

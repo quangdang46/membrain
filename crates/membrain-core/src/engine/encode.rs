@@ -12,7 +12,7 @@ use crate::policy::{
 };
 use crate::types::{
     CanonicalMemoryType, FastPathRouteFamily, LandmarkMetadata, LandmarkSignals, MemoryId,
-    NormalizedMemoryEnvelope, RawEncodeInput, WorkingMemoryId, WorkingMemoryItem,
+    NormalizedMemoryEnvelope, RawEncodeInput, SharingMetadata, WorkingMemoryId, WorkingMemoryItem,
 };
 use xxhash_rust::xxh64::xxh64;
 
@@ -525,10 +525,11 @@ impl EncodeEngine {
             .join(" ");
         let payload_size_bytes = input.raw_text.len();
 
-        let landmark = input
-            .landmark_signals
-            .map(|signals| self.derive_landmark_metadata(&compact_text, signals))
-            .unwrap_or_else(LandmarkMetadata::non_landmark);
+        let landmark = self.derive_landmark_metadata(
+            &compact_text,
+            input.landmark_signals,
+            input.active_era_id.as_deref(),
+        );
 
         let observation_source = matches!(input.kind, crate::types::RawIntakeKind::Observation)
             .then(|| PASSIVE_OBSERVATION_SOURCE.to_string());
@@ -545,6 +546,7 @@ impl EncodeEngine {
             landmark,
             observation_source,
             observation_chunk_id,
+            sharing: SharingMetadata::default(),
         }
     }
 
@@ -573,15 +575,24 @@ impl EncodeEngine {
     fn derive_landmark_metadata(
         &self,
         compact_text: &str,
-        signals: LandmarkSignals,
+        signals: Option<LandmarkSignals>,
+        active_era_id: Option<&str>,
     ) -> LandmarkMetadata {
+        let Some(signals) = signals else {
+            let mut metadata = LandmarkMetadata::non_landmark();
+            metadata.era_id = active_era_id.map(str::to_owned);
+            return metadata;
+        };
+
         let qualifies = signals.arousal >= LANDMARK_AROUSAL_THRESHOLD
             && signals.novelty >= LANDMARK_NOVELTY_THRESHOLD
             && signals.recent_similarity < LANDMARK_SIMILARITY_FLOOR
             && signals.ticks_since_last_landmark >= LANDMARK_MIN_ERA_GAP_TICKS;
 
         if !qualifies {
-            return LandmarkMetadata::non_landmark();
+            let mut metadata = LandmarkMetadata::non_landmark();
+            metadata.era_id = active_era_id.map(str::to_owned);
+            return metadata;
         }
 
         let label = compact_text

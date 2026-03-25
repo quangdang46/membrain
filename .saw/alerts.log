@@ -1,0 +1,1 @@
+2026-03-25T13:45:46Z ALERT TOOL_LOOP file=crates/membrain-daemon/src/daemon.rs rewrites=14 - same file keeps being rewritten action=warn suggestion="inspect the repeated write target before interrupting"

@@ -2,13 +2,19 @@ use crate::api::ApiModule;
 use crate::api::NamespaceId;
 use crate::config::RuntimeConfig;
 use crate::embed::EmbedModule;
+use crate::engine::belief_history::BeliefHistoryEngine;
 use crate::engine::confidence::ConfidenceEngine;
 use crate::engine::consolidation::{ConsolidationEngine, ConsolidationSummary};
+use crate::engine::context_budget::{ContextBudgetEngine, ContextBudgetRequest, ContextBudgetResponse};
 use crate::engine::contradiction::{
     ContradictionCandidate, ContradictionEngine, ContradictionError, ContradictionKind,
 };
 use crate::engine::encode::{ContradictionWriteOutcome, EncodeEngine, WriteBranchOutcome};
-use crate::engine::forgetting::ForgettingEngine;
+use crate::engine::forgetting::{
+    ForgettingEngine, ForgettingExplainOutput, ForgettingPolicy, ForgettingSummary,
+    ReversibilitySummary,
+};
+use crate::store::audit::AuditLogEntry;
 use crate::engine::intent::IntentEngine;
 use crate::engine::maintenance::MaintenanceController;
 use crate::engine::ranking::RankingEngine;
@@ -42,7 +48,7 @@ impl PreparedTier2Layout {
 }
 
 /// Stable top-level core facade for the initial workspace bootstrap.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct BrainStore {
     config: RuntimeConfig,
     api: ApiModule,
@@ -53,6 +59,7 @@ pub struct BrainStore {
     intent: IntentEngine,
     ranking: RankingEngine,
     contradiction: ContradictionEngine,
+    belief_history: BeliefHistoryEngine,
     confidence: ConfidenceEngine,
     consolidation: ConsolidationEngine,
     forgetting: ForgettingEngine,
@@ -81,6 +88,7 @@ impl BrainStore {
             intent: IntentEngine,
             ranking: RankingEngine,
             contradiction: ContradictionEngine::new(),
+            belief_history: BeliefHistoryEngine::new(),
             confidence: ConfidenceEngine,
             consolidation: ConsolidationEngine,
             forgetting: ForgettingEngine,
@@ -132,6 +140,15 @@ impl BrainStore {
         &self.recall
     }
 
+    /// Packs one canonical retrieval result set into a bounded token budget.
+    pub fn context_budget(
+        &self,
+        request: &ContextBudgetRequest,
+        result_set: &crate::engine::result::RetrievalResultSet,
+    ) -> ContextBudgetResponse {
+        ContextBudgetEngine::new().pack_result_set(request, result_set)
+    }
+
     /// Returns the shared intent-classification surface used by wrappers.
     pub fn intent_engine(&self) -> &IntentEngine {
         &self.intent
@@ -152,6 +169,75 @@ impl BrainStore {
         &mut self.contradiction
     }
 
+    /// Returns the shared belief-history surface owned by the core crate.
+    pub fn belief_history_engine(&self) -> &BeliefHistoryEngine {
+        &self.belief_history
+    }
+
+    /// Returns the mutable belief-history surface owned by the core crate.
+    pub fn belief_history_engine_mut(&mut self) -> &mut BeliefHistoryEngine {
+        &mut self.belief_history
+    }
+
+    /// Returns the belief timeline for one memory by following its version chain.
+    pub fn belief_timeline_for_memory(
+        &self,
+        memory_id: &MemoryId,
+    ) -> Result<
+        crate::engine::belief_history::BeliefTimelineView,
+        crate::engine::belief_history::BeliefHistoryError,
+    > {
+        let chain_id = self
+            .belief_history
+            .chain_for_memory(memory_id)
+            .map(|chain| chain.chain_id)
+            .ok_or(crate::engine::belief_history::BeliefHistoryError::ChainNotFound)?;
+        self.belief_history.timeline(chain_id)
+    }
+
+    /// Returns the belief resolution view for one memory.
+    pub fn belief_resolution_for_memory(
+        &self,
+        memory_id: &MemoryId,
+    ) -> Result<
+        crate::engine::belief_history::BeliefResolutionView,
+        crate::engine::belief_history::BeliefHistoryError,
+    > {
+        self.belief_history.resolve_view_for_memory(memory_id)
+    }
+
+    /// Returns the full historical explain output for one memory's belief chain.
+    pub fn belief_history_explain_for_memory(
+        &self,
+        memory_id: &MemoryId,
+    ) -> Result<
+        Vec<crate::engine::belief_history::HistoricalExplain>,
+        crate::engine::belief_history::BeliefHistoryError,
+    > {
+        let chain_id = self
+            .belief_history
+            .chain_for_memory(memory_id)
+            .map(|chain| chain.chain_id)
+            .ok_or(crate::engine::belief_history::BeliefHistoryError::ChainNotFound)?;
+        self.belief_history.historical_explain(chain_id)
+    }
+
+    /// Returns the first belief-history chain matching one query string.
+    pub fn belief_history_for_query(
+        &self,
+        query: &str,
+    ) -> Result<
+        crate::engine::belief_history::BeliefTimelineView,
+        crate::engine::belief_history::BeliefHistoryError,
+    > {
+        self.belief_history.belief_history_for_query(query)
+    }
+
+    /// Returns all currently open belief conflicts without flattening disagreement.
+    pub fn open_belief_conflicts(&self) -> Vec<crate::engine::belief_history::BeliefTimelineView> {
+        self.belief_history.open_conflicts()
+    }
+
     /// Returns the shared confidence engine surface owned by the core crate.
     pub fn confidence_engine(&self) -> &ConfidenceEngine {
         &self.confidence
@@ -166,14 +252,50 @@ impl BrainStore {
         kind: ContradictionKind,
         conflict_score: u16,
     ) -> Result<ContradictionWriteOutcome, ContradictionError> {
-        self.encode.record_contradiction_branch(
+        let outcome = self.encode.record_contradiction_branch(
             &mut self.contradiction,
-            namespace,
+            namespace.clone(),
             existing_memory,
             incoming_memory,
             kind,
             conflict_score,
-        )
+        )?;
+
+        let existing_text = self
+            .contradiction
+            .indexed_memory_text(&namespace, existing_memory)
+            .map(str::to_owned)
+            .unwrap_or_else(|| format!("memory {}", existing_memory.0));
+        let incoming_text = self
+            .contradiction
+            .indexed_memory_text(&namespace, incoming_memory)
+            .map(str::to_owned)
+            .unwrap_or_else(|| format!("memory {}", incoming_memory.0));
+
+        let chain_id =
+            if let Some(existing_chain) = self.belief_history.chain_for_memory(&existing_memory) {
+                existing_chain.chain_id
+            } else {
+                self.belief_history.create_chain(
+                    namespace,
+                    existing_memory,
+                    existing_text,
+                    conflict_score,
+                    0,
+                )
+            };
+
+        let _ = self.belief_history.record_contradiction(
+            chain_id,
+            incoming_memory,
+            outcome.contradiction_id,
+            kind,
+            incoming_text,
+            conflict_score,
+            1,
+        );
+
+        Ok(outcome)
     }
 
     /// Detects contradictions for an incoming candidate and branches into recording if found.
@@ -247,6 +369,108 @@ impl BrainStore {
         &self.forgetting
     }
 
+    /// Returns an inspectable summary of one bounded forgetting pass.
+    pub fn summarize_forgetting_pass(
+        &self,
+        namespace: NamespaceId,
+        policy: ForgettingPolicy,
+        estimated_candidates: u32,
+    ) -> ForgettingSummary {
+        use crate::engine::maintenance::{MaintenanceJobHandle, MaintenanceJobState};
+
+        let run = self
+            .forgetting
+            .create_run(namespace, policy, estimated_candidates);
+        let mut handle = MaintenanceJobHandle::new(run, estimated_candidates.max(1) + 1);
+
+        loop {
+            let snapshot = handle.poll();
+            match snapshot.state {
+                MaintenanceJobState::Completed(summary) => return summary,
+                MaintenanceJobState::Running { .. } => continue,
+                other => panic!("unexpected forgetting state: {other:?}"),
+            }
+        }
+    }
+
+    /// Returns the reversibility breakdown for one bounded forgetting pass.
+    pub fn summarize_forgetting_reversibility(
+        &self,
+        namespace: NamespaceId,
+        policy: ForgettingPolicy,
+        estimated_candidates: u32,
+    ) -> ReversibilitySummary {
+        use crate::engine::maintenance::{MaintenanceJobHandle, MaintenanceJobState};
+
+        let run = self
+            .forgetting
+            .create_run(namespace, policy, estimated_candidates);
+        let mut handle = MaintenanceJobHandle::new(run, estimated_candidates.max(1) + 1);
+
+        loop {
+            let snapshot = handle.poll();
+            match snapshot.state {
+                MaintenanceJobState::Completed(_) => {
+                    return self.forgetting.reversibility_summary(handle.operation())
+                }
+                MaintenanceJobState::Running { .. } => continue,
+                other => panic!("unexpected forgetting state: {other:?}"),
+            }
+        }
+    }
+
+    /// Returns the operator-facing explain payload for one bounded forgetting pass.
+    pub fn summarize_forgetting_explain(
+        &self,
+        namespace: NamespaceId,
+        policy: ForgettingPolicy,
+        estimated_candidates: u32,
+    ) -> ForgettingExplainOutput {
+        use crate::engine::maintenance::{MaintenanceJobHandle, MaintenanceJobState};
+
+        let run = self
+            .forgetting
+            .create_run(namespace, policy, estimated_candidates);
+        let mut handle = MaintenanceJobHandle::new(run, estimated_candidates.max(1) + 1);
+
+        loop {
+            let snapshot = handle.poll();
+            match snapshot.state {
+                MaintenanceJobState::Completed(_) => {
+                    return self.forgetting.explain_run(handle.operation())
+                }
+                MaintenanceJobState::Running { .. } => continue,
+                other => panic!("unexpected forgetting state: {other:?}"),
+            }
+        }
+    }
+
+    /// Returns append-only audit rows for one bounded forgetting pass.
+    pub fn summarize_forgetting_audit(
+        &self,
+        namespace: NamespaceId,
+        policy: ForgettingPolicy,
+        estimated_candidates: u32,
+    ) -> Vec<AuditLogEntry> {
+        use crate::engine::maintenance::{MaintenanceJobHandle, MaintenanceJobState};
+
+        let run = self
+            .forgetting
+            .create_run(namespace, policy, estimated_candidates);
+        let mut handle = MaintenanceJobHandle::new(run, estimated_candidates.max(1) + 1);
+
+        loop {
+            let snapshot = handle.poll();
+            match snapshot.state {
+                MaintenanceJobState::Completed(_) => {
+                    return self.forgetting.append_only_audit_entries(handle.operation())
+                }
+                MaintenanceJobState::Running { .. } => continue,
+                other => panic!("unexpected forgetting state: {other:?}"),
+            }
+        }
+    }
+
     /// Returns the shared repair surface owned by the core crate.
     pub fn repair_engine(&self) -> &RepairEngine {
         &self.repair
@@ -303,6 +527,8 @@ impl BrainStore {
             session_id,
             prepared.fingerprint,
             &prepared.normalized,
+            None,
+            None,
         )
     }
 
@@ -402,8 +628,9 @@ impl Default for BrainStore {
 mod tests {
     use super::{BrainStore, PreparedTier2Layout};
     use crate::api::NamespaceId;
-    use crate::engine::consolidation::ConsolidationPolicy;
-    use crate::engine::contradiction::ContradictionStore;
+    use crate::engine::consolidation::{ConsolidationPolicy, DerivedArtifactKind};
+    use crate::engine::contradiction::{ContradictionKind, ContradictionStore};
+    use crate::engine::forgetting::ForgettingPolicy;
     use crate::migrate::DurableSchemaObject;
     use crate::observability::Tier1LookupOutcome;
     use crate::store::{
@@ -483,13 +710,39 @@ mod tests {
 
         assert_eq!(summary.groups_evaluated, 2);
         assert_eq!(summary.episode_source_sets, 1);
-        assert_eq!(summary.derivations_emitted, 2);
+        assert_eq!(summary.derivations_emitted, 4);
         assert_eq!(summary.derivation_partial_failures, 0);
-        assert_eq!(summary.derived_artifacts.len(), 2);
+        assert_eq!(summary.derived_artifacts.len(), 4);
         assert_eq!(summary.derivation_failures.len(), 0);
+        assert!(summary.failure_artifacts.is_empty());
+        assert_eq!(
+            summary.derived_artifacts[0].kind,
+            DerivedArtifactKind::Summary
+        );
+        assert_eq!(summary.derived_artifacts[1].kind, DerivedArtifactKind::Fact);
+        assert_eq!(summary.derived_artifacts[2].kind, DerivedArtifactKind::Gist);
+        assert_eq!(
+            summary.derived_artifacts[3].kind,
+            DerivedArtifactKind::Relation
+        );
         assert_eq!(
             summary.derived_artifacts[0].source_ids,
             vec![MemoryId(1), MemoryId(2)]
+        );
+        assert_eq!(
+            summary.derived_artifacts[0].source_citations,
+            vec![
+                crate::engine::consolidation::DerivedSourceCitation {
+                    memory_id: MemoryId(1),
+                    source_ref: "memory://tests/consolidation/1".to_string(),
+                    timestamp_ms: 900_000,
+                },
+                crate::engine::consolidation::DerivedSourceCitation {
+                    memory_id: MemoryId(2),
+                    source_ref: "memory://tests/consolidation/2".to_string(),
+                    timestamp_ms: 1_020_000,
+                }
+            ]
         );
         assert_eq!(
             summary.derived_artifacts[0].continuity_keys,
@@ -502,9 +755,50 @@ mod tests {
                 "entity_overlap"
             ]
         );
+        assert_eq!(
+            summary.derived_artifacts[0].provenance.source_kind,
+            "consolidation"
+        );
+        assert_eq!(
+            summary.derived_artifacts[0].provenance.source_ref,
+            "consolidation://tests/consolidation/episode_1_session_cluster_1_2#summary"
+        );
+        assert_eq!(
+            summary.derived_artifacts[0].explain.derivation_rule,
+            "episode_summary"
+        );
+        assert_eq!(summary.derived_artifacts[0].explain.status, "complete");
+        assert!(summary.derived_artifacts[0].explain.confidence >= 700);
+        assert_eq!(
+            summary.derived_artifacts[0].provenance.derived_from,
+            vec![MemoryId(1), MemoryId(2)]
+        );
+        assert_eq!(
+            summary.derived_artifacts[0].provenance.lineage_ancestors,
+            vec![MemoryId(1), MemoryId(2)]
+        );
         assert!(summary.derived_artifacts[0]
             .content
             .contains("summary(session_cluster)"));
+        assert!(summary.derived_artifacts[1]
+            .content
+            .contains("fact(session_cluster)"));
+        assert_eq!(
+            summary.derived_artifacts[1].explain.derivation_rule,
+            "fact_extraction"
+        );
+        assert_eq!(summary.derived_artifacts[1].explain.status, "complete");
+        assert!(summary.derived_artifacts[3].content.contains(
+            "relation(session_cluster): namespace=tests/consolidation relation=shared_topic"
+        ));
+        assert!(summary.derived_artifacts[3]
+            .content
+            .contains("status=reinforced"));
+        assert_eq!(
+            summary.derived_artifacts[3].explain.derivation_rule,
+            "relation_reinforcement"
+        );
+        assert_eq!(summary.derived_artifacts[3].explain.status, "reinforced");
         assert!(summary.derivation_failures.is_empty());
     }
 
@@ -526,6 +820,111 @@ mod tests {
         assert_eq!(summary.derivations_emitted, 0);
         assert!(summary.derived_artifacts.is_empty());
         assert!(summary.derivation_failures.is_empty());
+        assert!(summary.failure_artifacts.is_empty());
+    }
+
+    #[test]
+    fn summarize_forgetting_pass_exposes_archive_not_delete_semantics() {
+        let store = BrainStore::default();
+        let summary = store.summarize_forgetting_pass(
+            NamespaceId::new("tests/forgetting").unwrap(),
+            ForgettingPolicy {
+                batch_size: 2,
+                ..Default::default()
+            },
+            2,
+        );
+
+        assert_eq!(summary.evaluated, 2);
+        assert_eq!(summary.archived, 0);
+        assert_eq!(summary.demoted, 0);
+        assert_eq!(summary.policy_deleted, 0);
+        assert_eq!(summary.skipped, 2);
+        assert_eq!(summary.review_required, 0);
+        assert_eq!(summary.audit_records.len(), 2);
+        assert_eq!(summary.audit_records[0].action, crate::engine::forgetting::ForgettingAction::Skip);
+        assert_eq!(summary.audit_records[0].audit_kind, "maintenance_forgetting_evaluated");
+    }
+
+    #[test]
+    fn summarize_forgetting_reversibility_reports_archive_restore_requirement() {
+        let store = BrainStore::default();
+        let reversibility = store.summarize_forgetting_reversibility(
+            NamespaceId::new("tests/forgetting-reversibility").unwrap(),
+            ForgettingPolicy {
+                batch_size: 1,
+                ..Default::default()
+            },
+            1,
+        );
+
+        assert_eq!(reversibility.total, 1);
+        assert_eq!(reversibility.reversible, 0);
+        assert_eq!(reversibility.restore_required, 0);
+        assert_eq!(reversibility.irreversible, 0);
+        assert_eq!(reversibility.no_action, 1);
+        assert_eq!(reversibility.review_required, 0);
+    }
+
+    #[test]
+    fn summarize_forgetting_reversibility_reports_restore_required_for_archive_candidates() {
+        let store = BrainStore::default();
+        let reversibility = store.summarize_forgetting_reversibility(
+            NamespaceId::new("tests/forgetting-archive-reversibility").unwrap(),
+            ForgettingPolicy {
+                forget_score_threshold: 600,
+                batch_size: 1,
+                ..Default::default()
+            },
+            1,
+        );
+
+        assert_eq!(reversibility.total, 1);
+        assert_eq!(reversibility.reversible, 0);
+        assert_eq!(reversibility.restore_required, 1);
+        assert_eq!(reversibility.irreversible, 0);
+        assert_eq!(reversibility.no_action, 0);
+        assert_eq!(reversibility.review_required, 0);
+    }
+
+    #[test]
+    fn summarize_forgetting_explain_exposes_operator_review_fields() {
+        let store = BrainStore::default();
+        let explain = store.summarize_forgetting_explain(
+            NamespaceId::new("tests/forgetting-explain").unwrap(),
+            ForgettingPolicy {
+                batch_size: 1,
+                ..Default::default()
+            },
+            1,
+        );
+
+        assert_eq!(explain.evaluated, 1);
+        assert_eq!(explain.entries.len(), 1);
+        assert_eq!(explain.entries[0].reason_code, "ineligible_or_retained");
+        assert_eq!(explain.entries[0].disposition, "ineligible");
+        assert_eq!(explain.entries[0].audit_kind, "maintenance_forgetting_evaluated");
+        assert_eq!(explain.review_count, 0);
+    }
+
+    #[test]
+    fn summarize_forgetting_audit_returns_append_only_rows() {
+        let store = BrainStore::default();
+        let rows = store.summarize_forgetting_audit(
+            NamespaceId::new("tests/forgetting-audit").unwrap(),
+            ForgettingPolicy {
+                forget_score_threshold: 600,
+                batch_size: 1,
+                ..Default::default()
+            },
+            1,
+        );
+
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].kind, crate::observability::AuditEventKind::MaintenanceForgettingEvaluated);
+        assert_eq!(rows[0].memory_id, Some(MemoryId(1)));
+        assert!(rows[0].detail.contains("action=archive"));
+        assert!(rows[0].detail.contains("reason_code=below_forget_threshold"));
     }
 
     #[test]
@@ -811,6 +1210,67 @@ mod tests {
             store.contradiction_engine().count_in_namespace(&namespace),
             1
         );
+    }
+
+    #[test]
+    fn record_encode_contradiction_populates_belief_history_surface() {
+        let mut store = BrainStore::default();
+        let namespace = NamespaceId::new("tests/belief-history").unwrap();
+
+        store.contradiction_engine_mut().register_memory(
+            namespace.clone(),
+            MemoryId(10),
+            101,
+            "deployment target is prod-a".into(),
+        );
+        store.contradiction_engine_mut().register_memory(
+            namespace.clone(),
+            MemoryId(20),
+            202,
+            "deployment target is prod-b".into(),
+        );
+
+        let outcome = store
+            .record_encode_contradiction(
+                namespace.clone(),
+                MemoryId(10),
+                MemoryId(20),
+                ContradictionKind::Supersession,
+                880,
+            )
+            .unwrap();
+
+        let chain = store
+            .belief_history_engine()
+            .chain_for_contradiction(outcome.contradiction_id)
+            .unwrap();
+        assert_eq!(chain.primary_memory_id, MemoryId(10));
+        assert_eq!(chain.current_version().memory_id, MemoryId(20));
+        assert_eq!(
+            chain.current_version().content_snapshot,
+            "deployment target is prod-b"
+        );
+
+        let timeline = store.belief_timeline_for_memory(&MemoryId(20)).unwrap();
+        assert_eq!(timeline.preferred_memory_id, MemoryId(20));
+        assert_eq!(timeline.resolution_state, "superseded");
+        assert_eq!(timeline.conflicts, 1);
+        assert_eq!(timeline.versions.len(), 2);
+        assert_eq!(timeline.versions[1].conflict_state, "superseded");
+
+        let resolution = store.belief_resolution_for_memory(&MemoryId(20)).unwrap();
+        assert_eq!(resolution.current_memory_id, MemoryId(20));
+        assert_eq!(resolution.conflict_state, "superseded");
+
+        let history = store
+            .belief_history_explain_for_memory(&MemoryId(20))
+            .unwrap();
+        assert_eq!(history.len(), 2);
+        assert_eq!(history[1].contradiction_id, Some(outcome.contradiction_id));
+
+        let by_query = store.belief_history_for_query("prod-b").unwrap();
+        assert_eq!(by_query.chain_id, chain.chain_id);
+        assert!(store.open_belief_conflicts().is_empty());
     }
 
     #[test]

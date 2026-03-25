@@ -2,16 +2,16 @@
 //!
 //! Computes uncertainty scores from explicit evidence inputs rather than
 //! treating confidence as a single opaque number. Each sub-component
-//! (corroboration, freshness, contradiction, missing evidence) contributes
-//! to a combined uncertainty score, with optional interval bounds for
-//! high-stakes paths.
+//! (corroboration, reconsolidation churn, freshness, contradiction, missing
+//! evidence) contributes to a combined uncertainty score, with optional
+//! interval bounds for high-stakes paths.
 
 use crate::engine::contradiction::ResolutionState;
 
 // ── Uncertainty bounds ───────────────────────────────────────────────────────
 
 /// Confidence interval bounds for high-stakes retrieval paths.
-#[derive(Debug, Clone, Copy, PartialEq, serde::Serialize, serde::Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct UncertaintyBounds {
     /// Lower bound of the confidence interval (0..=1000).
     pub lower: u16,
@@ -52,10 +52,12 @@ impl UncertaintyBounds {
 // ── Confidence inputs ────────────────────────────────────────────────────────
 
 /// Evidence inputs used to compute a confidence score.
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct ConfidenceInputs {
     /// Number of memories that corroborate this belief.
     pub corroboration_count: u32,
+    /// Number of times the memory has been reconsolidated.
+    pub reconsolidation_count: u32,
     /// Number of ticks since last access.
     pub ticks_since_last_access: u64,
     /// Number of ticks since encoding.
@@ -77,6 +79,7 @@ impl ConfidenceInputs {
     pub fn fresh() -> Self {
         Self {
             corroboration_count: 0,
+            reconsolidation_count: 0,
             ticks_since_last_access: 0,
             age_ticks: 0,
             resolution_state: ResolutionState::None,
@@ -91,12 +94,14 @@ impl ConfidenceInputs {
 // ── Confidence output ────────────────────────────────────────────────────────
 
 /// Computed confidence and uncertainty from evidence inputs.
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct ConfidenceOutput {
     /// Combined uncertainty score (0..1000, lower = more certain).
     pub uncertainty_score: u16,
     /// Uncertainty from lack of corroboration.
     pub corroboration_uncertainty: u16,
+    /// Uncertainty from reconsolidation churn.
+    pub reconsolidation_uncertainty: u16,
     /// Uncertainty from temporal staleness.
     pub freshness_uncertainty: u16,
     /// Uncertainty from active contradiction.
@@ -112,12 +117,16 @@ pub struct ConfidenceOutput {
 // ── Confidence policy ────────────────────────────────────────────────────────
 
 /// Policy controlling how uncertainty components are weighted.
-#[derive(Debug, Clone, Copy, PartialEq)]
+#[derive(Debug, Clone, Copy, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct ConfidencePolicy {
     /// Maximum ticks before freshness uncertainty reaches cap.
     pub freshness_decay_ticks: u64,
+    /// Maximum reconsolidation count before churn uncertainty reaches cap.
+    pub reconsolidation_cap: u32,
     /// Weight of corroboration in combined uncertainty (0..1).
     pub corroboration_weight: f32,
+    /// Weight of reconsolidation churn in combined uncertainty (0..1).
+    pub reconsolidation_weight: f32,
     /// Weight of freshness in combined uncertainty (0..1).
     pub freshness_weight: f32,
     /// Weight of contradiction in combined uncertainty (0..1).
@@ -134,9 +143,11 @@ impl Default for ConfidencePolicy {
     fn default() -> Self {
         Self {
             freshness_decay_ticks: 1000,
-            corroboration_weight: 0.25,
-            freshness_weight: 0.25,
-            contradiction_weight: 0.30,
+            reconsolidation_cap: 16,
+            corroboration_weight: 0.20,
+            reconsolidation_weight: 0.15,
+            freshness_weight: 0.20,
+            contradiction_weight: 0.25,
             missing_evidence_weight: 0.20,
             compute_intervals: true,
             interval_spread_factor: 0.15,
@@ -163,12 +174,15 @@ impl ConfidenceEngine {
         policy: &ConfidencePolicy,
     ) -> ConfidenceOutput {
         let corroboration = self.corroboration_uncertainty(inputs.corroboration_count);
+        let reconsolidation =
+            self.reconsolidation_uncertainty(inputs.reconsolidation_count, policy);
         let freshness = self.freshness_uncertainty(inputs.ticks_since_last_access, policy);
         let contradiction = self.contradiction_uncertainty(inputs);
         let missing_evidence = self.missing_evidence_uncertainty(inputs);
 
         let combined = self.combined_uncertainty(
             corroboration,
+            reconsolidation,
             freshness,
             contradiction,
             missing_evidence,
@@ -187,6 +201,7 @@ impl ConfidenceEngine {
         ConfidenceOutput {
             uncertainty_score: combined,
             corroboration_uncertainty: corroboration,
+            reconsolidation_uncertainty: reconsolidation,
             freshness_uncertainty: freshness,
             contradiction_uncertainty: contradiction,
             missing_evidence_uncertainty: missing_evidence,
@@ -209,6 +224,22 @@ impl ConfidenceEngine {
             6..=10 => 100,
             _ => 50,
         }
+    }
+
+    /// Computes reconsolidation uncertainty (0..1000).
+    ///
+    /// Reconsolidation churn lowers reliability while keeping strength independent.
+    fn reconsolidation_uncertainty(
+        &self,
+        reconsolidation_count: u32,
+        policy: &ConfidencePolicy,
+    ) -> u16 {
+        if policy.reconsolidation_cap == 0 {
+            return 0;
+        }
+        let capped = reconsolidation_count.min(policy.reconsolidation_cap) as f32;
+        let normalized = capped / policy.reconsolidation_cap as f32;
+        (normalized.sqrt() * 1000.0) as u16
     }
 
     /// Computes freshness uncertainty (0..1000).
@@ -279,12 +310,14 @@ impl ConfidenceEngine {
     fn combined_uncertainty(
         &self,
         corroboration: u16,
+        reconsolidation: u16,
         freshness: u16,
         contradiction: u16,
         missing_evidence: u16,
         policy: &ConfidencePolicy,
     ) -> u16 {
         let total_weight = policy.corroboration_weight
+            + policy.reconsolidation_weight
             + policy.freshness_weight
             + policy.contradiction_weight
             + policy.missing_evidence_weight;
@@ -294,6 +327,7 @@ impl ConfidenceEngine {
         }
 
         let weighted = corroboration as f32 * policy.corroboration_weight
+            + reconsolidation as f32 * policy.reconsolidation_weight
             + freshness as f32 * policy.freshness_weight
             + contradiction as f32 * policy.contradiction_weight
             + missing_evidence as f32 * policy.missing_evidence_weight;
@@ -348,6 +382,22 @@ mod tests {
 
         assert!(stale.freshness_uncertainty > fresh.freshness_uncertainty);
         assert!(stale.confidence < fresh.confidence);
+    }
+
+    #[test]
+    fn reconsolidation_churn_reduces_confidence_without_touching_other_inputs() {
+        let engine = ConfidenceEngine;
+        let policy = ConfidencePolicy::default();
+
+        let mut inputs = ConfidenceInputs::fresh();
+        inputs.reconsolidation_count = 0;
+        let stable = engine.compute(&inputs, &policy);
+
+        inputs.reconsolidation_count = 9;
+        let churned = engine.compute(&inputs, &policy);
+
+        assert!(churned.reconsolidation_uncertainty > stable.reconsolidation_uncertainty);
+        assert!(churned.confidence < stable.confidence);
     }
 
     #[test]

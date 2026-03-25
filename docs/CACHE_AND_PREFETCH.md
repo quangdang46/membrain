@@ -36,6 +36,7 @@ Every cache, sidecar, warm layer, and prefetch queue in retrieval is a bounded d
 - online repair may repopulate caches while foreground reads continue, but slower durable-truth reads are preferable to semantically different warmed results
 - rebuild must bind fresh generation anchors before a cache is eligible for reuse again after repair, rebuild, or migration
 - if a cache cannot explain its ownership boundaries, stale state, or fallback behavior, it should be treated as not production-ready
+- cache warm-state repair should keep named operator hooks for both verify-only parity checks (`snapshot_current_generation_anchors`, `verify_generation_anchor_report`) and rebuild flows (`invalidate_cache_families`, `drop_prefetch_hints`, `rebuild_tier1_item_cache`, `rebuild_result_cache`, `rebuild_summary_cache`, `rebuild_ann_probe_cache`, `verify_generation_anchor_report`) so regression suites can prove which maintenance path ran
 
 ### Prefetch and warmup boundaries
 - prefetch hints are speculative, owner-bound handles or shortlists keyed to the current session or task intent; they are optional, budget-bounded, and cancelable when user intent changes

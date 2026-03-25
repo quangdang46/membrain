@@ -1,17 +1,28 @@
-use clap::{Parser, Subcommand};
+use clap::{ArgAction, Parser, Subcommand};
 use membrain_core::api::{
-    AvailabilityReason, AvailabilitySummary, CacheMetricsSummary, ConflictMarker, FreshnessMarker,
-    NamespaceId, RemediationStep, RequestId, ResponseContext, TraceOmissionSummary,
-    TracePolicySummary, TraceProvenanceSummary, TraceScoreComponent, TraceStage, UncertaintyMarker,
+    AvailabilityReason, AvailabilitySummary, CacheMetricsSummary, ConflictMarker, FieldPresence,
+    FreshnessMarker, NamespaceId, PassiveObservationInspectSummary, RemediationStep, RequestId,
+    ResponseContext, ResponseWarning, TraceOmissionSummary, TracePolicySummary,
+    TraceProvenanceSummary, TraceScoreComponent, TraceStage, UncertaintyMarker,
+};
+use membrain_core::engine::confidence::{ConfidenceInputs, ConfidencePolicy};
+use membrain_core::engine::context_budget::{
+    ContextBudgetRequest, ContextBudgetResponse, InjectionFormat,
 };
 use membrain_core::engine::maintenance::{
     MaintenanceController, MaintenanceJobHandle, MaintenanceJobState,
 };
-use membrain_core::engine::ranking::{fuse_scores, RankingInput, RankingProfile};
+use membrain_core::engine::observe::{ObserveConfig, ObserveEngine};
+use membrain_core::engine::ranking::{
+    fuse_scores, ConfidenceDisplayConfig, ConfidenceExplain, RankingInput, RankingProfile,
+};
 use membrain_core::engine::recall::RecallRuntime;
 use membrain_core::engine::repair::{IndexRepairEntrypoint, RepairTarget};
 use membrain_core::engine::result::{
     AnsweredFrom, ResultBuilder, RetrievalExplain, RetrievalResultSet,
+};
+use membrain_core::engine::retrieval_planner::{
+    RetrievalPlanTrace, RetrievalRequest, RetrievalRequestValidationError,
 };
 use membrain_core::health::{BrainHealthInputs, BrainHealthReport, FeatureAvailabilityEntry};
 use membrain_core::index::{IndexApi, IndexModule};
@@ -21,9 +32,17 @@ use membrain_core::store::audit::{
 };
 use membrain_core::store::cache::CacheManager;
 use membrain_core::store::hot::Tier1HotMetadataStore;
-use membrain_core::types::{MemoryId, RawEncodeInput, RawIntakeKind, SessionId, Tier1HotRecord};
+use membrain_core::types::{
+    CanonicalMemoryType, MemoryId, RawEncodeInput, RawIntakeKind, SessionId, Tier1HotRecord,
+};
 use membrain_core::{BrainStore, RuntimeConfig};
 use membrain_daemon::daemon::{DaemonRuntime, DaemonRuntimeConfig};
+use membrain_daemon::preflight::{
+    evaluate_preflight as evaluate_shared_preflight,
+    to_preflight_explain_response as to_shared_preflight_explain_response,
+    to_preflight_outcome as to_shared_preflight_outcome, EvaluatedPreflight,
+    PreflightExplainResponse, PreflightOutcome,
+};
 use membrain_daemon::rpc::{RuntimeMetrics, RuntimePosture, RuntimeStatus};
 use serde::Serialize;
 use std::path::PathBuf;
@@ -35,6 +54,9 @@ static NEXT_MEMORY_ID: AtomicU64 = AtomicU64::new(1);
 
 /// Global session ID for CLI-local session.
 static SESSION_ID: AtomicU64 = AtomicU64::new(1);
+
+/// Global preflight correlation ID for CLI-local session.
+static NEXT_PREFLIGHT_ID: AtomicU64 = AtomicU64::new(1);
 
 /// Local record kept for CLI-session recall and inspect.
 #[derive(Debug, Clone)]
@@ -48,6 +70,10 @@ struct LocalMemoryRecord {
     provisional_salience: u16,
     fingerprint: u64,
     payload_size_bytes: usize,
+    is_landmark: bool,
+    landmark_label: Option<String>,
+    era_id: Option<String>,
+    passive_observation: Option<PassiveObservationInspectSummary>,
 }
 
 impl LocalMemoryRecord {
@@ -71,6 +97,66 @@ impl LocalMemoryRecord {
 struct Cli {
     #[command(subcommand)]
     command: Commands,
+}
+
+#[derive(Parser, Debug, Clone)]
+struct SharedOutputFlags {
+    /// Emit machine-readable output for the same semantic result shown in text mode.
+    #[arg(long, global = true, action = ArgAction::SetTrue)]
+    json: bool,
+    /// Suppress non-essential human-oriented narration.
+    #[arg(long, short = 'q', global = true, action = ArgAction::SetTrue)]
+    quiet: bool,
+    /// Add detail without changing the underlying result semantics.
+    #[arg(long, short = 'v', global = true, action = ArgAction::Count)]
+    verbose: u8,
+}
+
+#[derive(Subcommand, Debug)]
+enum DoctorCommands {
+    /// Run the read-only diagnosis surface.
+    Run,
+}
+
+#[derive(Subcommand, Debug)]
+enum PreflightCommands {
+    /// Evaluate whether the requested scope is ready to proceed.
+    Run {
+        #[arg(long)]
+        namespace: String,
+        #[arg(long = "original-query")]
+        original_query: String,
+        #[arg(long = "proposed-action")]
+        proposed_action: String,
+        #[command(flatten)]
+        output: SharedOutputFlags,
+    },
+    /// Explain blocked, preview-only, or degraded safeguard state.
+    Explain {
+        #[arg(long)]
+        namespace: String,
+        #[arg(long = "original-query")]
+        original_query: String,
+        #[arg(long = "proposed-action")]
+        proposed_action: String,
+        #[command(flatten)]
+        output: SharedOutputFlags,
+    },
+    /// Confirm local intent for the exact preflighted scope.
+    Allow {
+        #[arg(long)]
+        namespace: String,
+        #[arg(long = "original-query")]
+        original_query: String,
+        #[arg(long = "proposed-action")]
+        proposed_action: String,
+        #[arg(long = "authorization-token")]
+        authorization_token: String,
+        #[arg(long = "bypass-flag", action = ArgAction::Append)]
+        bypass_flags: Vec<String>,
+        #[command(flatten)]
+        output: SharedOutputFlags,
+    },
 }
 
 #[derive(Subcommand, Debug)]
@@ -101,17 +187,16 @@ enum Commands {
         /// Source tag: cli, mcp, api
         #[arg(long, default_value = "cli")]
         source: String,
-        /// Emit JSON instead of human-readable text
-        #[arg(long, default_value_t = false)]
-        json: bool,
+        #[command(flatten)]
+        output: SharedOutputFlags,
     },
     /// Recall memories matching a query
     Recall {
-        /// Query string to match
-        query: String,
+        /// Query string to match. May be omitted when --like or --unlike supplies the primary cue.
+        query: Option<String>,
         /// Namespace to search in
-        #[arg(long, default_value = "default")]
-        namespace: String,
+        #[arg(long)]
+        namespace: Option<String>,
         /// Maximum number of results to return
         #[arg(long, short = 'n', visible_short_alias = 't', default_value_t = 5)]
         top: usize,
@@ -127,9 +212,41 @@ enum Commands {
         /// Explain verbosity: none, summary, full
         #[arg(long, default_value = "summary")]
         explain: String,
-        /// Emit JSON instead of human-readable text
+        /// Query-by-example cue via like_id.
+        #[arg(long = "like")]
+        like: Option<u64>,
+        /// Query-by-example cue via unlike_id.
+        #[arg(long = "unlike")]
+        unlike: Option<u64>,
+        /// Widen only to policy-approved shared/public surfaces.
         #[arg(long, default_value_t = false)]
-        json: bool,
+        include_public: bool,
+        /// Force graph_mode=off.
+        #[arg(long, default_value_t = false)]
+        no_engram: bool,
+        /// Time-travel using as_of_tick.
+        #[arg(long = "as-of")]
+        as_of: Option<u64>,
+        /// Historical recall at named snapshot.
+        #[arg(long)]
+        at: Option<String>,
+        /// Filter recall to one explicit temporal era in the effective namespace.
+        #[arg(long)]
+        era: Option<String>,
+        /// Minimum confidence score.
+        #[arg(long = "min-confidence")]
+        min_confidence: Option<f32>,
+        /// Minimum effective strength.
+        #[arg(long = "min-strength")]
+        min_strength: Option<f32>,
+        /// Include memories near decay threshold.
+        #[arg(long = "show-decaying", default_value_t = false)]
+        show_decaying: bool,
+        /// Cold-tier routing hint: avoid, auto, allow.
+        #[arg(long = "cold-tier", default_value = "auto")]
+        cold_tier: String,
+        #[command(flatten)]
+        output: SharedOutputFlags,
     },
     /// Inspect a specific memory or entity by ID
     Inspect {
@@ -139,9 +256,8 @@ enum Commands {
         /// Namespace of the memory
         #[arg(long, short = 'n', default_value = "default")]
         namespace: String,
-        /// Emit JSON instead of human-readable text
-        #[arg(long, default_value_t = false)]
-        json: bool,
+        #[command(flatten)]
+        output: SharedOutputFlags,
     },
     /// Explain the ranking and routing path for a recall query
     #[command(name = "why", visible_alias = "explain")]
@@ -151,9 +267,8 @@ enum Commands {
         /// Namespace to explain over
         #[arg(long, short = 'n', default_value = "default")]
         namespace: String,
-        /// Emit JSON instead of human-readable text
-        #[arg(long, default_value_t = false)]
-        json: bool,
+        #[command(flatten)]
+        output: SharedOutputFlags,
     },
     /// Run maintenance tasks (repair, reclaim, metrics)
     Maintenance {
@@ -163,9 +278,8 @@ enum Commands {
         /// Scope of maintenance
         #[arg(long)]
         namespace: Option<String>,
-        /// Emit JSON instead of text
-        #[arg(long, default_value_t = false)]
-        json: bool,
+        #[command(flatten)]
+        output: SharedOutputFlags,
     },
     /// Run core performance and correctness benchmarks
     Benchmark {
@@ -175,12 +289,21 @@ enum Commands {
         /// Number of iterations
         #[arg(long, default_value_t = 100)]
         iters: usize,
-        /// Emit JSON instead of text
-        #[arg(long, default_value_t = false)]
-        json: bool,
+        #[command(flatten)]
+        output: SharedOutputFlags,
     },
     /// Validate system configuration and index health
-    Doctor,
+    Doctor {
+        #[command(subcommand)]
+        command: Option<DoctorCommands>,
+        #[command(flatten)]
+        output: SharedOutputFlags,
+    },
+    /// Run shared safeguard checks for risky actions.
+    Preflight {
+        #[command(subcommand)]
+        command: PreflightCommands,
+    },
     /// Query and export bounded audit history slices
     Audit {
         /// Namespace to inspect
@@ -201,9 +324,8 @@ enum Commands {
         /// Optional tail count after filtering
         #[arg(long)]
         recent: Option<usize>,
-        /// Emit JSON instead of text
-        #[arg(long, default_value_t = false)]
-        json: bool,
+        #[command(flatten)]
+        output: SharedOutputFlags,
     },
     /// Share a memory into an approved namespace scope
     Share {
@@ -213,9 +335,8 @@ enum Commands {
         /// Target namespace for approved sharing
         #[arg(long = "namespace")]
         namespace_id: String,
-        /// Emit JSON instead of text
-        #[arg(long, default_value_t = false)]
-        json: bool,
+        #[command(flatten)]
+        output: SharedOutputFlags,
     },
     /// Tighten a shared memory back to private visibility
     Unshare {
@@ -225,9 +346,68 @@ enum Commands {
         /// Canonical namespace that retains ownership
         #[arg(long, short = 'n', default_value = "default")]
         namespace: String,
-        /// Emit JSON instead of text
+        #[command(flatten)]
+        output: SharedOutputFlags,
+    },
+    /// Pack a ready-to-inject context window from bounded recall results
+    Budget {
+        /// Hard token budget for the packed output
+        #[arg(long = "tokens")]
+        token_budget: usize,
+        /// Optional query string used to build the bounded shortlist
+        query: Option<String>,
+        /// Namespace to search in
+        #[arg(long)]
+        namespace: Option<String>,
+        /// Current context; sharpens the bounded shortlist before packing
+        #[arg(long, short = 'c')]
+        context: Option<String>,
+        /// Output rendering: plain, markdown, json
+        #[arg(long, default_value = "plain")]
+        format: String,
+        /// Maximum shortlist size before token packing
+        #[arg(long, short = 'n', visible_short_alias = 't', default_value_t = 5)]
+        top: usize,
+        /// Widen only to policy-approved shared/public surfaces.
         #[arg(long, default_value_t = false)]
-        json: bool,
+        include_public: bool,
+        #[command(flatten)]
+        output: SharedOutputFlags,
+    },
+    /// Segment piped or watched content into passive-observation memories.
+    Observe {
+        /// Read from stdin and segment the supplied content into bounded fragments.
+        #[arg(value_name = "CONTENT")]
+        content: Option<String>,
+        /// Namespace for the observed fragments.
+        #[arg(long, short = 'n', default_value = "default")]
+        namespace: String,
+        /// Optional context attached to each observed fragment.
+        #[arg(long, short = 'c')]
+        context: Option<String>,
+        /// Deterministic chunk-size hint in characters.
+        #[arg(long = "chunk-size", default_value_t = 500)]
+        chunk_size: usize,
+        /// Topic-shift threshold in the range 0.0..=1.0.
+        #[arg(long = "topic-threshold", default_value_t = 0.35)]
+        topic_threshold: f32,
+        /// Minimum chunk size before a boundary can flush.
+        #[arg(long = "min-chunk-size", default_value_t = 50)]
+        min_chunk_size: usize,
+        /// Provenance-only source label preserved on each fragment.
+        #[arg(long = "source-label")]
+        source_label: Option<String>,
+        /// Preview the fragments without writing memories.
+        #[arg(long = "dry-run", default_value_t = false)]
+        dry_run: bool,
+        /// Watch one file or directory path instead of stdin.
+        #[arg(long)]
+        watch: Option<PathBuf>,
+        /// Optional watch-mode glob/pattern hint preserved in output.
+        #[arg(long)]
+        pattern: Option<String>,
+        #[command(flatten)]
+        output: SharedOutputFlags,
     },
     /// Run the local daemon inside the CLI process
     Daemon {
@@ -276,6 +456,39 @@ struct InspectOutput {
     payload_state: &'static str,
     is_landmark: bool,
     session_id: u64,
+    passive_observation: Option<PassiveObservationInspectSummary>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+struct ObservePreviewFragment {
+    index: usize,
+    write_decision: &'static str,
+    captured_as_observation: bool,
+    compact_text: String,
+    fingerprint: u64,
+    route_family: &'static str,
+    observation_source: String,
+    observation_chunk_id: String,
+}
+
+#[derive(Debug, Clone, Serialize)]
+struct ObserveOutput {
+    outcome: &'static str,
+    namespace: String,
+    watch_mode: bool,
+    watched_path: Option<String>,
+    pattern: Option<String>,
+    dry_run: bool,
+    observation_source: String,
+    observation_chunk_id: String,
+    bytes_processed: usize,
+    topic_shifts: usize,
+    fragments_previewed: usize,
+    memories_created: usize,
+    suppressed: usize,
+    denied: usize,
+    context: Option<String>,
+    preview: Vec<ObservePreviewFragment>,
 }
 
 // ── Shared helper types ──────────────────────────────────────────────────────
@@ -287,6 +500,19 @@ struct RepairResultOutput {
     verification_passed: bool,
     rebuild_entrypoint: Option<&'static str>,
     rebuilt_outputs: Vec<&'static str>,
+    durable_sources: Vec<&'static str>,
+    verification_artifact_name: &'static str,
+    parity_check: &'static str,
+    authoritative_rows: u64,
+    derived_rows: u64,
+    authoritative_generation: &'static str,
+    derived_generation: &'static str,
+    affected_item_count: u32,
+    error_count: u32,
+    rebuild_duration_ms: u64,
+    rollback_state: Option<&'static str>,
+    queue_depth_before: u32,
+    queue_depth_after: u32,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize)]
@@ -296,6 +522,12 @@ struct MaintenanceOutput {
     namespace: String,
     targets_checked: u32,
     rebuilt: u32,
+    affected_item_count: u32,
+    error_count: u32,
+    rebuild_duration_ms: u64,
+    rollback_state: Option<&'static str>,
+    queue_depth_before: u32,
+    queue_depth_after: u32,
     results: Vec<RepairResultOutput>,
     warnings: Vec<&'static str>,
 }
@@ -337,6 +569,22 @@ struct AuditExport {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+struct ShareAuditView {
+    event_kind: &'static str,
+    actor_source: &'static str,
+    request_id: String,
+    effective_namespace: String,
+    source_namespace: Option<String>,
+    target_namespace: Option<String>,
+    policy_family: &'static str,
+    outcome_class: &'static str,
+    blocked_stage: &'static str,
+    redaction_summary: Vec<String>,
+    related_run: Option<String>,
+    redacted: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 struct ShareOutput {
     outcome: &'static str,
     memory_id: u64,
@@ -344,6 +592,7 @@ struct ShareOutput {
     visibility: &'static str,
     policy_summary: TracePolicySummary,
     policy_filters_applied: Vec<membrain_core::api::PolicyFilterSummary>,
+    audit: ShareAuditView,
     audit_rows: Vec<AuditRow>,
 }
 
@@ -363,6 +612,19 @@ struct RepairReportRow {
     verification_passed: bool,
     rebuild_entrypoint: Option<&'static str>,
     rebuilt_outputs: Vec<&'static str>,
+    durable_sources: Vec<&'static str>,
+    verification_artifact_name: &'static str,
+    parity_check: &'static str,
+    authoritative_rows: u64,
+    derived_rows: u64,
+    authoritative_generation: &'static str,
+    derived_generation: &'static str,
+    affected_item_count: u32,
+    error_count: u32,
+    rebuild_duration_ms: u64,
+    rollback_state: Option<&'static str>,
+    queue_depth_before: u32,
+    queue_depth_after: u32,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize)]
@@ -413,6 +675,174 @@ fn intent_confidence_label(low_confidence_fallback: bool) -> &'static str {
     } else {
         "high"
     }
+}
+
+fn describe_retrieval_validation_error(error: RetrievalRequestValidationError) -> &'static str {
+    match error {
+        RetrievalRequestValidationError::MissingPrimaryCue => {
+            "missing query text or query-by-example cue"
+        }
+        RetrievalRequestValidationError::DuplicateExampleCue(_) => {
+            "like and unlike cues must reference different memories"
+        }
+        RetrievalRequestValidationError::ExactIdWithExampleCue => {
+            "exact-id retrieval cannot be combined with query-by-example cues"
+        }
+    }
+}
+
+#[derive(Debug, Clone)]
+struct RecallCommandConfig {
+    query: Option<String>,
+    context: Option<String>,
+    top: usize,
+    kind: Option<String>,
+    confidence: String,
+    explain: String,
+    namespace: NamespaceId,
+    include_public: bool,
+    like: Option<MemoryId>,
+    unlike: Option<MemoryId>,
+    graph_expansion: bool,
+    as_of: Option<u64>,
+    at: Option<String>,
+    era: Option<String>,
+    min_confidence: Option<f32>,
+    min_strength: Option<f32>,
+    show_decaying: bool,
+    cold_tier: String,
+}
+
+fn validate_recall_command(
+    namespace: Option<&str>,
+    query: Option<&str>,
+    top: usize,
+    kind: Option<&str>,
+    confidence: &str,
+    explain: &str,
+    like: Option<u64>,
+    unlike: Option<u64>,
+    include_public: bool,
+    no_engram: bool,
+    as_of: Option<u64>,
+    at: Option<&str>,
+    era: Option<&str>,
+    min_confidence: Option<f32>,
+    min_strength: Option<f32>,
+    show_decaying: bool,
+    cold_tier: &str,
+    context: Option<&str>,
+) -> anyhow::Result<RecallCommandConfig> {
+    let namespace = namespace.ok_or_else(|| anyhow::anyhow!("missing namespace"))?;
+    let namespace = NamespaceId::new(namespace)?;
+
+    if top == 0 {
+        anyhow::bail!("result budget must be greater than zero");
+    }
+
+    let confidence = confidence.trim().to_lowercase();
+    if !matches!(confidence.as_str(), "fast" | "normal" | "high") {
+        anyhow::bail!(
+            "invalid confidence `{}`; expected fast, normal, or high",
+            confidence
+        );
+    }
+
+    let explain = explain.trim().to_lowercase();
+    if !matches!(explain.as_str(), "none" | "summary" | "full") {
+        anyhow::bail!(
+            "invalid explain verbosity `{}`; expected none, summary, or full",
+            explain
+        );
+    }
+
+    let cold_tier = cold_tier.trim().to_lowercase();
+    if !matches!(cold_tier.as_str(), "avoid" | "auto" | "allow") {
+        anyhow::bail!(
+            "invalid cold-tier `{}`; expected avoid, auto, or allow",
+            cold_tier
+        );
+    }
+
+    if as_of.is_some() && at.is_some() {
+        anyhow::bail!("--as-of and --at cannot be combined");
+    }
+
+    if let Some(value) = min_confidence {
+        if !(0.0..=1.0).contains(&value) {
+            anyhow::bail!("min-confidence must be between 0.0 and 1.0");
+        }
+    }
+
+    if let Some(value) = min_strength {
+        if !(0.0..=1.0).contains(&value) {
+            anyhow::bail!("min-strength must be between 0.0 and 1.0");
+        }
+    }
+
+    let kind = kind.map(|value| value.trim().to_lowercase());
+    if let Some(kind_value) = kind.as_deref() {
+        if !matches!(kind_value, "episodic" | "semantic" | "procedural") {
+            anyhow::bail!(
+                "invalid kind `{}`; expected episodic, semantic, or procedural",
+                kind_value
+            );
+        }
+    }
+
+    let era = era
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(str::to_owned);
+    let at = at
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(str::to_owned);
+    let context = context
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(str::to_owned);
+    let query = query.map(str::to_owned);
+
+    let request =
+        RetrievalRequest::hybrid(namespace.clone(), query.as_deref().unwrap_or_default(), top)
+            .with_budget(top)
+            .with_graph_expansion(false)
+            .with_tier3_fallback(cold_tier != "avoid");
+    let request = if let Some(memory_id) = like.map(MemoryId) {
+        request.with_like_memory(memory_id)
+    } else {
+        request
+    };
+    let request = if let Some(memory_id) = unlike.map(MemoryId) {
+        request.with_unlike_memory(memory_id)
+    } else {
+        request
+    };
+    request
+        .normalize_query_by_example()
+        .map_err(|error| anyhow::anyhow!(describe_retrieval_validation_error(error)))?;
+
+    Ok(RecallCommandConfig {
+        query,
+        context,
+        top,
+        kind,
+        confidence,
+        explain,
+        namespace,
+        include_public,
+        like: like.map(MemoryId),
+        unlike: unlike.map(MemoryId),
+        graph_expansion: !no_engram,
+        as_of,
+        at,
+        era,
+        min_confidence,
+        min_strength,
+        show_decaying,
+        cold_tier,
+    })
 }
 
 type ResponseTraceBundle = (
@@ -537,6 +967,7 @@ fn response_from_result_set(
         conflict_markers,
         uncertainty_markers,
     ) = response_trace_for_result_set(&result_set);
+    let policy_filters = policy_summary.filters.clone();
     let mut response = ResponseContext::success(namespace.clone(), request_id, result_set)
         .with_trace_schema(
             route_summary,
@@ -552,40 +983,94 @@ fn response_from_result_set(
             conflict_markers,
             uncertainty_markers,
         );
+    if !policy_filters.is_empty() {
+        response = response.with_policy_filters(policy_filters);
+    }
     if partial_success {
         response = response.with_partial_success();
     }
     response
 }
 
+fn parse_injection_format(raw: &str) -> anyhow::Result<InjectionFormat> {
+    match raw.trim().to_ascii_lowercase().as_str() {
+        "plain" => Ok(InjectionFormat::Plain),
+        "markdown" => Ok(InjectionFormat::Markdown),
+        "json" => Ok(InjectionFormat::Json),
+        other => anyhow::bail!("invalid format `{other}`; expected plain, markdown, or json"),
+    }
+}
+
+fn build_confidence_inputs(record: &LocalMemoryRecord) -> ConfidenceInputs {
+    ConfidenceInputs {
+        corroboration_count: u32::from((record.provisional_salience / 250).min(4)),
+        reconsolidation_count: u32::from((record.payload_size_bytes / 512).min(16) as u16),
+        ticks_since_last_access: u64::from(record.memory_id.0.saturating_mul(17)),
+        age_ticks: u64::from(record.memory_id.0.saturating_mul(23)),
+        resolution_state: membrain_core::engine::contradiction::ResolutionState::None,
+        conflict_score: 0,
+        causal_parent_count: u32::from((record.payload_size_bytes / 256).clamp(1, 4) as u16),
+        authoritativeness: record.provisional_salience.saturating_add(100).min(1000),
+        recall_count: u32::from((record.memory_id.0 % 6) as u16),
+    }
+}
+
 fn build_retrieval_result_set(
     local_records: &[LocalMemoryRecord],
-    namespace: &NamespaceId,
-    top: usize,
+    config: &RecallCommandConfig,
     ranking_profile: RankingProfile,
     route_family: &'static str,
     route_reason: String,
     matched_ids: Vec<MemoryId>,
 ) -> RetrievalResultSet {
-    let mut builder = ResultBuilder::new(top, namespace.clone());
+    let mut builder = ResultBuilder::new(config.top, config.namespace.clone());
+    let confidence_display = if config.min_confidence.is_some() {
+        ConfidenceDisplayConfig::strict()
+    } else {
+        ConfidenceDisplayConfig::default()
+    };
+    let confidence_policy = ConfidencePolicy::default();
     let matched_empty = matched_ids.is_empty();
     let selected_ids = if matched_empty {
         local_records
             .iter()
-            .filter(|r| r.namespace == *namespace)
+            .filter(|r| r.namespace == config.namespace)
+            .filter(|record| {
+                config
+                    .era
+                    .as_deref()
+                    .is_none_or(|era| record.era_id.as_deref() == Some(era))
+            })
             .rev()
-            .take(top)
+            .take(config.top)
             .map(|r| r.memory_id)
             .collect::<Vec<_>>()
     } else {
         matched_ids
+            .into_iter()
+            .filter(|memory_id| {
+                local_records
+                    .iter()
+                    .find(|r| r.namespace == config.namespace && r.memory_id == *memory_id)
+                    .and_then(|record| {
+                        config
+                            .era
+                            .as_deref()
+                            .map(|era| record.era_id.as_deref() == Some(era))
+                    })
+                    .unwrap_or(true)
+            })
+            .collect::<Vec<_>>()
     };
 
     for memory_id in &selected_ids {
         if let Some(record) = local_records
             .iter()
-            .find(|r| r.namespace == *namespace && r.memory_id == *memory_id)
+            .find(|r| r.namespace == config.namespace && r.memory_id == *memory_id)
         {
+            let confidence_inputs = build_confidence_inputs(record);
+            let confidence_output = membrain_core::engine::confidence::ConfidenceEngine
+                .compute(&confidence_inputs, &confidence_policy);
             let ranking = fuse_scores(
                 RankingInput {
                     recency: 900,
@@ -593,11 +1078,11 @@ fn build_retrieval_result_set(
                     strength: 750,
                     provenance: 850,
                     conflict: 500,
-                    confidence: 700,
+                    confidence: confidence_output.confidence,
                 },
                 ranking_profile,
             );
-            builder.add(
+            builder.add_with_confidence(
                 record.memory_id,
                 record.namespace.clone(),
                 record.session_id,
@@ -605,17 +1090,34 @@ fn build_retrieval_result_set(
                 record.compact_text.clone(),
                 &ranking,
                 AnsweredFrom::Tier1Hot,
+                &confidence_inputs,
+                &confidence_policy,
             );
         }
     }
 
     let mut explain = RetrievalExplain {
-        recall_plan: membrain_core::engine::recall::RecallPlanKind::RecentTier1ThenTier2Exact,
+        recall_plan: if config.graph_expansion {
+            membrain_core::engine::recall::RecallPlanKind::Tier2ExactThenGraphExpansion
+        } else {
+            membrain_core::engine::recall::RecallPlanKind::RecentTier1ThenTier2Exact
+        },
         route_reason,
-        tiers_consulted: vec!["tier1_recent".to_string()],
-        trace_stages: vec![membrain_core::engine::recall::RecallTraceStage::Tier1RecentWindow],
-        tier1_answered_directly: true,
-        candidate_budget: top,
+        tiers_consulted: if config.graph_expansion {
+            vec!["tier2_exact".to_string(), "graph_expansion".to_string()]
+        } else {
+            vec!["tier1_recent".to_string()]
+        },
+        trace_stages: if config.graph_expansion {
+            vec![
+                membrain_core::engine::recall::RecallTraceStage::Tier2Exact,
+                membrain_core::engine::recall::RecallTraceStage::GraphExpansion,
+            ]
+        } else {
+            vec![membrain_core::engine::recall::RecallTraceStage::Tier1RecentWindow]
+        },
+        tier1_answered_directly: !config.graph_expansion,
+        candidate_budget: config.top,
         time_consumed_ms: None,
         ranking_profile: route_family.to_string(),
         contradictions_found: 0,
@@ -642,7 +1144,200 @@ fn build_retrieval_result_set(
                 detail: "bounded hot-window scan returned no visible evidence".to_string(),
             });
     }
-    builder.build(explain)
+    if config.show_decaying {
+        explain
+            .result_reasons
+            .push(membrain_core::engine::result::ResultReason {
+                memory_id: None,
+                reason_code: "show_decaying_enabled".to_string(),
+                detail: "show-decaying requested inclusion of near-decay candidates when available"
+                    .to_string(),
+            });
+    }
+    if let Some(era) = config.era.as_deref() {
+        let landmark_descriptors = local_records
+            .iter()
+            .filter(|record| {
+                record.namespace == config.namespace
+                    && record.is_landmark
+                    && record.era_id.as_deref() == Some(era)
+            })
+            .map(|record| {
+                record
+                    .landmark_label
+                    .as_deref()
+                    .map(|label| format!("{label} (#{})", record.memory_id.0))
+                    .unwrap_or_else(|| format!("memory #{}", record.memory_id.0))
+            })
+            .collect::<Vec<_>>();
+        let matched_candidate_count = selected_ids.len();
+        explain
+            .result_reasons
+            .push(membrain_core::engine::result::ResultReason {
+                memory_id: None,
+                reason_code: "era_filter_applied".to_string(),
+                detail: if landmark_descriptors.is_empty() {
+                    format!(
+                        "bounded retrieval stayed inside era `{era}`; no returned landmark anchor opened that era and {matched_candidate_count} candidate(s) remained after era scoping"
+                    )
+                } else {
+                    format!(
+                        "bounded retrieval stayed inside era `{era}` opened by landmark(s) {}; {matched_candidate_count} candidate(s) remained after era scoping",
+                        landmark_descriptors.join(", ")
+                    )
+                },
+            });
+    }
+    if let Some(snapshot) = config.at.as_deref() {
+        explain
+            .result_reasons
+            .push(membrain_core::engine::result::ResultReason {
+                memory_id: None,
+                reason_code: "snapshot_scope_applied".to_string(),
+                detail: format!("historical recall anchored to snapshot `{snapshot}`"),
+            });
+    }
+    if let Some(as_of) = config.as_of {
+        explain
+            .result_reasons
+            .push(membrain_core::engine::result::ResultReason {
+                memory_id: None,
+                reason_code: "as_of_scope_applied".to_string(),
+                detail: format!("historical recall bounded at as_of_tick={as_of}"),
+            });
+    }
+    if let Some(min_confidence) = config.min_confidence {
+        explain
+            .result_reasons
+            .push(membrain_core::engine::result::ResultReason {
+                memory_id: None,
+                reason_code: "confidence_filter_applied".to_string(),
+                detail: format!("results were filtered with min_confidence={min_confidence:.3}"),
+            });
+        explain
+            .result_reasons
+            .push(membrain_core::engine::result::ResultReason {
+                memory_id: None,
+                reason_code: "confidence_display_rule".to_string(),
+                detail: "confidence changes retrieval ordering through the ranking confidence signal and hides results only when min_confidence is set".to_string(),
+            });
+    } else {
+        explain
+            .result_reasons
+            .push(membrain_core::engine::result::ResultReason {
+                memory_id: None,
+                reason_code: "confidence_display_rule".to_string(),
+                detail: "confidence changes retrieval ordering through the ranking confidence signal; without min_confidence, low-confidence results remain visible with uncertainty markers".to_string(),
+            });
+    }
+    if let Some(min_strength) = config.min_strength {
+        explain
+            .result_reasons
+            .push(membrain_core::engine::result::ResultReason {
+                memory_id: None,
+                reason_code: "strength_filter_applied".to_string(),
+                detail: format!("results were filtered with min_strength={min_strength:.3}"),
+            });
+    }
+    if let Some(top_item) = builder.action_pack.as_ref().and_then(|_| None::<&membrain_core::engine::result::ActionArtifact>) {
+        let _ = top_item;
+    }
+    if config.include_public {
+        explain
+            .result_reasons
+            .push(membrain_core::engine::result::ResultReason {
+                memory_id: None,
+                reason_code: "include_public_enabled".to_string(),
+                detail: "policy-approved shared/public widening remained explicit on the request"
+                    .to_string(),
+            });
+    }
+    if let Some(kind) = config.kind.as_deref() {
+        explain
+            .result_reasons
+            .push(membrain_core::engine::result::ResultReason {
+                memory_id: None,
+                reason_code: "memory_kind_filter_applied".to_string(),
+                detail: format!("retrieval filtered to memory kind `{kind}`"),
+            });
+    }
+    if let Some(context) = config.context.as_deref() {
+        explain
+            .result_reasons
+            .push(membrain_core::engine::result::ResultReason {
+                memory_id: None,
+                reason_code: "context_text_supplied".to_string(),
+                detail: format!("context_text sharpened ranking with `{context}`"),
+            });
+    }
+    if config.cold_tier == "avoid" {
+        explain
+            .result_reasons
+            .push(membrain_core::engine::result::ResultReason {
+                memory_id: None,
+                reason_code: "cold_tier_avoided".to_string(),
+                detail: "cold-tier fallback was disabled for this bounded request".to_string(),
+            });
+    } else if config.cold_tier == "allow" {
+        explain
+            .result_reasons
+            .push(membrain_core::engine::result::ResultReason {
+                memory_id: None,
+                reason_code: "cold_tier_allowed".to_string(),
+                detail:
+                    "cold-tier fallback remained available without permitting pre-cut payload fetch"
+                        .to_string(),
+            });
+    }
+    if config.like.is_some() || config.unlike.is_some() {
+        let request = RetrievalRequest::hybrid(
+            config.namespace.clone(),
+            config.query.as_deref().unwrap_or_default(),
+            config.top,
+        )
+        .with_budget(config.top)
+        .with_graph_expansion(false)
+        .with_tier3_fallback(config.cold_tier != "avoid");
+        let request = if let Some(memory_id) = config.like {
+            request.with_like_memory(memory_id)
+        } else {
+            request
+        };
+        let request = if let Some(memory_id) = config.unlike {
+            request.with_unlike_memory(memory_id)
+        } else {
+            request
+        };
+        if let Ok(normalization) = request.normalize_query_by_example() {
+            let mut trace = RetrievalPlanTrace::new(&request);
+            trace.set_query_by_example_materialization(&normalization, &selected_ids);
+            trace.set_final_candidates(selected_ids.len());
+            explain.set_query_by_example_trace(&trace);
+        }
+    }
+    let mut result_set = builder.build(explain);
+    result_set.freshness_markers.as_of_tick = config.as_of;
+    result_set.policy_summary.filters = vec![membrain_core::api::PolicyFilterSummary::new(
+        config.namespace.as_str(),
+        if config.include_public {
+            "shared_public_widening"
+        } else {
+            "namespace_only"
+        },
+        result_set.outcome_class,
+        "policy_gate",
+        if config.include_public {
+            membrain_core::api::FieldPresence::Present("approved_shared".to_string())
+        } else {
+            membrain_core::api::FieldPresence::Present("same_namespace".to_string())
+        },
+        membrain_core::api::FieldPresence::Absent,
+        Vec::new(),
+    )];
+    result_set.packaging_metadata.result_budget = config.top;
+    result_set.packaging_metadata.degraded_summary =
+        (config.cold_tier == "avoid").then(|| "cold_tier_avoid".to_string());
+    result_set
 }
 
 // ── Encode ───────────────────────────────────────────────────────────────────
@@ -662,7 +1357,13 @@ fn encode_memory(
     source: &str,
 ) -> ResponseContext<EncodeOutput> {
     let intake_kind = parse_memory_kind(kind);
-    let input = RawEncodeInput::new(intake_kind, content);
+    let input = local_records
+        .iter()
+        .rev()
+        .find(|record| record.namespace == *namespace)
+        .and_then(|record| record.era_id.clone())
+        .map(|era_id| RawEncodeInput::new(intake_kind, content).with_active_era_id(era_id))
+        .unwrap_or_else(|| RawEncodeInput::new(intake_kind, content));
     let prepared = store.encode_engine().prepare_fast_path(input);
 
     let memory_id = MemoryId(NEXT_MEMORY_ID.fetch_add(1, Ordering::SeqCst));
@@ -678,6 +1379,10 @@ fn encode_memory(
         provisional_salience: prepared.provisional_salience,
         fingerprint: prepared.fingerprint,
         payload_size_bytes: prepared.normalized.payload_size_bytes,
+        is_landmark: prepared.normalized.landmark.is_landmark,
+        landmark_label: prepared.normalized.landmark.landmark_label.clone(),
+        era_id: prepared.normalized.landmark.era_id.clone(),
+        passive_observation: None,
     };
 
     hot.seed(local.as_hot_record());
@@ -706,29 +1411,136 @@ fn encode_memory(
 
 // ── Recall ───────────────────────────────────────────────────────────────────
 
-fn recall_memories(
+fn budget_memories(
     store: &BrainStore,
-    _hot: &Tier1HotMetadataStore,
     local_records: &[LocalMemoryRecord],
-    query: &str,
     namespace: &NamespaceId,
+    query: Option<&str>,
+    current_context: Option<&str>,
     top: usize,
-    _explain_verbosity: &str,
-) -> ResponseContext<RetrievalResultSet> {
-    let intent_result = store.intent_engine().classify(query);
+    token_budget: usize,
+    format: InjectionFormat,
+    include_public: bool,
+) -> ResponseContext<ContextBudgetResponse> {
+    let config = RecallCommandConfig {
+        query: query.map(str::to_owned),
+        context: current_context.map(str::to_owned),
+        top,
+        kind: None,
+        confidence: "normal".to_string(),
+        explain: "summary".to_string(),
+        namespace: namespace.clone(),
+        include_public,
+        like: None,
+        unlike: None,
+        graph_expansion: false,
+        as_of: None,
+        at: None,
+        era: None,
+        min_confidence: None,
+        min_strength: None,
+        show_decaying: false,
+        cold_tier: "auto".to_string(),
+    };
+    let query_text = config.query.as_deref().unwrap_or_default();
+    let intent_result = store.intent_engine().classify(query_text);
     let session_id = SessionId(SESSION_ID.load(Ordering::SeqCst));
-
     let recall_request =
         membrain_core::engine::recall::RecallRequest::small_session_lookup(session_id);
     let recall_plan = store
         .recall_engine()
         .plan_recall(recall_request, store.config());
 
-    let query_lower = query.to_lowercase();
+    let query_lower = query_text.to_lowercase();
     let matched_ids = local_records
         .iter()
-        .filter(|r| r.namespace == *namespace)
+        .filter(|record| record.namespace == *namespace)
         .filter(|record| {
+            if query_lower.is_empty() {
+                true
+            } else {
+                let text_lower = record.compact_text.to_lowercase();
+                text_lower.contains(&query_lower)
+                    || query_lower.contains(&text_lower)
+                    || record.memory_type.as_str().contains(&query_lower)
+            }
+        })
+        .map(|record| record.memory_id)
+        .collect::<Vec<_>>();
+
+    let result_set = build_retrieval_result_set(
+        local_records,
+        &config,
+        RankingProfile::balanced(),
+        intent_result.route_inputs.ranking_profile.as_str(),
+        recall_plan.route_summary.reason.to_string(),
+        matched_ids,
+    );
+
+    let request = ContextBudgetRequest::new(token_budget)
+        .with_working_memory(vec![])
+        .with_format(format);
+    let request = if let Some(context) = current_context {
+        request.with_context(context)
+    } else {
+        request
+    };
+    let partial_success = result_set.truncated;
+    let budget = store.context_budget(&request, &result_set);
+    let budget_partial = budget.partial_success;
+    let mut response = ResponseContext::success(
+        namespace.clone(),
+        RequestId::new(format!("budget-{}-{token_budget}", namespace.as_str()))
+            .expect("budget request id"),
+        budget,
+    );
+    if partial_success || budget_partial {
+        response = response.with_partial_success();
+    }
+    if budget_partial {
+        response.warnings.push(ResponseWarning::new(
+            "budget_exhausted",
+            "token budget truncated otherwise eligible injections",
+        ));
+    }
+    response
+}
+
+fn recall_memories(
+    store: &BrainStore,
+    _hot: &Tier1HotMetadataStore,
+    local_records: &[LocalMemoryRecord],
+    config: &RecallCommandConfig,
+) -> ResponseContext<RetrievalResultSet> {
+    let query_text = config.query.as_deref().unwrap_or_default();
+    let intent_result = store.intent_engine().classify(query_text);
+    let session_id = SessionId(SESSION_ID.load(Ordering::SeqCst));
+
+    let recall_request = if config.graph_expansion {
+        membrain_core::engine::recall::RecallRequest::small_session_lookup(session_id)
+            .with_graph_expansion(true)
+    } else {
+        membrain_core::engine::recall::RecallRequest::small_session_lookup(session_id)
+    };
+    let recall_plan = store
+        .recall_engine()
+        .plan_recall(recall_request, store.config());
+
+    let query_lower = query_text.to_lowercase();
+    let kind_filter = config.kind.as_deref().map(|kind| match kind {
+        "semantic" => CanonicalMemoryType::Observation,
+        "procedural" => CanonicalMemoryType::ToolOutcome,
+        _ => CanonicalMemoryType::Event,
+    });
+    let matched_ids = local_records
+        .iter()
+        .filter(|r| r.namespace == config.namespace)
+        .filter(|record| kind_filter.is_none_or(|kind| record.memory_type == kind))
+        .filter(|record| {
+            if query_lower.is_empty() {
+                return config.like == Some(record.memory_id)
+                    || config.unlike == Some(record.memory_id);
+            }
             let text_lower = record.compact_text.to_lowercase();
             text_lower.contains(&query_lower)
                 || query_lower.contains(&text_lower)
@@ -739,8 +1551,7 @@ fn recall_memories(
 
     let result_set = build_retrieval_result_set(
         local_records,
-        namespace,
-        top,
+        config,
         RankingProfile::balanced(),
         intent_result.route_inputs.ranking_profile.as_str(),
         recall_plan.route_summary.reason.to_string(),
@@ -749,11 +1560,11 @@ fn recall_memories(
 
     let request_id = RequestId::new(format!(
         "recall-{}-{}",
-        namespace.as_str(),
-        query.replace(' ', "-")
+        config.namespace.as_str(),
+        query_text.replace(' ', "-")
     ))
     .expect("recall request id");
-    response_from_result_set(namespace, request_id, result_set)
+    response_from_result_set(&config.namespace, request_id, result_set)
 }
 
 // ── Inspect ──────────────────────────────────────────────────────────────────
@@ -767,6 +1578,11 @@ fn inspect_memory(
     // Try hot store first, then fall back to local records
     let lookup = _hot.exact_lookup(namespace, memory_id);
     if let Some(record) = lookup.record {
+        let passive_observation = local_records
+            .iter()
+            .find(|local| local.memory_id == record.memory_id && local.namespace == record.namespace)
+            .and_then(|local| local.passive_observation.clone());
+
         return Ok(InspectOutput {
             outcome: "accepted",
             memory_id: record.memory_id.0,
@@ -783,6 +1599,7 @@ fn inspect_memory(
             },
             is_landmark: false,
             session_id: record.session_id.0,
+            passive_observation,
         });
     }
 
@@ -804,6 +1621,7 @@ fn inspect_memory(
             payload_state: "metadata_only",
             is_landmark: false,
             session_id: record.session_id.0,
+            passive_observation: record.passive_observation.clone(),
         });
     }
 
@@ -816,6 +1634,120 @@ fn inspect_memory(
 
 // ── Explain ──────────────────────────────────────────────────────────────────
 
+fn observe_memories(
+    store: &BrainStore,
+    hot: &mut Tier1HotMetadataStore,
+    local_records: &mut Vec<LocalMemoryRecord>,
+    namespace: &NamespaceId,
+    content: &str,
+    config: &ObserveConfig,
+    dry_run: bool,
+    watched_path: Option<&std::path::Path>,
+    pattern: Option<&str>,
+) -> ResponseContext<ObserveOutput> {
+    let mut seen_fingerprints = local_records
+        .iter()
+        .filter(|record| record.namespace == *namespace)
+        .map(|record| record.fingerprint)
+        .collect::<std::collections::HashSet<_>>();
+    let report = ObserveEngine::observe_content(store.encode_engine(), content, config, true, |fingerprint| {
+        let already_seen = seen_fingerprints.contains(&fingerprint);
+        if !already_seen {
+            seen_fingerprints.insert(fingerprint);
+        }
+        already_seen
+    });
+
+    if !dry_run {
+        let session_id = SessionId(SESSION_ID.load(Ordering::SeqCst));
+        for fragment in &report.fragments {
+            if fragment.prepared.write_decision.as_str() != "capture" {
+                continue;
+            }
+            let memory_id = MemoryId(NEXT_MEMORY_ID.fetch_add(1, Ordering::SeqCst));
+            let prepared = &fragment.prepared;
+            let local = LocalMemoryRecord {
+                memory_id,
+                namespace: namespace.clone(),
+                session_id,
+                memory_type: prepared.normalized.memory_type,
+                route_family: prepared.classification.route_family,
+                compact_text: prepared.normalized.compact_text.clone(),
+                provisional_salience: prepared.provisional_salience,
+                fingerprint: prepared.fingerprint,
+                payload_size_bytes: prepared.normalized.payload_size_bytes,
+                is_landmark: prepared.normalized.landmark.is_landmark,
+                landmark_label: prepared.normalized.landmark.landmark_label.clone(),
+                era_id: prepared.normalized.landmark.era_id.clone(),
+                passive_observation: Some(PassiveObservationInspectSummary::from_encode(
+                    &prepared.passive_observation_inspect,
+                )),
+            };
+            hot.seed(local.as_hot_record());
+            seen_fingerprints.insert(local.fingerprint);
+            local_records.push(local);
+        }
+    }
+
+    let output = ObserveOutput {
+        outcome: if dry_run { "preview" } else { "accepted" },
+        namespace: namespace.as_str().to_string(),
+        watch_mode: watched_path.is_some(),
+        watched_path: watched_path.map(|path| path.display().to_string()),
+        pattern: pattern.map(str::to_string),
+        dry_run,
+        observation_source: report.observation_source.clone(),
+        observation_chunk_id: report.observation_chunk_id.clone(),
+        bytes_processed: report.bytes_processed,
+        topic_shifts: report.topic_shifts_detected,
+        fragments_previewed: report.fragments.len(),
+        memories_created: if dry_run { 0 } else { report.memories_created },
+        suppressed: report.suppressed,
+        denied: report.denied,
+        context: config.context.clone(),
+        preview: report
+            .fragments
+            .iter()
+            .map(|fragment| ObservePreviewFragment {
+                index: fragment.index,
+                write_decision: fragment.prepared.write_decision.as_str(),
+                captured_as_observation: fragment.prepared.captured_as_observation,
+                compact_text: fragment.prepared.normalized.compact_text.clone(),
+                fingerprint: fragment.prepared.fingerprint,
+                route_family: fragment.prepared.classification.route_family.as_str(),
+                observation_source: report.observation_source.clone(),
+                observation_chunk_id: report.observation_chunk_id.clone(),
+            })
+            .collect(),
+    };
+    let request_id = RequestId::new(format!(
+        "observe-{}-{}",
+        namespace.as_str(),
+        report.observation_chunk_id
+    ))
+    .expect("observe request id");
+    let mut response = ResponseContext::success(namespace.clone(), request_id, output);
+    if dry_run || report.suppressed > 0 || report.denied > 0 {
+        response = response.with_partial_success();
+    }
+    if let Some(fragment) = report.fragments.first() {
+        response = response.with_passive_observation(PassiveObservationInspectSummary {
+            source_kind: fragment.prepared.passive_observation_inspect.source_kind,
+            write_decision: fragment.prepared.passive_observation_inspect.write_decision,
+            captured_as_observation: fragment
+                .prepared
+                .passive_observation_inspect
+                .captured_as_observation,
+            observation_source: FieldPresence::Present(report.observation_source.clone()),
+            observation_chunk_id: FieldPresence::Present(report.observation_chunk_id.clone()),
+            retention_marker: FieldPresence::Present(
+                fragment.prepared.passive_observation_inspect.retention_marker,
+            ),
+        });
+    }
+    response
+}
+
 fn explain_query(
     store: &BrainStore,
     local_records: &[LocalMemoryRecord],
@@ -823,6 +1755,26 @@ fn explain_query(
     namespace: &NamespaceId,
 ) -> ResponseContext<RetrievalResultSet> {
     let intent_result = store.intent_engine().classify(query);
+    let config = RecallCommandConfig {
+        query: Some(query.to_string()),
+        context: None,
+        top: 5,
+        kind: None,
+        confidence: "normal".to_string(),
+        explain: "full".to_string(),
+        namespace: namespace.clone(),
+        include_public: false,
+        like: None,
+        unlike: None,
+        graph_expansion: false,
+        as_of: None,
+        at: None,
+        era: None,
+        min_confidence: None,
+        min_strength: None,
+        show_decaying: false,
+        cold_tier: "auto".to_string(),
+    };
     let session_id = SessionId(SESSION_ID.load(Ordering::SeqCst));
 
     let recall_request =
@@ -846,8 +1798,7 @@ fn explain_query(
 
     let mut result_set = build_retrieval_result_set(
         local_records,
-        namespace,
-        5,
+        &config,
         RankingProfile::balanced(),
         intent_result.route_inputs.ranking_profile.as_str(),
         recall_plan.route_summary.reason.to_string(),
@@ -992,6 +1943,9 @@ fn parse_audit_kind(value: &str) -> Option<AuditEventKind> {
         "maintenance_reconsolidation_blocked" => {
             Some(AuditEventKind::MaintenanceReconsolidationBlocked)
         }
+        "maintenance_forgetting_evaluated" => {
+            Some(AuditEventKind::MaintenanceForgettingEvaluated)
+        }
         "incident_recorded" => Some(AuditEventKind::IncidentRecorded),
         "archive_recorded" => Some(AuditEventKind::ArchiveRecorded),
         _ => None,
@@ -1027,6 +1981,36 @@ fn sharing_trace_policy_summary(
     }
 }
 
+fn sharing_audit_view(
+    namespace: &NamespaceId,
+    target_namespace: Option<&NamespaceId>,
+    policy_summary: &TracePolicySummary,
+    request_id: String,
+    actor_source: &'static str,
+    event_kind: AuditEventKind,
+    redacted: bool,
+    related_run: Option<String>,
+) -> ShareAuditView {
+    ShareAuditView {
+        event_kind: event_kind.as_str(),
+        actor_source,
+        request_id,
+        effective_namespace: namespace.as_str().to_string(),
+        source_namespace: Some(namespace.as_str().to_string()),
+        target_namespace: target_namespace.map(|ns| ns.as_str().to_string()),
+        policy_family: policy_summary.policy_family,
+        outcome_class: policy_summary.outcome_class.as_str(),
+        blocked_stage: policy_summary.blocked_stage,
+        redaction_summary: policy_summary
+            .redaction_fields
+            .iter()
+            .map(|field| (*field).to_string())
+            .collect(),
+        related_run,
+        redacted,
+    }
+}
+
 fn share_output(memory_id: u64, namespace: &NamespaceId, visibility: &'static str) -> ShareOutput {
     let policy_summary = sharing_trace_policy_summary(
         namespace,
@@ -1034,6 +2018,8 @@ fn share_output(memory_id: u64, namespace: &NamespaceId, visibility: &'static st
         membrain_core::observability::OutcomeClass::Accepted,
         Vec::new(),
     );
+    let request_id = format!("req-share-{memory_id}");
+    let related_run = Some(format!("share-run-{memory_id}"));
     let mut audit = sample_audit_log(namespace);
     audit.append(
         AuditLogEntry::new(
@@ -1044,7 +2030,8 @@ fn share_output(memory_id: u64, namespace: &NamespaceId, visibility: &'static st
             format!("visibility set to {visibility}"),
         )
         .with_memory_id(MemoryId(memory_id))
-        .with_request_id(format!("req-share-{memory_id}")),
+        .with_request_id(request_id.clone())
+        .with_related_run(related_run.clone().expect("share related run")),
     );
     let rows = filter_audit_rows(
         &audit,
@@ -1064,6 +2051,16 @@ fn share_output(memory_id: u64, namespace: &NamespaceId, visibility: &'static st
         namespace: namespace.as_str().to_string(),
         visibility,
         policy_filters_applied: policy_summary.filters.clone(),
+        audit: sharing_audit_view(
+            namespace,
+            Some(namespace),
+            &policy_summary,
+            request_id,
+            "cli_share",
+            AuditEventKind::ApprovedSharing,
+            false,
+            related_run,
+        ),
         policy_summary,
         audit_rows: rows,
     }
@@ -1076,6 +2073,8 @@ fn unshare_output(memory_id: u64, namespace: &NamespaceId) -> ShareOutput {
         membrain_core::observability::OutcomeClass::Accepted,
         vec!["sharing_scope"],
     );
+    let request_id = format!("req-unshare-{memory_id}");
+    let related_run = Some(format!("share-run-{memory_id}"));
     let mut audit = sample_audit_log(namespace);
     audit.append(
         AuditLogEntry::new(
@@ -1086,7 +2085,8 @@ fn unshare_output(memory_id: u64, namespace: &NamespaceId) -> ShareOutput {
             "tightened visibility back to private",
         )
         .with_memory_id(MemoryId(memory_id))
-        .with_request_id(format!("req-unshare-{memory_id}"))
+        .with_request_id(request_id.clone())
+        .with_related_run(related_run.clone().expect("unshare related run"))
         .with_redaction(),
     );
     let rows = filter_audit_rows(
@@ -1107,6 +2107,16 @@ fn unshare_output(memory_id: u64, namespace: &NamespaceId) -> ShareOutput {
         namespace: namespace.as_str().to_string(),
         visibility: "private",
         policy_filters_applied: policy_summary.filters.clone(),
+        audit: sharing_audit_view(
+            namespace,
+            Some(namespace),
+            &policy_summary,
+            request_id,
+            "cli_unshare",
+            AuditEventKind::PolicyRedacted,
+            true,
+            related_run,
+        ),
         policy_summary,
         audit_rows: rows,
     }
@@ -1235,11 +2245,7 @@ fn doctor_report() -> DoctorReport {
     let repair_engine = store.repair_engine();
     let namespace = NamespaceId::new("doctor.system").expect("doctor namespace should be valid");
     let mut repair_handle = MaintenanceJobHandle::new(
-        repair_engine.create_targeted(
-            namespace.clone(),
-            vec![RepairTarget::LexicalIndex, RepairTarget::MetadataIndex],
-            IndexRepairEntrypoint::RebuildIfNeeded,
-        ),
+        repair_engine.create_index_rebuild(namespace.clone(), IndexRepairEntrypoint::VerifyOnly),
         8,
     );
     repair_handle.start();
@@ -1252,14 +2258,46 @@ fn doctor_report() -> DoctorReport {
                 repair_reports = summary
                     .results
                     .iter()
-                    .map(|result| RepairReportRow {
-                        target: result.target.as_str(),
-                        status: result.status.as_str(),
-                        verification_passed: result.verification_passed,
-                        rebuild_entrypoint: result
+                    .map(|result| {
+                        let report = summary
+                            .operator_reports
+                            .iter()
+                            .find(|report| report.target == result.target)
+                            .expect("repair operator report should exist for each doctor result");
+                        let plan = result
                             .rebuild_entrypoint
-                            .map(IndexRepairEntrypoint::as_str),
-                        rebuilt_outputs: result.rebuilt_outputs.clone(),
+                            .and_then(|entrypoint| {
+                                store.repair_engine().plan_index_rebuild(result.target, entrypoint)
+                            });
+                        let artifact = summary
+                            .verification_artifacts
+                            .get(&result.target)
+                            .expect("verification artifact should exist for each doctor result");
+                        RepairReportRow {
+                            target: result.target.as_str(),
+                            status: result.status.as_str(),
+                            verification_passed: result.verification_passed,
+                            rebuild_entrypoint: result
+                                .rebuild_entrypoint
+                                .map(IndexRepairEntrypoint::as_str),
+                            rebuilt_outputs: result.rebuilt_outputs.clone(),
+                            durable_sources: plan
+                                .as_ref()
+                                .map(|plan| plan.durable_sources.clone())
+                                .unwrap_or_default(),
+                            verification_artifact_name: artifact.artifact_name,
+                            parity_check: artifact.parity_check,
+                            authoritative_rows: artifact.authoritative_rows,
+                            derived_rows: artifact.derived_rows,
+                            authoritative_generation: artifact.authoritative_generation,
+                            derived_generation: artifact.derived_generation,
+                            affected_item_count: report.affected_item_count,
+                            error_count: report.error_count,
+                            rebuild_duration_ms: report.rebuild_duration_ms,
+                            rollback_state: report.rollback_state,
+                            queue_depth_before: report.queue_depth_before,
+                            queue_depth_after: report.queue_depth_after,
+                        }
                     })
                     .collect();
                 health_repair_summary = Some(summary);
@@ -1343,6 +2381,153 @@ fn print_doctor_report(report: &DoctorReport) -> anyhow::Result<()> {
     Ok(())
 }
 
+fn next_preflight_correlation_id() -> u64 {
+    NEXT_PREFLIGHT_ID.fetch_add(1, Ordering::SeqCst)
+}
+
+fn evaluate_cli_preflight(
+    namespace: &str,
+    original_query: &str,
+    proposed_action: &str,
+    local_confirmation: bool,
+    preview_only: bool,
+) -> anyhow::Result<EvaluatedPreflight> {
+    let correlation_id = next_preflight_correlation_id();
+    evaluate_shared_preflight(
+        namespace,
+        original_query,
+        proposed_action,
+        correlation_id,
+        local_confirmation,
+        preview_only,
+        "cli_preflight",
+        "cli",
+    )
+    .map_err(anyhow::Error::msg)
+}
+
+fn cli_preflight_explain(
+    namespace: &str,
+    original_query: &str,
+    proposed_action: &str,
+) -> anyhow::Result<PreflightExplainResponse> {
+    let evaluated =
+        evaluate_cli_preflight(namespace, original_query, proposed_action, false, true)?;
+    Ok(to_shared_preflight_explain_response(namespace, evaluated))
+}
+
+fn cli_preflight_run(
+    namespace: &str,
+    original_query: &str,
+    proposed_action: &str,
+) -> anyhow::Result<PreflightOutcome> {
+    let evaluated =
+        evaluate_cli_preflight(namespace, original_query, proposed_action, false, false)?;
+    Ok(to_shared_preflight_outcome(evaluated, false))
+}
+
+fn cli_preflight_allow(
+    namespace: &str,
+    original_query: &str,
+    proposed_action: &str,
+    authorization_token: &str,
+    bypass_flags: &[String],
+) -> anyhow::Result<PreflightOutcome> {
+    let confirmed = authorization_token.starts_with("allow-")
+        && bypass_flags.iter().any(|flag| flag == "manual_override");
+    let evaluated =
+        evaluate_cli_preflight(namespace, original_query, proposed_action, confirmed, false)?;
+    Ok(to_shared_preflight_outcome(evaluated, confirmed))
+}
+
+fn preflight_outcome_class_label(outcome_class: &str, preflight_state: &str) -> &'static str {
+    match outcome_class {
+        "accepted" => "accepted",
+        "degraded" => "degraded",
+        "rejected" => "rejected",
+        _ if preflight_state == "blocked"
+            || preflight_state == "missing_data"
+            || preflight_state == "stale_knowledge" =>
+        {
+            "blocked"
+        }
+        _ => "preview",
+    }
+}
+
+fn preflight_exit_code(response: &PreflightOutcome) -> i32 {
+    match response.outcome_class.as_str() {
+        "rejected" => 2,
+        "accepted" | "degraded" => 0,
+        _ => 4,
+    }
+}
+
+fn explain_blocked_by_policy(response: &PreflightExplainResponse) -> bool {
+    response
+        .blocked_reasons
+        .iter()
+        .any(|reason| reason == "policy_denied" || reason == "legal_hold")
+}
+
+fn explain_exit_code(response: &PreflightExplainResponse) -> i32 {
+    if explain_blocked_by_policy(response) {
+        2
+    } else if response.blocked_reasons.is_empty() {
+        0
+    } else {
+        4
+    }
+}
+
+fn print_preflight_run_human(response: &PreflightOutcome) {
+    println!(
+        "Preflight run [{}] state={} outcome={}",
+        preflight_outcome_class_label(&response.outcome_class, &response.preflight_state),
+        response.preflight_state,
+        response.preflight_outcome,
+    );
+    if !response.blocked_reasons.is_empty() {
+        println!("  blocked_reasons: {}", response.blocked_reasons.join(", "));
+    }
+    println!(
+        "  confirmation: required={} confirmed={} force_allowed={}",
+        response.confirmation.required,
+        response.confirmation.confirmed,
+        response.confirmation.force_allowed,
+    );
+}
+
+fn print_preflight_explain_human(response: &PreflightExplainResponse) {
+    println!(
+        "Preflight explain [{}] state={} outcome={}",
+        preflight_outcome_class_label("preview", &response.preflight_state),
+        response.preflight_state,
+        response.preflight_outcome,
+    );
+    if !response.blocked_reasons.is_empty() {
+        println!("  blocked_reasons: {}", response.blocked_reasons.join(", "));
+    }
+    if let Some(blocked_reason) = response.blocked_reason.as_deref() {
+        println!("  blocked_reason: {blocked_reason}");
+    }
+}
+
+fn print_preflight_allow_human(response: &PreflightOutcome) {
+    println!(
+        "Preflight allow [{}] state={} outcome={}",
+        preflight_outcome_class_label(&response.outcome_class, &response.preflight_state),
+        response.preflight_state,
+        response.preflight_outcome,
+    );
+    if !response.blocked_reasons.is_empty() {
+        println!("  blocked_reasons: {}", response.blocked_reasons.join(", "));
+    }
+    if let Some(reason) = response.confirmation_reason.as_deref() {
+        println!("  confirmation_reason: {reason}");
+    }
+}
+
 // ── Entry point ──────────────────────────────────────────────────────────────
 
 #[tokio::main]
@@ -1365,7 +2550,7 @@ async fn main() -> anyhow::Result<()> {
             valence,
             arousal,
             source,
-            json,
+            output,
         } => {
             let ns = NamespaceId::new(namespace)?;
             let response = encode_memory(
@@ -1381,21 +2566,28 @@ async fn main() -> anyhow::Result<()> {
                 *arousal,
                 source,
             );
-            if *json {
+            if output.json {
                 println!("{}", serde_json::to_string_pretty(&response)?);
             } else {
-                let output = response.result.as_ref().expect("encode result present");
-                println!(
-                    "Encoded memory #{} in '{}' [{} / {}]",
-                    output.memory_id, output.namespace, output.memory_type, output.route_family,
-                );
-                println!("  text: {}", output.compact_text);
-                println!("  salience: {}", output.provisional_salience);
-                println!("  fingerprint: {}", output.fingerprint);
-                if output.is_landmark {
+                let output_result = response.result.as_ref().expect("encode result present");
+                if !output.quiet {
+                    println!(
+                        "Encoded memory #{} in '{}' [{} / {}]",
+                        output_result.memory_id,
+                        output_result.namespace,
+                        output_result.memory_type,
+                        output_result.route_family,
+                    );
+                }
+                println!("  text: {}", output_result.compact_text);
+                if output.verbose > 0 {
+                    println!("  salience: {}", output_result.provisional_salience);
+                    println!("  fingerprint: {}", output_result.fingerprint);
+                }
+                if output_result.is_landmark {
                     println!(
                         "  landmark: {}",
-                        output.landmark_label.as_deref().unwrap_or("(auto)")
+                        output_result.landmark_label.as_deref().unwrap_or("(auto)")
                     );
                 }
             }
@@ -1404,31 +2596,63 @@ async fn main() -> anyhow::Result<()> {
             query,
             namespace,
             top,
-            context: _,
-            kind: _,
-            confidence: _,
+            context,
+            kind,
+            confidence,
             explain,
-            json,
+            like,
+            unlike,
+            include_public,
+            no_engram,
+            as_of,
+            at,
+            era,
+            min_confidence,
+            min_strength,
+            show_decaying,
+            cold_tier,
+            output,
         } => {
-            let ns = NamespaceId::new(namespace)?;
-            let response = recall_memories(&store, &hot, &local_records, query, &ns, *top, explain);
-            if *json {
+            let config = validate_recall_command(
+                namespace.as_deref(),
+                query.as_deref(),
+                *top,
+                kind.as_deref(),
+                confidence,
+                explain,
+                *like,
+                *unlike,
+                *include_public,
+                *no_engram,
+                *as_of,
+                at.as_deref(),
+                era.as_deref(),
+                *min_confidence,
+                *min_strength,
+                *show_decaying,
+                cold_tier,
+                context.as_deref(),
+            )?;
+            let response = recall_memories(&store, &hot, &local_records, &config);
+            if output.json {
                 println!("{}", serde_json::to_string_pretty(&response)?);
             } else {
                 let result_set = response.result.as_ref().expect("recall result present");
-                println!(
-                    "Recall '{}' in '{}' → {} results",
-                    query,
-                    ns.as_str(),
-                    result_set.evidence_pack.len(),
-                );
+                if !output.quiet {
+                    println!(
+                        "Recall '{}' in '{}' → {} results",
+                        config.query.as_deref().unwrap_or(""),
+                        config.namespace.as_str(),
+                        result_set.evidence_pack.len(),
+                    );
+                }
                 if let Some(route_summary) = response.route_summary.as_ref() {
                     println!(
                         "  route: {} → {}",
                         route_summary.route_family, route_summary.route_reason
                     );
                 }
-                if explain != "none" {
+                if config.explain != "none" {
                     println!(
                         "  tier1: consulted={}, answered_directly={}, deeper={}",
                         response
@@ -1458,6 +2682,36 @@ async fn main() -> anyhow::Result<()> {
                         item.result.compact_text,
                     );
                 }
+                if output.verbose > 0 {
+                    if let Some(query_by_example) = result_set.explain.query_by_example.as_ref() {
+                        println!(
+                            "  query_by_example: primary_cue={} requested={:?} materialized={:?} missing={:?}",
+                            query_by_example.primary_cue,
+                            query_by_example.requested_seed_descriptors,
+                            query_by_example.materialized_seed_descriptors,
+                            query_by_example.missing_seed_descriptors,
+                        );
+                    }
+                    let temporal_reasons = result_set
+                        .explain
+                        .result_reasons
+                        .iter()
+                        .filter(|reason| {
+                            reason.reason_code == "era_filter_applied"
+                                || reason.reason_code == "temporal_landmark_selected"
+                                || reason.reason_code == "temporal_landmark_not_selected"
+                        })
+                        .map(|reason| reason.detail.as_str())
+                        .collect::<Vec<_>>();
+                    if !temporal_reasons.is_empty() {
+                        println!("  temporal: {}", temporal_reasons.join(" | "));
+                    }
+                    if !response.warnings.is_empty() {
+                        for warning in &response.warnings {
+                            println!("  warning: {} [{}]", warning.detail, warning.code);
+                        }
+                    }
+                }
                 if let Some(action_pack) = result_set.action_pack.as_ref() {
                     println!("  derived actions: {}", action_pack.len());
                     for (i, action) in action_pack.iter().enumerate() {
@@ -1485,73 +2739,138 @@ async fn main() -> anyhow::Result<()> {
                 }
             }
         }
+        Commands::Budget {
+            token_budget,
+            query,
+            namespace,
+            context,
+            format,
+            top,
+            include_public,
+            output,
+        } => {
+            let namespace = namespace
+                .as_deref()
+                .ok_or_else(|| anyhow::anyhow!("missing namespace"))?;
+            let namespace = NamespaceId::new(namespace)?;
+            if *top == 0 {
+                anyhow::bail!("result budget must be greater than zero");
+            }
+            let format = parse_injection_format(format)?;
+            let response = budget_memories(
+                &store,
+                &local_records,
+                &namespace,
+                query.as_deref(),
+                context.as_deref(),
+                *top,
+                *token_budget,
+                format,
+                *include_public,
+            );
+            if output.json {
+                println!("{}", serde_json::to_string_pretty(&response)?);
+            } else if let Some(result) = response.result.as_ref() {
+                println!(
+                    "Budget '{}' in '{}' → {} injections ({} used / {} remaining)",
+                    query.as_deref().unwrap_or(""),
+                    namespace.as_str(),
+                    result.injections.len(),
+                    result.tokens_used,
+                    result.tokens_remaining,
+                );
+                for (index, item) in result.injections.iter().enumerate() {
+                    println!(
+                        "  [{}] #{} utility={:.3} tokens={} reason={} | {}",
+                        index + 1,
+                        item.memory_id.0,
+                        item.utility_score,
+                        item.token_count,
+                        item.reason.as_str(),
+                        item.content,
+                    );
+                }
+                if output.verbose > 0 {
+                    for omitted in &result.omitted {
+                        println!(
+                            "  omitted #{} reason={} utility={:.3} tokens={}",
+                            omitted.memory_id.0,
+                            omitted.reason.as_str(),
+                            omitted.utility_score,
+                            omitted.token_count,
+                        );
+                    }
+                    for warning in &response.warnings {
+                        println!("  warning: {} [{}]", warning.detail, warning.code);
+                    }
+                }
+            }
+        }
         Commands::Inspect {
             id,
             namespace,
-            json,
+            output,
         } => {
             let ns = NamespaceId::new(namespace)?;
             let memory_id = MemoryId(*id);
             match inspect_memory(&mut hot, &local_records, &ns, memory_id) {
-                Ok(output) => {
-                    if *json {
-                        let response = ResponseContext::success(
+                Ok(output_result) => {
+                    if output.json {
+                        let mut response = ResponseContext::success(
                             ns.clone(),
-                            RequestId::new(format!("inspect-{}", output.memory_id))?,
-                            output,
+                            RequestId::new(format!("inspect-{}", output_result.memory_id))?,
+                            output_result.clone(),
                         );
+                        if let Some(passive) = output_result.passive_observation.clone() {
+                            response = response.with_passive_observation(passive);
+                        }
                         println!("{}", serde_json::to_string_pretty(&response)?);
                     } else {
-                        println!(
-                            "Inspect #{} in '{}' [{} / {}]",
-                            output.memory_id,
-                            output.namespace,
-                            output.memory_type,
-                            output.route_family,
-                        );
-                        println!("  text: {}", output.compact_text);
-                        println!("  salience: {}", output.provisional_salience);
-                        println!("  fingerprint: {}", output.fingerprint);
-                        println!(
-                            "  payload: {} bytes ({})",
-                            output.payload_size_bytes, output.payload_state
-                        );
-                        println!("  session: {}", output.session_id);
+                        if !output.quiet {
+                            println!(
+                                "Inspect #{} in '{}' [{} / {}]",
+                                output_result.memory_id,
+                                output_result.namespace,
+                                output_result.memory_type,
+                                output_result.route_family,
+                            );
+                        }
+                        println!("  text: {}", output_result.compact_text);
+                        if output.verbose > 0 {
+                            println!("  salience: {}", output_result.provisional_salience);
+                            println!("  fingerprint: {}", output_result.fingerprint);
+                            println!(
+                                "  payload: {} bytes ({})",
+                                output_result.payload_size_bytes, output_result.payload_state
+                            );
+                            println!("  session: {}", output_result.session_id);
+                            if let Some(passive) = output_result.passive_observation.as_ref() {
+                                let observation_chunk_id = match &passive.observation_chunk_id {
+                                    FieldPresence::Present(value) => value.as_str(),
+                                    FieldPresence::Absent => "absent",
+                                    FieldPresence::Redacted => "redacted",
+                                };
+                                println!(
+                                    "  passive_observation: {} / {} / {}",
+                                    passive.source_kind,
+                                    passive.write_decision,
+                                    observation_chunk_id
+                                );
+                            }
+                        }
                     }
                 }
                 Err(e) => {
-                    if *json {
+                    if output.json {
                         let resp: ResponseContext<()> = ResponseContext::failure(
                             ns,
                             RequestId::new("inspect-not-found")?,
                             membrain_core::api::ErrorKind::ValidationFailure,
                             vec![],
                         );
-                        let mut json = serde_json::to_value(&resp)?;
-                        if let Some(object) = json.as_object_mut() {
-                            object.insert(
-                                "error_kind".to_string(),
-                                serde_json::Value::String("validation_failure".to_string()),
-                            );
-                            if let Some(remediation) = object
-                                .get_mut("remediation")
-                                .and_then(serde_json::Value::as_object_mut)
-                            {
-                                remediation.insert(
-                                    "summary".to_string(),
-                                    serde_json::Value::String("validation_failure".to_string()),
-                                );
-                                remediation.insert(
-                                    "next_steps".to_string(),
-                                    serde_json::Value::Array(vec![serde_json::Value::String(
-                                        "fix_request".to_string(),
-                                    )]),
-                                );
-                            }
-                        }
-                        println!("{}", serde_json::to_string_pretty(&json)?);
+                        println!("{}", serde_json::to_string_pretty(&resp)?);
                     } else {
-                        eprintln!("Error: {}", e);
+                        eprintln!("Invalid request: {}", e);
                         std::process::exit(1);
                     }
                 }
@@ -1560,14 +2879,16 @@ async fn main() -> anyhow::Result<()> {
         Commands::Explain {
             query,
             namespace,
-            json,
+            output,
         } => {
             let ns = NamespaceId::new(namespace)?;
             let response = explain_query(&store, &local_records, query, &ns);
-            if *json {
+            if output.json {
                 println!("{}", serde_json::to_string_pretty(&response)?);
             } else {
-                println!("Explain '{}' in '{}'", query, ns.as_str());
+                if !output.quiet {
+                    println!("Explain '{}' in '{}'", query, ns.as_str());
+                }
                 if let Some(route_summary) = response.route_summary.as_ref() {
                     println!(
                         "  route: {} → {}",
@@ -1599,27 +2920,34 @@ async fn main() -> anyhow::Result<()> {
         Commands::Maintenance {
             action,
             namespace,
-            json,
+            output,
         } => {
             let ns_str = namespace.as_deref().unwrap_or("default");
             let ns = NamespaceId::new(ns_str)?;
 
             let targets = match action.as_str() {
-                "repair" | "repair_all" => {
-                    vec![RepairTarget::LexicalIndex, RepairTarget::MetadataIndex]
-                }
-                "repair_index" | "repair_indexes" => vec![RepairTarget::LexicalIndex],
+                "repair" | "repair_all" => vec![
+                    RepairTarget::LexicalIndex,
+                    RepairTarget::MetadataIndex,
+                    RepairTarget::SemanticHotIndex,
+                    RepairTarget::SemanticColdIndex,
+                    RepairTarget::GraphConsistency,
+                    RepairTarget::CacheWarmState,
+                    RepairTarget::EngramIndex,
+                ],
+                "repair_index" | "repair_indexes" => vec![
+                    RepairTarget::LexicalIndex,
+                    RepairTarget::MetadataIndex,
+                    RepairTarget::SemanticHotIndex,
+                    RepairTarget::SemanticColdIndex,
+                ],
                 "repair_metadata" => vec![RepairTarget::MetadataIndex],
-                "repair_graph" | "repair_lineage" | "repair_cache" => {
-                    eprintln!(
-                        "Warning: repair target '{}' not yet implemented, falling back to index repair",
-                        action
-                    );
-                    vec![RepairTarget::LexicalIndex]
-                }
+                "repair_graph" => vec![RepairTarget::GraphConsistency],
+                "repair_lineage" => vec![RepairTarget::EngramIndex],
+                "repair_cache" => vec![RepairTarget::CacheWarmState],
                 _ => {
                     eprintln!(
-                        "Unknown maintenance action '{}'. Available: repair, repair_index, repair_metadata",
+                        "Unknown maintenance action '{}'. Available: repair, repair_index, repair_metadata, repair_graph, repair_lineage, repair_cache",
                         action
                     );
                     std::process::exit(1);
@@ -1634,28 +2962,66 @@ async fn main() -> anyhow::Result<()> {
             let mut handle = MaintenanceJobHandle::new(run, 8);
             handle.start();
 
-            let mut output = None;
+            let mut maintenance_output = None;
             for _ in 0..16 {
                 let snapshot = handle.poll();
                 match snapshot.state {
                     MaintenanceJobState::Completed(summary) => {
-                        output = Some(MaintenanceOutput {
+                        maintenance_output = Some(MaintenanceOutput {
                             outcome: "accepted",
                             action: action.clone(),
                             namespace: ns.as_str().to_string(),
                             targets_checked: summary.targets_checked,
                             rebuilt: summary.rebuilt,
+                            affected_item_count: summary.affected_item_count,
+                            error_count: summary.error_count,
+                            rebuild_duration_ms: summary.rebuild_duration_ms,
+                            rollback_state: summary.rollback_state,
+                            queue_depth_before: summary.queue_report.queue_depth_before,
+                            queue_depth_after: summary.queue_report.queue_depth_after,
                             results: summary
                                 .results
                                 .iter()
-                                .map(|r| RepairResultOutput {
-                                    target: r.target.as_str(),
-                                    status: r.status.as_str(),
-                                    verification_passed: r.verification_passed,
-                                    rebuild_entrypoint: r
+                                .map(|r| {
+                                    let report = summary
+                                        .operator_reports
+                                        .iter()
+                                        .find(|report| report.target == r.target)
+                                        .expect("repair operator report should exist for each maintenance result");
+                                    let plan = r
                                         .rebuild_entrypoint
-                                        .map(IndexRepairEntrypoint::as_str),
-                                    rebuilt_outputs: r.rebuilt_outputs.clone(),
+                                        .and_then(|entrypoint| {
+                                            store.repair_engine().plan_index_rebuild(r.target, entrypoint)
+                                        });
+                                    let artifact = summary
+                                        .verification_artifacts
+                                        .get(&r.target)
+                                        .expect("verification artifact should exist for each maintenance result");
+                                    RepairResultOutput {
+                                        target: r.target.as_str(),
+                                        status: r.status.as_str(),
+                                        verification_passed: r.verification_passed,
+                                        rebuild_entrypoint: r
+                                            .rebuild_entrypoint
+                                            .map(IndexRepairEntrypoint::as_str),
+                                        rebuilt_outputs: r.rebuilt_outputs.clone(),
+                                        durable_sources: plan
+                                            .as_ref()
+                                            .map(|plan| plan.durable_sources.clone())
+                                            .unwrap_or_default(),
+                                        verification_artifact_name: artifact.artifact_name,
+                                        parity_check: artifact.parity_check,
+                                        authoritative_rows: artifact.authoritative_rows,
+                                        derived_rows: artifact.derived_rows,
+                                        authoritative_generation: artifact.authoritative_generation,
+                                        derived_generation: artifact.derived_generation,
+                                        affected_item_count: report.affected_item_count,
+                                        error_count: report.error_count,
+                                        rebuild_duration_ms: report.rebuild_duration_ms,
+                                        rollback_state: report.rollback_state,
+                                        queue_depth_before: report.queue_depth_before,
+                                        queue_depth_after: report.queue_depth_after,
+                                    }
                                 })
                                 .collect(),
                             warnings: Vec::new(),
@@ -1670,19 +3036,37 @@ async fn main() -> anyhow::Result<()> {
                 }
             }
 
-            match output {
+            match maintenance_output {
                 Some(result) => {
-                    if *json {
+                    if output.json {
                         println!("{}", serde_json::to_string_pretty(&result)?);
                     } else {
                         println!(
-                            "Maintenance '{}' on '{}' → {} checked, {} rebuilt",
-                            result.action, result.namespace, result.targets_checked, result.rebuilt,
+                            "Maintenance '{}' on '{}' → {} checked, {} rebuilt, affected={}, errors={}, duration_ms={}, rollback_state={}, queue={}→{}",
+                            result.action,
+                            result.namespace,
+                            result.targets_checked,
+                            result.rebuilt,
+                            result.affected_item_count,
+                            result.error_count,
+                            result.rebuild_duration_ms,
+                            result.rollback_state.unwrap_or("none"),
+                            result.queue_depth_before,
+                            result.queue_depth_after,
                         );
                         for r in &result.results {
                             println!(
-                                "  {} [{}] verified={} outputs={:?}",
-                                r.target, r.status, r.verification_passed, r.rebuilt_outputs
+                                "  {} [{}] verified={} outputs={:?} affected={} errors={} duration_ms={} rollback_state={} queue={}→{}",
+                                r.target,
+                                r.status,
+                                r.verification_passed,
+                                r.rebuilt_outputs,
+                                r.affected_item_count,
+                                r.error_count,
+                                r.rebuild_duration_ms,
+                                r.rollback_state.unwrap_or("none"),
+                                r.queue_depth_before,
+                                r.queue_depth_after,
                             );
                         }
                     }
@@ -1696,7 +3080,7 @@ async fn main() -> anyhow::Result<()> {
         Commands::Benchmark {
             target,
             iters,
-            json,
+            output,
         } => {
             let store_bench = BrainStore::new(RuntimeConfig::default());
             let mut durations_ns: Vec<u128> = Vec::with_capacity(*iters);
@@ -1750,7 +3134,7 @@ async fn main() -> anyhow::Result<()> {
             let p50_us = durations_ns[p50_idx] as f64 / 1_000.0;
             let p95_us = durations_ns[p95_idx.min(durations_ns.len() - 1)] as f64 / 1_000.0;
 
-            let output = BenchmarkOutput {
+            let benchmark_output = BenchmarkOutput {
                 outcome: "accepted",
                 target: target.clone(),
                 iterations: *iters,
@@ -1762,8 +3146,8 @@ async fn main() -> anyhow::Result<()> {
                 p95_duration_us: p95_us,
             };
 
-            if *json {
-                println!("{}", serde_json::to_string_pretty(&output)?);
+            if output.json {
+                println!("{}", serde_json::to_string_pretty(&benchmark_output)?);
             } else {
                 println!(
                     "Benchmark '{}': {} iters, avg={:.1}us, min={:.1}us, max={:.1}us, p50={:.1}us, p95={:.1}us, total={:.1}ms",
@@ -1771,10 +3155,169 @@ async fn main() -> anyhow::Result<()> {
                 );
             }
         }
-        Commands::Doctor => {
+        Commands::Doctor { command, output } => {
+            let _ = command.as_ref().unwrap_or(&DoctorCommands::Run);
             let report = doctor_report();
-            print_doctor_report(&report)?;
+            if output.json {
+                print_doctor_report(&report)?;
+            } else {
+                if !output.quiet {
+                    println!("Doctor run [{}]", report.status);
+                }
+                println!("  posture: {}", report.posture);
+                println!("  indexes: {}", report.indexes.len());
+                if output.verbose > 0 {
+                    println!("  warnings: {}", report.warnings.join(", "));
+                }
+            }
         }
+        Commands::Observe {
+            content,
+            namespace,
+            context,
+            chunk_size,
+            topic_threshold,
+            min_chunk_size,
+            source_label,
+            dry_run,
+            watch,
+            pattern,
+            output,
+        } => {
+            let ns = NamespaceId::new(namespace)?;
+            let (observed_content, watched_path) = if let Some(path) = watch {
+                (std::fs::read_to_string(path)?, Some(path.as_path()))
+            } else if let Some(content) = content {
+                (content.clone(), None)
+            } else {
+                use std::io::Read;
+                let mut buffer = String::new();
+                std::io::stdin().read_to_string(&mut buffer)?;
+                (buffer, None)
+            };
+            let config = ObserveConfig {
+                chunk_size_chars: *chunk_size,
+                topic_shift_threshold: *topic_threshold,
+                min_chunk_chars: *min_chunk_size,
+                context: context.clone(),
+                source_label: source_label.clone(),
+            };
+            let response = observe_memories(
+                &store,
+                &mut hot,
+                &mut local_records,
+                &ns,
+                &observed_content,
+                &config,
+                *dry_run,
+                watched_path,
+                pattern.as_deref(),
+            );
+            if output.json {
+                println!("{}", serde_json::to_string_pretty(&response)?);
+            } else {
+                let result = response.result.as_ref().expect("observe result present");
+                if !output.quiet {
+                    println!(
+                        "Observe '{}' in '{}' → {} fragment(s)",
+                        result.observation_source,
+                        result.namespace,
+                        result.fragments_previewed,
+                    );
+                }
+                println!("  batch: {}", result.observation_chunk_id);
+                println!("  bytes: {}", result.bytes_processed);
+                println!("  topic_shifts: {}", result.topic_shifts);
+                println!("  created: {}", result.memories_created);
+                if result.suppressed > 0 || result.denied > 0 {
+                    println!(
+                        "  suppressed: {}, denied: {}",
+                        result.suppressed, result.denied
+                    );
+                }
+                if *dry_run {
+                    println!("  dry_run: preview only");
+                }
+                if output.verbose > 0 {
+                    for fragment in &result.preview {
+                        println!(
+                            "  fragment #{} [{} / {}] {}",
+                            fragment.index,
+                            fragment.route_family,
+                            fragment.write_decision,
+                            fragment.compact_text
+                        );
+                    }
+                }
+            }
+        }
+        Commands::Preflight { command } => match command {
+            PreflightCommands::Run {
+                namespace,
+                original_query,
+                proposed_action,
+                output,
+            } => {
+                let response = cli_preflight_run(namespace, original_query, proposed_action)?;
+                if output.json {
+                    println!("{}", serde_json::to_string_pretty(&response)?);
+                } else {
+                    if !output.quiet {
+                        print_preflight_run_human(&response);
+                    }
+                }
+                let exit_code = preflight_exit_code(&response);
+                if exit_code != 0 {
+                    std::process::exit(exit_code);
+                }
+            }
+            PreflightCommands::Explain {
+                namespace,
+                original_query,
+                proposed_action,
+                output,
+            } => {
+                let response = cli_preflight_explain(namespace, original_query, proposed_action)?;
+                if output.json {
+                    println!("{}", serde_json::to_string_pretty(&response)?);
+                } else {
+                    if !output.quiet {
+                        print_preflight_explain_human(&response);
+                    }
+                }
+                let exit_code = explain_exit_code(&response);
+                if exit_code != 0 {
+                    std::process::exit(exit_code);
+                }
+            }
+            PreflightCommands::Allow {
+                namespace,
+                original_query,
+                proposed_action,
+                authorization_token,
+                bypass_flags,
+                output,
+            } => {
+                let response = cli_preflight_allow(
+                    namespace,
+                    original_query,
+                    proposed_action,
+                    authorization_token,
+                    bypass_flags,
+                )?;
+                if output.json {
+                    println!("{}", serde_json::to_string_pretty(&response)?);
+                } else {
+                    if !output.quiet {
+                        print_preflight_allow_human(&response);
+                    }
+                }
+                let exit_code = preflight_exit_code(&response);
+                if exit_code != 0 {
+                    std::process::exit(exit_code);
+                }
+            }
+        },
         Commands::Audit {
             namespace,
             id,
@@ -1782,26 +3325,26 @@ async fn main() -> anyhow::Result<()> {
             since,
             op,
             recent,
-            json,
+            output,
         } => {
             let ns = NamespaceId::new(namespace)?;
             let log = sample_audit_log(&ns);
             let export =
                 filter_audit_rows(&log, &ns, *id, *session, *since, op.as_deref(), *recent)?;
-            print_audit_rows(&export, *json)?;
+            print_audit_rows(&export, output.json)?;
         }
         Commands::Share {
             id,
             namespace_id,
-            json,
+            output,
         } => {
             let ns = NamespaceId::new(namespace_id)?;
-            let output = share_output(*id, &ns, "shared");
-            if *json {
+            let output_result = share_output(*id, &ns, "shared");
+            if output.json {
                 let response = ResponseContext::success(
                     ns.clone(),
                     RequestId::new(format!("share-{id}"))?,
-                    output,
+                    output_result,
                 )
                 .with_policy_filters(vec![
                     membrain_core::api::PolicyFilterSummary::new(
@@ -1820,22 +3363,22 @@ async fn main() -> anyhow::Result<()> {
                     "Shared memory #{} into '{}' [{}]",
                     id,
                     ns.as_str(),
-                    output.visibility
+                    output_result.visibility
                 );
             }
         }
         Commands::Unshare {
             id,
             namespace,
-            json,
+            output,
         } => {
             let ns = NamespaceId::new(namespace)?;
-            let output = unshare_output(*id, &ns);
-            if *json {
+            let output_result = unshare_output(*id, &ns);
+            if output.json {
                 let response = ResponseContext::success(
                     ns.clone(),
                     RequestId::new(format!("unshare-{id}"))?,
-                    output,
+                    output_result,
                 )
                 .with_policy_filters(vec![
                     membrain_core::api::PolicyFilterSummary::new(
@@ -1873,17 +3416,21 @@ async fn main() -> anyhow::Result<()> {
 #[allow(clippy::items_after_test_module)]
 mod tests {
     use super::{
-        filter_audit_rows, parse_audit_category, parse_audit_kind, print_audit_rows,
-        response_trace_for_result_set, sample_audit_log, share_output, unshare_output, Cli,
-        Commands,
+        build_retrieval_result_set, cli_preflight_allow, cli_preflight_explain,
+        filter_audit_rows, inspect_memory, observe_memories, parse_audit_category,
+        parse_audit_kind, print_audit_rows, response_trace_for_result_set, sample_audit_log,
+        share_output, unshare_output, Cli, Commands, LocalMemoryRecord, PreflightCommands,
+        RecallCommandConfig,
     };
     use clap::Parser;
     use membrain_core::api::{NamespaceId, TraceStage};
+    use membrain_core::engine::observe::ObserveConfig;
+    use membrain_core::{BrainStore, RuntimeConfig};
     use membrain_core::engine::confidence::{ConfidenceInputs, ConfidencePolicy};
     use membrain_core::engine::ranking::{fuse_scores, RankingInput, RankingProfile};
-    use membrain_core::engine::result::{AnsweredFrom, ResultBuilder, RetrievalExplain};
     use membrain_core::engine::recall::{RecallPlanKind, RecallTraceStage};
-    use membrain_core::types::{CanonicalMemoryType, MemoryId, SessionId};
+    use membrain_core::engine::result::{AnsweredFrom, ResultBuilder, RetrievalExplain};
+    use membrain_core::types::{CanonicalMemoryType, FastPathRouteFamily, MemoryId, SessionId};
 
     #[test]
     fn audit_rows_preserve_request_id_in_json_export() {
@@ -1903,9 +3450,23 @@ mod tests {
         );
     }
 
-    fn parsed_recall_namespace_and_top(command: Commands) -> Option<(String, usize)> {
+    fn parsed_recall_namespace_and_top(command: Commands) -> Option<(Option<String>, usize)> {
         match command {
             Commands::Recall { namespace, top, .. } => Some((namespace, top)),
+            _ => None,
+        }
+    }
+
+    fn parsed_budget_namespace_top_and_tokens(
+        command: Commands,
+    ) -> Option<(Option<String>, usize, usize)> {
+        match command {
+            Commands::Budget {
+                namespace,
+                top,
+                token_budget,
+                ..
+            } => Some((namespace, top, token_budget)),
             _ => None,
         }
     }
@@ -1924,7 +3485,7 @@ mod tests {
 
         assert_eq!(
             parsed_recall_namespace_and_top(cli.command),
-            Some(("team.alpha".to_string(), 7))
+            Some((Some("team.alpha".to_string()), 7))
         );
     }
 
@@ -1942,7 +3503,7 @@ mod tests {
 
         assert_eq!(
             parsed_recall_namespace_and_top(cli.command),
-            Some(("team.alpha".to_string(), 4))
+            Some((Some("team.alpha".to_string()), 4))
         );
     }
 
@@ -1960,7 +3521,29 @@ mod tests {
 
         assert_eq!(
             parsed_recall_namespace_and_top(cli.command),
-            Some(("team.alpha".to_string(), 3))
+            Some((Some("team.alpha".to_string()), 3))
+        );
+    }
+
+    #[test]
+    fn budget_command_preserves_namespace_top_and_token_flags() {
+        let cli = Cli::parse_from([
+            "membrain",
+            "budget",
+            "incident timeline",
+            "--tokens",
+            "200",
+            "--namespace",
+            "team.alpha",
+            "-n",
+            "4",
+            "--format",
+            "markdown",
+        ]);
+
+        assert_eq!(
+            parsed_budget_namespace_top_and_tokens(cli.command),
+            Some((Some("team.alpha".to_string()), 4, 200))
         );
     }
 
@@ -1990,6 +3573,56 @@ mod tests {
     }
 
     #[test]
+    fn observe_command_preserves_passive_observation_surface() {
+        let cli = Cli::parse_from([
+            "membrain",
+            "observe",
+            "captured stream",
+            "--namespace",
+            "team.alpha",
+            "--context",
+            "coding session",
+            "--chunk-size",
+            "120",
+            "--topic-threshold",
+            "0.4",
+            "--min-chunk-size",
+            "32",
+            "--source-label",
+            "stdin:session",
+            "--dry-run",
+        ]);
+
+        match cli.command {
+            Commands::Observe {
+                content,
+                namespace,
+                context,
+                chunk_size,
+                topic_threshold,
+                min_chunk_size,
+                source_label,
+                dry_run,
+                watch,
+                pattern,
+                ..
+            } => {
+                assert_eq!(content.as_deref(), Some("captured stream"));
+                assert_eq!(namespace, "team.alpha");
+                assert_eq!(context.as_deref(), Some("coding session"));
+                assert_eq!(chunk_size, 120);
+                assert_eq!(topic_threshold, 0.4);
+                assert_eq!(min_chunk_size, 32);
+                assert_eq!(source_label.as_deref(), Some("stdin:session"));
+                assert!(dry_run);
+                assert!(watch.is_none());
+                assert!(pattern.is_none());
+            }
+            other => panic!("expected observe command, got {other:?}"),
+        }
+    }
+
+    #[test]
     fn why_command_preserves_explain_surface() {
         let cli = Cli::parse_from([
             "membrain",
@@ -2011,13 +3644,239 @@ mod tests {
     }
 
     #[test]
+    fn observe_memories_uses_shared_batch_metadata_and_dry_run_preview() {
+        let store = BrainStore::new(RuntimeConfig::default());
+        let mut hot = store.hot_store().new_metadata_store(64);
+        let mut local_records = Vec::new();
+        let namespace = NamespaceId::new("team.alpha").unwrap();
+        let config = ObserveConfig {
+            chunk_size_chars: 80,
+            topic_shift_threshold: 0.30,
+            min_chunk_chars: 20,
+            context: Some("coding session".to_string()),
+            source_label: Some("stdin:test".to_string()),
+        };
+        let content =
+            "build stayed green across canary rollout.\n\nuser prefers dark mode in dashboard settings.";
+
+        let preview = observe_memories(
+            &store,
+            &mut hot,
+            &mut local_records,
+            &namespace,
+            content,
+            &config,
+            true,
+            None,
+            None,
+        );
+        let preview_result = preview.result.as_ref().unwrap();
+        assert!(preview.partial_success);
+        assert_eq!(preview_result.memories_created, 0);
+        assert_eq!(preview_result.fragments_previewed, 2);
+        assert_eq!(preview_result.observation_source, "stdin:test");
+        assert_eq!(local_records.len(), 0);
+        assert_eq!(preview.passive_observation.as_ref().unwrap().source_kind, "observation");
+
+        let applied = observe_memories(
+            &store,
+            &mut hot,
+            &mut local_records,
+            &namespace,
+            content,
+            &config,
+            false,
+            None,
+            None,
+        );
+        let applied_result = applied.result.as_ref().unwrap();
+        assert_eq!(applied_result.memories_created, 2);
+        assert_eq!(local_records.len(), 2);
+        assert!(local_records.iter().all(|record| {
+            record
+                .passive_observation
+                .as_ref()
+                .and_then(|passive| match &passive.observation_chunk_id {
+                    membrain_core::api::FieldPresence::Present(value) => Some(value.as_str()),
+                    _ => None,
+                })
+                == Some(applied_result.observation_chunk_id.as_str())
+        }));
+
+        let inspected = inspect_memory(&mut hot, &local_records, &namespace, MemoryId(1)).unwrap();
+        let passive = inspected.passive_observation.as_ref().unwrap();
+        assert_eq!(passive.source_kind, "observation");
+        assert_eq!(passive.write_decision, "capture");
+        assert!(passive.captured_as_observation);
+        assert_eq!(
+            passive.observation_source,
+            membrain_core::api::FieldPresence::Present("stdin:test".to_string())
+        );
+        assert_eq!(
+            passive.observation_chunk_id,
+            membrain_core::api::FieldPresence::Present(
+                applied_result.observation_chunk_id.clone()
+            )
+        );
+        assert_eq!(
+            passive.retention_marker,
+            membrain_core::api::FieldPresence::Present("volatile_observation")
+        );
+    }
+
+    #[test]
+    fn preflight_commands_preserve_shared_cli_surface() {
+        let run = Cli::parse_from([
+            "membrain",
+            "preflight",
+            "run",
+            "--namespace",
+            "team.alpha",
+            "--original-query",
+            "delete prior audit events",
+            "--proposed-action",
+            "purge namespace audit history",
+        ]);
+        let explain = Cli::parse_from([
+            "membrain",
+            "preflight",
+            "explain",
+            "--namespace",
+            "team.alpha",
+            "--original-query",
+            "delete prior audit events",
+            "--proposed-action",
+            "purge namespace audit history",
+        ]);
+        let allow = Cli::parse_from([
+            "membrain",
+            "preflight",
+            "allow",
+            "--namespace",
+            "team.alpha",
+            "--original-query",
+            "delete prior audit events",
+            "--proposed-action",
+            "purge namespace audit history",
+            "--authorization-token",
+            "allow-123",
+            "--bypass-flag",
+            "manual_override",
+        ]);
+
+        match run.command {
+            Commands::Preflight {
+                command:
+                    PreflightCommands::Run {
+                        namespace,
+                        original_query,
+                        proposed_action,
+                        ..
+                    },
+            } => {
+                assert_eq!(namespace, "team.alpha");
+                assert_eq!(original_query, "delete prior audit events");
+                assert_eq!(proposed_action, "purge namespace audit history");
+            }
+            other => panic!("expected preflight run command, got {other:?}"),
+        }
+
+        assert!(matches!(
+            explain.command,
+            Commands::Preflight {
+                command: PreflightCommands::Explain { .. }
+            }
+        ));
+        match allow.command {
+            Commands::Preflight {
+                command:
+                    PreflightCommands::Allow {
+                        authorization_token,
+                        bypass_flags,
+                        ..
+                    },
+            } => {
+                assert_eq!(authorization_token, "allow-123");
+                assert_eq!(bypass_flags, vec!["manual_override"]);
+            }
+            other => panic!("expected preflight allow command, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn cli_preflight_helpers_preserve_shared_blocked_and_force_confirmed_semantics() {
+        let explain = cli_preflight_explain(
+            "team.alpha",
+            "delete prior audit events across all namespaces",
+            "purge namespace audit history",
+        )
+        .expect("preflight explain should succeed");
+        assert_eq!(explain.preflight_state, "blocked");
+        assert_eq!(explain.preflight_outcome, "preview_only");
+        assert_eq!(
+            explain.blocked_reasons,
+            vec![
+                "scope_ambiguous".to_string(),
+                "confirmation_required".to_string()
+            ]
+        );
+        assert_eq!(explain.audit.actor_source, "cli_preflight");
+        assert!(explain
+            .request_id
+            .as_deref()
+            .is_some_and(|id| id.starts_with("cli-preflight-explain-")));
+
+        let allow = cli_preflight_allow(
+            "team.alpha",
+            "delete prior audit events",
+            "purge namespace audit history",
+            "allow-123",
+            &["manual_override".to_string()],
+        )
+        .expect("preflight allow should succeed");
+        assert!(allow.success);
+        assert_eq!(allow.preflight_state, "ready");
+        assert_eq!(allow.preflight_outcome, "force_confirmed");
+        assert_eq!(allow.outcome_class, "accepted");
+        assert_eq!(allow.confirmation.confirmed, true);
+        assert_eq!(
+            allow.confirmation_reason.as_deref(),
+            Some("operator confirmed exact previewed scope")
+        );
+        assert_eq!(allow.audit.actor_source, "cli_preflight");
+        assert!(allow
+            .request_id
+            .as_deref()
+            .is_some_and(|id| id.starts_with("cli-preflight-allow-")));
+    }
+
+    #[test]
     fn response_trace_bundle_uses_canonical_explain_route_stages() {
         let namespace = NamespaceId::new("team.gamma").unwrap();
-        let result_set = super::build_retrieval_result_set(
+        let config = RecallCommandConfig {
+            query: Some("search-term".to_string()),
+            context: None,
+            top: 3,
+            kind: None,
+            confidence: "normal".to_string(),
+            explain: "summary".to_string(),
+            namespace: namespace.clone(),
+            include_public: false,
+            like: None,
+            unlike: None,
+            graph_expansion: false,
+            as_of: None,
+            at: None,
+            era: None,
+            min_confidence: None,
+            min_strength: None,
+            show_decaying: false,
+            cold_tier: "auto".to_string(),
+        };
+        let result_set = build_retrieval_result_set(
             &[],
-            &namespace,
-            3,
-            membrain_core::engine::ranking::RankingProfile::balanced(),
+            &config,
+            RankingProfile::balanced(),
             "balanced",
             "small lookup for active session can stay on hot recent window before durable fallback"
                 .to_string(),
@@ -2034,6 +3893,105 @@ mod tests {
                 TraceStage::Packaging
             ]
         );
+    }
+
+    #[test]
+    fn build_retrieval_result_set_reports_landmark_anchors_for_era_scoped_recall() {
+        let namespace = NamespaceId::new("team.gamma").unwrap();
+        let local_records = vec![
+            LocalMemoryRecord {
+                memory_id: MemoryId(7),
+                namespace: namespace.clone(),
+                session_id: SessionId(2),
+                memory_type: CanonicalMemoryType::Event,
+                route_family: FastPathRouteFamily::Event,
+                compact_text: "launch day pivot".to_string(),
+                provisional_salience: 900,
+                fingerprint: 700,
+                payload_size_bytes: 32,
+                is_landmark: true,
+                landmark_label: Some("launch day pivot".to_string()),
+                era_id: Some("era-launch-0042".to_string()),
+                passive_observation: None,
+            },
+            LocalMemoryRecord {
+                memory_id: MemoryId(8),
+                namespace: namespace.clone(),
+                session_id: SessionId(2),
+                memory_type: CanonicalMemoryType::Observation,
+                route_family: FastPathRouteFamily::Observation,
+                compact_text: "follow-up task carried into launch era".to_string(),
+                provisional_salience: 650,
+                fingerprint: 800,
+                payload_size_bytes: 48,
+                is_landmark: false,
+                landmark_label: None,
+                era_id: Some("era-launch-0042".to_string()),
+                passive_observation: None,
+            },
+            LocalMemoryRecord {
+                memory_id: MemoryId(9),
+                namespace: namespace.clone(),
+                session_id: SessionId(2),
+                memory_type: CanonicalMemoryType::Event,
+                route_family: FastPathRouteFamily::Event,
+                compact_text: "older unrelated era".to_string(),
+                provisional_salience: 500,
+                fingerprint: 900,
+                payload_size_bytes: 24,
+                is_landmark: true,
+                landmark_label: Some("older unrelated era".to_string()),
+                era_id: Some("era-older-0001".to_string()),
+                passive_observation: None,
+            },
+        ];
+        let config = RecallCommandConfig {
+            query: Some("launch".to_string()),
+            context: None,
+            top: 5,
+            kind: None,
+            confidence: "normal".to_string(),
+            explain: "full".to_string(),
+            namespace: namespace.clone(),
+            include_public: false,
+            like: None,
+            unlike: None,
+            graph_expansion: false,
+            as_of: None,
+            at: None,
+            era: Some("era-launch-0042".to_string()),
+            min_confidence: None,
+            min_strength: None,
+            show_decaying: false,
+            cold_tier: "auto".to_string(),
+        };
+
+        let result_set = build_retrieval_result_set(
+            &local_records,
+            &config,
+            RankingProfile::balanced(),
+            "balanced",
+            "temporal recall stayed inside one landmark-defined era".to_string(),
+            vec![MemoryId(7), MemoryId(8), MemoryId(9)],
+        );
+
+        let returned_ids = result_set
+            .evidence_pack
+            .iter()
+            .map(|item| item.result.memory_id)
+            .collect::<Vec<_>>();
+        assert_eq!(returned_ids, vec![MemoryId(7), MemoryId(8)]);
+        let era_reason = result_set
+            .explain
+            .result_reasons
+            .iter()
+            .find(|reason| reason.reason_code == "era_filter_applied")
+            .expect("era filter reason");
+        assert!(era_reason.detail.contains("era `era-launch-0042`"));
+        assert!(era_reason.detail.contains("launch day pivot (#7)"));
+        assert!(era_reason
+            .detail
+            .contains("2 candidate(s) remained after era scoping"));
     }
 
     #[test]
@@ -2092,7 +4050,10 @@ mod tests {
 
         assert_eq!(uncertainty_markers.len(), 1);
         assert_eq!(expected_uncertainty_markers.len(), 1);
-        assert_eq!(uncertainty_markers[0].code, expected_uncertainty_markers[0].code);
+        assert_eq!(
+            uncertainty_markers[0].code,
+            expected_uncertainty_markers[0].code
+        );
         assert_eq!(
             uncertainty_markers[0].detail,
             expected_uncertainty_markers[0].detail
@@ -2131,11 +4092,11 @@ mod tests {
             Commands::Share {
                 id,
                 namespace_id,
-                json,
+                output,
             } => {
                 assert_eq!(id, 42);
                 assert_eq!(namespace_id, "team.beta");
-                assert!(!json);
+                assert!(!output.json);
             }
             other => panic!("expected share command, got {other:?}"),
         }
@@ -2144,11 +4105,11 @@ mod tests {
             Commands::Unshare {
                 id,
                 namespace,
-                json,
+                output,
             } => {
                 assert_eq!(id, 42);
                 assert_eq!(namespace, "team.alpha");
-                assert!(!json);
+                assert!(!output.json);
             }
             other => panic!("expected unshare command, got {other:?}"),
         }
@@ -2162,10 +4123,26 @@ mod tests {
         assert_eq!(shared.visibility, "shared");
         assert_eq!(shared.policy_summary.policy_family, "visibility_sharing");
         assert_eq!(shared.policy_summary.sharing_scope.state_name(), "present");
+        assert_eq!(shared.audit.event_kind, "approved_sharing");
+        assert_eq!(shared.audit.actor_source, "cli_share");
+        assert_eq!(shared.audit.request_id, "req-share-42");
+        assert_eq!(shared.audit.effective_namespace, "team.beta");
+        assert_eq!(shared.audit.source_namespace.as_deref(), Some("team.beta"));
+        assert_eq!(shared.audit.target_namespace.as_deref(), Some("team.beta"));
+        assert_eq!(shared.audit.policy_family, "visibility_sharing");
+        assert_eq!(shared.audit.outcome_class, "accepted");
+        assert_eq!(shared.audit.blocked_stage, "policy_gate");
+        assert_eq!(shared.audit.related_run.as_deref(), Some("share-run-42"));
+        assert!(!shared.audit.redacted);
+        assert_eq!(shared.audit.redaction_summary, Vec::<String>::new());
         assert_eq!(shared.audit_rows.len(), 1);
         assert_eq!(
             shared.audit_rows[0].request_id.as_deref(),
             Some("req-share-42")
+        );
+        assert_eq!(
+            shared.audit_rows[0].related_run.as_deref(),
+            Some("share-run-42")
         );
         assert_eq!(shared.audit_rows[0].kind, "approved_sharing");
 
@@ -2175,10 +4152,35 @@ mod tests {
             unshared.policy_summary.redaction_fields,
             vec!["sharing_scope"]
         );
+        assert_eq!(unshared.audit.event_kind, "policy_redacted");
+        assert_eq!(unshared.audit.actor_source, "cli_unshare");
+        assert_eq!(unshared.audit.request_id, "req-unshare-42");
+        assert_eq!(unshared.audit.effective_namespace, "team.alpha");
+        assert_eq!(
+            unshared.audit.source_namespace.as_deref(),
+            Some("team.alpha")
+        );
+        assert_eq!(
+            unshared.audit.target_namespace.as_deref(),
+            Some("team.alpha")
+        );
+        assert_eq!(unshared.audit.policy_family, "visibility_sharing");
+        assert_eq!(unshared.audit.outcome_class, "accepted");
+        assert_eq!(unshared.audit.blocked_stage, "policy_gate");
+        assert_eq!(unshared.audit.related_run.as_deref(), Some("share-run-42"));
+        assert!(unshared.audit.redacted);
+        assert_eq!(
+            unshared.audit.redaction_summary,
+            vec!["sharing_scope".to_string()]
+        );
         assert_eq!(unshared.audit_rows.len(), 1);
         assert_eq!(
             unshared.audit_rows[0].request_id.as_deref(),
             Some("req-unshare-42")
+        );
+        assert_eq!(
+            unshared.audit_rows[0].related_run.as_deref(),
+            Some("share-run-42")
         );
         assert_eq!(unshared.audit_rows[0].kind, "policy_redacted");
         assert!(unshared.audit_rows[0].redacted);
@@ -2229,6 +4231,10 @@ mod tests {
         assert_eq!(
             parse_audit_kind("maintenance_reconsolidation_blocked"),
             Some(membrain_core::observability::AuditEventKind::MaintenanceReconsolidationBlocked)
+        );
+        assert_eq!(
+            parse_audit_kind("maintenance_forgetting_evaluated"),
+            Some(membrain_core::observability::AuditEventKind::MaintenanceForgettingEvaluated)
         );
         assert_eq!(parse_audit_category("unknown"), None);
         assert_eq!(parse_audit_kind("unknown"), None);

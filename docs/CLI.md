@@ -121,7 +121,9 @@ echo "content" | membrain remember --context "recent commits" --kind semantic
 
 All CLI recall invocations normalize into the canonical `RecallRequest` described by `PLAN.md` and `RETRIEVAL.md`: `<QUERY>` populates `query_text`, `--context` maps to `context_text`, `--confidence` maps to bounded `effort`, and CLI-only spelling differences must not create different retrieval semantics.
 
-The machine-readable result for `recall` is the canonical `RetrievalResult` envelope from `mb-1hw.8`. In practice that means CLI JSON should expose a bounded `evidence_pack`, optional `action_pack`, `outcome_class`, omission/deferred-payload state, and the same policy/provenance/freshness/conflict/explanation families used by daemon/JSON-RPC and MCP.
+The machine-readable result for `recall` is the canonical `RetrievalResult` envelope from `mb-1hw.8`. In practice that means CLI JSON should expose a bounded `evidence_pack`, optional `action_pack`, explicit `output_mode`, `outcome_class`, omission/deferred-payload state, and the same policy/provenance/freshness/conflict/explanation families used by daemon/JSON-RPC and MCP.
+
+`--confidence fast|normal|high` doubles as the Dual Memory Output packaging mode selector for CLI recall: `fast` keeps derived action guidance permissive, `normal` maps to balanced evidence/action packaging, and `high` maps to strict packaging that suppresses action suggestions when uncertainty, freshness caveats, or policy caveats would make them unsafe to foreground.
 
 ```bash
 membrain recall "JWT authentication"
@@ -169,6 +171,8 @@ Normalization and safety rules:
 - `--cold-tier allow` may enable Tier3 candidate generation, but it does not permit pre-cut cold payload fetch.
 - `--explain summary` should surface major route choices, omitted-result reasons, freshness/conflict markers, and any cache bypass, stale-warning, or degraded-mode outcome that materially affected returned results.
 - `--explain full` should preserve machine-readable routing-trace parity with daemon, IPC/JSON-RPC, and MCP surfaces, including candidate counts, cache family or event data, and exclusion reasons where those surfaces exist.
+- Confidence affects retrieval in two visible ways: it contributes to ranking order through the confidence score family, and `--min-confidence` can suppress low-confidence results after ranking while recording `confidence_filtered` / `low_confidence_suppressed` in omission and explain surfaces.
+- Human CLI recall output should show per-item confidence, optional confidence intervals, and uncertainty breakdowns such as `freshness`, `contradiction`, `missing_evidence`, `corroboration`, and `reconsolidation` when explain/detail mode requests them.
 
 ### `membrain forget <ID> [OPTIONS]`
 
@@ -185,6 +189,7 @@ Rules:
 - Archived memories remain inspectable and auditable, and those surfaces should expose archive reason, restore eligibility, and any degraded-fidelity markers when only partial recovery is possible.
 - Ordinary recall, cold-tier lookup, and snapshot inspection do not implicitly restore archived memories.
 - Explicit restore or admin paths may reactivate archived memories when policy allows, but they restore only retained authoritative evidence and must surface partial or degraded state rather than pretending to recreate a perfect pre-archive copy.
+- JSON and daemon/MCP parity for forgetting should preserve `action`, `reason_code`, `disposition`, `policy_surface`, `reversibility`, `audit_kind`, and operator-review markers when no mutation occurred because the item was retained for review or policy protection.
 
 ### `membrain strengthen <ID>`
 
@@ -232,7 +237,11 @@ Diagnose brain health: orphan edges, missing embeddings, stale indexes, broken l
 Doctor contract:
 - `membrain doctor` is a read-only diagnosis surface; it identifies corruption, stale derived state, and degraded serving posture without implicitly mutating anything. Repair remains an explicit `membrain repair ...` flow.
 - `membrain doctor run --json` should preserve machine-readable per-check results with stable fields for check name, surface kind, status/severity, affected scope, degraded impact, and remediation or repair hints so CLI text, daemon/JSON-RPC, and MCP do not drift.
+- The machine-readable payload includes `summary`, `repair_engine_component`, `checks`, and `runbook_hints` so operators can see which checks passed, which degraded conditions remain, and which documented runbook should be followed next.
+- `runbook_hints[*]` should include a stable `runbook_id`, the source doc path, the exact section heading, and a short reason keyed to the surfaced incident class or degraded-mode condition.
 - When corruption or unreadable authoritative inputs prevent safe serving, `doctor` should surface the same `error_kind`, `availability`, and remediation semantics used by sibling daemon/MCP contracts rather than collapsing everything into prose-only warnings.
+- If stale action-critical evidence reaches `recheck_required` or `withhold` handling, `doctor` should surface that state explicitly through freshness-oriented checks and warnings rather than silently treating the result as fully healthy.
+- The canonical logging-heavy CLI proof artifact for these workflow families is `crates/membrain-cli/tests/e2e_cli.sh`. It should emit human-readable logs plus deterministic validation for retrieval, contradiction, policy denial/share/unshare redaction, consolidation, forgetting, and repair so reviewers can rerun one script and inspect the same proof bundle named by bead acceptance criteria.
 
 ```bash
 membrain doctor run
@@ -268,8 +277,9 @@ Dream Mode is a later-stage, background-only offline synthesis surface layered o
 
 CLI expectations:
 - `membrain dream` should make its maintenance-class posture visible: it is an explicit manual trigger for an idle-window synthesis pass, not a foreground recall or encode shortcut.
-- `membrain dream --status` should expose enough operator detail to inspect the last bounded run, including whether the feature is enabled, the last run tick, links created, and any degraded or paused posture that prevented a new cycle.
+- `membrain dream --status` should expose enough operator detail to inspect the current bounded scheduler state, including whether the feature is enabled, the last run tick, cumulative links created, idle ticks observed versus threshold, and any degraded or paused posture that prevented a new cycle.
 - `membrain dream --disable` should pause future background dreaming without deleting canonical memories, graph edges, or lineage-bearing evidence already created by prior accepted runs.
+- The initial scheduler slice should stay bounded and explicit: status and manual runs report bounded poll budget, bounded candidate batches, and bounded link creation instead of implying unconstrained background work.
 - Any candidate expansion, similarity search, or merge follow-on must remain bounded, namespace-aware, policy-aware, and lineage-backed; the CLI surface should not imply full-corpus scans or silent promotion of synthetic links into sole authoritative truth.
 - Because this is later-stage follow-on work, the surface should make its gated/background nature visible instead of implying that every deployment or maintenance window must run it.
 
@@ -289,8 +299,8 @@ Full terminal dashboard: tier utilization, decay curves, engrams, signals, activ
 
 Health contract:
 - `membrain health` is the operator dashboard rendering of the same bounded `BrainHealthReport` exposed through daemon/JSON-RPC and MCP `health()`.
-- `--json`, `--brief`, and `--watch` are presentation variants over one machine-readable report; they must preserve the same tier/capacity, quality/conflict/uncertainty, activity/runtime, repair/backpressure, availability-posture, and feature-availability meaning.
-- The report should make degraded posture, repair-queue growth, and backpressure state inspectable enough that operators can tell whether to continue normal work, inspect `doctor`, or switch to a runbook instead of inferring that state from prose.
+- `--json`, `--brief`, and `--watch` are presentation variants over one machine-readable report; they must preserve the same tier/capacity, quality/conflict/uncertainty, activity/runtime, repair/backpressure, availability-posture, degraded-status, and feature-availability meaning.
+- The report should make degraded posture, repair-queue growth, backpressure state, surviving query or mutation paths, and the next recommended runbook inspectable enough that operators can tell whether to continue normal work, inspect `doctor`, or switch to a runbook instead of inferring that state from prose.
 - If historical scope, policy limits, or degraded serving change what can be shown, the surface should say so through warnings or availability markers instead of silently pretending the dashboard is complete.
 
 ```bash
@@ -349,7 +359,7 @@ Audit output should preserve retention, legal-hold, repair, and degraded-serving
 
 Audit expectations:
 - entries remain read-only history records, not a restore or replay command surface
-- each entry should preserve the operation, actor/source (`triggered_by`), effective namespace scope, before/after deltas when applicable, and an operator-meaningful reason or note
+- each entry should preserve the operation, actor/source (`triggered_by`), effective namespace scope, logical `tick`, before/after strength or confidence deltas when applicable, and an operator-meaningful reason or note
 - policy-limited audit responses should surface redaction explicitly rather than silently omitting protected context
 - when a visible state change came from repair, snapshot-protected maintenance, migration, compaction, or incident handling, the audit trail should retain enough correlation metadata or note text to connect the entry back to that run without treating snapshots as the audit log
 - CLI text, CLI `--json`, daemon/JSON-RPC, and MCP `audit()` must preserve the same entry meaning, required correlation fields, and degraded or redacted history semantics even if one surface summarizes or paginates differently.
@@ -413,6 +423,7 @@ Trace causal and retrieval rationale for one item, including lineage and route a
 
 Why-surface contract:
 - `membrain why` is the focused route-and-causality view for one item or belief chain, complementing `inspect` rather than replacing it.
+- When the target resolves to an explicit memory id, causal traversal must stay bounded by the declared `--depth` cap plus runtime graph caps; returned ancestors should remain visible as ordinary explain/result families instead of a separate opaque trace blob.
 - `--json` should preserve machine-readable route and explanation families rather than a bespoke trace-only blob: `route_summary`, `result_reasons`, `omitted_summary` when siblings or alternatives were capped, `policy_summary`, `provenance_summary`, `freshness_markers`, `conflict_markers`, and `trace_stages` when full route ancestry is requested.
 - If the command returns a deferred explanation handle instead of embedding the full trace, the handle should still point at the same semantic explanation contract used by recall, daemon/JSON-RPC, and MCP surfaces.
 
@@ -436,6 +447,14 @@ membrain skills                       # list extracted procedural memories
 membrain skills --extract             # trigger extraction pass
 membrain engram <uuid> --extract      # extract from specific engram
 ```
+
+CLI expectations:
+- `membrain skills` is the operator review and recall surface for extracted skill artifacts. It should list bounded, namespace-scoped derived procedures rather than silently promoting them into authoritative procedural truth.
+- Each listed procedure should preserve storage/review/recall semantics in machine-readable form: derived-durable storage class, tentative vs accepted state, explicit operator-review status, derivation rule, bounded supporting evidence counts, and recall cues such as `source_engram_id`, `member_count`, and extracted keywords.
+- Reflection-compiler follow-ons should surface advisory artifact metadata alongside those fields: `artifact_class` (`procedure` or `anti_pattern`), `source_outcome`, bounded checklist items, and release/promotion rules showing that reuse remains derived guidance rather than trusted-by-default truth.
+- `--extract` triggers a bounded extraction pass first, then returns the same reviewable artifact family; it does not invent a second output schema.
+- In `--json` mode the response should preserve `{ namespace, extraction_trigger, extracted_count, skipped_count, reflection_compiler_active, procedures[...] }`, where each procedure includes `storage`, `review`, and `recall` subobjects in addition to the artifact content and confidence.
+- Human output may summarize these fields, but it must keep tentative/non-authoritative status obvious and inspectable.
 
 ### `membrain schemas [OPTIONS]` (Feature 17)
 
@@ -620,7 +639,7 @@ membrain import --format ndjson < backup.ndjson
 
 ### `membrain repair <SURFACE> [OPTIONS]`
 
-Repair commands preview or rebuild derived surfaces from durable truth without changing the logical meaning of a namespace.
+Repair commands preview or rebuild derived surfaces from durable truth without changing the logical meaning of a namespace. `membrain repair index` is the explicit index-subsystem entrypoint: it rebuilds lexical plus hot/cold semantic index surfaces from durable memory rows, canonical embeddings, and namespace/policy metadata, and its verification output should surface rebuilt outputs plus parity artifacts (`verification_artifact_name`, `parity_check`, row/generation parity fields) for each target. `membrain repair graph` should follow the same contract for graph consistency: rebuild adjacency and neighborhood projections from durable memory, relation, and lineage rows, then verify that the rebuilt projection matches canonical edge truth before clearing degraded mode. `membrain repair cache` should first invalidate stale warm families and drop speculative prefetch hints, then rewarm bounded cache families from durable truth plus fresh generation anchors before warm reuse becomes eligible again.
 
 ```bash
 membrain repair index --dry-run

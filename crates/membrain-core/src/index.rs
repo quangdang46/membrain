@@ -652,6 +652,8 @@ pub struct TemporalQuery {
     pub session_filter: Option<SessionId>,
     /// Tick range filter (start, end).
     pub tick_range: Option<(u64, u64)>,
+    /// Stable era selector for landmark-defined history slices.
+    pub era_id: Option<String>,
     /// Epoch filter for coarse temporal grouping.
     pub epoch_filter: Option<u64>,
     /// Maximum candidates to return.
@@ -667,6 +669,7 @@ impl TemporalQuery {
             namespace,
             session_filter: None,
             tick_range: None,
+            era_id: None,
             epoch_filter: None,
             limit,
             candidate_budget: 5000,
@@ -682,6 +685,12 @@ impl TemporalQuery {
     /// Adds a tick range filter.
     pub fn with_tick_range(mut self, start: u64, end: u64) -> Self {
         self.tick_range = Some((start, end));
+        self
+    }
+
+    /// Adds a stable era selector for landmark-defined slices.
+    pub fn with_era_id(mut self, era_id: impl Into<String>) -> Self {
+        self.era_id = Some(era_id.into());
         self
     }
 
@@ -1019,11 +1028,13 @@ mod tests {
         let query = TemporalQuery::new(ns.clone(), 20)
             .with_session(SessionId(5))
             .with_tick_range(100, 200)
+            .with_era_id("era-deploy-0042")
             .with_epoch(3);
 
         assert_eq!(query.namespace, ns);
         assert_eq!(query.session_filter, Some(SessionId(5)));
         assert_eq!(query.tick_range, Some((100, 200)));
+        assert_eq!(query.era_id.as_deref(), Some("era-deploy-0042"));
         assert_eq!(query.epoch_filter, Some(3));
         assert_eq!(query.limit, 20);
     }

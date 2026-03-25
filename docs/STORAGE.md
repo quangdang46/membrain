@@ -104,6 +104,8 @@ Cold durable archive supporting cheap storage, metadata-first prefiltering, and 
 - Archive is a durable lifecycle state, not a hidden trash bin: archived memories remain inspectable through metadata, lineage, policy, and retention surfaces even when their payload is detached, compressed, or partially withheld.
 - Retention decisions must be represented in cold durable metadata with explicit class, horizon, hold, and purge eligibility markers so operators can explain why a memory remains, is frozen, or is pending deletion.
 - Archiving may move payload bytes to cheaper layouts or storage classes, but it must not orphan `content_ref`, `payload_ref`, or the ability to inspect why the record exists.
+- The cold durable row must expose a concrete storage contract: `archive_state`, `archive_reason`, `content_ref`, `payload_ref`, `payload_state`, and zero or more loss indicators.
+- `payload_state` distinguishes `inline`, `detached`, `tombstoned`, and `unavailable` payload ownership; detached payload fetch is optional for inspect, while tombstoned or unavailable payloads force explicit degraded restore semantics.
 - Purge or payload-drop flows must leave a durable tombstone or loss record whenever policy requires preserving the fact of prior existence, prior authority, or prior retention action.
 - Inspect surfaces should be able to answer what exists, where the durable payload lives, whether it is archived or tombstoned, and which retention rule controls it without performing a full payload fetch.
 - Migration and repair flows must preserve legal-hold, retention-horizon, and tombstone markers even when payload layouts, manifests, or sidecars are rewritten.
@@ -134,6 +136,7 @@ Cold durable archive supporting cheap storage, metadata-first prefiltering, and 
 
 ### Derived durable artifact rules
 - Persisted summaries, extracted facts, graph summaries, tentative skills, task or session checkpoints, blackboard snapshots, resumable goal-stack state, and compaction outputs must record artifact type, source-set or lineage handles, producer/workflow generation, freshness or repair status, and the rebuild inputs needed to regenerate them.
+- For tentative skill artifacts specifically, the stored view must also preserve explicit review and recall semantics: tentative vs accepted state, operator-review requirement, bounded supporting-evidence counts, stable seed or source-engram handle when available, and recall cues that let wrappers expose the artifact without treating it as authoritative procedural truth.
 - Durable storage of an artifact is justified when reuse, inspectability, auditability, or background coordination is valuable; durability alone does not grant authority over memory existence, policy, contradiction, or canonical relation truth.
 - Graph or neighborhood summaries may be stored for bounded inspect and recall support, but canonical entity and relation tables remain the source of truth and summary projections must be replaceable.
 - If source evidence, lineage, policy, redaction, schema, or workflow generation changes, dependent derived artifacts must be invalidated, regenerated, or marked stale instead of silently surviving across the mismatch.

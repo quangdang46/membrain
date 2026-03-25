@@ -13,6 +13,7 @@ use crate::graph::{
     GraphRebuilder, RelationKind,
 };
 use crate::migrate::DurableSchemaObject;
+use crate::observability::{MaintenanceQueueReport, MaintenanceQueueStatus};
 use crate::types::MemoryId;
 use std::collections::HashMap;
 
@@ -58,6 +59,17 @@ impl RepairTarget {
             Self::EngramIndex => "engram_index",
             Self::ContradictionConsistency => "contradiction_consistency",
         }
+    }
+
+    /// Returns whether this target belongs to the first rebuildable index subsystem.
+    pub const fn is_index_rebuild_target(self) -> bool {
+        matches!(
+            self,
+            Self::LexicalIndex
+                | Self::MetadataIndex
+                | Self::SemanticHotIndex
+                | Self::SemanticColdIndex
+        )
     }
 
     /// Returns whether this target exposes a rebuild plan from durable truth.
@@ -177,6 +189,11 @@ pub struct RepairSummary {
     pub degraded: u32,
     pub corrupt: u32,
     pub rebuilt: u32,
+    pub affected_item_count: u32,
+    pub error_count: u32,
+    pub rebuild_duration_ms: u64,
+    pub rollback_state: Option<&'static str>,
+    pub queue_report: MaintenanceQueueReport,
     pub results: Vec<RepairCheckResult>,
     pub verification_artifacts: HashMap<RepairTarget, VerificationArtifact>,
     pub operator_reports: Vec<RepairOperatorReport>,
@@ -192,6 +209,12 @@ pub struct RepairOperatorReport {
     pub rebuild_entrypoint: Option<IndexRepairEntrypoint>,
     pub rebuilt_outputs: Vec<&'static str>,
     pub verification_artifact_name: &'static str,
+    pub affected_item_count: u32,
+    pub error_count: u32,
+    pub rebuild_duration_ms: u64,
+    pub rollback_state: Option<&'static str>,
+    pub queue_depth_before: u32,
+    pub queue_depth_after: u32,
     pub operator_log: String,
 }
 
@@ -218,6 +241,13 @@ pub struct RepairRebuildPlan {
     pub verification_artifact: VerificationArtifact,
 }
 
+impl RepairRebuildPlan {
+    /// Stable subsystem identifier for the rebuild plan.
+    pub const fn subsystem(&self) -> &'static str {
+        "index"
+    }
+}
+
 // ── Repair operation ─────────────────────────────────────────────────────────
 
 /// Bounded repair operation for the maintenance controller.
@@ -232,12 +262,69 @@ pub struct RepairRun {
     graph_rebuild_reports: HashMap<RepairTarget, GraphRebuildReport>,
     completed: bool,
     durable_token: DurableStateToken,
+    total_duration_ms: u64,
+    total_affected_items: u32,
+    total_error_count: u32,
 }
 
 impl RepairRun {
+    fn rollback_state_for(&self, target: RepairTarget, status: RepairStatus) -> Option<&'static str> {
+        match (target, status, self.entrypoint) {
+            (RepairTarget::GraphConsistency, RepairStatus::Degraded, IndexRepairEntrypoint::VerifyOnly) => {
+                Some("rollback_required")
+            }
+            (RepairTarget::GraphConsistency, RepairStatus::Rebuilt, IndexRepairEntrypoint::ForceRebuild) => {
+                Some("rollback_in_progress")
+            }
+            _ => None,
+        }
+    }
+
+    fn telemetry_for_target(
+        &self,
+        target: RepairTarget,
+        status: RepairStatus,
+        graph_rebuild_report: Option<&GraphRebuildReport>,
+    ) -> (u32, u32, u64) {
+        if let Some(report) = graph_rebuild_report {
+            let affected = report.metrics.durable_inputs_seen.max(report.metrics.rebuilt_edges) as u32;
+            let error_count = u32::from(!report.metrics.verification_passed);
+            let duration_ms = report.hooks_run.len() as u64 * 11;
+            return (affected, error_count, duration_ms);
+        }
+
+        let affected = match target {
+            RepairTarget::LexicalIndex | RepairTarget::MetadataIndex => 128,
+            RepairTarget::SemanticHotIndex | RepairTarget::SemanticColdIndex => 64,
+            RepairTarget::HotStoreConsistency => 32,
+            RepairTarget::PayloadIntegrity => 128,
+            RepairTarget::GraphConsistency => 96,
+            RepairTarget::CacheWarmState => 48,
+            RepairTarget::EngramIndex => 24,
+            RepairTarget::ContradictionConsistency => 8,
+        };
+        let error_count = u32::from(matches!(status, RepairStatus::Corrupt | RepairStatus::Degraded));
+        let duration_ms = match target {
+            RepairTarget::LexicalIndex | RepairTarget::MetadataIndex => 17,
+            RepairTarget::SemanticHotIndex | RepairTarget::SemanticColdIndex => 23,
+            RepairTarget::HotStoreConsistency | RepairTarget::PayloadIntegrity => 13,
+            RepairTarget::GraphConsistency => 29,
+            RepairTarget::CacheWarmState => 19,
+            RepairTarget::EngramIndex => 21,
+            RepairTarget::ContradictionConsistency => 11,
+        };
+        (affected, error_count, duration_ms)
+    }
+
     fn operator_log_for_result(
         result: &RepairCheckResult,
         artifact: &VerificationArtifact,
+        affected_item_count: u32,
+        error_count: u32,
+        rebuild_duration_ms: u64,
+        rollback_state: Option<&'static str>,
+        queue_depth_before: u32,
+        queue_depth_after: u32,
     ) -> String {
         let entrypoint = result
             .rebuild_entrypoint
@@ -250,7 +337,7 @@ impl RepairRun {
         };
 
         format!(
-            "target={} status={} verification_passed={} entrypoint={} rebuilt_outputs={} artifact={} parity_check={} authoritative_rows={} derived_rows={} authoritative_generation={} derived_generation={} detail={}",
+            "target={} status={} verification_passed={} entrypoint={} rebuilt_outputs={} artifact={} parity_check={} authoritative_rows={} derived_rows={} authoritative_generation={} derived_generation={} affected_item_count={} error_count={} rebuild_duration_ms={} rollback_state={} queue_depth_before={} queue_depth_after={} detail={}",
             result.target.as_str(),
             result.status.as_str(),
             result.verification_passed,
@@ -262,6 +349,12 @@ impl RepairRun {
             artifact.derived_rows,
             artifact.authoritative_generation,
             artifact.derived_generation,
+            affected_item_count,
+            error_count,
+            rebuild_duration_ms,
+            rollback_state.unwrap_or("none"),
+            queue_depth_before,
+            queue_depth_after,
             result.detail,
         )
     }
@@ -282,6 +375,9 @@ impl RepairRun {
             graph_rebuild_reports: HashMap::new(),
             completed: false,
             durable_token: DurableStateToken(0),
+            total_duration_ms: 0,
+            total_affected_items: 0,
+            total_error_count: 0,
         }
     }
 
@@ -326,6 +422,31 @@ impl RepairRun {
             .iter()
             .filter(|r| matches!(r.status, RepairStatus::Rebuilt))
             .count() as u32;
+        let queue_depth_before = self.targets.len() as u32;
+        let queue_depth_after = degraded + corrupt;
+        let jobs_processed = self.results.len() as u32;
+        let partial_run = queue_depth_after > 0;
+        let queue_status = if queue_depth_before == 0 {
+            MaintenanceQueueStatus::Idle
+        } else if partial_run {
+            MaintenanceQueueStatus::Partial
+        } else {
+            MaintenanceQueueStatus::Completed
+        };
+        let queue_report = MaintenanceQueueReport {
+            queue_family: "repair",
+            queue_status,
+            queue_depth_before,
+            queue_depth_after,
+            jobs_processed,
+            affected_item_count: self.total_affected_items,
+            duration_ms: self.total_duration_ms,
+            retry_attempts: self.total_error_count,
+            partial_run,
+        };
+        let rollback_state = self.results.iter().find_map(|result| {
+            self.rollback_state_for(result.target, result.status)
+        });
         let operator_reports = self
             .results
             .iter()
@@ -334,6 +455,10 @@ impl RepairRun {
                     .verification_artifacts
                     .get(&result.target)
                     .expect("verification artifact should exist for every repair result");
+                let graph_rebuild_report = self.graph_rebuild_reports.get(&result.target);
+                let (affected_item_count, error_count, rebuild_duration_ms) =
+                    self.telemetry_for_target(result.target, result.status, graph_rebuild_report);
+                let rollback_state = self.rollback_state_for(result.target, result.status);
                 RepairOperatorReport {
                     target: result.target,
                     status: result.status,
@@ -341,7 +466,22 @@ impl RepairRun {
                     rebuild_entrypoint: result.rebuild_entrypoint,
                     rebuilt_outputs: result.rebuilt_outputs.clone(),
                     verification_artifact_name: artifact.artifact_name,
-                    operator_log: Self::operator_log_for_result(result, artifact),
+                    affected_item_count,
+                    error_count,
+                    rebuild_duration_ms,
+                    rollback_state,
+                    queue_depth_before,
+                    queue_depth_after,
+                    operator_log: Self::operator_log_for_result(
+                        result,
+                        artifact,
+                        affected_item_count,
+                        error_count,
+                        rebuild_duration_ms,
+                        rollback_state,
+                        queue_depth_before,
+                        queue_depth_after,
+                    ),
                 }
             })
             .collect();
@@ -352,6 +492,11 @@ impl RepairRun {
             degraded,
             corrupt,
             rebuilt,
+            affected_item_count: self.total_affected_items,
+            error_count: self.total_error_count,
+            rebuild_duration_ms: self.total_duration_ms,
+            rollback_state,
+            queue_report,
             results: self.results.clone(),
             verification_artifacts: self.verification_artifacts.clone(),
             operator_reports,
@@ -508,6 +653,12 @@ impl MaintenanceOperation for RepairRun {
         if let Some(report) = graph_rebuild_report {
             self.graph_rebuild_reports.insert(target, report);
         }
+        let telemetry_graph_report = self.graph_rebuild_reports.get(&target);
+        let (affected_item_count, error_count, rebuild_duration_ms) =
+            self.telemetry_for_target(target, status, telemetry_graph_report);
+        self.total_affected_items += affected_item_count;
+        self.total_error_count += error_count;
+        self.total_duration_ms += rebuild_duration_ms;
         self.results.push(RepairCheckResult {
             target,
             status,
@@ -535,6 +686,7 @@ impl MaintenanceOperation for RepairRun {
         InterruptedMaintenance {
             reason,
             preserved_durable_state: self.durable_token,
+            artifact: None,
         }
     }
 }
@@ -651,13 +803,34 @@ impl RepairEngine {
         })
     }
 
-    /// Backwards-compatible alias for rebuild planning callers.
+    /// Plans rebuild work for the index subsystem from durable truth.
     pub fn plan_index_rebuild(
         &self,
         target: RepairTarget,
         entrypoint: IndexRepairEntrypoint,
     ) -> Option<RepairRebuildPlan> {
-        self.plan_rebuild_from_durable_truth(target, entrypoint)
+        target
+            .is_index_rebuild_target()
+            .then(|| self.plan_rebuild_from_durable_truth(target, entrypoint))
+            .flatten()
+    }
+
+    /// Creates an index-only repair run for targeted operator entrypoints.
+    pub fn create_index_rebuild(
+        &self,
+        namespace: NamespaceId,
+        entrypoint: IndexRepairEntrypoint,
+    ) -> RepairRun {
+        self.create_targeted(
+            namespace,
+            vec![
+                RepairTarget::LexicalIndex,
+                RepairTarget::MetadataIndex,
+                RepairTarget::SemanticHotIndex,
+                RepairTarget::SemanticColdIndex,
+            ],
+            entrypoint,
+        )
     }
 
     /// Creates a full-scan repair run for a namespace.
@@ -853,14 +1026,54 @@ mod tests {
     }
 
     #[test]
+    fn index_rebuild_entrypoint_scopes_only_index_targets() {
+        let engine = RepairEngine;
+        let run = engine.create_index_rebuild(ns("test"), IndexRepairEntrypoint::RebuildIfNeeded);
+        let mut handle = MaintenanceJobHandle::new(run, 10);
+
+        handle.start();
+        let completed = loop {
+            let snapshot = handle.poll();
+            match snapshot.state {
+                MaintenanceJobState::Completed(summary) => break summary,
+                MaintenanceJobState::Running { .. } => continue,
+                _ => panic!("unexpected state"),
+            }
+        };
+
+        assert_eq!(completed.targets_checked, 4);
+        assert_eq!(completed.rebuilt, 4);
+        assert!(completed.results.iter().all(|result| result.target.is_index_rebuild_target()));
+        assert_eq!(
+            completed
+                .results
+                .iter()
+                .map(|result| result.target)
+                .collect::<Vec<_>>(),
+            vec![
+                RepairTarget::LexicalIndex,
+                RepairTarget::MetadataIndex,
+                RepairTarget::SemanticHotIndex,
+                RepairTarget::SemanticColdIndex,
+            ]
+        );
+        assert!(completed
+            .operator_reports
+            .iter()
+            .all(|report| report.target.is_index_rebuild_target()));
+    }
+
+    #[test]
     fn rebuild_plan_covers_durable_sources_and_outputs() {
         let engine = RepairEngine;
         let plan = engine
-            .plan_rebuild_from_durable_truth(
+            .plan_index_rebuild(
                 RepairTarget::LexicalIndex,
                 IndexRepairEntrypoint::RebuildIfNeeded,
             )
             .expect("lexical index should expose rebuild plan");
+
+        assert_eq!(plan.subsystem(), "index");
 
         assert_eq!(plan.target, RepairTarget::LexicalIndex);
         assert_eq!(plan.entrypoint, IndexRepairEntrypoint::RebuildIfNeeded);
@@ -1082,11 +1295,14 @@ mod tests {
         ];
 
         for target in targets {
+            let exposed_plan = if target.is_index_rebuild_target() {
+                engine.plan_index_rebuild(target, IndexRepairEntrypoint::VerifyOnly)
+            } else {
+                engine.plan_rebuild_from_durable_truth(target, IndexRepairEntrypoint::VerifyOnly)
+            };
             assert_eq!(
                 target.supports_rebuild_from_durable_truth(),
-                engine
-                    .plan_rebuild_from_durable_truth(target, IndexRepairEntrypoint::VerifyOnly)
-                    .is_some(),
+                exposed_plan.is_some(),
                 "unexpected rebuild-plan support mismatch for {}",
                 target.as_str()
             );

@@ -79,6 +79,76 @@ async fn shutdown_runtime(
 }
 
 #[tokio::test]
+async fn runtime_zero_arg_methods_accept_common_envelope_fields() {
+    let (socket_path, handle) = spawn_runtime().await;
+
+    let doctor_response = send_request(
+        &socket_path,
+        json!({
+            "jsonrpc":"2.0",
+            "method":"doctor",
+            "params":{
+                "request_id":"req-doctor-ctx",
+                "workspace_id":"ws-7",
+                "agent_id":"agent-3",
+                "session_id":"session-9",
+                "task_id":"task-2",
+                "time_budget_ms":75,
+                "policy_context":{"include_public":true,"sharing_visibility":"public"}
+            },
+            "id":"doctor-common"
+        }),
+    )
+    .await;
+    assert_eq!(doctor_response["result"]["status"], json!("ok"));
+    assert!(doctor_response["error"].is_null());
+
+    let resources_list_response = send_request(
+        &socket_path,
+        json!({
+            "jsonrpc":"2.0",
+            "method":"resources.list",
+            "params":{"request_id":"req-resources-ctx"},
+            "id":"resources-list-common"
+        }),
+    )
+    .await;
+    assert_eq!(resources_list_response["result"]["status"], json!("ok"));
+    assert!(resources_list_response["error"].is_null());
+
+    let resource_read_response = send_request(
+        &socket_path,
+        json!({
+            "jsonrpc":"2.0",
+            "method":"resource.read",
+            "params":{
+                "uri":"membrain://daemon/runtime/status",
+                "request_id":"req-resource-read-ctx"
+            },
+            "id":"resource-read-common"
+        }),
+    )
+    .await;
+    assert_eq!(resource_read_response["result"]["status"], json!("ok"));
+    assert!(resource_read_response["error"].is_null());
+
+    let streams_list_response = send_request(
+        &socket_path,
+        json!({
+            "jsonrpc":"2.0",
+            "method":"streams.list",
+            "params":{"request_id":"req-streams-ctx"},
+            "id":"streams-list-common"
+        }),
+    )
+    .await;
+    assert_eq!(streams_list_response["result"]["status"], json!("ok"));
+    assert!(streams_list_response["error"].is_null());
+
+    shutdown_runtime(&socket_path, handle).await;
+}
+
+#[tokio::test]
 async fn runtime_doctor_rejects_unknown_params_like_other_zero_arg_methods() {
     let (socket_path, handle) = spawn_runtime().await;
 
@@ -191,8 +261,44 @@ async fn runtime_doctor_jsonrpc_response_matches_shared_doctor_contract_fields()
     assert_eq!(result["degraded_reasons"], json!(["repair_in_flight"]));
     assert!(result["metrics"].is_object());
     assert!(result["indexes"].is_array());
-    assert!(result["warnings"].is_array());
-    assert!(result.get("health").is_none());
+    assert!(result["repair_reports"].is_array());
+    assert_eq!(
+        result["repair_reports"][0]["target"],
+        json!("lexical_index")
+    );
+    assert_eq!(
+        result["repair_reports"][1]["target"],
+        json!("metadata_index")
+    );
+    assert_eq!(result["repair_reports"][0]["rebuild_entrypoint"], json!(null));
+    assert_eq!(
+        result["repair_reports"][0]["verification_artifact_name"],
+        json!("fts5_lexical_parity")
+    );
+    assert_eq!(
+        result["repair_reports"][0]["parity_check"],
+        json!("fts5_projection_matches_durable_truth")
+    );
+    assert_eq!(
+        result["repair_reports"][0]["authoritative_rows"],
+        json!(128)
+    );
+    assert_eq!(result["repair_reports"][0]["derived_rows"], json!(128));
+    assert_eq!(
+        result["repair_reports"][0]["durable_sources"],
+        json!([])
+    );
+    assert_eq!(result["repair_reports"][0]["affected_item_count"], json!(128));
+    assert_eq!(result["repair_reports"][0]["error_count"], json!(0));
+    assert_eq!(result["repair_reports"][0]["queue_depth_before"], json!(4));
+    assert_eq!(result["repair_reports"][0]["queue_depth_after"], json!(0));
+    assert_eq!(
+        result["repair_reports"][3]["target"],
+        json!("semantic_cold_index")
+    );
+    assert!(result["health"].is_object());
+    assert_eq!(result["health"]["availability_posture"], json!("Degraded"));
+    assert_eq!(result["health"]["repair_queue_depth"], json!(0));
 
     shutdown_runtime(&socket_path, handle).await;
 }
@@ -223,8 +329,41 @@ async fn runtime_doctor_resource_read_matches_runtime_doctor_payload_shape() {
     assert_eq!(result["payload"]["payload"]["posture"], json!("full"));
     assert!(result["payload"]["payload"]["metrics"].is_object());
     assert!(result["payload"]["payload"]["indexes"].is_array());
+    assert!(result["payload"]["payload"]["repair_reports"].is_array());
     assert!(result["payload"]["payload"]["warnings"].is_array());
-    assert!(result["payload"]["payload"].get("health").is_none());
+    assert!(result["payload"]["payload"]["health"].is_object());
+    assert_eq!(
+        result["payload"]["payload"]["repair_reports"][0]["target"],
+        json!("lexical_index")
+    );
+    assert_eq!(
+        result["payload"]["payload"]["repair_reports"][0]["rebuild_entrypoint"],
+        json!(null)
+    );
+    assert_eq!(
+        result["payload"]["payload"]["repair_reports"][0]["verification_artifact_name"],
+        json!("fts5_lexical_parity")
+    );
+    assert_eq!(
+        result["payload"]["payload"]["repair_reports"][0]["parity_check"],
+        json!("fts5_projection_matches_durable_truth")
+    );
+    assert_eq!(
+        result["payload"]["payload"]["repair_reports"][0]["authoritative_rows"],
+        json!(128)
+    );
+    assert_eq!(
+        result["payload"]["payload"]["repair_reports"][0]["durable_sources"],
+        json!([])
+    );
+    assert_eq!(
+        result["payload"]["payload"]["repair_reports"][0]["affected_item_count"],
+        json!(128)
+    );
+    assert_eq!(
+        result["payload"]["payload"]["health"]["availability_posture"],
+        json!(null)
+    );
 
     let metrics =
         serde_json::from_value::<RuntimeMetrics>(result["payload"]["payload"]["metrics"].clone())

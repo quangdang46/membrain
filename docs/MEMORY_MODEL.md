@@ -107,8 +107,8 @@ Every memory item carries these attributes (directly or derivably):
 | `distilled_from_engram` | Option | F8 Skill Extraction | Source engram for procedurals |
 | `namespace_id` | String | F9 Cross-Agent | Namespace for sharing |
 | `visibility` | enum | F9 | private, shared, public |
-| `has_causal_parents` | bool | F11 Causal | Has causal provenance |
-| `has_causal_children` | bool | F11 | Is source of derived beliefs |
+| `has_causal_parents` | bool | F11 Causal | Has causal provenance and at least one durable causal-link parent row |
+| `has_causal_children` | bool | F11 | Is source of derived beliefs through at least one durable causal-link child row |
 | `compressed_into` | Option | F17 Compression | Schema memory this was compressed into |
 | `encoding_valence` | Option | F18 Emotional | Mood at encoding time |
 |.*| F18 Emotional | Mood at encoding time |/| `encoding_arousal` | Option | F18 Emotional | Mood at encoding time |
@@ -334,6 +334,7 @@ Graph-linked retrieval adds bounded neighborhood structure without minting a sec
 - `Associative` edges represent similarity or co-activation neighborhoods used for bounded engram expansion and partial-cue recall. They are rebuildable from durable evidence plus embeddings and must not become the sole surviving record of a semantic claim.
 - `Temporal` edges represent ordered adjacency grounded in timestamps, session or episode continuity, or other durable chronology evidence.
 - `Causal` edges represent claimed or derived “led to” structure and must remain backed by inspectable evidence, lineage, or canonical relation records rather than existing only as an opaque traversal hint.
+- A causal claim is only valid when it is source-backed: at least one cited durable memory handle must anchor the claim, and any supplemental evidence must come from allowed inspectable surfaces such as reconsolidation audits, consolidation artifacts, or belief-version diffs.
 - `Contradictory` edges represent active contrast or disagreement neighborhoods that support explain, belief-history, and conflict-aware recall; they do not replace `ConflictRecord`, supersession, or belief-chain state.
 - Additional graph-local labels are allowed only when documented as derived materializations, and they must not silently widen the canonical user-visible taxonomy above.
 

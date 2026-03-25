@@ -52,6 +52,15 @@ impl SharingVisibility {
             Self::Public => "public",
         }
     }
+
+    pub fn parse(raw: &str) -> Option<Self> {
+        match raw.trim().to_ascii_lowercase().as_str() {
+            "private" => Some(Self::Private),
+            "shared" => Some(Self::Shared),
+            "public" => Some(Self::Public),
+            _ => None,
+        }
+    }
 }
 
 /// Machine-readable access scope granted after sharing mediation.
@@ -1007,6 +1016,24 @@ mod tests {
             .denial_reasons
             .iter()
             .any(|reason| reason.as_str() == "approved_scope_required"));
+    }
+
+    #[test]
+    fn sharing_access_redacts_public_cross_namespace_visibility_when_widening_is_approved() {
+        let gateway = PolicyModule;
+        let outcome = gateway.evaluate_sharing_access(SharingAccessRequest {
+            same_namespace: false,
+            include_public: true,
+            visibility: SharingVisibility::Public,
+            workspace_acl_allowed: true,
+            agent_acl_allowed: true,
+            session_visibility_allowed: true,
+            legal_hold: false,
+        });
+
+        assert_eq!(outcome.decision, SharingAccessDecision::Redact);
+        assert_eq!(outcome.sharing_scope.unwrap().as_str(), "approved_public");
+        assert_eq!(outcome.redaction_fields, vec!["workspace_id", "session_id"]);
     }
 
     #[test]

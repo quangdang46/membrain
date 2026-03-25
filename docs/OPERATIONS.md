@@ -170,8 +170,8 @@ Use stable machine-readable reason codes so every transport can preserve the sam
 
 - **Forgetting, deletion, redaction, and invalidation** previews must report affected authoritative-evidence counts, retention or legal-hold blockers, whether losing evidence remains inspectable afterward, and whether the path is archive-by-default, redaction-only, or irreversible removal.
 - **Merge or namespace-scope rewrites** must report source and target scopes, visibility or sharing changes, conflict-handling policy, and the rollback or unwind path before mutation.
-- **Repair and rebuild apply** must report the authoritative input set used for rebuild, degraded-serving posture while repair is in flight, unresolved follow-up items, and whether explicit loss records may be emitted if full fidelity cannot be restored.
-- **Compaction, compression, migration, rollback, and restore** must report maintenance class, pre-run snapshot or backup requirement, paused-job requirements, before/after telemetry expectations, rollback owner, and whether the run rewrites authoritative durable layout or only derived surfaces.
+- **Repair and rebuild apply** must report the authoritative input set used for rebuild, degraded-serving posture while repair is in flight, unresolved follow-up items, whether explicit loss records may be emitted if full fidelity cannot be restored, and stable `degraded_mode`, `rollback_trigger`, and `remediation_steps` fields so operator handoff is machine-readable.
+- **Compaction, compression, migration, rollback, and restore** must report maintenance class, pre-run snapshot or backup requirement, paused-job requirements, before/after telemetry expectations, rollback owner, whether the run rewrites authoritative durable layout or only derived surfaces, and for bounded compaction runs a stable operator report containing `report_kind`, unit selection, queue depth, degraded-mode posture, rollback trigger, and remediation steps.
 
 ## Phase 4 operational ergonomics follow-on contract
 
@@ -244,6 +244,7 @@ membrain doctor run
 - Repair queue depth growing or staying non-zero → inspect repair backlog growth before it becomes degraded serving
 - Backpressure state leaving `normal` or availability posture leaving `full` → switch from routine review to the matching runbook or containment path
 - Doctor warnings → schedule repair
+- Doctor `runbook_hints` or freshness warnings such as `stale_action_critical_recheck_required` → switch from routine review to the named runbook before acting on stale action-critical evidence
 
 ---
 
@@ -347,9 +348,9 @@ membrain benchmark tier2 --json | jq '.p99_us'
 | Surface | Authoritative input | Repair command shape | Availability during rebuild | Post-run proof |
 |---|---|---|---|---|
 | indexes / ANN / lexical projections | durable records + canonical embeddings + policy-bearing metadata | `membrain repair index ...` | online by default; exact lookup and durable-truth reads remain available, ranked recall may run colder/slower | candidate counts match durable truth; latency returns to budget |
-| graph edges / neighborhoods / materialized clusters | normalized SQLite relation tables + lineage | `membrain repair graph ...` | online only if canonical edge tables remain readable; otherwise degrade affected namespaces to read-only or offline | graph counts match canonical edge tables; bounded traversal resumes |
+| graph edges / neighborhoods / materialized clusters | normalized SQLite relation tables + lineage | `membrain repair graph ...` | online only if canonical edge tables remain readable; otherwise degrade affected namespaces to read-only or offline | graph counts match canonical edge tables; bounded traversal resumes; rebuilt projection proves `graph_projection_matches_durable_edges` |
 | lineage chains / ancestry views | durable lineage records + supersession/conflict records | `membrain repair lineage ...` | online if explain/inspect can fall back to durable lineage reads; otherwise degrade explain surfaces until validated | no broken chains; explain surfaces resolve ancestry |
-| caches / sidecars / planner accelerators | durable records + policy/namespace filters | `membrain repair cache ...` or drop-and-rewarm | fully online; slower reads are acceptable while caches repopulate | caches repopulate without becoming sole truth |
+| caches / sidecars / planner accelerators | durable records + policy/namespace filters + current generation anchors | `membrain repair cache ...` or drop-and-rewarm | fully online; slower reads are acceptable while caches repopulate | caches repopulate without becoming sole truth; warmed families only re-enter reuse after fresh generation-anchor validation |
 
 ### Flow requirements
 - Run doctor and a dry run before mutating repair when available.
@@ -376,6 +377,7 @@ Whenever degraded mode, repair posture, fallback, or fail-closed containment mat
 | `degraded_reasons` | Machine-readable reasons such as `graph_unavailable`, `index_bypassed`, `cache_invalidated`, `repair_in_flight`, `stale_generation`, or `authoritative_input_unreadable`. |
 | `recovery_conditions` | The checks, repairs, or validations required before the scope may return to normal serving. |
 | `availability_notes` | Human-facing summary of what changed and which safer fallback path is still available. |
+| `degraded_status` | Canonical operator handoff block with affected subsystems, surviving query and mutation paths, degraded reasons, remediation steps, and recommended runbooks. |
 
 Availability rules:
 - `degraded` means some bounded queries still work, but the response must say which read paths survived and which fidelity or latency guarantees were reduced.
@@ -497,6 +499,7 @@ membrain health --brief
 
 ### Derived-cache repair rules
 - Caches, sidecars, and prefetch queues are drop-and-rewarm derived surfaces keyed by effective namespace, declared owner boundary, and the policy and generation inputs that affect reuse.
+- Broad cache repair should invalidate affected warm families first, drop speculative prefetch hints, and only then repopulate bounded warm families from durable rows plus the current generation anchors.
 - Prefetch queues must be rebuilt from live session or task intent only; repaired hints should be discarded rather than replayed if the original owner binding or intent signature is no longer authoritative.
 - Session warmup recovery may rebuild a bounded session-local hot set, but rewarmed entries remain unusable until the session binding, visibility scope, and warmed-family generation anchors are rebound.
 - Process-local cold-start mitigation may be reinitialized during repair or restart, but request-serving paths must treat prewarm artifacts as bootstrap-only until current namespace and generation checks succeed.

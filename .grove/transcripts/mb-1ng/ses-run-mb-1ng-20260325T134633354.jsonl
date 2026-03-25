@@ -1,0 +1,75 @@
+{"ts":"2026-03-25T13:46:33.358925339Z","kind":"session_started","session_id":"ses-run-mb-1ng-20260325T134633354"}
+{"ts":"2026-03-25T14:11:52.908662084Z","kind":"stdout","line":"GROVE_RESULT"}
+{"ts":"2026-03-25T14:11:52.978879065Z","kind":"stdout","line":"Completed `mb-1ng.1.1` end-to-end: Dream Mode’s offline scheduler slice is now implemented and verified."}
+{"ts":"2026-03-25T14:11:52.978894152Z","kind":"stdout","line":""}
+{"ts":"2026-03-25T14:11:52.978896808Z","kind":"stdout","line":"GROVE_ARTIFACTS"}
+{"ts":"2026-03-25T14:11:52.978903289Z","kind":"stdout","line":"- Added bounded Dream scheduler engine: `crates/membrain-core/src/engine/dream.rs`"}
+{"ts":"2026-03-25T14:11:52.978906264Z","kind":"stdout","line":"- Exported Dream engine module: `crates/membrain-core/src/engine/mod.rs`"}
+{"ts":"2026-03-25T14:11:52.978908708Z","kind":"stdout","line":"- Added CLI Dream surface and outputs: `crates/membrain-cli/src/main.rs`"}
+{"ts":"2026-03-25T14:11:52.978910833Z","kind":"stdout","line":"- Tightened CLI contract docs for this slice: `docs/CLI.md`"}
+{"ts":"2026-03-25T14:11:52.978913170Z","kind":"stdout","line":""}
+{"ts":"2026-03-25T14:11:52.978915826Z","kind":"stdout","line":"Key code surfaces:"}
+{"ts":"2026-03-25T14:11:52.978918164Z","kind":"stdout","line":"- `crates/membrain-core/src/engine/dream.rs:7` — `DreamPolicy`"}
+{"ts":"2026-03-25T14:11:52.978920395Z","kind":"stdout","line":"- `crates/membrain-core/src/engine/dream.rs:34` — `DreamTrigger`"}
+{"ts":"2026-03-25T14:11:52.978922520Z","kind":"stdout","line":"- `crates/membrain-core/src/engine/dream.rs:66` — `DreamStatus`"}
+{"ts":"2026-03-25T14:11:52.978924751Z","kind":"stdout","line":"- `crates/membrain-core/src/engine/dream.rs:138` — `DreamRun`"}
+{"ts":"2026-03-25T14:11:52.978926876Z","kind":"stdout","line":"- `crates/membrain-core/src/engine/dream.rs:284` — `DreamEngine`"}
+{"ts":"2026-03-25T14:11:52.978929001Z","kind":"stdout","line":"- `crates/membrain-cli/src/main.rs:310` — `Commands::Dream`"}
+{"ts":"2026-03-25T14:11:52.978931126Z","kind":"stdout","line":"- `crates/membrain-cli/src/main.rs:663` — `DreamOutput`"}
+{"ts":"2026-03-25T14:11:52.978933357Z","kind":"stdout","line":"- `crates/membrain-cli/src/main.rs:4484` — Dream command execution"}
+{"ts":"2026-03-25T14:11:52.978935801Z","kind":"stdout","line":"- `crates/membrain-cli/src/main.rs:5324` — CLI parse test"}
+{"ts":"2026-03-25T14:11:52.978937926Z","kind":"stdout","line":"- `crates/membrain-cli/src/main.rs:6435` — paused-status test"}
+{"ts":"2026-03-25T14:11:52.978940050Z","kind":"stdout","line":"- `docs/CLI.md:273` — Dream CLI contract section"}
+{"ts":"2026-03-25T14:11:52.978942600Z","kind":"stdout","line":""}
+{"ts":"2026-03-25T14:11:52.978944619Z","kind":"stdout","line":"What landed:"}
+{"ts":"2026-03-25T14:11:52.978946850Z","kind":"stdout","line":"- explicit Dream scheduler policy with:"}
+{"ts":"2026-03-25T14:11:52.978949081Z","kind":"stdout","line":"  - enable/disable state"}
+{"ts":"2026-03-25T14:11:52.978951525Z","kind":"stdout","line":"  - idle threshold ticks"}
+{"ts":"2026-03-25T14:11:52.978953650Z","kind":"stdout","line":"  - bounded poll budget"}
+{"ts":"2026-03-25T14:11:52.978955775Z","kind":"stdout","line":"  - bounded batch size"}
+{"ts":"2026-03-25T14:11:52.978958006Z","kind":"stdout","line":"  - bounded max links per run"}
+{"ts":"2026-03-25T14:11:52.978960131Z","kind":"stdout","line":"- inspectable scheduler status snapshot"}
+{"ts":"2026-03-25T14:11:52.978962468Z","kind":"stdout","line":"- manual vs idle-window trigger distinction"}
+{"ts":"2026-03-25T14:11:52.978964593Z","kind":"stdout","line":"- stable skip reasons:"}
+{"ts":"2026-03-25T14:11:52.978966825Z","kind":"stdout","line":"  - `disabled`"}
+{"ts":"2026-03-25T14:11:52.978969056Z","kind":"stdout","line":"  - `idle_window_not_reached`"}
+{"ts":"2026-03-25T14:11:52.978971181Z","kind":"stdout","line":"- bounded maintenance-run behavior via existing maintenance controller contract"}
+{"ts":"2026-03-25T14:11:52.978973412Z","kind":"stdout","line":"- CLI surface:"}
+{"ts":"2026-03-25T14:11:52.978975537Z","kind":"stdout","line":"  - `membrain dream`"}
+{"ts":"2026-03-25T14:11:52.978993492Z","kind":"stdout","line":"  - `membrain dream --status`"}
+{"ts":"2026-03-25T14:11:52.978995192Z","kind":"stdout","line":"  - `membrain dream --disable`"}
+{"ts":"2026-03-25T14:11:52.978996574Z","kind":"stdout","line":"  - plus surfaced idle/run counters for inspection"}
+{"ts":"2026-03-25T14:11:52.978997955Z","kind":"stdout","line":""}
+{"ts":"2026-03-25T14:11:52.978999230Z","kind":"stdout","line":"GROVE_DECISIONS"}
+{"ts":"2026-03-25T14:11:52.979001248Z","kind":"stdout","line":"- Kept the slice self-contained in core engine + CLI rather than touching contested integration files."}
+{"ts":"2026-03-25T14:11:52.979051609Z","kind":"stdout","line":"- Reused the existing maintenance state-machine contract instead of inventing a parallel scheduler abstraction."}
+{"ts":"2026-03-25T14:11:52.979053947Z","kind":"stdout","line":"- Did not modify `brain_store.rs` or `crates/membrain-core/tests/maintenance_control.rs` because of active overlap with another agent."}
+{"ts":"2026-03-25T14:11:52.979055859Z","kind":"stdout","line":"- Restored a local compile drift in the existing `Health` command by adding back its explicit `brief` flag, since `Commands::Health` already expected it in dispatch."}
+{"ts":"2026-03-25T14:11:52.979057771Z","kind":"stdout","line":""}
+{"ts":"2026-03-25T14:11:52.979059153Z","kind":"stdout","line":"GROVE_WARNINGS"}
+{"ts":"2026-03-25T14:11:52.979061703Z","kind":"stdout","line":"- This slice implements the scheduler/control surface, not the full dream-link storage/integration path from the larger F1 spec."}
+{"ts":"2026-03-25T14:11:52.979063190Z","kind":"stdout","line":"- `DreamEngine` is currently a bounded maintenance-class scheduler/run contract and CLI surface; it does not yet wire into durable dream-link persistence or daemon background execution."}
+{"ts":"2026-03-25T14:11:52.979081464Z","kind":"stdout","line":"- I avoided contested files intentionally, so integration into `BrainStore`/shared maintenance orchestration remains a follow-on."}
+{"ts":"2026-03-25T14:11:52.979083908Z","kind":"stdout","line":""}
+{"ts":"2026-03-25T14:11:52.979085714Z","kind":"stdout","line":"GROVE_LESSONS"}
+{"ts":"2026-03-25T14:11:52.979088902Z","kind":"stdout","line":"- The repo already had the right reusable primitive for this feature: `MaintenanceJobHandle` in `crates/membrain-core/src/engine/maintenance.rs`."}
+{"ts":"2026-03-25T14:11:52.979090814Z","kind":"stdout","line":"- Dream-related health fields were already present in `crates/membrain-core/src/health.rs`, which made this scheduler slice a good bounded follow-on."}
+{"ts":"2026-03-25T14:11:52.979092195Z","kind":"stdout","line":"- `crates/membrain-cli/src/main.rs` had a preexisting mismatch where `Commands::Health` used `output.brief` without `brief` existing in `SharedOutputFlags`; fixing that was necessary to get verification green."}
+{"ts":"2026-03-25T14:11:52.979093789Z","kind":"stdout","line":""}
+{"ts":"2026-03-25T14:11:52.979095170Z","kind":"stdout","line":"Verification run:"}
+{"ts":"2026-03-25T14:11:52.979096551Z","kind":"stdout","line":"- `cargo fmt --all`"}
+{"ts":"2026-03-25T14:11:52.979097933Z","kind":"stdout","line":"- `cargo test -p membrain-core engine::dream -- --nocapture`"}
+{"ts":"2026-03-25T14:11:52.979099526Z","kind":"stdout","line":"- `cargo test -p membrain-cli dream -- --nocapture`"}
+{"ts":"2026-03-25T14:11:52.979101014Z","kind":"stdout","line":"- `cargo check -p membrain-core -p membrain-cli`"}
+{"ts":"2026-03-25T14:11:52.979102395Z","kind":"stdout","line":""}
+{"ts":"2026-03-25T14:11:52.979104201Z","kind":"stdout","line":"Bead / coordination:"}
+{"ts":"2026-03-25T14:11:52.979105582Z","kind":"stdout","line":"- Claimed and closed `mb-1ng.1.1`"}
+{"ts":"2026-03-25T14:11:52.979108451Z","kind":"stdout","line":"- Synced beads with `br sync --flush-only`"}
+{"ts":"2026-03-25T14:11:52.979109832Z","kind":"stdout","line":"- Registered with MCP Agent Mail as `LavenderCrane`"}
+{"ts":"2026-03-25T14:11:52.979111213Z","kind":"stdout","line":"- Announced start/completion to agents"}
+{"ts":"2026-03-25T14:11:52.979112595Z","kind":"stdout","line":"- Acknowledged inbound ack-required message"}
+{"ts":"2026-03-25T14:11:52.979119288Z","kind":"stdout","line":"- Released all file reservations"}
+{"ts":"2026-03-25T14:11:52.979120776Z","kind":"stdout","line":""}
+{"ts":"2026-03-25T14:11:52.979122157Z","kind":"stdout","line":"GROVE_EXIT: true"}
+{"ts":"2026-03-25T14:11:52.979122157Z","kind":"protocol","event":{"type":"exit","value":true}}
+{"ts":"2026-03-25T14:11:53.610345392Z","kind":"session_ended","exit_code":0}

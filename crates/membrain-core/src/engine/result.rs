@@ -123,6 +123,7 @@ pub struct UncertaintyMarkers {
     pub contradiction_uncertainty: Option<u16>,
     pub missing_evidence_uncertainty: Option<u16>,
     pub corroboration_uncertainty: Option<u16>,
+    pub reconsolidation_uncertainty: Option<u16>,
     /// Confidence interval bounds (lower, point, upper) when computed.
     pub confidence_interval: Option<(u16, u16, u16)>,
 }
@@ -644,7 +645,10 @@ impl RetrievalExplain {
                 detail.push_str(&format!(" at tick {era_started_at_tick}"));
             }
             if landmark.detection_score > 0 {
-                detail.push_str(&format!(" with detection_score={}", landmark.detection_score));
+                detail.push_str(&format!(
+                    " with detection_score={}",
+                    landmark.detection_score
+                ));
             }
             if prepared.prefilter_stays_metadata_only() {
                 detail.push_str(" while staying on metadata-only Tier2 planning");
@@ -655,8 +659,13 @@ impl RetrievalExplain {
                 detail,
             });
         } else {
-            let mut detail =
-                "memory stayed recallable without landmark promotion or era creation".to_string();
+            let mut detail = if let Some(era_id) = &landmark.era_id {
+                format!(
+                    "memory stayed recallable without landmark promotion or era creation inside era \"{era_id}\""
+                )
+            } else {
+                "memory stayed recallable without landmark promotion or era creation".to_string()
+            };
             if landmark.detection_score > 0 {
                 detail.push_str(&format!(" (detection_score={})", landmark.detection_score));
             }
@@ -778,6 +787,7 @@ impl ResultBuilder {
                     .max(),
                 missing_evidence_uncertainty: None,
                 corroboration_uncertainty: None,
+                reconsolidation_uncertainty: None,
                 confidence_interval: None,
             },
             answered_from,
@@ -899,6 +909,7 @@ impl ResultBuilder {
                 contradiction_uncertainty: Some(confidence_output.contradiction_uncertainty),
                 missing_evidence_uncertainty: Some(confidence_output.missing_evidence_uncertainty),
                 corroboration_uncertainty: Some(confidence_output.corroboration_uncertainty),
+                reconsolidation_uncertainty: Some(confidence_output.reconsolidation_uncertainty),
                 confidence_interval: confidence_output
                     .confidence_interval
                     .map(|ci| (ci.lower, ci.point, ci.upper)),
@@ -1817,7 +1828,9 @@ mod tests {
         );
         assert!(explain.result_reasons[2].detail.contains("launch"));
         assert!(explain.result_reasons[2].detail.contains("tick 88"));
-        assert!(explain.result_reasons[2].detail.contains("detection_score="));
+        assert!(explain.result_reasons[2]
+            .detail
+            .contains("detection_score="));
         assert!(explain.result_reasons[2]
             .detail
             .contains("metadata-only Tier2 planning"));
@@ -1830,7 +1843,8 @@ mod tests {
             ns("timeline"),
             MemoryId(34),
             SessionId(9),
-            RawEncodeInput::new(RawIntakeKind::Observation, "Routine checkin"),
+            RawEncodeInput::new(RawIntakeKind::Observation, "Routine checkin")
+                .with_active_era_id("era-launch-0088"),
         );
         let mut explain = RetrievalExplain {
             recall_plan: RecallPlanKind::Tier2ExactThenTier3Fallback,
@@ -1863,6 +1877,9 @@ mod tests {
         assert!(explain.result_reasons[2]
             .detail
             .contains("without landmark promotion or era creation"));
+        assert!(explain.result_reasons[2]
+            .detail
+            .contains("era \"era-launch-0088\""));
         assert!(!explain.result_reasons[2]
             .detail
             .contains("detection_score="));
@@ -2550,6 +2567,7 @@ mod tests {
             AnsweredFrom::Tier2Indexed,
             &crate::engine::confidence::ConfidenceInputs {
                 corroboration_count: 8,
+                reconsolidation_count: 0,
                 ticks_since_last_access: 10,
                 age_ticks: 10,
                 resolution_state: ResolutionState::None,
@@ -2570,6 +2588,7 @@ mod tests {
             AnsweredFrom::Tier2Indexed,
             &crate::engine::confidence::ConfidenceInputs {
                 corroboration_count: 0,
+                reconsolidation_count: 0,
                 ticks_since_last_access: 1000,
                 age_ticks: 1000,
                 resolution_state: ResolutionState::Unresolved,

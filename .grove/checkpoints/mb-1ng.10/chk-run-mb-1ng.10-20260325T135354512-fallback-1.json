@@ -1,0 +1,45 @@
+{
+  "id": "chk-run-mb-1ng.10-20260325T135354512-fallback-1",
+  "bead_id": "mb-1ng.10",
+  "run_id": "run-mb-1ng.10-20260325T135354512",
+  "session_id": "ses-run-mb-1ng.10-20260325T135354512",
+  "progress": "Synthetic fallback checkpoint after NoProgress",
+  "next_step": "Resume from the transcript tail, avoid repeating completed setup, and continue with the smallest safe remaining step.",
+  "payload": {
+    "claimed_paths": [],
+    "confidence": 0.25,
+    "context": {
+      "failure_class": "NoProgress",
+      "failure_detail": "session ended with Unknown",
+      "stderr_tail": [],
+      "stdout_tail": [
+        "- `cargo check -p membrain-daemon -p membrain-cli`",
+        "- `cargo test -p membrain-daemon --test runtime_doctor_parity -- --nocapture`",
+        "- `cargo run -p membrain-cli -- health --brief`",
+        "",
+        "Key refs:",
+        "- `crates/membrain-cli/src/main.rs:333`",
+        "- `crates/membrain-cli/src/main.rs:3558`",
+        "- `crates/membrain-cli/src/main.rs:4614`",
+        "- `crates/membrain-daemon/src/rpc.rs:613`",
+        "- `crates/membrain-daemon/src/rpc.rs:1243`",
+        "- `crates/membrain-daemon/src/daemon.rs:9`",
+        "- `crates/membrain-daemon/src/daemon.rs:921`",
+        "- `crates/membrain-daemon/src/daemon.rs:1609`",
+        "- `crates/membrain-daemon/src/daemon.rs:2116`",
+        "- `crates/membrain-daemon/src/daemon.rs:2205`",
+        "- `crates/membrain-daemon/tests/runtime_doctor_parity.rs:82`",
+        "- `crates/membrain-daemon/tests/runtime_doctor_parity.rs:152`",
+        "- `crates/membrain-daemon/tests/runtime_doctor_parity.rs:388`",
+        "- `crates/membrain-daemon/tests/runtime_doctor_parity.rs:427`",
+        ""
+      ],
+      "synthetic": true
+    },
+    "next_step": "Resume from the transcript tail, avoid repeating completed setup, and continue with the smallest safe remaining step.",
+    "open_questions": [],
+    "progress": "Synthetic fallback checkpoint after NoProgress"
+  },
+  "saved_at": "2026-03-25T14:11:55.872332008Z",
+  "resume_generation": 1
+}

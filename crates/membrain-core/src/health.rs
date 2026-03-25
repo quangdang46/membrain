@@ -479,7 +479,7 @@ impl IndexHealthSummary {
 impl RepairHealthReport {
     /// Aggregates operator-visible repair state into health-facing counters.
     pub fn from_summary(summary: &RepairSummary) -> Self {
-        let queue_depth = (summary.degraded + summary.corrupt) as u64;
+        let queue_depth = summary.queue_report.queue_depth_after as u64;
         let state = if summary.corrupt > 0 {
             SubsystemHealthState::Blocked
         } else if summary.degraded > 0 || queue_depth > 0 {
@@ -629,6 +629,21 @@ mod tests {
             degraded: 1,
             corrupt: 1,
             rebuilt: 0,
+            affected_item_count: 5,
+            error_count: 2,
+            rebuild_duration_ms: 33,
+            rollback_state: Some("rollback_required"),
+            queue_report: crate::observability::MaintenanceQueueReport {
+                queue_family: "repair",
+                queue_status: crate::observability::MaintenanceQueueStatus::Partial,
+                queue_depth_before: 2,
+                queue_depth_after: 2,
+                jobs_processed: 0,
+                affected_item_count: 5,
+                duration_ms: 33,
+                retry_attempts: 2,
+                partial_run: true,
+            },
             results: Vec::new(),
             verification_artifacts: HashMap::new(),
             operator_reports: Vec::new(),
@@ -669,6 +684,21 @@ mod tests {
             degraded: 1,
             corrupt: 1,
             rebuilt: 0,
+            affected_item_count: 10,
+            error_count: 2,
+            rebuild_duration_ms: 41,
+            rollback_state: Some("rollback_required"),
+            queue_report: crate::observability::MaintenanceQueueReport {
+                queue_family: "repair",
+                queue_status: crate::observability::MaintenanceQueueStatus::Partial,
+                queue_depth_before: 3,
+                queue_depth_after: 2,
+                jobs_processed: 1,
+                affected_item_count: 10,
+                duration_ms: 41,
+                retry_attempts: 2,
+                partial_run: true,
+            },
             results: vec![RepairCheckResult {
                 target: RepairTarget::LexicalIndex,
                 status: RepairStatus::Corrupt,
@@ -696,7 +726,13 @@ mod tests {
                 rebuild_entrypoint: Some(IndexRepairEntrypoint::RebuildIfNeeded),
                 rebuilt_outputs: vec!["fts5_memory_index"],
                 verification_artifact_name: "fts5_lexical_parity",
-                operator_log: "target=lexical_index status=corrupt".to_string(),
+                affected_item_count: 10,
+                error_count: 2,
+                rebuild_duration_ms: 41,
+                rollback_state: Some("rollback_required"),
+                queue_depth_before: 3,
+                queue_depth_after: 0,
+                operator_log: "target=lexical_index status=corrupt affected_item_count=10 error_count=2 rebuild_duration_ms=41 rollback_state=rollback_required queue_depth_before=3 queue_depth_after=0".to_string(),
             }],
             graph_rebuild_reports: HashMap::new(),
         };
@@ -750,6 +786,12 @@ mod tests {
         );
         assert_eq!(report.backpressure_state, Some("high"));
         assert_eq!(report.repair_queue_depth, Some(2));
+        assert_eq!(report.repair.as_ref().map(|r| r.targets_checked), Some(3));
+        assert!(report
+            .subsystem_status
+            .iter()
+            .find(|status| status.subsystem == "repair")
+            .is_some_and(|status| status.detail.contains("queue_depth=2")));
         assert_eq!(report.cache.state, SubsystemHealthState::Unavailable);
         assert_eq!(report.indexes.state, SubsystemHealthState::Degraded);
         assert_eq!(

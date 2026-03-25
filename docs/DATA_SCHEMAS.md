@@ -13,6 +13,7 @@ This baseline freezes the durable core tables that later retrieval, contradictio
 | `engrams` | `id` (`engram_id`) | Stable cluster handles and durable cluster metadata live here | Centroids and membership-derived counters may be recomputed without minting a new `engram_id` |
 | `engram_members` | `(engram_id, memory_id)` | Durable, inspectable membership rows back bounded engram expansion | Membership repair must reconcile back to canonical memory and engram handles rather than trusting ANN neighborhood output alone |
 | `graph_edges` | `(src_memory_id, dst_memory_id, edge_type)` | Normalized durable graph rows are the inspectable graph surface | Similarity-only accelerators may be dropped and rebuilt, but canonical contradiction, lineage, or relation meaning must still resolve through durable records |
+| `causal_links` | `(src_memory_id, dst_memory_id)` | Explicit durable causal provenance rows keep "why do I believe this?" claims source-backed instead of implicit in graph traversal | Rebuild explain or traversal helpers from these rows plus their cited durable evidence; never infer canonical causality from similarity or cache state alone |
 | `brain_state` | `key` | Stores durable process-level logical state such as counters or generation anchors required for reproducible repair | Restart, rebuild, and migration flows must restore these values before derived services claim healthy state |
 
 ### Stable identifier rules
@@ -27,7 +28,7 @@ This baseline freezes the durable core tables that later retrieval, contradictio
 Derived state must rebuild from durable truth in this order:
 1. canonical `memories` rows and referenced durable evidence (`content_ref`, `payload_ref`, provenance, lineage)
 2. authoritative float embedding records in `memory_embeddings`
-3. durable cluster and graph rows in `engrams`, `engram_members`, and `graph_edges`
+3. durable cluster, causal, and graph rows in `engrams`, `engram_members`, `causal_links`, and `graph_edges`
 4. durable process state in `brain_state`
 
 Caches, quantized vectors, FTS projections, warm routing mirrors, and other accelerators are rebuild targets, not rebuild authority.
@@ -48,6 +49,7 @@ Every durable item family in this schema baseline inherits the same provenance f
 - `created_at_ms` and `updated_at_ms` are mandatory on every durable item family covered below.
 - `source_kind` and `source_ref` are mandatory for first-order intake records and mandatory on derived records unless lineage points to the durable parent evidence they came from.
 - `lineage` is mandatory for any derived, repaired, consolidated, summarized, extracted, merged, or contradiction-related record; first-order intake may leave it empty.
+- `causal_links` and any user-visible `Causal` graph edges must carry explicit evidence attribution. At minimum one cited durable memory handle is required, and any additional supporting evidence must come from inspectable durable families such as reconsolidation audit rows, consolidation artifacts, or belief-version diffs rather than opaque traversal hints.
 
 #### Shared source and lineage rules
 
@@ -147,6 +149,7 @@ Future schema-changing work must inherit one reusable obligations set instead of
 - created_at_ms must not exceed updated_at_ms
 - version must increment on mutation
 - payload_ref must be stable or tombstoned
+- archived or cold-owned payload rows must preserve a machine-readable `payload_state` (`inline`, `detached`, `tombstoned`, or `unavailable`) plus explicit loss indicators when restore fidelity is degraded
 - first-order intake rows must carry both `source_kind` and `source_ref`; derived rows may satisfy source traceability through explicit lineage only when the parent evidence remains durable and inspectable
 - any non-empty `lineage` entry must resolve to stable canonical handles in the same namespace unless an explicit policy contract allows a linked cross-namespace reference
 - mutation, repair, rollback, and compaction flows must preserve source traceability and lineage or emit an explicit tombstone/loss artifact instead of dropping ancestry silently

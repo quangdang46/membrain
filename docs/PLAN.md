@@ -9887,7 +9887,12 @@ Each section below is written in English and focuses on **how to build the featu
    - `Checklist`
    - `ReflectionArtifact`
 4. Keep reflection artifacts derived from evidence; do not pretend they are raw facts.
-5. Later-stage procedural-memory follow-ons may promote successful reflections or extracted skills into stronger reusable procedure surfaces only when lineage, supersession, and repeated-use usefulness remain inspectable.
+5. Reflection outputs should preserve explicit artifact class and release metadata:
+   - successful episodes may emit advisory `Procedure` artifacts
+   - failed or retry-heavy episodes may emit advisory `anti-pattern` artifacts
+   - both paths may emit bounded checklist items tied to the same source trace
+   - all such outputs must remain `advisory=true` and `trusted_by_default=false` until acceptance criteria are met
+6. Later-stage procedural-memory follow-ons may promote successful reflections or extracted skills into stronger reusable procedure surfaces only when lineage, supersession, and repeated-use usefulness remain inspectable.
 
 **Minimum release rule**
 - Reflection is advisory until validated by repeated usefulness or human approval.

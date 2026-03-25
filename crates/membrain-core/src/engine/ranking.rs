@@ -445,7 +445,7 @@ impl ConfidenceExplain {
         config: ConfidenceDisplayConfig,
         confidence: u16,
         confidence_interval: Option<(u16, u16, u16)>,
-        uncertainty_breakdown: [(u16, Option<u16>); 4],
+        uncertainty_breakdown: [(u16, Option<u16>); 5],
     ) -> Self {
         let interval = if config.show_confidence_intervals {
             confidence_interval
@@ -460,6 +460,7 @@ impl ConfidenceExplain {
                 ("contradiction", uncertainty_breakdown[1]),
                 ("missing_evidence", uncertainty_breakdown[2]),
                 ("corroboration", uncertainty_breakdown[3]),
+                ("reconsolidation", uncertainty_breakdown[4]),
             ]
             .into_iter()
             .map(|(name, (value, override_value))| {
@@ -619,7 +620,7 @@ mod tests {
             ConfidenceDisplayConfig::default(),
             375,
             Some((300, 375, 450)),
-            [(10, None), (20, None), (30, None), (40, None)],
+            [(10, None), (20, None), (30, None), (40, Some(25)), (50, None)],
         );
 
         assert!(explain.passes_threshold);
@@ -639,7 +640,8 @@ mod tests {
                 ("freshness".to_string(), 10),
                 ("contradiction".to_string(), 20),
                 ("missing_evidence".to_string(), 30),
-                ("corroboration".to_string(), 40),
+                ("corroboration".to_string(), 25),
+                ("reconsolidation".to_string(), 50),
             ]
         );
     }
@@ -655,7 +657,7 @@ mod tests {
             config,
             450,
             Some((300, 450, 600)),
-            [(10, None), (20, None), (30, None), (40, None)],
+            [(10, None), (20, None), (30, None), (40, None), (50, None)],
         );
 
         assert!(!explain.passes_threshold);

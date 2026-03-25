@@ -154,6 +154,8 @@ pub struct ReconsolidationAuditRecord {
     pub strength_after: Option<f32>,
     /// Strength preserved from the pre-reopen authoritative state.
     pub preserved_strength: Option<f32>,
+    /// Stable durable state captured before reopen.
+    pub preserved_state: Option<ReopenStableState>,
     /// Concrete authoritative-state mutation proposed by an applied update.
     pub applied_update_state: Option<AppliedUpdateState>,
     /// Refresh triggers emitted for this tick.
@@ -172,6 +174,24 @@ pub struct ReconsolidationAuditRecord {
     pub restabilized: bool,
 }
 
+/// Stable durable states that may be reopened by successful recall.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ReopenStableState {
+    /// A synaptic-done memory may reopen into a bounded labile window.
+    SynapticDone,
+    /// A consolidated memory may reopen into a bounded labile window.
+    Consolidated,
+}
+
+impl ReopenStableState {
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::SynapticDone => "synaptic_done",
+            Self::Consolidated => "consolidated",
+        }
+    }
+}
+
 /// Captured stable state before a labile window reopens.
 ///
 /// This preserves the pre-reopen authoritative state so that discard or
@@ -188,6 +208,15 @@ pub struct PreReopenState {
     pub stability_at_reopen: f32,
     /// Access count at the moment of reopen.
     pub access_count_at_reopen: u32,
+}
+
+/// Successful recall reopen result: a bounded labile window plus the target
+/// durable state to restore after apply or expiry.
+#[derive(Debug, Clone, PartialEq)]
+pub struct RecallReopenWindow {
+    pub labile_state: LabileState,
+    pub pre_reopen_state: PreReopenState,
+    pub restabilize_to: ReopenStableState,
 }
 
 /// Rejection reasons for pending-update submission.
@@ -355,6 +384,39 @@ impl ReconsolidationEngine {
             return None;
         }
         Some(LabileState::new(current_tick, window))
+    }
+
+    /// Reopens a stable memory into a bounded labile window after successful recall.
+    pub fn reopen_after_recall(
+        &self,
+        memory_id: MemoryId,
+        stable_state: ReopenStableState,
+        current_tick: u64,
+        age_ticks: u64,
+        effective_strength: f32,
+        stability: f32,
+        access_count: u32,
+        policy: &ReconsolidationPolicy,
+    ) -> Option<RecallReopenWindow> {
+        if !self.should_enter_labile(effective_strength, access_count, policy) {
+            return None;
+        }
+
+        let labile_state =
+            self.enter_labile(current_tick, age_ticks, effective_strength, policy)?;
+        let pre_reopen_state = self.capture_pre_reopen_state(
+            memory_id,
+            current_tick,
+            effective_strength,
+            stability,
+            access_count,
+        );
+
+        Some(RecallReopenWindow {
+            labile_state,
+            pre_reopen_state,
+            restabilize_to: stable_state,
+        })
     }
 
     /// Creates a bare pending update for the given memory.
@@ -592,6 +654,7 @@ impl ReconsolidationEngine {
         result: &ReconsolidationTickResult,
         strength_before: Option<f32>,
         preserved_strength: Option<f32>,
+        preserved_state: Option<ReopenStableState>,
         applied_source: Option<UpdateSource>,
     ) -> ReconsolidationAuditRecord {
         ReconsolidationAuditRecord {
@@ -602,6 +665,7 @@ impl ReconsolidationEngine {
             strength_before,
             strength_after: result.new_strength,
             preserved_strength,
+            preserved_state,
             applied_update_state: result.applied_update_state.clone(),
             refresh_triggers: result.refresh_triggers.clone(),
             executed_refresh_triggers: result.executed_refresh_triggers.clone(),
@@ -650,6 +714,7 @@ pub struct LabileMemory {
     pub pending_update: Option<PendingUpdate>,
     pub current_strength: f32,
     pub pre_reopen_state: PreReopenState,
+    pub restabilize_to: ReopenStableState,
     pub refresh_readiness: RefreshReadiness,
 }
 
@@ -676,6 +741,7 @@ pub struct ReconsolidationAuditRecordFlat {
     pub strength_before: Option<u32>,
     pub strength_after: Option<u32>,
     pub preserved_strength: Option<u32>,
+    pub preserved_state: Option<&'static str>,
     pub applied_content: Option<String>,
     pub applied_emotional_arousal: Option<u32>,
     pub applied_emotional_valence: Option<i32>,
@@ -803,7 +869,7 @@ impl ReconsolidationRun {
                     .map(|value| format!("{value:.3}"))
                     .unwrap_or_else(|| "none".to_string());
                 let detail = format!(
-                    "reconsolidation {} at tick {} (outcome={}, source={}, strength_before={}, strength_after={}, preserved_strength={}, refresh_triggers={}, executed_refresh_triggers={}, deferred_refresh_triggers={}, applied_content={}, applied_emotional_arousal={}, applied_emotional_valence={}, restabilized={}, authoritative_state_mutated={}, pending_update_cleared={})",
+                    "reconsolidation {} at tick {} (outcome={}, source={}, strength_before={}, strength_after={}, preserved_strength={}, preserved_state={}, refresh_triggers={}, executed_refresh_triggers={}, deferred_refresh_triggers={}, applied_content={}, applied_emotional_arousal={}, applied_emotional_valence={}, restabilized={}, authoritative_state_mutated={}, pending_update_cleared={})",
                     record.audit_kind.as_str(),
                     record.tick,
                     record.outcome.as_str(),
@@ -811,6 +877,7 @@ impl ReconsolidationRun {
                     strength_before,
                     strength_after,
                     preserved_strength,
+                    record.preserved_state.map(|state| state.as_str()).unwrap_or("none"),
                     refresh_triggers,
                     executed_refresh_triggers,
                     deferred_refresh_triggers,
@@ -871,6 +938,7 @@ impl MaintenanceOperation for ReconsolidationRun {
             &result,
             Some(mem.current_strength),
             Some(mem.pre_reopen_state.strength_at_reopen),
+            Some(mem.restabilize_to),
             mem.pending_update.as_ref().map(|p| p.submitter),
         );
         self.audit_records.push(audit);
@@ -893,6 +961,7 @@ impl MaintenanceOperation for ReconsolidationRun {
         InterruptedMaintenance {
             reason,
             preserved_durable_state: self.durable_state_token,
+            artifact: None,
         }
     }
 }
@@ -918,6 +987,7 @@ impl ReconsolidationRun {
                 strength_before: r.strength_before.map(Self::quantize_millis_u32),
                 strength_after: r.strength_after.map(Self::quantize_millis_u32),
                 preserved_strength: r.preserved_strength.map(Self::quantize_millis_u32),
+                preserved_state: r.preserved_state.map(|state| state.as_str()),
                 applied_content: r
                     .applied_update_state
                     .as_ref()
@@ -1037,6 +1107,65 @@ mod tests {
         });
         assert_eq!(state.since_tick, 100);
         assert!(state.window_ticks > 0);
+    }
+
+    #[test]
+    fn reopen_after_recall_captures_window_and_restabilize_target() {
+        let engine = ReconsolidationEngine::new();
+        let policy = policy();
+        let reopened = engine
+            .reopen_after_recall(
+                MemoryId(7),
+                ReopenStableState::Consolidated,
+                120,
+                20,
+                0.6,
+                3.5,
+                4,
+                &policy,
+            )
+            .unwrap_or_else(|| {
+                std::process::abort();
+            });
+
+        assert_eq!(reopened.labile_state.since_tick, 120);
+        assert!(reopened.labile_state.window_ticks > 0);
+        assert_eq!(reopened.pre_reopen_state.memory_id, MemoryId(7));
+        assert_eq!(reopened.pre_reopen_state.reopen_tick, 120);
+        assert_eq!(reopened.pre_reopen_state.strength_at_reopen, 0.6);
+        assert_eq!(reopened.pre_reopen_state.stability_at_reopen, 3.5);
+        assert_eq!(reopened.pre_reopen_state.access_count_at_reopen, 4);
+        assert_eq!(reopened.restabilize_to, ReopenStableState::Consolidated);
+    }
+
+    #[test]
+    fn reopen_after_recall_rejects_ineligible_memories() {
+        let engine = ReconsolidationEngine::new();
+        let policy = policy();
+        assert!(engine
+            .reopen_after_recall(
+                MemoryId(8),
+                ReopenStableState::SynapticDone,
+                120,
+                20,
+                0.1,
+                2.0,
+                4,
+                &policy,
+            )
+            .is_none());
+        assert!(engine
+            .reopen_after_recall(
+                MemoryId(9),
+                ReopenStableState::Consolidated,
+                120,
+                20,
+                0.6,
+                2.0,
+                0,
+                &policy,
+            )
+            .is_none());
     }
 
     #[test]
@@ -1391,6 +1520,7 @@ mod tests {
             &result,
             Some(0.5),
             Some(0.45),
+            Some(ReopenStableState::Consolidated),
             Some(UpdateSource::User),
         );
         assert_eq!(audit.memory_id, MemoryId(42));
@@ -1400,6 +1530,7 @@ mod tests {
         assert_eq!(audit.strength_before, Some(0.5));
         assert_eq!(audit.strength_after, Some(0.55));
         assert_eq!(audit.preserved_strength, Some(0.45));
+        assert_eq!(audit.preserved_state, Some(ReopenStableState::Consolidated));
         assert_eq!(
             audit.applied_update_state,
             Some(AppliedUpdateState {
@@ -1495,6 +1626,7 @@ mod tests {
                     stability_at_reopen: 3.0,
                     access_count_at_reopen: 4,
                 },
+                restabilize_to: ReopenStableState::Consolidated,
                 refresh_readiness: RefreshReadiness::Ready,
             },
             LabileMemory {
@@ -1509,6 +1641,7 @@ mod tests {
                     stability_at_reopen: 2.0,
                     access_count_at_reopen: 3,
                 },
+                restabilize_to: ReopenStableState::Consolidated,
                 refresh_readiness: RefreshReadiness::Ready,
             },
             LabileMemory {
@@ -1523,6 +1656,7 @@ mod tests {
                     stability_at_reopen: 1.5,
                     access_count_at_reopen: 2,
                 },
+                restabilize_to: ReopenStableState::Consolidated,
                 refresh_readiness: RefreshReadiness::Ready,
             },
         ];
@@ -1585,6 +1719,7 @@ mod tests {
                     stability_at_reopen: 2.0,
                     access_count_at_reopen: 1,
                 },
+                restabilize_to: ReopenStableState::Consolidated,
                 refresh_readiness: RefreshReadiness::Ready,
             },
             LabileMemory {
@@ -1599,6 +1734,7 @@ mod tests {
                     stability_at_reopen: 2.0,
                     access_count_at_reopen: 1,
                 },
+                restabilize_to: ReopenStableState::Consolidated,
                 refresh_readiness: RefreshReadiness::Ready,
             },
         ];
@@ -1645,6 +1781,7 @@ mod tests {
                     stability_at_reopen: 2.0,
                     access_count_at_reopen: 1,
                 },
+                restabilize_to: ReopenStableState::Consolidated,
                 refresh_readiness: RefreshReadiness::Ready,
             })
             .collect();
@@ -1691,6 +1828,7 @@ mod tests {
                     stability_at_reopen: 2.0,
                     access_count_at_reopen: 1,
                 },
+                restabilize_to: ReopenStableState::Consolidated,
                 refresh_readiness: RefreshReadiness::Ready,
             })
             .collect();
@@ -1783,6 +1921,7 @@ mod tests {
                     stability_at_reopen: 3.0,
                     access_count_at_reopen: 5,
                 },
+                restabilize_to: ReopenStableState::SynapticDone,
                 refresh_readiness: RefreshReadiness::Deferred,
             },
             LabileMemory {
@@ -1800,6 +1939,7 @@ mod tests {
                     stability_at_reopen: 4.0,
                     access_count_at_reopen: 6,
                 },
+                restabilize_to: ReopenStableState::SynapticDone,
                 refresh_readiness: RefreshReadiness::Failed,
             },
             LabileMemory {
@@ -1817,6 +1957,7 @@ mod tests {
                     stability_at_reopen: 5.0,
                     access_count_at_reopen: 7,
                 },
+                restabilize_to: ReopenStableState::Consolidated,
                 refresh_readiness: RefreshReadiness::Ready,
             },
         ];
@@ -1895,6 +2036,7 @@ mod tests {
                 stability_at_reopen: 3.0,
                 access_count_at_reopen: 5,
             },
+            restabilize_to: ReopenStableState::Consolidated,
             refresh_readiness: RefreshReadiness::Ready,
         }];
 
@@ -1937,6 +2079,7 @@ mod tests {
                     stability_at_reopen: 3.0,
                     access_count_at_reopen: 5,
                 },
+                restabilize_to: ReopenStableState::Consolidated,
                 refresh_readiness: RefreshReadiness::Ready,
             },
             LabileMemory {
@@ -1954,6 +2097,7 @@ mod tests {
                     stability_at_reopen: 5.0,
                     access_count_at_reopen: 7,
                 },
+                restabilize_to: ReopenStableState::Consolidated,
                 refresh_readiness: RefreshReadiness::Ready,
             },
             LabileMemory {
@@ -1971,6 +2115,7 @@ mod tests {
                     stability_at_reopen: 4.0,
                     access_count_at_reopen: 6,
                 },
+                restabilize_to: ReopenStableState::SynapticDone,
                 refresh_readiness: RefreshReadiness::Deferred,
             },
             LabileMemory {
@@ -1988,6 +2133,7 @@ mod tests {
                     stability_at_reopen: 4.0,
                     access_count_at_reopen: 6,
                 },
+                restabilize_to: ReopenStableState::SynapticDone,
                 refresh_readiness: RefreshReadiness::Failed,
             },
         ];

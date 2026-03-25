@@ -121,13 +121,48 @@ pub enum InterruptionReason {
     TimedOut,
 }
 
+impl InterruptionReason {
+    /// Returns the stable machine-readable interruption label.
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Cancelled => "cancelled",
+            Self::TimedOut => "timed_out",
+        }
+    }
+}
+
+/// Operator-visible partial/interruption artifact emitted by bounded maintenance work.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct MaintenanceFailureArtifact {
+    /// Stable artifact identifier.
+    pub artifact_name: &'static str,
+    /// Stable handle naming the affected object or queue.
+    pub object_handle: String,
+    /// Namespace or shard scope preserved for follow-up work.
+    pub scope: String,
+    /// Stable attempted edge/stage associated with the artifact.
+    pub attempted_edge: &'static str,
+    /// Number of items implicated by this partial or interrupted outcome.
+    pub affected_item_count: u32,
+    /// Number of items still pending or unresolved after the boundary.
+    pub pending_item_count: u32,
+    /// Stable failure family for repair or incident routing.
+    pub failure_family: &'static str,
+    /// Whether the same bounded work may be safely resumed automatically.
+    pub retryable: bool,
+    /// Operator-visible escalation boundary when automatic retry is no longer allowed.
+    pub escalation_boundary: &'static str,
+}
+
 /// Durable-state preservation summary returned after an interrupted run.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct InterruptedMaintenance {
     /// Why the maintenance run stopped before completion.
     pub reason: InterruptionReason,
     /// Prior durable state that remained authoritative after interruption.
     pub preserved_durable_state: DurableStateToken,
+    /// Optional operator artifact describing the interrupted bounded work.
+    pub artifact: Option<MaintenanceFailureArtifact>,
 }
 
 /// One bounded execution step produced by a maintenance operation.

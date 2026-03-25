@@ -1,5 +1,7 @@
-use crate::api::NamespaceId;
+use crate::api::{AgentId, NamespaceId, WorkspaceId};
+use crate::engine::confidence::{ConfidenceInputs, ConfidenceOutput};
 use crate::observability::{Tier2PrefilterOutcome, Tier2PrefilterTrace};
+use crate::policy::SharingVisibility;
 use crate::store::Tier2StoreApi;
 use crate::types::{
     CanonicalMemoryType, FastPathRouteFamily, LandmarkMetadata, MemoryId, NormalizedMemoryEnvelope,
@@ -20,6 +22,8 @@ impl Tier2Store {
         session_id: SessionId,
         fingerprint: u64,
         envelope: &NormalizedMemoryEnvelope,
+        confidence_inputs: Option<ConfidenceInputs>,
+        confidence_output: Option<ConfidenceOutput>,
     ) -> Tier2DurableItemLayout {
         let payload_locator = Tier2PayloadLocator::for_memory(&namespace, memory_id);
 
@@ -35,8 +39,13 @@ impl Tier2Store {
                 normalization_generation: envelope.normalization_generation,
                 payload_size_bytes: envelope.payload_size_bytes,
                 landmark: envelope.landmark.clone(),
+                visibility: envelope.sharing.visibility,
+                workspace_id: envelope.sharing.workspace_id.clone(),
+                agent_id: envelope.sharing.agent_id.clone(),
                 observation_source: envelope.observation_source.clone(),
                 observation_chunk_id: envelope.observation_chunk_id.clone(),
+                confidence_inputs,
+                confidence_output,
                 payload_locator: payload_locator.clone(),
             },
             payload: Tier2PayloadRecord {
@@ -77,8 +86,13 @@ impl Tier2DurableItemLayout {
             normalization_generation: self.metadata.normalization_generation,
             payload_size_bytes: self.metadata.payload_size_bytes,
             landmark: &self.metadata.landmark,
+            visibility: self.metadata.visibility,
+            workspace_id: self.metadata.workspace_id.as_ref(),
+            agent_id: self.metadata.agent_id.as_ref(),
             observation_source: self.metadata.observation_source.as_deref(),
             observation_chunk_id: self.metadata.observation_chunk_id.as_deref(),
+            confidence_inputs: self.metadata.confidence_inputs.as_ref(),
+            confidence_output: self.metadata.confidence_output.as_ref(),
             payload_locator: self.metadata.payload_locator.clone(),
         }
     }
@@ -95,6 +109,11 @@ impl Tier2DurableItemLayout {
             compact_text: &self.metadata.compact_text,
             normalization_generation: self.metadata.normalization_generation,
             landmark: &self.metadata.landmark,
+            visibility: self.metadata.visibility,
+            workspace_id: self.metadata.workspace_id.as_ref(),
+            agent_id: self.metadata.agent_id.as_ref(),
+            confidence_inputs: self.metadata.confidence_inputs.as_ref(),
+            confidence_output: self.metadata.confidence_output.as_ref(),
             payload_locator: self.metadata.payload_locator.clone(),
         }
     }
@@ -185,8 +204,13 @@ pub struct Tier2MetadataRecord {
     pub normalization_generation: &'static str,
     pub payload_size_bytes: usize,
     pub landmark: LandmarkMetadata,
+    pub visibility: SharingVisibility,
+    pub workspace_id: Option<WorkspaceId>,
+    pub agent_id: Option<AgentId>,
     pub observation_source: Option<String>,
     pub observation_chunk_id: Option<String>,
+    pub confidence_inputs: Option<ConfidenceInputs>,
+    pub confidence_output: Option<ConfidenceOutput>,
     pub payload_locator: Tier2PayloadLocator,
 }
 
@@ -267,12 +291,32 @@ pub struct Tier2PrefilterView<'a> {
     pub normalization_generation: &'static str,
     pub payload_size_bytes: usize,
     pub landmark: &'a LandmarkMetadata,
+    pub visibility: SharingVisibility,
+    pub workspace_id: Option<&'a WorkspaceId>,
+    pub agent_id: Option<&'a AgentId>,
     pub observation_source: Option<&'a str>,
     pub observation_chunk_id: Option<&'a str>,
+    pub confidence_inputs: Option<&'a ConfidenceInputs>,
+    pub confidence_output: Option<&'a ConfidenceOutput>,
     pub payload_locator: Tier2PayloadLocator,
 }
 
 impl Tier2PrefilterView<'_> {
+    /// Returns the machine-readable sharing visibility preserved in metadata.
+    pub const fn visibility(&self) -> SharingVisibility {
+        self.visibility
+    }
+
+    /// Returns the workspace scope preserved in metadata when one exists.
+    pub fn workspace_id(&self) -> Option<&str> {
+        self.workspace_id.map(WorkspaceId::as_str)
+    }
+
+    /// Returns the producing agent identity preserved in metadata when one exists.
+    pub fn agent_id(&self) -> Option<&str> {
+        self.agent_id.map(AgentId::as_str)
+    }
+
     /// Returns the landmark label visible to metadata-first temporal consumers.
     pub fn landmark_label(&self) -> Option<&str> {
         self.landmark.landmark_label.as_deref()
@@ -311,10 +355,30 @@ pub struct Tier2MetadataIndexKey<'a> {
     pub compact_text: &'a str,
     pub normalization_generation: &'static str,
     pub landmark: &'a LandmarkMetadata,
+    pub visibility: SharingVisibility,
+    pub workspace_id: Option<&'a WorkspaceId>,
+    pub agent_id: Option<&'a AgentId>,
+    pub confidence_inputs: Option<&'a ConfidenceInputs>,
+    pub confidence_output: Option<&'a ConfidenceOutput>,
     pub payload_locator: Tier2PayloadLocator,
 }
 
 impl Tier2MetadataIndexKey<'_> {
+    /// Returns the machine-readable sharing visibility preserved on the metadata-only index key.
+    pub const fn visibility(&self) -> SharingVisibility {
+        self.visibility
+    }
+
+    /// Returns the workspace scope preserved on the metadata-only index key when one exists.
+    pub fn workspace_id(&self) -> Option<&str> {
+        self.workspace_id.map(WorkspaceId::as_str)
+    }
+
+    /// Returns the producing agent identity preserved on the metadata-only index key when one exists.
+    pub fn agent_id(&self) -> Option<&str> {
+        self.agent_id.map(AgentId::as_str)
+    }
+
     /// Returns the landmark label preserved on the metadata-only index key.
     pub fn landmark_label(&self) -> Option<&str> {
         self.landmark.landmark_label.as_deref()

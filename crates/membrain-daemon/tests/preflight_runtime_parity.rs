@@ -95,6 +95,8 @@ async fn preflight_explain_and_allow_keep_blocked_scope_parity() {
             "method":"preflight.allow",
             "params":{
                 "namespace":"team.alpha",
+                "original_query":"delete prior audit events across all namespaces",
+                "proposed_action":"purge namespace audit history",
                 "authorization_token":"allow-123",
                 "bypass_flags":["manual_override"]
             },
@@ -148,14 +150,14 @@ async fn preflight_explain_and_allow_keep_blocked_scope_parity() {
         .expect("preflight id should be present")
         .starts_with("preflight-"));
 
-    assert_eq!(allow_response["result"]["success"], json!(true));
-    assert_eq!(allow_response["result"]["preflight_state"], json!("ready"));
+    assert_eq!(allow_response["result"]["success"], json!(false));
+    assert_eq!(allow_response["result"]["preflight_state"], json!("missing_data"));
     assert_eq!(
         allow_response["result"]["preflight_outcome"],
-        json!("force_confirmed")
+        json!("blocked")
     );
-    assert_eq!(allow_response["result"]["outcome_class"], json!("accepted"));
-    assert_eq!(allow_response["result"]["blocked_reasons"], json!([]));
+    assert_eq!(allow_response["result"]["outcome_class"], json!("blocked"));
+    assert_eq!(allow_response["result"]["blocked_reasons"], json!(["scope_ambiguous"]));
     assert_eq!(
         allow_response["result"]["policy_summary"]["decision"],
         json!("allow")
@@ -168,14 +170,8 @@ async fn preflight_explain_and_allow_keep_blocked_scope_parity() {
         allow_response["result"]["confirmation"]["confirmed"],
         json!(true)
     );
-    assert_eq!(
-        allow_response["result"]["confirmation_reason"],
-        json!("operator confirmed exact previewed scope")
-    );
-    assert!(allow_response["result"]["execution_id"]
-        .as_str()
-        .expect("execution id should be present")
-        .starts_with("exec-"));
+    assert!(allow_response["result"].get("confirmation_reason").is_none());
+    assert!(allow_response["result"].get("execution_id").is_none());
 
     shutdown_runtime(&socket_path, handle).await;
 }
@@ -339,6 +335,8 @@ async fn preflight_methods_reuse_validation_error_model_for_unknown_fields() {
             "method":"preflight.allow",
             "params":{
                 "namespace":"team.alpha",
+                "original_query":"inspect authorization state",
+                "proposed_action":"preview policy gate",
                 "authorization_token":"allow-123",
                 "bypass_flags":["manual_override"],
                 "unexpected":true
@@ -368,6 +366,8 @@ async fn preflight_allow_rejects_non_string_bypass_flags_with_shared_validation_
             "method":"preflight.allow",
             "params":{
                 "namespace":"team.alpha",
+                "original_query":"inspect authorization state",
+                "proposed_action":"preview policy gate",
                 "authorization_token":"allow-123",
                 "bypass_flags":["manual_override", 7]
             },

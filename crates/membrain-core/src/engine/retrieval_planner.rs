@@ -62,6 +62,60 @@ impl QueryPath {
     }
 }
 
+/// Graph-expansion serving policy for bounded retrieval.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
+pub enum GraphMode {
+    /// Leave graph expansion available for future heuristics without forcing traversal.
+    Auto,
+    /// Disable graph expansion for this request.
+    Off,
+    /// Explicitly allow bounded graph expansion from the authorized shortlist.
+    Expand,
+}
+
+impl GraphMode {
+    /// Returns the stable machine-readable name.
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Auto => "auto",
+            Self::Off => "off",
+            Self::Expand => "expand",
+        }
+    }
+
+    /// Returns whether the current planner should include bounded graph expansion.
+    pub const fn allows_expansion(self) -> bool {
+        matches!(self, Self::Expand)
+    }
+}
+
+/// Tier3 cold-tier serving policy for bounded retrieval.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
+pub enum ColdTierPolicy {
+    /// Allow ordinary bounded cold fallback when Tier2 underfills or degrades.
+    Auto,
+    /// Avoid Tier3 fallback for this request.
+    Avoid,
+    /// Explicitly allow Tier3 fallback while preserving pre-cut hydration rules.
+    Allow,
+}
+
+impl ColdTierPolicy {
+    /// Returns the stable machine-readable name.
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Auto => "auto",
+            Self::Avoid => "avoid",
+            Self::Allow => "allow",
+        }
+    }
+
+    /// Returns whether bounded Tier3 fallback may run for this request.
+    pub const fn allows_tier3_fallback(self) -> bool {
+        !matches!(self, Self::Avoid)
+    }
+}
+
 /// Query-by-example polarity for a seed memory.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum QueryExamplePolarity {
@@ -225,6 +279,8 @@ pub struct RetrievalRequest {
     pub namespace: NamespaceId,
     /// Query text for lexical matching.
     pub query_text: Option<String>,
+    /// Optional caller-supplied context text used only for bounded ranking hints.
+    pub context_text: Option<String>,
     /// Query-by-example positive cue.
     pub like_memory_id: Option<MemoryId>,
     /// Query-by-example negative cue.
@@ -239,20 +295,78 @@ pub struct RetrievalRequest {
     pub as_of_tick_range: Option<RangeInclusive<u64>>,
     /// Optional snapshot label anchoring historical retrieval.
     pub snapshot_name: Option<String>,
+    /// Optional era id constraining retrieval inside the bound namespace.
+    pub era_id: Option<String>,
     /// Memory type filter.
     pub memory_type_filter: Option<CanonicalMemoryType>,
     /// Optional entity-name filter for entity-heavy retrieval.
     pub entity_name_filter: Option<String>,
     /// Optional entity-type filter for entity-heavy retrieval.
     pub entity_type_filter: Option<String>,
+    /// Minimum retained ranking strength (0..1000) for post-ranking filtering.
+    pub min_strength: Option<u16>,
+    /// Minimum retained confidence (0..1000) for post-ranking filtering.
+    pub min_confidence: Option<u16>,
+    /// Whether near-decay results may remain visible to explain surfaces.
+    pub show_decaying: bool,
+    /// Whether mood-congruent ranking hints are allowed.
+    pub mood_congruent: bool,
+    /// Whether approved shared/public widening was requested.
+    pub include_public: bool,
+    /// Explain verbosity requested by the caller.
+    pub explain_level: ExplainLevel,
+    /// Effort hint requested by the caller.
+    pub effort: RetrievalEffort,
+    /// Optional token budget hint for packaging.
+    pub token_budget: Option<usize>,
+    /// Optional request-path time budget hint in milliseconds.
+    pub time_budget_ms: Option<u32>,
     /// Maximum final results to return.
     pub limit: usize,
     /// Candidate budget for bounded retrieval.
     pub candidate_budget: usize,
-    /// Whether to enable Tier3 fallback.
-    pub enable_tier3_fallback: bool,
-    /// Whether to enable graph/engram expansion.
-    pub enable_graph_expansion: bool,
+    /// Cold-tier serving policy.
+    pub cold_tier_policy: ColdTierPolicy,
+    /// Graph serving policy.
+    pub graph_mode: GraphMode,
+}
+
+/// Requested explain verbosity for bounded retrieval.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
+pub enum ExplainLevel {
+    None,
+    Summary,
+    Full,
+}
+
+impl ExplainLevel {
+    /// Returns the stable machine-readable name.
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::None => "none",
+            Self::Summary => "summary",
+            Self::Full => "full",
+        }
+    }
+}
+
+/// Requested effort tier for bounded retrieval.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
+pub enum RetrievalEffort {
+    Fast,
+    Normal,
+    High,
+}
+
+impl RetrievalEffort {
+    /// Returns the stable machine-readable name.
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Fast => "fast",
+            Self::Normal => "normal",
+            Self::High => "high",
+        }
+    }
 }
 
 impl RetrievalRequest {
@@ -261,6 +375,7 @@ impl RetrievalRequest {
         Self {
             namespace,
             query_text: Some(query_text.into()),
+            context_text: None,
             like_memory_id: None,
             unlike_memory_id: None,
             query_path: QueryPath::Hybrid,
@@ -268,13 +383,23 @@ impl RetrievalRequest {
             session_filter: None,
             as_of_tick_range: None,
             snapshot_name: None,
+            era_id: None,
             memory_type_filter: None,
             entity_name_filter: None,
             entity_type_filter: None,
+            min_strength: None,
+            min_confidence: None,
+            show_decaying: false,
+            mood_congruent: false,
+            include_public: false,
+            explain_level: ExplainLevel::Summary,
+            effort: RetrievalEffort::Normal,
+            token_budget: None,
+            time_budget_ms: None,
             limit,
             candidate_budget: Self::DEFAULT_CANDIDATE_BUDGET,
-            enable_tier3_fallback: true,
-            enable_graph_expansion: false,
+            cold_tier_policy: ColdTierPolicy::Auto,
+            graph_mode: GraphMode::Auto,
         }
     }
 
@@ -283,6 +408,7 @@ impl RetrievalRequest {
         Self {
             namespace,
             query_text: None,
+            context_text: None,
             like_memory_id: None,
             unlike_memory_id: None,
             query_path: QueryPath::ExactId,
@@ -290,13 +416,23 @@ impl RetrievalRequest {
             session_filter: None,
             as_of_tick_range: None,
             snapshot_name: None,
+            era_id: None,
             memory_type_filter: None,
             entity_name_filter: None,
             entity_type_filter: None,
+            min_strength: None,
+            min_confidence: None,
+            show_decaying: false,
+            mood_congruent: false,
+            include_public: false,
+            explain_level: ExplainLevel::Summary,
+            effort: RetrievalEffort::Normal,
+            token_budget: None,
+            time_budget_ms: None,
             limit: 1,
             candidate_budget: 1,
-            enable_tier3_fallback: false,
-            enable_graph_expansion: false,
+            cold_tier_policy: ColdTierPolicy::Avoid,
+            graph_mode: GraphMode::Off,
         }
     }
 
@@ -309,6 +445,7 @@ impl RetrievalRequest {
         Self {
             namespace,
             query_text: None,
+            context_text: None,
             like_memory_id: Some(like_memory_id),
             unlike_memory_id: None,
             query_path: QueryPath::Hybrid,
@@ -316,13 +453,23 @@ impl RetrievalRequest {
             session_filter: None,
             as_of_tick_range: None,
             snapshot_name: None,
+            era_id: None,
             memory_type_filter: None,
             entity_name_filter: None,
             entity_type_filter: None,
+            min_strength: None,
+            min_confidence: None,
+            show_decaying: false,
+            mood_congruent: false,
+            include_public: false,
+            explain_level: ExplainLevel::Summary,
+            effort: RetrievalEffort::Normal,
+            token_budget: None,
+            time_budget_ms: None,
             limit,
             candidate_budget: Self::DEFAULT_CANDIDATE_BUDGET,
-            enable_tier3_fallback: true,
-            enable_graph_expansion: false,
+            cold_tier_policy: ColdTierPolicy::Auto,
+            graph_mode: GraphMode::Auto,
         }
     }
 
@@ -397,6 +544,12 @@ impl RetrievalRequest {
         })
     }
 
+    /// Adds bounded caller-supplied context text.
+    pub fn with_context_text(mut self, context_text: impl Into<String>) -> Self {
+        self.context_text = Some(context_text.into());
+        self
+    }
+
     /// Adds a session filter.
     pub fn with_session(mut self, session_id: SessionId) -> Self {
         self.session_filter = Some(session_id);
@@ -412,6 +565,12 @@ impl RetrievalRequest {
     /// Adds a named snapshot anchor for time-travel retrieval.
     pub fn with_snapshot_name(mut self, snapshot_name: impl Into<String>) -> Self {
         self.snapshot_name = Some(snapshot_name.into());
+        self
+    }
+
+    /// Adds an era filter scoped inside the already-bound namespace.
+    pub fn with_era_id(mut self, era_id: impl Into<String>) -> Self {
+        self.era_id = Some(era_id.into());
         self
     }
 
@@ -433,21 +592,95 @@ impl RetrievalRequest {
         self
     }
 
+    /// Sets the minimum retained ranking strength.
+    pub fn with_min_strength(mut self, min_strength: u16) -> Self {
+        self.min_strength = Some(min_strength);
+        self
+    }
+
+    /// Sets the minimum retained confidence.
+    pub fn with_min_confidence(mut self, min_confidence: u16) -> Self {
+        self.min_confidence = Some(min_confidence);
+        self
+    }
+
+    /// Allows near-decay candidates to remain visible.
+    pub fn with_show_decaying(mut self, show_decaying: bool) -> Self {
+        self.show_decaying = show_decaying;
+        self
+    }
+
+    /// Enables mood-congruent ranking hints.
+    pub fn with_mood_congruent(mut self, mood_congruent: bool) -> Self {
+        self.mood_congruent = mood_congruent;
+        self
+    }
+
+    /// Enables approved shared/public widening.
+    pub fn with_include_public(mut self, include_public: bool) -> Self {
+        self.include_public = include_public;
+        self
+    }
+
+    /// Sets explain verbosity for this bounded request.
+    pub fn with_explain_level(mut self, explain_level: ExplainLevel) -> Self {
+        self.explain_level = explain_level;
+        self
+    }
+
+    /// Sets effort tier for this bounded request.
+    pub fn with_effort(mut self, effort: RetrievalEffort) -> Self {
+        self.effort = effort;
+        self
+    }
+
+    /// Sets an optional token budget hint.
+    pub fn with_token_budget(mut self, token_budget: usize) -> Self {
+        self.token_budget = Some(token_budget);
+        self
+    }
+
+    /// Sets an optional request-path time budget hint.
+    pub fn with_time_budget_ms(mut self, time_budget_ms: u32) -> Self {
+        self.time_budget_ms = Some(time_budget_ms);
+        self
+    }
+
     /// Sets the candidate budget.
     pub fn with_budget(mut self, budget: usize) -> Self {
         self.candidate_budget = budget;
         self
     }
 
+    /// Sets the cold-tier serving policy.
+    pub fn with_cold_tier_policy(mut self, policy: ColdTierPolicy) -> Self {
+        self.cold_tier_policy = policy;
+        self
+    }
+
     /// Enables Tier3 fallback.
     pub fn with_tier3_fallback(mut self, enabled: bool) -> Self {
-        self.enable_tier3_fallback = enabled;
+        self.cold_tier_policy = if enabled {
+            ColdTierPolicy::Auto
+        } else {
+            ColdTierPolicy::Avoid
+        };
+        self
+    }
+
+    /// Sets the graph serving policy.
+    pub fn with_graph_mode(mut self, graph_mode: GraphMode) -> Self {
+        self.graph_mode = graph_mode;
         self
     }
 
     /// Enables graph/engram expansion.
     pub fn with_graph_expansion(mut self, enabled: bool) -> Self {
-        self.enable_graph_expansion = enabled;
+        self.graph_mode = if enabled {
+            GraphMode::Expand
+        } else {
+            GraphMode::Off
+        };
         self
     }
 
@@ -468,19 +701,36 @@ impl RetrievalRequest {
             || self.unlike_memory_id.is_some()
     }
 
+    /// Returns whether bounded Tier3 fallback may run for this request.
+    pub const fn allows_tier3_fallback(&self) -> bool {
+        self.cold_tier_policy.allows_tier3_fallback()
+    }
+
+    /// Returns whether bounded graph expansion may run for this request.
+    pub const fn allows_graph_expansion(&self) -> bool {
+        self.graph_mode.allows_expansion()
+    }
+
     /// Builds the bounded temporal prefilter query when this request uses the temporal lane.
     pub fn temporal_prefilter_query(&self) -> Option<TemporalQuery> {
-        (self.query_path == QueryPath::Temporal).then(|| {
-            let mut query = TemporalQuery::new(self.namespace.clone(), self.limit)
-                .with_budget(self.candidate_budget);
-            if let Some(session_id) = self.session_filter {
-                query = query.with_session(session_id);
-            }
-            if let Some(range) = &self.as_of_tick_range {
-                query = query.with_tick_range(*range.start(), *range.end());
-            }
-            query
-        })
+        ((self.query_path == QueryPath::Temporal)
+            || self.era_id.is_some()
+            || self.as_of_tick_range.is_some()
+            || self.session_filter.is_some())
+            .then(|| {
+                let mut query = TemporalQuery::new(self.namespace.clone(), self.limit)
+                    .with_budget(self.candidate_budget);
+                if let Some(session_id) = self.session_filter {
+                    query = query.with_session(session_id);
+                }
+                if let Some(range) = &self.as_of_tick_range {
+                    query = query.with_tick_range(*range.start(), *range.end());
+                }
+                if let Some(era_id) = &self.era_id {
+                    query = query.with_era_id(era_id.clone());
+                }
+                query
+            })
     }
 
     /// Builds the bounded entity prefilter query when this request uses the entity-heavy lane.
@@ -683,7 +933,7 @@ impl EscalationDecision {
         request: &RetrievalRequest,
     ) -> Self {
         // If request explicitly disables Tier3 fallback, respect that
-        if !request.enable_tier3_fallback {
+        if !request.allows_tier3_fallback() {
             return Self::no_escalation(tier2_results.len(), tier2_confidence);
         }
 
@@ -814,6 +1064,32 @@ pub struct RetrievalPlanTrace {
     pub requested_limit: usize,
     /// Candidate budget.
     pub candidate_budget: usize,
+    /// Optional caller-supplied context text.
+    pub context_text: Option<String>,
+    /// Optional as-of tick upper bound anchored from the request.
+    pub as_of_tick: Option<u64>,
+    /// Optional era filter anchored from the request.
+    pub era_id: Option<String>,
+    /// Optional minimum retained confidence.
+    pub min_confidence: Option<u16>,
+    /// Optional minimum retained strength.
+    pub min_strength: Option<u16>,
+    /// Whether near-decay candidates were explicitly requested.
+    pub show_decaying: bool,
+    /// Whether approved shared/public widening was requested.
+    pub include_public: bool,
+    /// Requested graph serving policy.
+    pub graph_mode: GraphMode,
+    /// Requested cold-tier serving policy.
+    pub cold_tier_policy: ColdTierPolicy,
+    /// Requested explain verbosity.
+    pub explain_level: ExplainLevel,
+    /// Requested effort tier.
+    pub effort: RetrievalEffort,
+    /// Optional token budget hint.
+    pub token_budget: Option<usize>,
+    /// Optional request-path time budget hint.
+    pub time_budget_ms: Option<u32>,
     /// Optional lexical prefilter query prepared from request hints.
     pub lexical_query: Option<Fts5Query>,
     /// Optional temporal prefilter query prepared from request hints.
@@ -854,6 +1130,19 @@ impl RetrievalPlanTrace {
             namespace: request.namespace.clone(),
             requested_limit: request.limit,
             candidate_budget: request.candidate_budget,
+            context_text: request.context_text.clone(),
+            as_of_tick: request.as_of_tick_range.as_ref().map(|range| *range.end()),
+            era_id: request.era_id.clone(),
+            min_confidence: request.min_confidence,
+            min_strength: request.min_strength,
+            show_decaying: request.show_decaying,
+            include_public: request.include_public,
+            graph_mode: request.graph_mode,
+            cold_tier_policy: request.cold_tier_policy,
+            explain_level: request.explain_level,
+            effort: request.effort,
+            token_budget: request.token_budget,
+            time_budget_ms: request.time_budget_ms,
             lexical_query: request.lexical_prefilter_query(),
             temporal_query: request.temporal_prefilter_query(),
             snapshot_name: request.snapshot_name.clone(),
@@ -924,6 +1213,48 @@ impl RetrievalPlanTrace {
             lines.push(format!("  {}", stage.summary()));
         }
 
+        if let Some(context_text) = &self.context_text {
+            lines.push(format!("  context_text: {context_text:?}"));
+        }
+        if let Some(as_of_tick) = self.as_of_tick {
+            lines.push(format!("  as_of_tick: {as_of_tick}"));
+        }
+        if let Some(era_id) = &self.era_id {
+            lines.push(format!("  era_id: {era_id:?}"));
+        }
+        if let Some(min_confidence) = self.min_confidence {
+            lines.push(format!("  min_confidence: {min_confidence}"));
+        }
+        if let Some(min_strength) = self.min_strength {
+            lines.push(format!("  min_strength: {min_strength}"));
+        }
+        if self.show_decaying {
+            lines.push("  show_decaying: true".to_string());
+        }
+        if self.include_public {
+            lines.push("  include_public: true".to_string());
+        }
+        if self.graph_mode != GraphMode::Auto {
+            lines.push(format!("  graph_mode: {}", self.graph_mode.as_str()));
+        }
+        if self.cold_tier_policy != ColdTierPolicy::Auto {
+            lines.push(format!(
+                "  cold_tier_policy: {}",
+                self.cold_tier_policy.as_str()
+            ));
+        }
+        if self.explain_level != ExplainLevel::Summary {
+            lines.push(format!("  explain_level: {}", self.explain_level.as_str()));
+        }
+        if self.effort != RetrievalEffort::Normal {
+            lines.push(format!("  effort: {}", self.effort.as_str()));
+        }
+        if let Some(token_budget) = self.token_budget {
+            lines.push(format!("  token_budget: {token_budget}"));
+        }
+        if let Some(time_budget_ms) = self.time_budget_ms {
+            lines.push(format!("  time_budget_ms: {time_budget_ms}"));
+        }
         if let Some(query) = &self.lexical_query {
             lines.push(format!(
                 "  lexical_query: terms={:?}, session={:?}, memory_type={:?}, budget={}",
@@ -932,8 +1263,12 @@ impl RetrievalPlanTrace {
         }
         if let Some(query) = &self.temporal_query {
             lines.push(format!(
-                "  temporal_query: session={:?}, tick_range={:?}, epoch={:?}, budget={}",
-                query.session_filter, query.tick_range, query.epoch_filter, query.candidate_budget
+                "  temporal_query: session={:?}, tick_range={:?}, era_id={:?}, epoch={:?}, budget={}",
+                query.session_filter,
+                query.tick_range,
+                query.era_id,
+                query.epoch_filter,
+                query.candidate_budget
             ));
         }
         if let Some(snapshot_name) = &self.snapshot_name {
@@ -1028,13 +1363,13 @@ impl RetrievalPlan {
         stage_budgets.push(request.limit.min(request.candidate_budget).min(20)); // Final bounded rerank slice
 
         // Stage 4: Tier3 fallback (conditional)
-        if request.enable_tier3_fallback {
+        if request.allows_tier3_fallback() {
             stages.push(PlannerStage::Tier3ColdSearch);
             stage_budgets.push(escalation_config.tier3_candidate_limit);
         }
 
         // Stage 5: Graph expansion (conditional)
-        if request.enable_graph_expansion {
+        if request.allows_graph_expansion() {
             stages.push(PlannerStage::GraphExpansion);
             stage_budgets.push(50); // Bounded expansion
         }
@@ -1138,7 +1473,11 @@ mod tests {
         assert!(request.query_path.requires_lexical_prefilter());
         assert!(request.query_path.requires_semantic_search());
         assert_eq!(request.limit, 10);
-        assert!(request.enable_tier3_fallback);
+        assert!(request.allows_tier3_fallback());
+        assert_eq!(request.cold_tier_policy, ColdTierPolicy::Auto);
+        assert_eq!(request.graph_mode, GraphMode::Auto);
+        assert_eq!(request.explain_level, ExplainLevel::Summary);
+        assert_eq!(request.effort, RetrievalEffort::Normal);
         assert_eq!(request.query_text.as_deref(), Some("hello world"));
         assert!(request.like_memory_id.is_none());
         assert!(request.unlike_memory_id.is_none());
@@ -1251,7 +1590,10 @@ mod tests {
         assert!(!request.query_path.requires_lexical_prefilter());
         assert!(!request.query_path.requires_semantic_search());
         assert_eq!(request.limit, 1);
-        assert!(!request.enable_tier3_fallback);
+        assert!(!request.allows_tier3_fallback());
+        assert!(!request.allows_graph_expansion());
+        assert_eq!(request.cold_tier_policy, ColdTierPolicy::Avoid);
+        assert_eq!(request.graph_mode, GraphMode::Off);
     }
 
     #[test]
@@ -1261,6 +1603,7 @@ mod tests {
             .with_session(SessionId(33))
             .with_as_of_tick_range(40, 75)
             .with_snapshot_name("pre_migration")
+            .with_era_id("era-deploy-0042")
             .with_budget(77);
         let request = RetrievalRequest {
             query_path: QueryPath::Temporal,
@@ -1272,6 +1615,7 @@ mod tests {
         assert_eq!(query.namespace, ns);
         assert_eq!(query.session_filter, Some(SessionId(33)));
         assert_eq!(query.tick_range, Some((40, 75)));
+        assert_eq!(query.era_id.as_deref(), Some("era-deploy-0042"));
         assert_eq!(query.limit, 8);
         assert_eq!(query.candidate_budget, 77);
         assert_eq!(request.snapshot_name.as_deref(), Some("pre_migration"));
@@ -1327,6 +1671,7 @@ mod tests {
                 .with_session(SessionId(33))
                 .with_as_of_tick_range(40, 75)
                 .with_snapshot_name("incident_baseline")
+                .with_era_id("era-incident-baseline")
         };
         let entity = RetrievalRequest {
             query_path: QueryPath::EntityHeavy,
@@ -1340,6 +1685,10 @@ mod tests {
 
         assert!(temporal_trace.lexical_query.is_none());
         assert!(temporal_trace.temporal_query.is_some());
+        assert_eq!(
+            temporal_trace.temporal_query.as_ref().and_then(|query| query.era_id.as_deref()),
+            Some("era-incident-baseline")
+        );
         assert_eq!(
             temporal_trace.snapshot_name.as_deref(),
             Some("incident_baseline")
@@ -1591,9 +1940,21 @@ mod tests {
         let request = RetrievalRequest {
             query_path: QueryPath::Temporal,
             ..RetrievalRequest::hybrid(ns, "test", 10)
+                .with_context_text("incident response")
                 .with_session(SessionId(5))
                 .with_as_of_tick_range(12, 34)
                 .with_snapshot_name("pre_patch")
+                .with_era_id("era-pre-patch")
+                .with_min_confidence(700)
+                .with_min_strength(450)
+                .with_show_decaying(true)
+                .with_include_public(true)
+                .with_graph_mode(GraphMode::Expand)
+                .with_cold_tier_policy(ColdTierPolicy::Allow)
+                .with_explain_level(ExplainLevel::Full)
+                .with_effort(RetrievalEffort::High)
+                .with_token_budget(256)
+                .with_time_budget_ms(1200)
         };
         let mut trace = RetrievalPlanTrace::new(&request);
 
@@ -1620,6 +1981,19 @@ mod tests {
 
         let summary = trace.summary();
         assert!(summary.contains("temporal"));
+        assert!(summary.contains("context_text: \"incident response\""));
+        assert!(summary.contains("as_of_tick: 34"));
+        assert!(summary.contains("era_id: \"era-pre-patch\""));
+        assert!(summary.contains("min_confidence: 700"));
+        assert!(summary.contains("min_strength: 450"));
+        assert!(summary.contains("show_decaying: true"));
+        assert!(summary.contains("include_public: true"));
+        assert!(summary.contains("graph_mode: expand"));
+        assert!(summary.contains("cold_tier_policy: allow"));
+        assert!(summary.contains("explain_level: full"));
+        assert!(summary.contains("effort: high"));
+        assert!(summary.contains("token_budget: 256"));
+        assert!(summary.contains("time_budget_ms: 1200"));
         assert!(summary.contains("lexical_prefilter"));
         assert!(summary
             .contains("temporal_query: session=Some(SessionId(5)), tick_range=Some((12, 34))"));
@@ -1648,6 +2022,66 @@ mod tests {
 
         let plan = planner.plan(request);
         assert!(plan.stage_count() >= 3); // At least prefilter, rescore, packaging
+    }
+
+    #[test]
+    fn builder_methods_preserve_canonical_request_controls() {
+        let ns = test_namespace();
+        let request = RetrievalRequest::hybrid(ns, "investigate drift", 6)
+            .with_context_text("triage incident")
+            .with_era_id("era-drift-0042")
+            .with_min_confidence(620)
+            .with_min_strength(410)
+            .with_show_decaying(true)
+            .with_mood_congruent(true)
+            .with_include_public(true)
+            .with_explain_level(ExplainLevel::Full)
+            .with_effort(RetrievalEffort::High)
+            .with_token_budget(384)
+            .with_time_budget_ms(1800)
+            .with_cold_tier_policy(ColdTierPolicy::Allow)
+            .with_graph_mode(GraphMode::Expand);
+
+        assert_eq!(request.context_text.as_deref(), Some("triage incident"));
+        assert_eq!(request.era_id.as_deref(), Some("era-drift-0042"));
+        assert_eq!(request.min_confidence, Some(620));
+        assert_eq!(request.min_strength, Some(410));
+        assert!(request.show_decaying);
+        assert!(request.mood_congruent);
+        assert!(request.include_public);
+        assert_eq!(request.explain_level, ExplainLevel::Full);
+        assert_eq!(request.effort, RetrievalEffort::High);
+        assert_eq!(request.token_budget, Some(384));
+        assert_eq!(request.time_budget_ms, Some(1800));
+        assert_eq!(request.cold_tier_policy, ColdTierPolicy::Allow);
+        assert_eq!(request.graph_mode, GraphMode::Expand);
+        assert!(request.allows_tier3_fallback());
+        assert!(request.allows_graph_expansion());
+    }
+
+    #[test]
+    fn graph_and_cold_policy_enums_expose_stable_labels() {
+        assert_eq!(GraphMode::Auto.as_str(), "auto");
+        assert_eq!(GraphMode::Off.as_str(), "off");
+        assert_eq!(GraphMode::Expand.as_str(), "expand");
+        assert!(!GraphMode::Auto.allows_expansion());
+        assert!(!GraphMode::Off.allows_expansion());
+        assert!(GraphMode::Expand.allows_expansion());
+
+        assert_eq!(ColdTierPolicy::Auto.as_str(), "auto");
+        assert_eq!(ColdTierPolicy::Avoid.as_str(), "avoid");
+        assert_eq!(ColdTierPolicy::Allow.as_str(), "allow");
+        assert!(ColdTierPolicy::Auto.allows_tier3_fallback());
+        assert!(!ColdTierPolicy::Avoid.allows_tier3_fallback());
+        assert!(ColdTierPolicy::Allow.allows_tier3_fallback());
+
+        assert_eq!(ExplainLevel::None.as_str(), "none");
+        assert_eq!(ExplainLevel::Summary.as_str(), "summary");
+        assert_eq!(ExplainLevel::Full.as_str(), "full");
+
+        assert_eq!(RetrievalEffort::Fast.as_str(), "fast");
+        assert_eq!(RetrievalEffort::Normal.as_str(), "normal");
+        assert_eq!(RetrievalEffort::High.as_str(), "high");
     }
 
     #[test]

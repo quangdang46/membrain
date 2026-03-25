@@ -392,6 +392,7 @@ fn confidence_filter_emits_explain_reasons_for_suppressed_candidates() {
         AnsweredFrom::Tier2Indexed,
         &membrain_core::engine::confidence::ConfidenceInputs {
             corroboration_count: 8,
+            reconsolidation_count: 0,
             ticks_since_last_access: 10,
             age_ticks: 10,
             resolution_state: membrain_core::engine::contradiction::ResolutionState::None,
@@ -515,7 +516,10 @@ fn confidence_filter_empty_result_set_degrades_outcome_from_accepted() {
     );
 
     assert_eq!(result_set.count(), 0);
-    assert_eq!(result_set.outcome_class, membrain_core::observability::OutcomeClass::Preview);
+    assert_eq!(
+        result_set.outcome_class,
+        membrain_core::observability::OutcomeClass::Preview
+    );
     assert_eq!(
         result_set.policy_summary.outcome_class,
         membrain_core::observability::OutcomeClass::Preview
