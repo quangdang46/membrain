@@ -74,6 +74,7 @@ use membrain_core::observability::{
 use membrain_core::policy::{
     PolicyModule, SharingAccessDecision, SharingAccessOutcome, SharingVisibility,
 };
+use membrain_core::persistence::{load_cli_records, open_hot_db};
 use membrain_core::store::audit::{AuditLogEntry, AuditLogFilter};
 use membrain_core::store::cache::{
     CacheEvent, CacheFamily, CacheGenerationAnchors, CacheKey, CacheLookupResult, CacheManager,
@@ -268,6 +269,8 @@ struct RuntimeAuditState {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct DaemonRuntimeConfig {
     pub socket_path: PathBuf,
+    pub hot_db_path: Option<PathBuf>,
+    pub cold_db_path: Option<PathBuf>,
     pub request_concurrency: usize,
     pub max_queue_depth: usize,
     pub maintenance_interval: Duration,
@@ -279,12 +282,20 @@ impl DaemonRuntimeConfig {
     pub fn new<P: AsRef<Path>>(socket_path: P) -> Self {
         Self {
             socket_path: socket_path.as_ref().to_path_buf(),
+            hot_db_path: None,
+            cold_db_path: None,
             request_concurrency: 8,
             max_queue_depth: 32,
             maintenance_interval: Duration::from_secs(60),
             maintenance_poll_budget: 4,
             maintenance_step_delay: Duration::from_millis(25),
         }
+    }
+
+    pub fn with_db_paths<P1: AsRef<Path>, P2: AsRef<Path>>(mut self, hot_db: P1, cold_db: P2) -> Self {
+        self.hot_db_path = Some(hot_db.as_ref().to_path_buf());
+        self.cold_db_path = Some(cold_db.as_ref().to_path_buf());
+        self
     }
 }
 
@@ -316,7 +327,7 @@ struct RuntimeState {
 
 impl RuntimeState {
     fn new(config: &DaemonRuntimeConfig) -> Self {
-        Self {
+        let state = Self {
             posture: Mutex::new(RuntimePosture::Full),
             degraded_reasons: Mutex::new(Vec::new()),
             active_requests: AtomicUsize::new(0),
@@ -338,7 +349,32 @@ impl RuntimeState {
                 RuntimeConfig::default().cache_per_family_capacity,
                 RuntimeConfig::default().prefetch_queue_capacity,
             )),
+        };
+
+        if let Some(hot_db_path) = &config.hot_db_path {
+            if let Ok(conn) = open_hot_db(hot_db_path) {
+                if let Ok(records) = load_cli_records(&conn) {
+                    for persisted in records {
+                        let namespace = match NamespaceId::new(&persisted.namespace) {
+                            Ok(ns) => ns,
+                            Err(_) => continue,
+                        };
+                        let common = crate::rpc::RuntimeCommonFields::default();
+                        let record = state.encode_memory(
+                            namespace,
+                            MemoryId(persisted.memory_id),
+                            &persisted.raw_text,
+                            None,
+                            &common,
+                            SharingVisibility::Private,
+                        );
+                        state.store_encoded_memory(record);
+                    }
+                }
+            }
         }
+
+        state
     }
 
     async fn status(&self) -> RuntimeStatus {

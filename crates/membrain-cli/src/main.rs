@@ -7231,7 +7231,9 @@ async fn main() -> anyhow::Result<()> {
         Commands::Mcp => {
             let default_paths = resolve_local_paths(cli.db_path.as_deref())?;
             ensure_local_root(&default_paths)?;
-            let runtime = DaemonRuntime::with_config(DaemonRuntimeConfig::new(&default_paths.socket_path));
+            let config = DaemonRuntimeConfig::new(&default_paths.socket_path)
+                .with_db_paths(&default_paths.hot_db_path, &default_paths.cold_db_path);
+            let runtime = DaemonRuntime::with_config(config);
             runtime.run_stdio_server().await?;
         }
     }
