@@ -69,7 +69,9 @@ use membrain_daemon::preflight::{
     to_preflight_outcome as to_shared_preflight_outcome, EvaluatedPreflight,
     PreflightExplainResponse, PreflightOutcome,
 };
-use membrain_daemon::rpc::{RuntimeMetrics, RuntimePosture, RuntimeStatus};
+use membrain_daemon::rpc::{
+    RuntimeAuthorityMode, RuntimeMetrics, RuntimePosture, RuntimeStatus,
+};
 use serde::Serialize;
 use std::collections::{BTreeMap, HashSet};
 use std::path::PathBuf;
@@ -4162,6 +4164,13 @@ fn print_audit_rows(export: &AuditExport, json: bool) -> anyhow::Result<()> {
 fn sample_runtime_status() -> RuntimeStatus {
     RuntimeStatus {
         posture: RuntimePosture::Full,
+        authority_mode: RuntimeAuthorityMode::StdioFacade,
+        authoritative_runtime: false,
+        maintenance_active: false,
+        warm_runtime_guarantees: vec![
+            "single_process_request_state".to_string(),
+            "stdio_transport".to_string(),
+        ],
         degraded_reasons: Vec::new(),
         metrics: RuntimeMetrics {
             queue_depth: 0,

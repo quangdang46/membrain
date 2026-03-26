@@ -129,6 +129,22 @@ impl RuntimePosture {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum RuntimeAuthorityMode {
+    UnixSocketDaemon,
+    StdioFacade,
+}
+
+impl RuntimeAuthorityMode {
+    pub const fn as_str(&self) -> &'static str {
+        match self {
+            Self::UnixSocketDaemon => "unix_socket_daemon",
+            Self::StdioFacade => "stdio_facade",
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct RuntimeMetrics {
     pub queue_depth: usize,
     pub active_requests: usize,
@@ -140,6 +156,10 @@ pub struct RuntimeMetrics {
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct RuntimeStatus {
     pub posture: RuntimePosture,
+    pub authority_mode: RuntimeAuthorityMode,
+    pub authoritative_runtime: bool,
+    pub maintenance_active: bool,
+    pub warm_runtime_guarantees: Vec<String>,
     pub degraded_reasons: Vec<String>,
     pub metrics: RuntimeMetrics,
 }

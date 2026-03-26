@@ -27,10 +27,11 @@ use crate::preflight::{
     PreflightOutcome,
 };
 use crate::rpc::{
-    busy_payload, cancelled_payload, JsonRpcRequest, JsonRpcResponse, RuntimeAvailability,
-    RuntimeDoctorCheck, RuntimeDoctorIndex, RuntimeDoctorReport, RuntimeDoctorRunbookHint,
-    RuntimeDoctorSummary, RuntimeMaintenanceAccepted, RuntimeMethodRequest, RuntimeMetrics,
-    RuntimePosture, RuntimeRemediation, RuntimeRequest, RuntimeStatus,
+    busy_payload, cancelled_payload, JsonRpcRequest, JsonRpcResponse, RuntimeAuthorityMode,
+    RuntimeAvailability, RuntimeDoctorCheck, RuntimeDoctorIndex, RuntimeDoctorReport,
+    RuntimeDoctorRunbookHint, RuntimeDoctorSummary, RuntimeMaintenanceAccepted,
+    RuntimeMethodRequest, RuntimeMetrics, RuntimePosture, RuntimeRemediation, RuntimeRequest,
+    RuntimeStatus,
 };
 use anyhow::Context;
 use tokio::io::{self, AsyncBufReadExt, AsyncWriteExt};
@@ -308,6 +309,7 @@ pub struct DaemonRuntime {
 #[derive(Debug)]
 struct RuntimeState {
     posture: Mutex<RuntimePosture>,
+    authority_mode: Mutex<RuntimeAuthorityMode>,
     degraded_reasons: Mutex<Vec<String>>,
     active_requests: AtomicUsize,
     queued_requests: AtomicUsize,
@@ -329,6 +331,7 @@ impl RuntimeState {
     fn new(config: &DaemonRuntimeConfig) -> Self {
         let state = Self {
             posture: Mutex::new(RuntimePosture::Full),
+            authority_mode: Mutex::new(RuntimeAuthorityMode::StdioFacade),
             degraded_reasons: Mutex::new(Vec::new()),
             active_requests: AtomicUsize::new(0),
             queued_requests: AtomicUsize::new(0),
@@ -378,8 +381,26 @@ impl RuntimeState {
     }
 
     async fn status(&self) -> RuntimeStatus {
+        let authority_mode = self.authority_mode.lock().await.clone();
+        let maintenance_active = matches!(authority_mode, RuntimeAuthorityMode::UnixSocketDaemon);
+        let warm_runtime_guarantees = match authority_mode {
+            RuntimeAuthorityMode::UnixSocketDaemon => vec![
+                "shared_process_state".to_string(),
+                "background_maintenance_loop".to_string(),
+                "unix_socket_authority".to_string(),
+            ],
+            RuntimeAuthorityMode::StdioFacade => vec![
+                "single_process_request_state".to_string(),
+                "stdio_transport".to_string(),
+            ],
+        };
+
         RuntimeStatus {
             posture: self.posture.lock().await.clone(),
+            authority_mode: authority_mode.clone(),
+            authoritative_runtime: matches!(authority_mode, RuntimeAuthorityMode::UnixSocketDaemon),
+            maintenance_active,
+            warm_runtime_guarantees,
             degraded_reasons: self.degraded_reasons.lock().await.clone(),
             metrics: RuntimeMetrics {
                 queue_depth: self.queued_requests.load(Ordering::SeqCst),
@@ -397,6 +418,10 @@ impl RuntimeState {
         self.status().await
     }
 
+    async fn set_authority_mode(&self, authority_mode: RuntimeAuthorityMode) {
+        *self.authority_mode.lock().await = authority_mode;
+    }
+
     async fn doctor_report(&self) -> RuntimeDoctorReport {
         use membrain_core::api::{
             AvailabilityPosture, AvailabilityReason, AvailabilitySummary, ErrorKind,
@@ -411,6 +436,10 @@ impl RuntimeState {
 
         let status = self.status().await;
         let posture = status.posture.clone();
+        let authority_mode = status.authority_mode.clone();
+        let authoritative_runtime = status.authoritative_runtime;
+        let maintenance_active = status.maintenance_active;
+        let warm_runtime_guarantees = status.warm_runtime_guarantees.clone();
         let degraded_reasons = status.degraded_reasons.clone();
         let metrics = status.metrics.clone();
         let posture_status = match posture {
@@ -419,11 +448,14 @@ impl RuntimeState {
             RuntimePosture::ReadOnly | RuntimePosture::Offline => "fail",
         };
         let cache_usable = !matches!(posture, RuntimePosture::Offline);
-        let warnings = if matches!(posture, RuntimePosture::Full) {
+        let mut warnings = if matches!(posture, RuntimePosture::Full) {
             Vec::new()
         } else {
             vec!["operator_review_recommended"]
         };
+        if !authoritative_runtime {
+            warnings.push("stdio_mode_has_no_background_maintenance_loop");
+        }
 
         let store = membrain_core::BrainStore::new(RuntimeConfig::default());
         let repair_engine = store.repair_engine();
@@ -665,11 +697,28 @@ impl RuntimeState {
                     daemon_uptime_ticks: current_tick,
                     index_reports: index_reports.clone(),
                     availability: availability.clone(),
-                    feature_availability: vec![FeatureAvailabilityEntry {
-                        feature: "health".to_string(),
-                        posture: membrain_core::api::AvailabilityPosture::Full,
-                        note: Some("daemon_doctor_embeds_brain_health_report".to_string()),
-                    }],
+                    feature_availability: vec![
+                        FeatureAvailabilityEntry {
+                            feature: "health".to_string(),
+                            posture: membrain_core::api::AvailabilityPosture::Full,
+                            note: Some("daemon_doctor_embeds_brain_health_report".to_string()),
+                        },
+                        FeatureAvailabilityEntry {
+                            feature: "runtime_authority".to_string(),
+                            posture: if authoritative_runtime {
+                                membrain_core::api::AvailabilityPosture::Full
+                            } else {
+                                membrain_core::api::AvailabilityPosture::Degraded
+                            },
+                            note: Some(format!(
+                                "mode={} authoritative_runtime={} maintenance_active={} warm_runtime_guarantees={}",
+                                authority_mode.as_str(),
+                                authoritative_runtime,
+                                maintenance_active,
+                                warm_runtime_guarantees.join(",")
+                            )),
+                        },
+                    ],
                     previous_total_recalls: Some(total_recalls.saturating_sub(1)),
                     previous_total_encodes: Some(total_encodes.saturating_sub(1)),
                     previous_repair_queue_depth: Some(0),
@@ -945,6 +994,24 @@ impl RuntimeState {
                     )
                 }),
                 remediation: remediation.clone(),
+            },
+            RuntimeDoctorCheck {
+                name: "runtime_authority",
+                surface_kind: "runtime_mode",
+                status: if authoritative_runtime { "ok" } else { "warn" },
+                severity: if authoritative_runtime { "info" } else { "warning" },
+                affected_scope: authority_mode.as_str().to_string(),
+                degraded_impact: Some(format!(
+                    "authoritative_runtime={} maintenance_active={} warm_runtime_guarantees={}",
+                    authoritative_runtime,
+                    maintenance_active,
+                    warm_runtime_guarantees.join(",")
+                )),
+                remediation: (!authoritative_runtime).then(|| RuntimeRemediation {
+                    summary: "start the unix-socket daemon when you need authoritative warm-runtime guarantees"
+                        .to_string(),
+                    next_steps: vec!["run_daemon".to_string(), "check_health".to_string()],
+                }),
             },
             RuntimeDoctorCheck {
                 name: "lease_freshness",
@@ -1621,6 +1688,9 @@ impl DaemonRuntime {
     }
 
     pub async fn run_stdio_server(&self) -> anyhow::Result<()> {
+        self.state
+            .set_authority_mode(RuntimeAuthorityMode::StdioFacade)
+            .await;
         eprintln!("membrain mcp server listening on stdio");
         let stdin = io::stdin();
         let stdout = io::stdout();
@@ -1681,6 +1751,9 @@ impl DaemonRuntime {
     }
 
     pub async fn run_until_stopped(&self) -> anyhow::Result<()> {
+        self.state
+            .set_authority_mode(RuntimeAuthorityMode::UnixSocketDaemon)
+            .await;
         if let Some(parent) = self.config.socket_path.parent() {
             tokio::fs::create_dir_all(parent).await?;
         }
@@ -5861,7 +5934,7 @@ mod tests {
     use std::path::PathBuf;
     use std::sync::Arc;
     use std::time::{SystemTime, UNIX_EPOCH};
-    use tokio::io::BufReader;
+    use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
     use tokio::net::UnixStream;
     use tokio::time::{timeout, Duration};
 
@@ -5996,6 +6069,12 @@ mod tests {
         let status: RuntimeStatus =
             serde_json::from_value(status_response.get("result").cloned().unwrap()).unwrap();
         assert_eq!(status.posture.as_str(), "full");
+        assert_eq!(status.authority_mode.as_str(), "unix_socket_daemon");
+        assert!(status.authoritative_runtime);
+        assert!(status.maintenance_active);
+        assert!(status
+            .warm_runtime_guarantees
+            .contains(&"background_maintenance_loop".to_string()));
         assert_eq!(status.metrics.queue_depth, 0);
 
         let shutdown_response = send_request(
@@ -6048,6 +6127,17 @@ mod tests {
         assert_eq!(doctor_response["result"]["status"], json!("warn"));
         assert_eq!(doctor_response["result"]["action"], json!("doctor"));
         assert_eq!(doctor_response["result"]["posture"], json!("degraded"));
+        assert_eq!(doctor_response["result"]["health"]["feature_availability"][1]["feature"], json!("runtime_authority"));
+        assert!(doctor_response["result"]["health"]["feature_availability"][1]["note"]
+            .as_str()
+            .is_some_and(|note| note.contains("mode=unix_socket_daemon")));
+        assert!(doctor_response["result"]["checks"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|check| check["name"] == json!("runtime_authority")
+                && check["status"] == json!("ok")
+                && check["affected_scope"] == json!("unix_socket_daemon")));
         assert_eq!(
             doctor_response["result"]["degraded_reasons"],
             json!(["repair_in_flight"])
@@ -9367,6 +9457,18 @@ mod tests {
         assert_eq!(
             status_resource["result"]["payload"]["resource_kind"],
             json!("runtime_status")
+        );
+        assert_eq!(
+            status_resource["result"]["payload"]["payload"]["authority_mode"],
+            json!("unix_socket_daemon")
+        );
+        assert_eq!(
+            status_resource["result"]["payload"]["payload"]["authoritative_runtime"],
+            json!(true)
+        );
+        assert_eq!(
+            status_resource["result"]["payload"]["payload"]["maintenance_active"],
+            json!(true)
         );
         assert_eq!(status_resource["result"]["payload"]["bounded"], json!(true));
         assert_eq!(
