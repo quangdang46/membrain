@@ -670,6 +670,63 @@ impl RuntimeState {
             .expect("runtime cache lock should be available")
             .prefetch
             .queue_depth();
+        let runtime_memory_records = self
+            .memories
+            .lock()
+            .expect("runtime memory registry lock should be available")
+            .values()
+            .cloned()
+            .collect::<Vec<_>>();
+        let hot_memories = runtime_memory_records.len();
+        let hot_capacity = 100usize;
+        let cold_memories = 0usize;
+        let confidence_sum = runtime_memory_records
+            .iter()
+            .map(|record| f64::from(record.confidence_output.confidence) / 1000.0)
+            .sum::<f64>();
+        let avg_confidence = if hot_memories > 0 {
+            confidence_sum / hot_memories as f64
+        } else {
+            0.0
+        };
+        let strength_sum = runtime_memory_records
+            .iter()
+            .map(|record| {
+                f64::from(record.confidence_output.confidence.saturating_sub(80)) / 1000.0
+            })
+            .sum::<f64>();
+        let avg_strength = if hot_memories > 0 {
+            strength_sum / hot_memories as f64
+        } else {
+            0.0
+        };
+        let low_confidence_count = runtime_memory_records
+            .iter()
+            .filter(|record| record.confidence_output.confidence < 500)
+            .count();
+        let landmark_count = runtime_memory_records
+            .iter()
+            .filter(|record| record.layout.metadata.landmark.is_landmark)
+            .count();
+        let uncertain_count = runtime_memory_records
+            .iter()
+            .filter(|record| record.confidence_output.confidence < 700)
+            .count();
+        let top_engrams = runtime_memory_records
+            .iter()
+            .filter_map(|record| record.layout.metadata.landmark.landmark_label.clone())
+            .fold(std::collections::HashMap::<String, usize>::new(), |mut acc, label| {
+                *acc.entry(label).or_insert(0) += 1;
+                acc
+            })
+            .into_iter()
+            .collect::<Vec<_>>();
+        let total_engrams = landmark_count;
+        let avg_cluster_size = if landmark_count > 0 {
+            hot_memories as f64 / landmark_count as f64
+        } else {
+            0.0
+        };
         let health = {
             let cache = self
                 .cache
@@ -677,22 +734,22 @@ impl RuntimeState {
                 .expect("runtime cache lock should be available");
             membrain_core::health::BrainHealthReport::from_inputs(
                 BrainHealthInputs {
-                    hot_memories: 76,
-                    hot_capacity: 100,
-                    cold_memories: 12,
-                    avg_strength: 0.71,
-                    avg_confidence: 0.84,
-                    low_confidence_count: 3,
+                    hot_memories,
+                    hot_capacity,
+                    cold_memories,
+                    avg_strength: avg_strength as f32,
+                    avg_confidence: avg_confidence as f32,
+                    low_confidence_count,
                     decay_rate: 0.012,
-                    archive_count: 5,
-                    total_engrams: 14,
-                    avg_cluster_size: 2.5,
-                    top_engrams: vec![("ops".to_string(), 4)],
-                    landmark_count: 2,
-                    unresolved_conflicts: 1,
-                    uncertain_count: 3,
-                    dream_links_total: 9,
-                    last_dream_tick: Some(42),
+                    archive_count: 0,
+                    total_engrams,
+                    avg_cluster_size: avg_cluster_size as f32,
+                    top_engrams,
+                    landmark_count,
+                    unresolved_conflicts: 0,
+                    uncertain_count,
+                    dream_links_total: 0,
+                    last_dream_tick: None,
                     affect_history_rows,
                     latest_affect_snapshot,
                     latest_affect_tick,
@@ -728,10 +785,10 @@ impl RuntimeState {
                     previous_total_recalls: Some(total_recalls.saturating_sub(1)),
                     previous_total_encodes: Some(total_encodes.saturating_sub(1)),
                     previous_repair_queue_depth: Some(0),
-                    previous_hot_memories: Some(70),
-                    previous_low_confidence_count: Some(5),
-                    previous_unresolved_conflicts: Some(2),
-                    previous_uncertain_count: Some(4),
+                    previous_hot_memories: Some(hot_memories.saturating_sub(1)),
+                    previous_low_confidence_count: Some(low_confidence_count.saturating_sub(1)),
+                    previous_unresolved_conflicts: Some(0),
+                    previous_uncertain_count: Some(uncertain_count.saturating_sub(1)),
                     previous_cache_hit_count: Some(0),
                     previous_cache_miss_count: Some(0),
                     previous_cache_bypass_count: Some(0),
