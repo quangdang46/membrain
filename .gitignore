@@ -2,7 +2,6 @@
 .bv/
 target/
 .runtime/
-.claude/
 .logs/
 __pycache__/
 state.json

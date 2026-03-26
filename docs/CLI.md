@@ -91,6 +91,110 @@ At the CLI layer, destructive or high-blast-radius commands should follow these 
 
 ## Core Commands
 
+## Connection Modes
+
+### `membrain daemon`
+
+Run Membrain as a local Unix-socket daemon.
+
+Use this when you want a background local service process that multiple local tools can talk to over the socket.
+
+Current behavior:
+- binds a Unix socket
+- logs the bound socket path on startup
+- serves JSON-RPC 2.0 requests over that socket
+
+Typical usage:
+
+```bash
+membrain daemon
+membrain daemon --socket-path ~/.membrain/membrain.sock
+```
+
+Default socket path follows the local storage contract:
+
+```bash
+~/.membrain/membrain.sock
+```
+
+### `membrain mcp`
+
+Run Membrain as a stdio MCP-style server for easy client integration.
+
+Use this when you want an MCP client to launch Membrain directly as a subprocess without manually connecting to a Unix socket.
+
+For Claude Code, configure it in `mcpServers` like this:
+
+```json
+{
+  "mcpServers": {
+    "membrain": {
+      "command": "membrain",
+      "args": ["mcp"]
+    }
+  }
+}
+```
+
+A practical project-level `.claude/settings.json` example can combine Membrain MCP with hooks:
+
+```json
+{
+  "mcpServers": {
+    "membrain": {
+      "command": "membrain",
+      "args": ["mcp"]
+    }
+  },
+  "hooks": {
+    "SessionStart": [
+      {
+        "matcher": "startup|resume",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "bash -lc 'pgrep -f \"membrain-daemon\" >/dev/null || nohup membrain-daemon >/tmp/membrain-daemon.log 2>&1 &'"
+          }
+        ]
+      }
+    ],
+    "UserPromptSubmit": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "echo 'Membrain reminder: use memory tools for prior context, incidents, and reusable facts.'"
+          }
+        ]
+      }
+    ]
+  }
+}
+```
+
+Current behavior:
+- reads newline-delimited JSON-RPC requests from stdin
+- writes newline-delimited responses to stdout
+- logs a startup message to stderr
+- supports the same real installed operation families already exposed by the daemon path, including `encode`, `recall`, `inspect`, `health`, `doctor`, `observe`, `resources.list`, `resource.read`, and `streams.list`
+
+Typical usage:
+
+```bash
+membrain mcp
+```
+
+For a quick manual smoke test:
+
+```bash
+printf '%s\n' '{"jsonrpc":"2.0","id":"1","method":"resources.list","params":{}}' | membrain mcp
+```
+
+High-level guidance:
+- use `membrain daemon` for long-lived local service mode
+- use `membrain mcp` for easy subprocess-based MCP client integration
+
+
 ### `membrain remember [CONTENT] [OPTIONS]`
 
 Encode a new memory into the brain's hot store. Computes embedding, novelty, initial strength. Applies attention gating, emotional tagging, engram clustering.

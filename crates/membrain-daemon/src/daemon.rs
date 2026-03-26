@@ -235,7 +235,7 @@ use std::os::unix::fs::FileTypeExt;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex as StdMutex};
-use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+use tokio::io::BufReader;
 use tokio::net::{UnixListener, UnixStream};
 use tokio::sync::{Mutex, Notify, Semaphore};
 use tokio::task::JoinSet;
@@ -1585,6 +1585,7 @@ impl DaemonRuntime {
     }
 
     pub async fn run_stdio_server(&self) -> anyhow::Result<()> {
+        eprintln!("membrain mcp server listening on stdio");
         let stdin = io::stdin();
         let stdout = io::stdout();
         let mut reader = io::BufReader::new(stdin);
@@ -1642,6 +1643,10 @@ impl DaemonRuntime {
         self.remove_stale_socket().await?;
 
         let listener = UnixListener::bind(&self.config.socket_path)?;
+        eprintln!(
+            "membrain daemon listening on unix socket {}",
+            self.config.socket_path.display()
+        );
         let state = Arc::clone(&self.state);
         let config = self.config.clone();
         let accept_state = Arc::clone(&self.state);
@@ -5444,7 +5449,7 @@ mod tests {
     use std::path::PathBuf;
     use std::sync::Arc;
     use std::time::{SystemTime, UNIX_EPOCH};
-    use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+    use tokio::io::BufReader;
     use tokio::net::UnixStream;
     use tokio::time::{timeout, Duration};
 

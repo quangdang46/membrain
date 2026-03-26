@@ -564,7 +564,7 @@ enum GoalCommands {
 #[derive(Subcommand, Debug)]
 enum Commands {
     /// Encode (store) a new memory
-    #[command(name = "remember", visible_alias = "encode")]
+    #[command(name = "remember")]
     Encode {
         /// Content to store
         content: String,
@@ -667,7 +667,7 @@ enum Commands {
         output: SharedOutputFlags,
     },
     /// Explain the ranking and routing path for a recall query
-    #[command(name = "why", visible_alias = "explain")]
+    #[command(name = "why")]
     Explain {
         /// Query string or memory ID to explain
         query: String,
@@ -939,7 +939,7 @@ enum Commands {
     /// Pack a ready-to-inject context window from bounded recall results
     Budget {
         /// Hard token budget for the packed output
-        #[arg(long = "tokens")]
+        #[arg(long = "tokens", default_value_t = 512)]
         token_budget: usize,
         /// Optional query string used to build the bounded shortlist
         query: Option<String>,
@@ -1058,6 +1058,8 @@ enum Commands {
         #[arg(long, default_value_t = 32)]
         max_queue_depth: usize,
     },
+    /// Run Membrain as a stdio MCP server for easy client connection.
+    Mcp,
 }
 
 // ── Output types ─────────────────────────────────────────────────────────────
@@ -1785,8 +1787,7 @@ fn validate_recall_command(
     cold_tier: &str,
     context: Option<&str>,
 ) -> anyhow::Result<RecallCommandConfig> {
-    let namespace = namespace.ok_or_else(|| anyhow::anyhow!("missing namespace"))?;
-    let namespace = NamespaceId::new(namespace)?;
+    let namespace = NamespaceId::new(namespace.unwrap_or("default"))?;
 
     if top == 0 {
         anyhow::bail!("result budget must be greater than zero");
@@ -7226,6 +7227,12 @@ async fn main() -> anyhow::Result<()> {
             config.max_queue_depth = *max_queue_depth;
             let runtime = DaemonRuntime::with_config(config);
             runtime.run_until_stopped().await?;
+        }
+        Commands::Mcp => {
+            let default_paths = resolve_local_paths(cli.db_path.as_deref())?;
+            ensure_local_root(&default_paths)?;
+            let runtime = DaemonRuntime::with_config(DaemonRuntimeConfig::new(&default_paths.socket_path));
+            runtime.run_stdio_server().await?;
         }
     }
 

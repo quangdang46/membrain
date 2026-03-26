@@ -204,6 +204,117 @@ Minimum parity coverage for governance-sensitive work includes:
 
 Silent cross-surface divergence is a contract violation, not an acceptable transport difference.
 
+## Easy Connection
+
+The easiest current integration path is:
+
+```bash
+membrain mcp
+```
+
+This launches Membrain as a stdio MCP-style server so clients can spawn it directly instead of manually connecting to the Unix daemon socket.
+
+### Claude Code integration
+
+For Claude Code, configure Membrain in the `mcpServers` section like this:
+
+```json
+{
+  "mcpServers": {
+    "membrain": {
+      "command": "membrain",
+      "args": ["mcp"]
+    }
+  }
+}
+```
+
+If you want Claude Code to use a specific storage root instead of the default local state, pass `--db-path` too:
+
+```json
+{
+  "mcpServers": {
+    "membrain": {
+      "command": "membrain",
+      "args": ["mcp", "--db-path", "/path/to/state-root"]
+    }
+  }
+}
+```
+
+A practical project-level `.claude/settings.json` can also combine Membrain MCP with Claude Code hooks:
+
+```json
+{
+  "mcpServers": {
+    "membrain": {
+      "command": "membrain",
+      "args": ["mcp"]
+    }
+  },
+  "hooks": {
+    "SessionStart": [
+      {
+        "matcher": "startup|resume",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "bash -lc 'pgrep -f \"membrain-daemon\" >/dev/null || nohup membrain-daemon >/tmp/membrain-daemon.log 2>&1 &'"
+          },
+          {
+            "type": "command",
+            "command": "echo 'Membrain is available in this project. Prefer using Membrain MCP or CLI recall/inspect/why before guessing prior context. Local state lives under ~/.membrain by default.'"
+          }
+        ]
+      }
+    ],
+    "UserPromptSubmit": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "echo 'Membrain reminder: use memory tools for prior context, incidents, and reusable facts. Prefer `membrain recall`, `membrain inspect`, `membrain why`, or the Membrain MCP server when context may already exist.'"
+          }
+        ]
+      }
+    ]
+  }
+}
+```
+
+Manual smoke test before wiring a client:
+
+```bash
+python3 - <<'PY'
+import json, subprocess
+p = subprocess.Popen(['membrain', 'mcp'], stdin=subprocess.PIPE, stdout=subprocess.PIPE, text=True)
+p.stdin.write(json.dumps({"jsonrpc":"2.0","id":"1","method":"resources.list","params":{}}) + "\n")
+p.stdin.flush()
+print(p.stdout.readline().strip())
+p.stdin.write(json.dumps({"jsonrpc":"2.0","id":"2","method":"shutdown","params":{}}) + "\n")
+p.stdin.flush()
+print(p.stdout.readline().strip())
+PY
+```
+
+When you want a long-lived background service instead, use:
+
+```bash
+membrain daemon
+# or
+membrain-daemon
+```
+
+That path serves the same underlying operation families over a Unix domain socket, defaulting to:
+
+```bash
+~/.membrain/membrain.sock
+```
+
+Recommended usage split:
+- `membrain mcp` — easiest client/subprocess integration, including Claude Code
+- `membrain daemon` / `membrain-daemon` — background local service mode
+
 ## Daemon JSON-RPC Contract
 
 - The daemon transport is Unix socket plus JSON-RPC 2.0. Socket discovery, pid/socket lifecycle, and CLI fallback behavior stay owned by the daemon lifecycle contract, but once connected the daemon interface exposes the same underlying bounded operations as the CLI and MCP surfaces.

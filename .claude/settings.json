@@ -1,0 +1,261 @@
+{
+  "mcpServers": {
+    "membrain": {
+      "command": "membrain",
+      "args": ["mcp"]
+    }
+  },
+  "hooks": {
+    "SessionStart": [
+      {
+        "matcher": "startup|resume",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "bash -lc 'pgrep -f \"membrain-daemon\" >/dev/null || nohup membrain-daemon >/tmp/membrain-daemon.log 2>&1 &'"
+          },
+          {
+            "type": "command",
+            "command": "echo 'Membrain is available in this project. Prefer using Membrain MCP or CLI recall/inspect/why before guessing prior context. Local state lives under ~/.membrain by default.'"
+          }
+        ]
+      }
+    ],
+    "UserPromptSubmit": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "echo 'Membrain reminder: use memory tools for prior context, incidents, reusable facts, and earlier decisions. Prefer `membrain recall`, `membrain inspect`, `membrain why`, or the Membrain MCP server when context may already exist.'"
+          }
+        ]
+      }
+    ],
+    "PreToolUse": [
+      {
+        "matcher": "Read|Grep|Glob|WebFetch|WebSearch|Bash",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "echo 'Before expensive exploration or external lookup, consider whether relevant context may already be in Membrain.'"
+          }
+        ]
+      }
+    ],
+    "PostToolUse": [
+      {
+        "matcher": "Read|Grep|Glob|Edit|Write|Bash",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "echo 'If this step surfaced a durable fact, decision, incident, or reusable context, consider storing it in Membrain rather than leaving it only in transient conversation state.'"
+          }
+        ]
+      }
+    ],
+    "PostToolUseFailure": [
+      {
+        "matcher": "Bash|Read|Edit|Write|mcp__.*",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "echo 'If a failure reveals a reusable incident pattern or environment constraint, consider recording it in Membrain after diagnosis.'"
+          }
+        ]
+      }
+    ],
+    "Stop": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "echo 'Before stopping, consider whether any important findings from this turn should be persisted into Membrain.'"
+          }
+        ]
+      }
+    ],
+    "SubagentStart": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "echo 'Membrain is available to support subagent context lookup and explanation.'"
+          }
+        ]
+      }
+    ],
+    "SubagentStop": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "echo 'If the subagent produced durable context or conclusions, consider folding them into Membrain.'"
+          }
+        ]
+      }
+    ],
+    "TaskCompleted": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "echo 'When a task completes, persist important reusable findings or decisions into Membrain if they will matter later.'"
+          }
+        ]
+      }
+    ],
+    "TeammateIdle": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "echo 'If a teammate is going idle after meaningful findings, consider whether those findings belong in Membrain.'"
+          }
+        ]
+      }
+    ],
+    "InstructionsLoaded": [
+      {
+        "matcher": "session_start|nested_traversal|path_glob_match|include|compact",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "echo 'Instructions loaded. Keep Membrain available as the durable place for important repo context and reusable facts.'"
+          }
+        ]
+      }
+    ],
+    "ConfigChange": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "echo 'Configuration changed. If the new config affects how the project is operated or debugged, consider preserving that fact in Membrain.'"
+          }
+        ]
+      }
+    ],
+    "CwdChanged": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "echo 'Working directory changed. Re-evaluate whether Membrain should be consulted for this scope.'"
+          }
+        ]
+      }
+    ],
+    "FileChanged": [
+      {
+        "matcher": "CLAUDE.md|AGENTS.md|README.md|settings.json|settings.local.json",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "echo 'Important control/documentation file changed. Consider whether the change introduces durable context worth storing in Membrain.'"
+          }
+        ]
+      }
+    ],
+    "PreCompact": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "echo 'Before compaction, consider whether any important context should be persisted in Membrain.'"
+          }
+        ]
+      }
+    ],
+    "PostCompact": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "echo 'Context was compacted. Membrain remains the durable place to preserve important facts across compression.'"
+          }
+        ]
+      }
+    ],
+    "SessionEnd": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "echo 'Session ending. If key takeaways were not persisted, consider Membrain for durable retention next session.'"
+          }
+        ]
+      }
+    ],
+    "Notification": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "echo 'Claude Code notification fired. Keep Membrain in mind for durable project memory, not just transient prompts.'"
+          }
+        ]
+      }
+    ],
+    "PermissionRequest": [
+      {
+        "matcher": "Bash|Write|Edit|mcp__.*",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "echo 'If the action is important enough to require permission, it may also deserve durable context in Membrain once completed.'"
+          }
+        ]
+      }
+    ],
+    "StopFailure": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "echo 'The turn ended in failure. If the failure reveals a reusable environment issue, store it in Membrain after recovery.'"
+          }
+        ]
+      }
+    ],
+    "Elicitation": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "echo 'An MCP server requested user input. If the answer creates durable project context, consider storing it in Membrain later.'"
+          }
+        ]
+      }
+    ],
+    "ElicitationResult": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "echo 'User input was collected for an MCP flow. If it creates lasting context, consider persisting it in Membrain.'"
+          }
+        ]
+      }
+    ],
+    "WorktreeCreate": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "echo 'A worktree is being created. Treat Membrain as the durable store for reusable context that should survive across worktree boundaries.'"
+          }
+        ]
+      }
+    ],
+    "WorktreeRemove": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "echo 'A worktree is being removed. Preserve any important findings in Membrain if they should outlive the worktree.'"
+          }
+        ]
+      }
+    ]
+  }
+}
