@@ -1449,6 +1449,42 @@ impl RuntimeMethodRequest {
                     common: _common,
                 })
             }
+
+            // -- MCP Protocol methods ------------------------------------------------
+            "initialize" => {
+                let protocol_version = self
+                    .params
+                    .get("protocolVersion")
+                    .and_then(Value::as_str)
+                    .map(ToOwned::to_owned)
+                    .unwrap_or_else(|| "2024-11-05".to_string());
+                let capabilities = self.params.get("capabilities").cloned().unwrap_or(json!({}));
+                let client_info = self.params.get("clientInfo").cloned().unwrap_or(json!({}));
+                Ok(RuntimeRequest::McpInitialize {
+                    protocol_version,
+                    capabilities,
+                    client_info,
+                })
+            }
+            "notifications/initialized" => Ok(RuntimeRequest::McpInitialized),
+            "tools/list" => Ok(RuntimeRequest::McpToolsList),
+            "tools/call" => {
+                let name = parse_required_string(&self.params, "name")?;
+                let arguments = self.params.get("arguments").cloned().unwrap_or(json!({}));
+                Ok(RuntimeRequest::McpToolsCall { name, arguments })
+            }
+            "resources/list" => Ok(RuntimeRequest::McpResourcesList),
+            "resources/read" => {
+                let uri = parse_required_string(&self.params, "uri")?;
+                Ok(RuntimeRequest::McpResourcesRead { uri })
+            }
+            "prompts/list" => Ok(RuntimeRequest::McpPromptsList),
+            "prompts/get" => {
+                let name = parse_required_string(&self.params, "name")?;
+                let arguments = self.params.get("arguments").cloned().unwrap_or(json!({}));
+                Ok(RuntimeRequest::McpPromptsGet { name, arguments })
+            }
+
             _ => Err(JsonRpcError {
                 code: -32601,
                 message: format!("unknown method '{}'", self.method),
@@ -1707,6 +1743,28 @@ pub enum RuntimeRequest {
         step_delay_ms: Option<u64>,
     },
     Shutdown,
+
+    // -- MCP Protocol -------------------------------------------------------
+    McpInitialize {
+        protocol_version: String,
+        capabilities: serde_json::Value,
+        client_info: serde_json::Value,
+    },
+    McpInitialized,
+    McpToolsList,
+    McpToolsCall {
+        name: String,
+        arguments: serde_json::Value,
+    },
+    McpResourcesList,
+    McpResourcesRead {
+        uri: String,
+    },
+    McpPromptsList,
+    McpPromptsGet {
+        name: String,
+        arguments: serde_json::Value,
+    },
 }
 
 pub fn busy_payload(queue_depth: usize, max_queue_depth: usize) -> Value {

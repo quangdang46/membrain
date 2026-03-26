@@ -3251,6 +3251,330 @@ impl DaemonRuntime {
                     }),
                 )
             }
+
+            // -- MCP Protocol handlers -------------------------------------------------
+            RuntimeRequest::McpInitialize {
+                protocol_version,
+                capabilities: _,
+                client_info: _,
+            } => {
+                JsonRpcResponse::success(
+                    request_id,
+                    json!({
+                        "protocolVersion": protocol_version,
+                        "capabilities": {
+                            "tools": {
+                                "listChanged": false
+                            },
+                            "resources": {
+                                "subscribe": false,
+                                "listChanged": false
+                            },
+                            "prompts": {
+                                "listChanged": false
+                            }
+                        },
+                        "serverInfo": {
+                            "name": "membrain",
+                            "version": env!("CARGO_PKG_VERSION")
+                        }
+                    }),
+                )
+            }
+            RuntimeRequest::McpInitialized => {
+                // Notification - no response needed, but we return empty success for stdio mode
+                JsonRpcResponse::success(request_id, json!({}))
+            }
+            RuntimeRequest::McpToolsList => {
+                JsonRpcResponse::success(
+                    request_id,
+                    json!({
+                        "tools": [
+                            {
+                                "name": "encode",
+                                "description": "Store a new memory in the specified namespace",
+                                "inputSchema": {
+                                    "type": "object",
+                                    "properties": {
+                                        "content": { "type": "string", "description": "The memory content to store" },
+                                        "namespace": { "type": "string", "description": "The namespace to store the memory in" },
+                                        "memory_type": { "type": "string", "description": "Optional memory type classification" }
+                                    },
+                                    "required": ["content", "namespace"]
+                                }
+                            },
+                            {
+                                "name": "recall",
+                                "description": "Search and retrieve memories from a namespace",
+                                "inputSchema": {
+                                    "type": "object",
+                                    "properties": {
+                                        "query_text": { "type": "string", "description": "The search query" },
+                                        "namespace": { "type": "string", "description": "The namespace to search in" },
+                                        "limit": { "type": "integer", "description": "Maximum number of results" }
+                                    },
+                                    "required": ["namespace"]
+                                }
+                            },
+                            {
+                                "name": "inspect",
+                                "description": "Get detailed information about a specific memory",
+                                "inputSchema": {
+                                    "type": "object",
+                                    "properties": {
+                                        "id": { "type": "integer", "description": "The memory ID to inspect" },
+                                        "namespace": { "type": "string", "description": "The namespace containing the memory" }
+                                    },
+                                    "required": ["id", "namespace"]
+                                }
+                            },
+                            {
+                                "name": "why",
+                                "description": "Explain why a memory was retrieved or how it relates to a query",
+                                "inputSchema": {
+                                    "type": "object",
+                                    "properties": {
+                                        "query": { "type": "string", "description": "The query to explain" },
+                                        "namespace": { "type": "string", "description": "The namespace to search in" },
+                                        "limit": { "type": "integer", "description": "Maximum number of results to explain" }
+                                    },
+                                    "required": ["query", "namespace"]
+                                }
+                            },
+                            {
+                                "name": "health",
+                                "description": "Check the health status of the memory system",
+                                "inputSchema": {
+                                    "type": "object",
+                                    "properties": {}
+                                }
+                            },
+                            {
+                                "name": "doctor",
+                                "description": "Run diagnostics on the memory system",
+                                "inputSchema": {
+                                    "type": "object",
+                                    "properties": {}
+                                }
+                            }
+                        ]
+                    }),
+                )
+            }
+            RuntimeRequest::McpToolsCall { name, arguments } => {
+                // Dispatch tool call to the appropriate runtime method
+                match name.as_str() {
+                    "encode" => {
+                        let content = arguments.get("content").and_then(|v| v.as_str()).unwrap_or("");
+                        let namespace = arguments.get("namespace").and_then(|v| v.as_str()).unwrap_or("default").to_string();
+                        let _memory_type = arguments.get("memory_type").and_then(|v| v.as_str()).map(|s| s.to_string());
+                        let visibility = arguments.get("visibility").and_then(|v| v.as_str()).map(|s| s.to_string());
+
+                        let namespace_id = match NamespaceId::new(&namespace) {
+                            Ok(ns) => ns,
+                            Err(_) => {
+                                return JsonRpcResponse::error(
+                                    request_id,
+                                    -32602,
+                                    "malformed namespace",
+                                    Some(json!({"error_kind": "validation_failure"})),
+                                )
+                            }
+                        };
+                        let requested_visibility = visibility.as_deref();
+                        let visibility = match requested_visibility {
+                            Some(raw) => match SharingVisibility::parse(raw) {
+                                Some(visibility) => visibility,
+                                None => {
+                                    return JsonRpcResponse::error(
+                                        request_id,
+                                        -32602,
+                                        "invalid visibility",
+                                        Some(json!({"error_kind": "validation_failure"})),
+                                    )
+                                }
+                            },
+                            None => SharingVisibility::Private,
+                        };
+                        let memory_id = MemoryId(request_correlation_id);
+                        let common = crate::rpc::RuntimeCommonFields::default();
+                        let record = state.encode_memory(
+                            namespace_id.clone(),
+                            memory_id,
+                            content,
+                            None,
+                            &common,
+                            visibility,
+                        );
+                        state.store_encoded_memory(record.clone());
+                        if let Some(affect) = record.layout.metadata.affect {
+                            let mut audit = state.audit.lock().expect("runtime audit state lock should be available");
+                            let tick = audit.store.current_tick().saturating_add(1);
+                            let _ = audit.store.record_affect_trajectory(
+                                namespace_id,
+                                memory_id,
+                                record.layout.metadata.landmark.era_id.clone(),
+                                tick,
+                                affect,
+                            );
+                        }
+                        JsonRpcResponse::success(
+                            request_id,
+                            json!({
+                                "status": "accepted",
+                                "memory_id": memory_id.0,
+                                "namespace": namespace,
+                                "visibility": visibility.as_str(),
+                                "message": "encode envelope accepted"
+                            }),
+                        )
+                    }
+                    "recall" => {
+                        let query_text = arguments.get("query_text").and_then(|v| v.as_str()).map(|s| s.to_string());
+                        let namespace = arguments.get("namespace").and_then(|v| v.as_str()).unwrap_or("default").to_string();
+                        let result_budget = arguments.get("limit").and_then(|v| v.as_u64()).map(|n| n as usize);
+
+                        match Self::handle_recall(
+                            query_text,
+                            &namespace,
+                            None, // mode
+                            result_budget,
+                            None, // token_budget
+                            None, // time_budget_ms
+                            None, // context_text
+                            None, // effort
+                            None, // include_public
+                            None, // like_id
+                            None, // unlike_id
+                            None, // graph_mode
+                            None, // cold_tier
+                            None, // workspace_id
+                            None, // agent_id
+                            None, // session_id
+                            None, // task_id
+                            None, // memory_kinds
+                            None, // era_id
+                            None, // as_of_tick
+                            None, // at_snapshot
+                            None, // min_strength
+                            None, // min_confidence
+                            None, // show_decaying
+                            None, // mood_congruent
+                            crate::rpc::RuntimeCommonFields::default(),
+                            request_correlation_id,
+                            &state,
+                        ) {
+                            Ok(response) => JsonRpcResponse::success(request_id, json!(response)),
+                            Err(message) => JsonRpcResponse::error(request_id, -32602, message, None),
+                        }
+                    }
+                    "inspect" => {
+                        let id = arguments.get("id").and_then(|v| v.as_u64()).unwrap_or(0);
+                        let namespace = arguments.get("namespace").and_then(|v| v.as_str()).unwrap_or("default").to_string();
+
+                        match Self::handle_inspect(
+                            id,
+                            &namespace,
+                            crate::rpc::RuntimeCommonFields::default(),
+                            request_correlation_id,
+                            &state,
+                        ) {
+                            Ok(response) => JsonRpcResponse::success(request_id, json!(response)),
+                            Err(message) => JsonRpcResponse::error(request_id, -32602, message, None),
+                        }
+                    }
+                    "why" => {
+                        let query = arguments.get("query").and_then(|v| v.as_str()).unwrap_or("");
+                        let namespace = arguments.get("namespace").and_then(|v| v.as_str()).unwrap_or("default").to_string();
+                        let limit = arguments.get("limit").and_then(|v| v.as_u64()).map(|n| n as usize);
+
+                        match Self::handle_explain(
+                            query,
+                            &namespace,
+                            limit,
+                            None, // depth
+                            crate::rpc::RuntimeCommonFields::default(),
+                            request_correlation_id,
+                            &state,
+                        ) {
+                            Ok(response) => JsonRpcResponse::success(request_id, json!(response)),
+                            Err(message) => JsonRpcResponse::error(request_id, -32602, message, None),
+                        }
+                    }
+                    "health" => {
+                        let report = state.health_report().await;
+                        JsonRpcResponse::success(request_id, report)
+                    }
+                    "doctor" => {
+                        let report = state.doctor_report().await;
+                        JsonRpcResponse::success(request_id, json!(report))
+                    }
+                    _ => {
+                        JsonRpcResponse::error(
+                            request_id,
+                            -32601,
+                            format!("unknown tool: {}", name),
+                            None,
+                        )
+                    }
+                }
+            }
+            RuntimeRequest::McpResourcesList => {
+                JsonRpcResponse::success(
+                    request_id,
+                    json!({
+                        "resources": [
+                            {
+                                "uri": "membrain://default/status",
+                                "name": "Memory System Status",
+                                "description": "Current status and statistics of the memory system",
+                                "mimeType": "application/json"
+                            }
+                        ]
+                    }),
+                )
+            }
+            RuntimeRequest::McpResourcesRead { uri } => {
+                if uri == "membrain://default/status" {
+                    let status = state.status().await;
+                    JsonRpcResponse::success(
+                        request_id,
+                        json!({
+                            "contents": [
+                                {
+                                    "uri": uri,
+                                    "mimeType": "application/json",
+                                    "text": serde_json::to_string(&status).unwrap_or_default()
+                                }
+                            ]
+                        }),
+                    )
+                } else {
+                    JsonRpcResponse::error(
+                        request_id,
+                        -32602,
+                        format!("unknown resource: {}", uri),
+                        None,
+                    )
+                }
+            }
+            RuntimeRequest::McpPromptsList => {
+                JsonRpcResponse::success(
+                    request_id,
+                    json!({
+                        "prompts": []
+                    }),
+                )
+            }
+            RuntimeRequest::McpPromptsGet { name, arguments: _ } => {
+                JsonRpcResponse::error(
+                    request_id,
+                    -32601,
+                    format!("unknown prompt: {}", name),
+                    None,
+                )
+            }
+
             RuntimeRequest::Shutdown => {
                 state.request_shutdown();
                 JsonRpcResponse::success(
