@@ -1,7 +1,14 @@
 use clap::Parser;
+use membrain_core::persistence::default_local_paths;
 use membrain_daemon::daemon::{DaemonRuntime, DaemonRuntimeConfig};
 use std::path::PathBuf;
 use std::time::Duration;
+
+fn default_socket_path() -> PathBuf {
+    default_local_paths()
+        .map(|paths| paths.socket_path)
+        .unwrap_or_else(|_| PathBuf::from("/tmp/membrain.sock"))
+}
 
 fn parse_positive_usize(value: &str) -> Result<usize, String> {
     let parsed: usize = value
@@ -40,7 +47,7 @@ fn parse_positive_u32(value: &str) -> Result<u32, String> {
 #[command(name = "membrain-daemon", version, about = "Membrain local daemon")]
 struct Cli {
     /// Unix socket path to bind.
-    #[arg(long, default_value = "/tmp/membrain.sock")]
+    #[arg(long, default_value_os_t = default_socket_path())]
     socket_path: PathBuf,
 
     /// Maximum number of concurrent request handlers.

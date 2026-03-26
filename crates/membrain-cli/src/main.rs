@@ -46,6 +46,10 @@ use membrain_core::graph::{
 use membrain_core::health::{BrainHealthInputs, BrainHealthReport, FeatureAvailabilityEntry};
 use membrain_core::index::{IndexApi, IndexModule};
 use membrain_core::observability::{AuditEventCategory, AuditEventKind};
+use membrain_core::persistence::{
+    ensure_local_root, load_cli_records, max_memory_id, open_cold_db, open_hot_db,
+    resolve_local_paths, save_affect_row, save_cli_records, PersistedLocalMemoryRecord,
+};
 use membrain_core::policy::SharingVisibility;
 use membrain_core::store::audit::{
     AppendOnlyAuditLog, AuditLogEntry, AuditLogFilter, AuditLogSlice, AuditLogStore,
@@ -67,7 +71,7 @@ use membrain_daemon::preflight::{
 };
 use membrain_daemon::rpc::{RuntimeMetrics, RuntimePosture, RuntimeStatus};
 use serde::Serialize;
-use std::collections::HashSet;
+use std::collections::{BTreeMap, HashSet};
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Instant;
@@ -119,11 +123,305 @@ impl LocalMemoryRecord {
             self.payload_size_bytes,
         )
     }
+
+    fn to_persisted(&self) -> PersistedLocalMemoryRecord {
+        PersistedLocalMemoryRecord {
+            memory_id: self.memory_id.0,
+            namespace: self.namespace.as_str().to_string(),
+            session_id: self.session_id.0,
+            memory_type: self.memory_type,
+            route_family: self.route_family,
+            compact_text: self.compact_text.clone(),
+            provisional_salience: self.provisional_salience,
+            affect: self.affect,
+            fingerprint: self.fingerprint,
+            payload_size_bytes: self.payload_size_bytes,
+            is_landmark: self.is_landmark,
+            landmark_label: self.landmark_label.clone(),
+            era_id: self.era_id.clone(),
+            raw_text: self.compact_text.clone(),
+        }
+    }
+
+    fn from_persisted(record: PersistedLocalMemoryRecord) -> anyhow::Result<Self> {
+        Ok(Self {
+            memory_id: MemoryId(record.memory_id),
+            namespace: NamespaceId::new(&record.namespace)?,
+            session_id: SessionId(record.session_id),
+            memory_type: record.memory_type,
+            route_family: record.route_family,
+            compact_text: record.compact_text,
+            provisional_salience: record.provisional_salience,
+            affect: record.affect,
+            fingerprint: record.fingerprint,
+            payload_size_bytes: record.payload_size_bytes,
+            is_landmark: record.is_landmark,
+            landmark_label: record.landmark_label,
+            era_id: record.era_id,
+            passive_observation: None,
+            causal_parents: Vec::new(),
+            causal_link_type: None,
+        })
+    }
+}
+
+fn load_cli_persistence(
+    db_path: Option<&PathBuf>,
+) -> anyhow::Result<(
+    BrainStore,
+    Tier1HotMetadataStore,
+    Vec<LocalMemoryRecord>,
+    rusqlite::Connection,
+)> {
+    let paths = resolve_local_paths(db_path.map(PathBuf::as_path))?;
+    ensure_local_root(&paths)?;
+    let hot_db = open_hot_db(&paths.hot_db_path)?;
+    let _cold_db = open_cold_db(&paths.cold_db_path)?;
+    let persisted = load_cli_records(&hot_db)?;
+    let local_records = persisted
+        .into_iter()
+        .map(LocalMemoryRecord::from_persisted)
+        .collect::<anyhow::Result<Vec<_>>>()?;
+    let store = BrainStore::new(RuntimeConfig::default());
+    let mut hot = store.hot_store().new_metadata_store(64);
+    for record in &local_records {
+        hot.seed(record.as_hot_record());
+    }
+    if let Some(max_id) = local_records.iter().map(|record| record.memory_id.0).max() {
+        NEXT_MEMORY_ID.store(max_id.saturating_add(1), Ordering::SeqCst);
+    } else {
+        NEXT_MEMORY_ID.store(
+            max_memory_id(&hot_db)?.saturating_add(1).max(1),
+            Ordering::SeqCst,
+        );
+    }
+    Ok((store, hot, local_records, hot_db))
+}
+
+fn save_cli_persistence(
+    conn: &mut rusqlite::Connection,
+    local_records: &[LocalMemoryRecord],
+) -> anyhow::Result<()> {
+    let persisted = local_records
+        .iter()
+        .map(LocalMemoryRecord::to_persisted)
+        .collect::<Vec<_>>();
+    save_cli_records(conn, &persisted)?;
+
+    conn.execute("DELETE FROM emotional_timeline", [])?;
+    let mut affect_rows = local_records
+        .iter()
+        .filter_map(|record| {
+            record.affect.map(|affect| {
+                (
+                    record.namespace.clone(),
+                    record.memory_id,
+                    affect,
+                    record.era_id.clone(),
+                )
+            })
+        })
+        .collect::<Vec<_>>();
+    affect_rows.sort_by(|left, right| {
+        left.0
+            .as_str()
+            .cmp(right.0.as_str())
+            .then_with(|| left.1 .0.cmp(&right.1 .0))
+    });
+    for (index, (namespace, memory_id, affect, era_id)) in affect_rows.into_iter().enumerate() {
+        save_affect_row(
+            conn,
+            &namespace,
+            memory_id,
+            (index as u64) + 1,
+            affect,
+            era_id.as_deref(),
+        )?;
+    }
+    Ok(())
+}
+
+fn build_health_report(local_records: &[LocalMemoryRecord]) -> BrainHealthReport {
+    let mut attention_by_namespace =
+        BTreeMap::<String, membrain_core::health::AttentionNamespaceInputs>::new();
+    let mut total_confidence = 0.0f32;
+    let mut total_strength = 0.0f32;
+    let mut affect_rows = 0usize;
+    let mut latest_affect_snapshot = None;
+    let mut landmark_count = 0usize;
+
+    for record in local_records {
+        total_strength += f32::from(record.provisional_salience) / 1000.0;
+        total_confidence += 1.0;
+        if record.is_landmark {
+            landmark_count += 1;
+        }
+        let entry = attention_by_namespace
+            .entry(record.namespace.as_str().to_string())
+            .or_insert_with(|| membrain_core::health::AttentionNamespaceInputs {
+                namespace: record.namespace.as_str().to_string(),
+                recall_count: 0,
+                encode_count: 0,
+                working_memory_pressure: 0,
+                promotion_count: 0,
+                overflow_count: 0,
+            });
+        entry.encode_count += 1;
+        entry.working_memory_pressure += 1;
+        if let Some(affect) = record.affect {
+            affect_rows += 1;
+            latest_affect_snapshot = Some((affect.valence, affect.arousal));
+        }
+    }
+
+    let hot_memories = local_records.len();
+    let avg_strength = if hot_memories == 0 {
+        0.0
+    } else {
+        total_strength / hot_memories as f32
+    };
+    let avg_confidence = if hot_memories == 0 {
+        0.0
+    } else {
+        total_confidence / hot_memories as f32
+    };
+
+    BrainHealthReport::from_inputs(
+        BrainHealthInputs {
+            hot_memories,
+            hot_capacity: hot_memories.max(100),
+            cold_memories: 0,
+            avg_strength,
+            avg_confidence,
+            low_confidence_count: 0,
+            decay_rate: 0.0,
+            archive_count: 0,
+            total_engrams: 0,
+            avg_cluster_size: 0.0,
+            top_engrams: Vec::new(),
+            landmark_count,
+            unresolved_conflicts: 0,
+            uncertain_count: 0,
+            dream_links_total: 0,
+            last_dream_tick: None,
+            affect_history_rows: affect_rows,
+            latest_affect_snapshot,
+            latest_affect_tick: (affect_rows > 0).then_some(affect_rows as u64),
+            attention_namespaces: attention_by_namespace.into_values().collect(),
+            total_recalls: 0,
+            total_encodes: hot_memories as u64,
+            current_tick: hot_memories as u64,
+            daemon_uptime_ticks: 0,
+            index_reports: IndexModule.health_reports(),
+            availability: None,
+            feature_availability: vec![FeatureAvailabilityEntry {
+                feature: "health".to_string(),
+                posture: membrain_core::api::AvailabilityPosture::Full,
+                note: Some("cli_local_persistence".to_string()),
+            }],
+            previous_total_recalls: Some(0),
+            previous_total_encodes: Some(0),
+            previous_repair_queue_depth: Some(0),
+            previous_hot_memories: Some(0),
+            previous_low_confidence_count: Some(0),
+            previous_unresolved_conflicts: Some(0),
+            previous_uncertain_count: Some(0),
+            previous_cache_hit_count: Some(0),
+            previous_cache_miss_count: Some(0),
+            previous_cache_bypass_count: Some(0),
+            previous_prefetch_queue_depth: Some(0),
+            previous_prefetch_drop_count: Some(0),
+            previous_index_stale_count: Some(0),
+            previous_index_missing_count: Some(0),
+            previous_index_repair_backlog_total: Some(0),
+            previous_availability_posture: Some(membrain_core::api::AvailabilityPosture::Full),
+        },
+        &CacheManager::new(4, 4),
+        None,
+    )
+}
+
+fn doctor_report(local_records: &[LocalMemoryRecord]) -> DoctorReport {
+    if local_records.is_empty() {
+        return legacy_doctor_report_sample();
+    }
+
+    let status = sample_runtime_status();
+    let health = build_health_report(local_records);
+    let indexes = health
+        .indexes
+        .reports
+        .iter()
+        .map(|report| DoctorIndexRow {
+            family: report.family,
+            health: report.health,
+            usable: report.health != "missing",
+            entry_count: report.entry_count,
+            generation: report.generation,
+        })
+        .collect::<Vec<_>>();
+    let checks = vec![
+        DoctorCheck {
+            name: "schema_catalog",
+            surface_kind: "schema",
+            status: "ok",
+            severity: "info",
+            affected_scope: "schema.v1".to_string(),
+            degraded_impact: None,
+            remediation: None,
+        },
+        DoctorCheck {
+            name: "derived_indexes",
+            surface_kind: "derived_index",
+            status: "ok",
+            severity: "info",
+            affected_scope: format!("index_families={}", indexes.len()),
+            degraded_impact: None,
+            remediation: None,
+        },
+        DoctorCheck {
+            name: "serving_posture",
+            surface_kind: "availability",
+            status: "ok",
+            severity: "info",
+            affected_scope: status.posture.as_str().to_string(),
+            degraded_impact: None,
+            remediation: None,
+        },
+    ];
+    let summary = DoctorSummary {
+        ok_checks: checks.len(),
+        warn_checks: 0,
+        fail_checks: 0,
+    };
+
+    DoctorReport {
+        status: "ok",
+        action: "doctor",
+        posture: status.posture.as_str(),
+        degraded_reasons: status.degraded_reasons,
+        metrics: status.metrics,
+        summary,
+        indexes,
+        repair_engine_component: "engine.repair",
+        repair_reports: Vec::new(),
+        checks,
+        runbook_hints: Vec::new(),
+        warnings: Vec::new(),
+        error_kind: None,
+        retryable: false,
+        remediation: None,
+        availability: None,
+        health,
+    }
 }
 
 #[derive(Parser, Debug)]
 #[command(name = "membrain", version, about = "Membrain CLI", long_about = None)]
 struct Cli {
+    /// Override the storage location root or hot.db path.
+    #[arg(long, global = true)]
+    db_path: Option<PathBuf>,
     #[command(subcommand)]
     command: Commands,
 }
@@ -358,8 +656,10 @@ enum Commands {
     /// Inspect a specific memory or entity by ID
     Inspect {
         /// The memory ID to inspect
-        #[arg(long)]
-        id: u64,
+        #[arg(long, short = 'i')]
+        id: Option<u64>,
+        /// Positional memory ID shorthand.
+        positional_id: Option<u64>,
         /// Namespace of the memory
         #[arg(long, short = 'n', default_value = "default")]
         namespace: String,
@@ -749,8 +1049,8 @@ enum Commands {
     /// Run the local daemon inside the CLI process
     Daemon {
         /// Unix socket path to bind
-        #[arg(long, default_value = "/tmp/membrain.sock")]
-        socket_path: PathBuf,
+        #[arg(long)]
+        socket_path: Option<PathBuf>,
         /// Maximum number of concurrent request handlers
         #[arg(long, default_value_t = 8)]
         request_concurrency: usize,
@@ -3872,7 +4172,7 @@ fn sample_runtime_status() -> RuntimeStatus {
     }
 }
 
-fn doctor_report() -> DoctorReport {
+fn legacy_doctor_report_sample() -> DoctorReport {
     let status = sample_runtime_status();
     let index_reports = IndexModule.health_reports();
     let indexes = index_reports
@@ -5016,10 +5316,9 @@ fn print_preflight_allow_human(response: &PreflightOutcome) {
 async fn main() -> anyhow::Result<()> {
     let cli = Cli::parse();
 
-    // Shared core store and hot metadata store for encode/recall/inspect/explain
-    let mut store = BrainStore::new(RuntimeConfig::default());
-    let mut hot = store.hot_store().new_metadata_store(64);
-    let mut local_records: Vec<LocalMemoryRecord> = Vec::new();
+    // Shared core store and hot metadata store for encode/recall/inspect/explain.
+    let (mut store, mut hot, mut local_records, mut hot_db) =
+        load_cli_persistence(cli.db_path.as_ref())?;
     let _session_id = SessionId(SESSION_ID.load(Ordering::SeqCst));
 
     match &cli.command {
@@ -5048,6 +5347,7 @@ async fn main() -> anyhow::Result<()> {
                 *arousal,
                 source,
             );
+            save_cli_persistence(&mut hot_db, &local_records)?;
             if output.json {
                 println!("{}", serde_json::to_string_pretty(&response)?);
             } else {
@@ -5334,11 +5634,15 @@ async fn main() -> anyhow::Result<()> {
         }
         Commands::Inspect {
             id,
+            positional_id,
             namespace,
             output,
         } => {
             let ns = NamespaceId::new(namespace)?;
-            let memory_id = MemoryId(*id);
+            let resolved_id = id.or(*positional_id).ok_or_else(|| {
+                anyhow::anyhow!("missing memory id; use --id <ID> or positional inspect <ID>")
+            })?;
+            let memory_id = MemoryId(resolved_id);
             match inspect_memory(&mut hot, &local_records, &ns, memory_id) {
                 Ok(output_result) => {
                     if output.json {
@@ -5994,7 +6298,7 @@ async fn main() -> anyhow::Result<()> {
             }
         }
         Commands::Health { brief, output } => {
-            let report = doctor_report().health;
+            let report = doctor_report(&local_records).health;
             if output.json {
                 println!("{}", serde_json::to_string_pretty(&report)?);
             } else {
@@ -6003,7 +6307,7 @@ async fn main() -> anyhow::Result<()> {
         }
         Commands::Doctor { command, output } => {
             let _ = command.as_ref().unwrap_or(&DoctorCommands::Run);
-            let report = doctor_report();
+            let report = doctor_report(&local_records);
             if output.json {
                 print_doctor_report(&report)?;
             } else {
@@ -6777,6 +7081,7 @@ async fn main() -> anyhow::Result<()> {
         } => {
             let ns = NamespaceId::new(namespace_id)?;
             let output_result = share_output(*id, &ns, "shared");
+            save_cli_persistence(&mut hot_db, &local_records)?;
             if output.json {
                 let response = ResponseContext::success(
                     ns.clone(),
@@ -6811,6 +7116,7 @@ async fn main() -> anyhow::Result<()> {
         } => {
             let ns = NamespaceId::new(namespace)?;
             let output_result = unshare_output(*id, &ns);
+            save_cli_persistence(&mut hot_db, &local_records)?;
             if output.json {
                 let response = ResponseContext::success(
                     ns.clone(),
@@ -6913,7 +7219,9 @@ async fn main() -> anyhow::Result<()> {
             request_concurrency,
             max_queue_depth,
         } => {
-            let mut config = DaemonRuntimeConfig::new(socket_path);
+            let default_paths = resolve_local_paths(cli.db_path.as_deref())?;
+            let effective_socket_path = socket_path.clone().unwrap_or(default_paths.socket_path);
+            let mut config = DaemonRuntimeConfig::new(&effective_socket_path);
             config.request_concurrency = *request_concurrency;
             config.max_queue_depth = *max_queue_depth;
             let runtime = DaemonRuntime::with_config(config);

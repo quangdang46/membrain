@@ -14,3 +14,5 @@ xxhash-rust = { version = "0.8", features = ["xxh64"] }
 petgraph = "0.6"
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
+rusqlite = { version = "0.31", features = ["bundled"] }
+dirs = "6.0"

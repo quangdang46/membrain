@@ -10,6 +10,14 @@ const RUNTIME_HEALTH_URI: &str = "membrain://daemon/runtime/health";
 const RUNTIME_DOCTOR_URI: &str = "membrain://daemon/runtime/doctor";
 const RUNTIME_STREAMS_URI: &str = "membrain://daemon/runtime/streams";
 const INSPECT_RESOURCE_URI_TEMPLATE: &str = "membrain://{namespace}/memories/{memory_id}";
+
+fn parse_inspect_resource_uri(uri: &str) -> Option<(String, u64)> {
+    let prefix = "membrain://";
+    let rest = uri.strip_prefix(prefix)?;
+    let (namespace, path) = rest.split_once('/')?;
+    let memory_id = path.strip_prefix("memories/")?.parse::<u64>().ok()?;
+    Some((namespace.to_string(), memory_id))
+}
 const SNAPSHOT_RESOURCE_URI_TEMPLATE: &str = "membrain://{namespace}/snapshots/{snapshot_name}";
 const MAINTENANCE_STATUS_METHOD: &str = "maintenance.status";
 use crate::preflight::{
@@ -25,6 +33,7 @@ use crate::rpc::{
     RuntimePosture, RuntimeRemediation, RuntimeRequest, RuntimeStatus,
 };
 use anyhow::Context;
+use tokio::io::{self, AsyncBufReadExt, AsyncWriteExt};
 use membrain_core::api::{
     AgentId, BlackboardSnapshotOutput, DeadZonesOutput, FieldPresence, ForkInheritance,
     GoalAbandonOutput, GoalPauseOutput, GoalResumeOutput, GoalStateOutput, HotPathsOutput,
@@ -50,7 +59,9 @@ use membrain_core::engine::result::{
     AnsweredFrom, EntryLane, EvidenceRole, QueryByExampleExplain, ResultBuilder, ResultReason,
     RetrievalExplain, RetrievalResultSet,
 };
-use membrain_core::engine::retrieval_planner::{QueryByExampleNormalization, RetrievalRequest};
+use membrain_core::engine::retrieval_planner::{
+    PrimaryCue, QueryByExampleNormalization, RetrievalRequest,
+};
 use membrain_core::engine::working_state::GoalWorkingState;
 use membrain_core::graph::{
     CausalEvidenceAttribution, CausalEvidenceKind, CausalLink, CausalLinkType, EntityId,
@@ -1573,6 +1584,56 @@ impl DaemonRuntime {
         &self.config.socket_path
     }
 
+    pub async fn run_stdio_server(&self) -> anyhow::Result<()> {
+        let stdin = io::stdin();
+        let stdout = io::stdout();
+        let mut reader = io::BufReader::new(stdin);
+        let mut writer = io::BufWriter::new(stdout);
+        let mut line = String::new();
+
+        loop {
+            line.clear();
+            let bytes_read = reader.read_line(&mut line).await?;
+            if bytes_read == 0 {
+                break;
+            }
+            if line.trim().is_empty() {
+                continue;
+            }
+
+            let request = match serde_json::from_str::<JsonRpcRequest>(&line) {
+                Ok(request) => request,
+                Err(err) => {
+                    let response = JsonRpcResponse::error(
+                        None,
+                        -32700,
+                        format!("invalid json: {err}"),
+                        None,
+                    );
+                    let encoded = serde_json::to_vec(&response)?;
+                    writer.write_all(&encoded).await?;
+                    writer.write_all(b"\n").await?;
+                    writer.flush().await?;
+                    continue;
+                }
+            };
+
+            let is_shutdown = request.method == "shutdown";
+            let response =
+                Self::dispatch_request(request, Arc::clone(&self.state), self.state.next_request_id())
+                    .await;
+            let encoded = serde_json::to_vec(&response)?;
+            writer.write_all(&encoded).await?;
+            writer.write_all(b"\n").await?;
+            writer.flush().await?;
+            if is_shutdown {
+                break;
+            }
+        }
+
+        Ok(())
+    }
+
     pub async fn run_until_stopped(&self) -> anyhow::Result<()> {
         if let Some(parent) = self.config.socket_path.parent() {
             tokio::fs::create_dir_all(parent).await?;
@@ -2608,12 +2669,34 @@ impl DaemonRuntime {
                         )),
                     )
                 }
-                _ => JsonRpcResponse::error(
-                    request_id,
-                    -32602,
-                    format!("unknown resource uri '{uri}'"),
-                    Some(json!({"error_kind": "validation_failure"})),
-                ),
+                _ => {
+                    if let Some((resource_namespace, memory_id)) =
+                        parse_inspect_resource_uri(uri.as_str())
+                    {
+                        match Self::handle_inspect(
+                            memory_id,
+                            &resource_namespace,
+                            crate::rpc::RuntimeCommonFields::default(),
+                            request_correlation_id,
+                            &state,
+                        ) {
+                            Ok(response) => JsonRpcResponse::success(request_id, json!(response)),
+                            Err(message) => JsonRpcResponse::error(
+                                request_id,
+                                -32602,
+                                message,
+                                Some(json!({"error_kind": "validation_failure"})),
+                            ),
+                        }
+                    } else {
+                        JsonRpcResponse::error(
+                            request_id,
+                            -32602,
+                            format!("unknown resource uri '{uri}'"),
+                            Some(json!({"error_kind": "validation_failure"})),
+                        )
+                    }
+                }
             },
             RuntimeRequest::StreamsList => JsonRpcResponse::success(
                 request_id,
@@ -3865,32 +3948,14 @@ impl DaemonRuntime {
             .map_err(|err| err.to_string())?;
 
         let Some(record) = state.memory_record(MemoryId(id)) else {
-            let mut result = RetrievalResultSet::empty(
-                RetrievalExplain::from_plan(
-                    &RecallEngine
-                        .plan_recall(RecallRequest::exact(MemoryId(id)), RuntimeConfig::default()),
-                    "balanced",
+            return Ok(McpResponse::failure(crate::mcp::McpError {
+                code: "validation_failure".to_string(),
+                message: format!(
+                    "memory {id} not found in namespace '{}'",
+                    namespace.as_str()
                 ),
-                namespace.clone(),
-            );
-            result.outcome_class = OutcomeClass::Degraded;
-            result.policy_summary.outcome_class = OutcomeClass::Degraded;
-            result.packaging_metadata.result_budget = 1;
-            result.packaging_metadata.degraded_summary =
-                Some("planner-only inspect envelope; item hydration not implemented".to_string());
-            let mut payload =
-                McpInspectPayload::from_result(request_id, namespace.clone(), id, &result)
-                    .map_err(|err| err.to_string())?;
-            let inspect_resource_uri = format!("membrain://{}/memories/{id}", namespace.as_str());
-            payload.explain_trace.passive_observation = Some(json!({
-                "resource_uri": inspect_resource_uri,
-                "resource_kind": "inspect_payload",
-                "resource_template": INSPECT_RESOURCE_URI_TEMPLATE,
-                "resource_examples": [format!("membrain://{}/memories/{id}", namespace.as_str())],
+                is_policy_denial: false,
             }));
-            return Ok(McpResponse::success(
-                serde_json::to_value(payload).map_err(|err| err.to_string())?,
-            ));
         };
 
         let layout = &record.layout;
@@ -4574,7 +4639,30 @@ impl DaemonRuntime {
                 detail: influence_summary,
             });
         }
-        let Some(memory_id) = request.exact_memory_id else {
+        let exact_match = request.exact_memory_id.and_then(|memory_id| {
+            state
+                .memory_record(memory_id)
+                .filter(|record| record.layout.metadata.namespace == namespace)
+                .map(|record| (memory_id, record))
+        });
+        let empty_query_by_example = QueryByExampleNormalization {
+            normalized_query_text: None,
+            primary_cue: PrimaryCue::QueryText,
+            seeds: Vec::new(),
+        };
+        let fallback_result = if exact_match.is_none() {
+            Some(Self::build_context_budget_result_set(
+                &namespace,
+                &common,
+                query_by_example.unwrap_or(&empty_query_by_example),
+                mood_congruent,
+                degraded_summary,
+                state,
+            ))
+        } else {
+            None
+        };
+        if let Some(mut result) = fallback_result {
             let request_key = RuntimeState::cache_key_for_request(
                 CacheFamily::ResultCache,
                 &namespace,
@@ -4587,13 +4675,19 @@ impl DaemonRuntime {
                 .expect("result cache store should exist")
                 .lookup(&request_key, &current_generations);
             let request_trace = cache_eval_trace_from_lookup(&request_lookup, result_budget);
-            let mut result = RetrievalResultSet::empty(explain, namespace.clone());
-            result.outcome_class = membrain_core::observability::OutcomeClass::Degraded;
-            result.policy_summary.outcome_class =
-                membrain_core::observability::OutcomeClass::Degraded;
             result.packaging_metadata.result_budget = result_budget;
-            result.packaging_metadata.degraded_summary = Some(degraded_summary.to_string());
+            result.packaging_metadata.degraded_summary = if result.evidence_pack.is_empty() {
+                Some(degraded_summary.to_string())
+            } else {
+                None
+            };
+            if result.evidence_pack.is_empty() {
+                result.outcome_class = membrain_core::observability::OutcomeClass::Degraded;
+                result.policy_summary.outcome_class =
+                    membrain_core::observability::OutcomeClass::Degraded;
+            }
             result.truncated = false;
+            let degraded = result.evidence_pack.is_empty();
             let mut payload =
                 McpRetrievalPayload::from_result(request_id, namespace, false, result)
                     .map_err(|err| err.to_string())?;
@@ -4607,52 +4701,14 @@ impl DaemonRuntime {
                         | CacheEvent::Disabled
                 )),
                 None,
-                0,
-                true,
+                payload.result.total_candidates,
+                degraded,
             )
             .map_err(|err| err.to_string())?;
             return Ok(McpResponse::retrieval_success(payload));
-        };
-
-        let Some(record) = state.memory_record(memory_id) else {
-            let request_key = RuntimeState::cache_key_for_request(
-                CacheFamily::ResultCache,
-                &namespace,
-                &common,
-                request_shape_hash,
-                Some(request_shape_hash),
-            );
-            let request_lookup = cache
-                .store_for(CacheFamily::ResultCache)
-                .expect("result cache store should exist")
-                .lookup(&request_key, &current_generations);
-            let request_trace = cache_eval_trace_from_lookup(&request_lookup, result_budget);
-            let mut result = RetrievalResultSet::empty(explain, namespace.clone());
-            result.outcome_class = membrain_core::observability::OutcomeClass::Degraded;
-            result.policy_summary.outcome_class =
-                membrain_core::observability::OutcomeClass::Degraded;
-            result.packaging_metadata.result_budget = result_budget;
-            result.packaging_metadata.degraded_summary = Some(degraded_summary.to_string());
-            result.truncated = false;
-            let mut payload =
-                McpRetrievalPayload::from_result(request_id, namespace, false, result)
-                    .map_err(|err| err.to_string())?;
-            payload.explain_trace.cache_metrics = cache_metrics_json(
-                vec![request_trace],
-                usize::from(matches!(
-                    request_lookup.event,
-                    CacheEvent::Miss
-                        | CacheEvent::Bypass
-                        | CacheEvent::StaleWarning
-                        | CacheEvent::Disabled
-                )),
-                None,
-                0,
-                true,
-            )
-            .map_err(|err| err.to_string())?;
-            return Ok(McpResponse::retrieval_success(payload));
-        };
+        }
+        let (memory_id, record) =
+            exact_match.expect("exact match should be present when no fallback result was built");
 
         let layout = &record.layout;
         let request_context = RuntimeState::runtime_request_context(

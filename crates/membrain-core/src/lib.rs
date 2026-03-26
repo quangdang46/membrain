@@ -23,6 +23,8 @@ pub mod index;
 pub mod migrate;
 /// Shared trace and outcome vocabulary for all wrappers.
 pub mod observability;
+/// Local filesystem and SQLite persistence bootstrap.
+pub mod persistence;
 /// Centralized policy evaluation and early-denial surfaces.
 pub mod policy;
 /// Namespace-aware hot, warm, and cold storage primitives.

@@ -1,8 +1,20 @@
 use serde_json::{json, Value};
 use std::process::Command;
+use std::time::{SystemTime, UNIX_EPOCH};
+
+fn test_db_root() -> std::path::PathBuf {
+    let unique = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .expect("system time should be after unix epoch")
+        .as_nanos();
+    std::env::temp_dir().join(format!("membrain-cli-e2e-{unique}"))
+}
 
 fn run_membrain(args: &[&str]) -> (bool, String, String) {
+    let db_root = test_db_root();
     let output = Command::new(env!("CARGO_BIN_EXE_membrain"))
+        .arg("--db-path")
+        .arg(&db_root)
         .args(args)
         .output()
         .expect("membrain binary should run");
