@@ -1619,7 +1619,16 @@ impl DaemonRuntime {
                 }
             };
 
+            // In JSON-RPC 2.0, notifications have no id and don't expect responses
+            let is_notification = request.id.is_none();
             let is_shutdown = request.method == "shutdown";
+
+            if is_notification {
+                // Process notification but don't send response
+                let _ = Self::dispatch_request(request, Arc::clone(&self.state), self.state.next_request_id()).await;
+                continue;
+            }
+
             let response =
                 Self::dispatch_request(request, Arc::clone(&self.state), self.state.next_request_id())
                     .await;
