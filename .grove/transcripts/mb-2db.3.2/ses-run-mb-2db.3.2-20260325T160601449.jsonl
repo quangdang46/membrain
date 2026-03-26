@@ -1,0 +1,115 @@
+{"ts":"2026-03-25T16:06:01.467372895Z","kind":"session_started","session_id":"ses-run-mb-2db.3.2-20260325T160601449"}
+{"ts":"2026-03-25T16:33:36.472738547Z","kind":"stdout","line":"GROVE_RESULT: success"}
+{"ts":"2026-03-25T16:33:36.472738547Z","kind":"protocol","event":{"type":"result","summary":"success"}}
+{"ts":"2026-03-25T16:33:36.491909771Z","kind":"stdout","line":""}
+{"ts":"2026-03-25T16:33:36.491920212Z","kind":"stdout","line":"Implemented adaptive pre-warming + attention heatmap surfaces for `mb-2db.3.2`."}
+{"ts":"2026-03-25T16:33:36.491923195Z","kind":"stdout","line":""}
+{"ts":"2026-03-25T16:33:36.491925326Z","kind":"stdout","line":"GROVE_ARTIFACTS:"}
+{"ts":"2026-03-25T16:33:36.491925326Z","kind":"protocol","event":{"type":"artifacts","items":[]}}
+{"ts":"2026-03-25T16:33:36.491932038Z","kind":"stdout","line":"- `crates/membrain-core/src/health.rs`"}
+{"ts":"2026-03-25T16:33:36.491932038Z","kind":"protocol","event":{"type":"artifacts","items":["`crates/membrain-core/src/health.rs`"]}}
+{"ts":"2026-03-25T16:33:36.491936938Z","kind":"stdout","line":"  - added attention heatmap metadata on hotspots:"}
+{"ts":"2026-03-25T16:33:36.491936938Z","kind":"protocol","event":{"type":"artifacts","items":["added attention heatmap metadata on hotspots:"]}}
+{"ts":"2026-03-25T16:33:36.492238866Z","kind":"stdout","line":"    - `heat_bucket`"}
+{"ts":"2026-03-25T16:33:36.492238866Z","kind":"protocol","event":{"type":"artifacts","items":["`heat_bucket`"]}}
+{"ts":"2026-03-25T16:33:36.492247176Z","kind":"stdout","line":"    - `heat_band`"}
+{"ts":"2026-03-25T16:33:36.492247176Z","kind":"protocol","event":{"type":"artifacts","items":["`heat_band`"]}}
+{"ts":"2026-03-25T16:33:36.492251757Z","kind":"stdout","line":"    - `prewarm_trigger`"}
+{"ts":"2026-03-25T16:33:36.492251757Z","kind":"protocol","event":{"type":"artifacts","items":["`prewarm_trigger`"]}}
+{"ts":"2026-03-25T16:33:36.492256551Z","kind":"stdout","line":"    - `prewarm_action`"}
+{"ts":"2026-03-25T16:33:36.492256551Z","kind":"protocol","event":{"type":"artifacts","items":["`prewarm_action`"]}}
+{"ts":"2026-03-25T16:33:36.492260812Z","kind":"stdout","line":"    - `prewarm_target_family`"}
+{"ts":"2026-03-25T16:33:36.492260812Z","kind":"protocol","event":{"type":"artifacts","items":["`prewarm_target_family`"]}}
+{"ts":"2026-03-25T16:33:36.492265607Z","kind":"stdout","line":"  - extended attention aggregate with:"}
+{"ts":"2026-03-25T16:33:36.492265607Z","kind":"protocol","event":{"type":"artifacts","items":["extended attention aggregate with:"]}}
+{"ts":"2026-03-25T16:33:36.492269975Z","kind":"stdout","line":"    - `max_attention_score`"}
+{"ts":"2026-03-25T16:33:36.492269975Z","kind":"protocol","event":{"type":"artifacts","items":["`max_attention_score`"]}}
+{"ts":"2026-03-25T16:33:36.492274343Z","kind":"stdout","line":"    - `warming_candidate_count`"}
+{"ts":"2026-03-25T16:33:36.492274343Z","kind":"protocol","event":{"type":"artifacts","items":["`warming_candidate_count`"]}}
+{"ts":"2026-03-25T16:33:36.492278391Z","kind":"stdout","line":"    - `hot_candidate_count`"}
+{"ts":"2026-03-25T16:33:36.492278391Z","kind":"protocol","event":{"type":"artifacts","items":["`hot_candidate_count`"]}}
+{"ts":"2026-03-25T16:33:36.492282866Z","kind":"stdout","line":"  - added adaptive prewarm summary on cache health:"}
+{"ts":"2026-03-25T16:33:36.492282866Z","kind":"protocol","event":{"type":"artifacts","items":["added adaptive prewarm summary on cache health:"]}}
+{"ts":"2026-03-25T16:33:36.492287021Z","kind":"stdout","line":"    - `prefetch_capacity`"}
+{"ts":"2026-03-25T16:33:36.492287021Z","kind":"protocol","event":{"type":"artifacts","items":["`prefetch_capacity`"]}}
+{"ts":"2026-03-25T16:33:36.492291495Z","kind":"stdout","line":"    - `adaptive_prewarm_state`"}
+{"ts":"2026-03-25T16:33:36.492291495Z","kind":"protocol","event":{"type":"artifacts","items":["`adaptive_prewarm_state`"]}}
+{"ts":"2026-03-25T16:33:36.492295544Z","kind":"stdout","line":"    - `adaptive_prewarm_summary`"}
+{"ts":"2026-03-25T16:33:36.492295544Z","kind":"protocol","event":{"type":"artifacts","items":["`adaptive_prewarm_summary`"]}}
+{"ts":"2026-03-25T16:33:36.492300125Z","kind":"stdout","line":"  - added `DashboardViewId::Attention`"}
+{"ts":"2026-03-25T16:33:36.492300125Z","kind":"protocol","event":{"type":"artifacts","items":["added `DashboardViewId::Attention`"]}}
+{"ts":"2026-03-25T16:33:36.492328357Z","kind":"stdout","line":"  - added `/health/attention` drill-down"}
+{"ts":"2026-03-25T16:33:36.492328357Z","kind":"protocol","event":{"type":"artifacts","items":["added `/health/attention` drill-down"]}}
+{"ts":"2026-03-25T16:33:36.492332299Z","kind":"stdout","line":"  - derived bounded hotspot-driven prewarm policy from inspectable signals"}
+{"ts":"2026-03-25T16:33:36.492332299Z","kind":"protocol","event":{"type":"artifacts","items":["derived bounded hotspot-driven prewarm policy from inspectable signals"]}}
+{"ts":"2026-03-25T16:33:36.492335921Z","kind":"stdout","line":"- `crates/membrain-core/src/store/cache.rs`"}
+{"ts":"2026-03-25T16:33:36.492335921Z","kind":"protocol","event":{"type":"artifacts","items":["`crates/membrain-core/src/store/cache.rs`"]}}
+{"ts":"2026-03-25T16:33:36.492338691Z","kind":"stdout","line":"  - added `PrefetchController::capacity()`"}
+{"ts":"2026-03-25T16:33:36.492338691Z","kind":"protocol","event":{"type":"artifacts","items":["added `PrefetchController::capacity()`"]}}
+{"ts":"2026-03-25T16:33:36.492341568Z","kind":"stdout","line":"- `crates/membrain-cli/src/main.rs`"}
+{"ts":"2026-03-25T16:33:36.492341568Z","kind":"protocol","event":{"type":"artifacts","items":["`crates/membrain-cli/src/main.rs`"]}}
+{"ts":"2026-03-25T16:33:36.492344125Z","kind":"stdout","line":"  - health output now renders:"}
+{"ts":"2026-03-25T16:33:36.492344125Z","kind":"protocol","event":{"type":"artifacts","items":["health output now renders:"]}}
+{"ts":"2026-03-25T16:33:36.492347001Z","kind":"stdout","line":"    - prewarm state + queue depth"}
+{"ts":"2026-03-25T16:33:36.492347001Z","kind":"protocol","event":{"type":"artifacts","items":["prewarm state + queue depth"]}}
+{"ts":"2026-03-25T16:33:36.492349558Z","kind":"stdout","line":"    - attention heatmap section"}
+{"ts":"2026-03-25T16:33:36.492349558Z","kind":"protocol","event":{"type":"artifacts","items":["attention heatmap section"]}}
+{"ts":"2026-03-25T16:33:36.492352222Z","kind":"stdout","line":"    - hotspot-ranked namespace rows"}
+{"ts":"2026-03-25T16:33:36.492352222Z","kind":"protocol","event":{"type":"artifacts","items":["hotspot-ranked namespace rows"]}}
+{"ts":"2026-03-25T16:33:36.492355098Z","kind":"stdout","line":"    - bounded prewarm summary"}
+{"ts":"2026-03-25T16:33:36.492355098Z","kind":"protocol","event":{"type":"artifacts","items":["bounded prewarm summary"]}}
+{"ts":"2026-03-25T16:33:36.492357868Z","kind":"stdout","line":"- `crates/membrain-cli/tests/cli_end_to_end.rs`"}
+{"ts":"2026-03-25T16:33:36.492357868Z","kind":"protocol","event":{"type":"artifacts","items":["`crates/membrain-cli/tests/cli_end_to_end.rs`"]}}
+{"ts":"2026-03-25T16:33:36.492360425Z","kind":"stdout","line":"  - updated JSON and human-output assertions for new heatmap/prewarm fields"}
+{"ts":"2026-03-25T16:33:36.492360425Z","kind":"protocol","event":{"type":"artifacts","items":["updated JSON and human-output assertions for new heatmap/prewarm fields"]}}
+{"ts":"2026-03-25T16:33:36.492363195Z","kind":"stdout","line":"- `docs/CLI.md`"}
+{"ts":"2026-03-25T16:33:36.492363195Z","kind":"protocol","event":{"type":"artifacts","items":["`docs/CLI.md`"]}}
+{"ts":"2026-03-25T16:33:36.492365965Z","kind":"stdout","line":"  - documented `attention` dashboard view and hotspot-driven bounded prewarm contract"}
+{"ts":"2026-03-25T16:33:36.492365965Z","kind":"protocol","event":{"type":"artifacts","items":["documented `attention` dashboard view and hotspot-driven bounded prewarm contract"]}}
+{"ts":"2026-03-25T16:33:36.492368629Z","kind":"stdout","line":"- `docs/OPERATIONS.md`"}
+{"ts":"2026-03-25T16:33:36.492368629Z","kind":"protocol","event":{"type":"artifacts","items":["`docs/OPERATIONS.md`"]}}
+{"ts":"2026-03-25T16:33:36.492883098Z","kind":"stdout","line":"  - updated operator posture/runbook evidence to include `attention.hotspots` and `cache.adaptive_prewarm_state`"}
+{"ts":"2026-03-25T16:33:36.492883098Z","kind":"protocol","event":{"type":"artifacts","items":["updated operator posture/runbook evidence to include `attention.hotspots` and `cache.adaptive_prewarm_state`"]}}
+{"ts":"2026-03-25T16:33:36.492893646Z","kind":"stdout","line":"- `docs/MCP_API.md`"}
+{"ts":"2026-03-25T16:33:36.492893646Z","kind":"protocol","event":{"type":"artifacts","items":["`docs/MCP_API.md`"]}}
+{"ts":"2026-03-25T16:33:36.492901956Z","kind":"stdout","line":"  - documented MCP parity for attention heatmap and adaptive prewarm fields"}
+{"ts":"2026-03-25T16:33:36.492901956Z","kind":"protocol","event":{"type":"artifacts","items":["documented MCP parity for attention heatmap and adaptive prewarm fields"]}}
+{"ts":"2026-03-25T16:33:36.492905045Z","kind":"stdout","line":""}
+{"ts":"2026-03-25T16:33:36.492906537Z","kind":"stdout","line":"GROVE_LESSONS:"}
+{"ts":"2026-03-25T16:33:36.492906537Z","kind":"protocol","event":{"type":"lessons","items":[]}}
+{"ts":"2026-03-25T16:33:36.492909946Z","kind":"stdout","line":"- The repo already had the right substrate: attention aggregation in `health.rs` and bounded speculative work in `cache.rs`. The missing piece was making the policy explicit and operator-visible."}
+{"ts":"2026-03-25T16:33:36.492909946Z","kind":"protocol","event":{"type":"lessons","items":["The repo already had the right substrate: attention aggregation in `health.rs` and bounded speculative work in `cache.rs`. The missing piece was making the policy explicit and operator-visible."]}}
+{"ts":"2026-03-25T16:33:36.492932532Z","kind":"stdout","line":"- Full CLI validation is currently blocked by unrelated daemon compile errors, so targeted core health validation was the reliable proof path."}
+{"ts":"2026-03-25T16:33:36.492932532Z","kind":"protocol","event":{"type":"lessons","items":["Full CLI validation is currently blocked by unrelated daemon compile errors, so targeted core health validation was the reliable proof path."]}}
+{"ts":"2026-03-25T16:33:36.493012542Z","kind":"stdout","line":""}
+{"ts":"2026-03-25T16:33:36.493014885Z","kind":"stdout","line":"GROVE_DECISIONS:"}
+{"ts":"2026-03-25T16:33:36.493014885Z","kind":"protocol","event":{"type":"decision","items":[]}}
+{"ts":"2026-03-25T16:33:36.493018401Z","kind":"stdout","line":"- Kept adaptive pre-warming bounded and explainable by emitting recommended prewarm actions/families in `BrainHealthReport` instead of adding opaque autonomous warming behavior on the hot path."}
+{"ts":"2026-03-25T16:33:36.493018401Z","kind":"protocol","event":{"type":"decision","items":["Kept adaptive pre-warming bounded and explainable by emitting recommended prewarm actions/families in `BrainHealthReport` instead of adding opaque autonomous warming behavior on the hot path."]}}
+{"ts":"2026-03-25T16:33:36.493021491Z","kind":"stdout","line":"- Anchored operator inspection to the existing `membrain health`/MCP health report surface via `dashboard_views`, `attention.hotspots`, and `/health/attention`, rather than inventing a new CLI command."}
+{"ts":"2026-03-25T16:33:36.493021491Z","kind":"protocol","event":{"type":"decision","items":["Anchored operator inspection to the existing `membrain health`/MCP health report surface via `dashboard_views`, `attention.hotspots`, and `/health/attention`, rather than inventing a new CLI command."]}}
+{"ts":"2026-03-25T16:33:36.493024367Z","kind":"stdout","line":""}
+{"ts":"2026-03-25T16:33:36.493025752Z","kind":"stdout","line":"GROVE_WARNINGS:"}
+{"ts":"2026-03-25T16:33:36.493025752Z","kind":"protocol","event":{"type":"warning","items":[]}}
+{"ts":"2026-03-25T16:33:36.493028416Z","kind":"stdout","line":"- `cargo check --all-targets` is currently blocked by unrelated pre-existing daemon compile errors:"}
+{"ts":"2026-03-25T16:33:36.493028416Z","kind":"protocol","event":{"type":"warning","items":["`cargo check --all-targets` is currently blocked by unrelated pre-existing daemon compile errors:"]}}
+{"ts":"2026-03-25T16:33:36.493033423Z","kind":"stdout","line":"  - `crates/membrain-daemon/src/rpc.rs:920`"}
+{"ts":"2026-03-25T16:33:36.493033423Z","kind":"protocol","event":{"type":"warning","items":["`crates/membrain-daemon/src/rpc.rs:920`"]}}
+{"ts":"2026-03-25T16:33:36.493040668Z","kind":"stdout","line":"  - `crates/membrain-daemon/src/rpc.rs:935`"}
+{"ts":"2026-03-25T16:33:36.493040668Z","kind":"protocol","event":{"type":"warning","items":["`crates/membrain-daemon/src/rpc.rs:935`"]}}
+{"ts":"2026-03-25T16:33:36.493043970Z","kind":"stdout","line":"  - missing `parse_required_positive_u64`"}
+{"ts":"2026-03-25T16:33:36.493043970Z","kind":"protocol","event":{"type":"warning","items":["missing `parse_required_positive_u64`"]}}
+{"ts":"2026-03-25T16:33:36.493046634Z","kind":"stdout","line":"- Because of that daemon blocker, `cargo test -p membrain-cli --test cli_end_to_end cli_health_ -- --nocapture` could not complete in this workspace state, even though the CLI test file was updated for the new contract."}
+{"ts":"2026-03-25T16:33:36.493046634Z","kind":"protocol","event":{"type":"warning","items":["Because of that daemon blocker, `cargo test -p membrain-cli --test cli_end_to_end cli_health_ -- --nocapture` could not complete in this workspace state, even though the CLI test file was updated for the new contract."]}}
+{"ts":"2026-03-25T16:33:36.493049723Z","kind":"stdout","line":""}
+{"ts":"2026-03-25T16:33:36.493051108Z","kind":"stdout","line":"Validation performed:"}
+{"ts":"2026-03-25T16:33:36.493052600Z","kind":"stdout","line":"- Passed:"}
+{"ts":"2026-03-25T16:33:36.493053985Z","kind":"stdout","line":"  - `cargo test -p membrain-core health_report_aggregates_subsystems_and_trends -- --nocapture`"}
+{"ts":"2026-03-25T16:33:36.493055370Z","kind":"stdout","line":"  - `cargo test -p membrain-core health_report_includes_prefetch_family_drop_metrics -- --nocapture`"}
+{"ts":"2026-03-25T16:33:36.493056755Z","kind":"stdout","line":"- Blocked by unrelated daemon errors:"}
+{"ts":"2026-03-25T16:33:36.493058140Z","kind":"stdout","line":"  - `cargo test -p membrain-cli --test cli_end_to_end cli_health_ -- --nocapture`"}
+{"ts":"2026-03-25T16:33:36.493059738Z","kind":"stdout","line":"  - `cargo check --all-targets`"}
+{"ts":"2026-03-25T16:33:36.493061123Z","kind":"stdout","line":""}
+{"ts":"2026-03-25T16:33:36.493062508Z","kind":"stdout","line":"GROVE_EXIT: true"}
+{"ts":"2026-03-25T16:33:36.493062508Z","kind":"protocol","event":{"type":"exit","value":true}}
+{"ts":"2026-03-25T16:33:37.075392659Z","kind":"session_ended","exit_code":0}

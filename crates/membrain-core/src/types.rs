@@ -1,4 +1,4 @@
-use crate::api::{AgentId, NamespaceId, WorkspaceId};
+use crate::api::{AgentId, NamespaceId, TaskId, WorkspaceId};
 use crate::observability::AuditEventKind;
 use crate::policy::SharingVisibility;
 
@@ -108,6 +108,68 @@ impl FastPathRouteFamily {
     }
 }
 
+/// Bounded affect signals evaluated during encode and trajectory capture.
+#[derive(Debug, Clone, Copy, PartialEq, serde::Serialize, serde::Deserialize)]
+pub struct AffectSignals {
+    /// Emotional valence normalized to -1.0..=1.0.
+    pub valence: f32,
+    /// Emotional arousal normalized to 0.0..=1.0.
+    pub arousal: f32,
+}
+
+impl AffectSignals {
+    /// Builds bounded affect signals for one encode candidate.
+    pub const fn new(valence: f32, arousal: f32) -> Self {
+        Self { valence, arousal }
+    }
+
+    /// Returns a clamped copy using the canonical durable bounds.
+    pub fn clamped(self) -> Self {
+        Self {
+            valence: self.valence.clamp(-1.0, 1.0),
+            arousal: self.arousal.clamp(0.0, 1.0),
+        }
+    }
+}
+
+/// One durable affect-trajectory row captured from encode-time signals.
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
+pub struct AffectTrajectoryRow {
+    /// Namespace owning this trajectory row.
+    pub namespace: NamespaceId,
+    /// Optional era anchor associated with the recorded affect state.
+    pub era_id: Option<String>,
+    /// Memory whose encode-time affect signal produced this row.
+    pub memory_id: MemoryId,
+    /// Logical tick where this row begins.
+    pub tick_start: u64,
+    /// Logical tick where this row ends.
+    pub tick_end: Option<u64>,
+    /// Averaged valence carried by the stored row.
+    pub avg_valence: f32,
+    /// Averaged arousal carried by the stored row.
+    pub avg_arousal: f32,
+    /// Number of contributing memories represented by this row.
+    pub memory_count: u64,
+    /// Stable label naming where the authoritative trajectory lives.
+    pub authoritative_truth: &'static str,
+}
+
+/// Bounded mood-history surface returned by core and wrapper introspection paths.
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
+pub struct AffectTrajectoryHistory {
+    /// Namespace whose affect trajectory was queried.
+    pub namespace: NamespaceId,
+    /// Optional inclusive lower tick bound applied to the result.
+    pub since_tick: Option<u64>,
+    /// Total rows returned after filtering.
+    pub total_rows: usize,
+    /// Ordered durable trajectory rows.
+    pub rows: Vec<AffectTrajectoryRow>,
+    /// Stable label naming where the authoritative trajectory lives.
+    pub authoritative_truth: &'static str,
+}
+
 /// Bounded temporal-landmark signals evaluated during encode.
 #[derive(Debug, Clone, Copy, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct LandmarkSignals {
@@ -176,6 +238,8 @@ pub struct RawEncodeInput {
     pub kind: RawIntakeKind,
     /// Raw evidence preserved for normalization and later persistence.
     pub raw_text: String,
+    /// Optional bounded affect signals supplied by the caller.
+    pub affect_signals: Option<AffectSignals>,
     /// Optional bounded temporal-landmark signals supplied by the caller.
     pub landmark_signals: Option<LandmarkSignals>,
     /// Optional currently active era carried by the caller for non-landmark memories.
@@ -190,10 +254,17 @@ impl RawEncodeInput {
         Self {
             kind,
             raw_text: raw_text.into(),
+            affect_signals: None,
             landmark_signals: None,
             active_era_id: None,
             current_tick: None,
         }
+    }
+
+    /// Attaches bounded affect signals for additive emotional enrichment.
+    pub fn with_affect_signals(mut self, affect_signals: AffectSignals) -> Self {
+        self.affect_signals = Some(affect_signals);
+        self
     }
 
     /// Attaches bounded landmark signals for additive temporal enrichment.
@@ -248,8 +319,28 @@ impl SharingMetadata {
     }
 }
 
+/// Durable compression lineage metadata preserved beside canonical memory records.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct CompressionMetadata {
+    /// Schema memory this memory was compressed into, when the row is a compressed source.
+    pub compressed_into: Option<MemoryId>,
+    /// Logical tick when compression state was recorded.
+    pub compression_tick: Option<u64>,
+    /// Source memories distilled into this row when the row itself is a schema memory.
+    pub source_memory_ids: Vec<MemoryId>,
+}
+
+impl CompressionMetadata {
+    /// Returns true when no durable compression lineage has been recorded.
+    pub fn is_empty(&self) -> bool {
+        self.compressed_into.is_none()
+            && self.compression_tick.is_none()
+            && self.source_memory_ids.is_empty()
+    }
+}
+
 /// Canonical normalized envelope produced before the first durable write.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct NormalizedMemoryEnvelope {
     /// First canonical memory family chosen for the durable record.
     pub memory_type: CanonicalMemoryType,
@@ -263,6 +354,8 @@ pub struct NormalizedMemoryEnvelope {
     pub normalization_generation: &'static str,
     /// Bounded normalized payload size consulted by later routing.
     pub payload_size_bytes: usize,
+    /// Optional bounded affect signals preserved as encode-time trajectory input.
+    pub affect: Option<AffectSignals>,
     /// Additive temporal landmark and era metadata derived during encode.
     pub landmark: LandmarkMetadata,
     /// Optional passive-observation batch source preserved for provenance and inspect.
@@ -273,6 +366,8 @@ pub struct NormalizedMemoryEnvelope {
     pub has_causal_parents: bool,
     /// Whether this record is already a source for downstream causal children.
     pub has_causal_children: bool,
+    /// Durable schema-compression lineage preserved for source and schema rows.
+    pub compression: CompressionMetadata,
     /// Cross-agent sharing envelope preserved for later namespace and visibility mediation.
     pub sharing: SharingMetadata,
 }
@@ -381,6 +476,24 @@ impl SemanticDiffCategory {
             Self::DerivedState => "derived_state",
         }
     }
+
+    /// Returns a stable explanation phrase for operator-facing inspect surfaces.
+    pub const fn explanation_phrase(self) -> &'static str {
+        match self {
+            Self::New => "new evidence or facts became visible",
+            Self::Strengthened => "existing evidence gained stronger support or visibility",
+            Self::Weakened => "existing evidence lost support, confidence, or availability",
+            Self::Archived => {
+                "previously available state moved behind archival or deletion boundaries"
+            }
+            Self::Conflicting => {
+                "the compared interval surfaced unresolved contradiction or rejection evidence"
+            }
+            Self::DerivedState => {
+                "the compared interval changed a derived or maintenance-backed state"
+            }
+        }
+    }
 }
 
 /// Directional change between two anchored historical states.
@@ -419,6 +532,85 @@ pub struct SemanticDiff {
     pub caution: &'static str,
 }
 
+impl SemanticDiff {
+    /// Builds the inspectable semantic-diff surface used by wrappers and explanation layers.
+    pub fn inspect_surface(&self) -> SemanticDiffInspectSurface {
+        let before_anchor_label = self.before_anchor.display_label();
+        let after_anchor_label = self.after_anchor.display_label();
+        let category_counts = self
+            .category_counts
+            .iter()
+            .map(|(category, count)| (category.as_str().to_string(), *count))
+            .collect::<Vec<_>>();
+        let changed_rows = self
+            .entries
+            .iter()
+            .map(|entry| SemanticDiffInspectRow {
+                category: entry.category,
+                category_name: entry.category.as_str().to_string(),
+                summary: entry.summary.clone(),
+                explanation: format!(
+                    "{} between {} and {}: {}",
+                    entry.category.explanation_phrase(),
+                    entry.before_anchor.display_label(),
+                    entry.after_anchor.display_label(),
+                    entry.summary
+                ),
+                memory_id: entry.memory_id,
+                audit_kind: entry.audit_kind,
+                before_anchor_label: entry.before_anchor.display_label(),
+                after_anchor_label: entry.after_anchor.display_label(),
+                unresolved: entry.unresolved,
+            })
+            .collect::<Vec<_>>();
+
+        SemanticDiffInspectSurface {
+            namespace: self.namespace.clone(),
+            before_anchor: self.before_anchor.clone(),
+            after_anchor: self.after_anchor.clone(),
+            before_anchor_label: before_anchor_label.clone(),
+            after_anchor_label: after_anchor_label.clone(),
+            category_counts,
+            explanation_summary: semantic_diff_explanation_summary(
+                &before_anchor_label,
+                &after_anchor_label,
+                &self.category_counts,
+                changed_rows.len(),
+            ),
+            changed_rows,
+            caution: self.caution,
+        }
+    }
+}
+
+/// One inspectable semantic-diff row with a stable explanation string.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct SemanticDiffInspectRow {
+    pub category: SemanticDiffCategory,
+    pub category_name: String,
+    pub summary: String,
+    pub explanation: String,
+    pub memory_id: Option<MemoryId>,
+    pub audit_kind: Option<AuditEventKind>,
+    pub before_anchor_label: String,
+    pub after_anchor_label: String,
+    pub unresolved: bool,
+}
+
+/// Inspectable and explainable semantic-diff surface for wrapper callers.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct SemanticDiffInspectSurface {
+    pub namespace: NamespaceId,
+    pub before_anchor: SnapshotAnchor,
+    pub after_anchor: SnapshotAnchor,
+    pub before_anchor_label: String,
+    pub after_anchor_label: String,
+    pub category_counts: Vec<(String, usize)>,
+    pub changed_rows: Vec<SemanticDiffInspectRow>,
+    pub explanation_summary: String,
+    pub caution: &'static str,
+}
+
 /// Durable metadata stored for one named snapshot without copying memory payloads.
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct SnapshotMetadata {
@@ -440,6 +632,23 @@ pub struct SnapshotMetadata {
     pub retention_class: SnapshotRetentionClass,
     /// Whether the snapshot is still active for historical recall.
     pub active: bool,
+}
+
+fn semantic_diff_explanation_summary(
+    before_anchor_label: &str,
+    after_anchor_label: &str,
+    category_counts: &[(SemanticDiffCategory, usize)],
+    changed_rows: usize,
+) -> String {
+    let counts = category_counts
+        .iter()
+        .map(|(category, count)| format!("{}={}", category.as_str(), count))
+        .collect::<Vec<_>>()
+        .join(", ");
+    format!(
+        "semantic diff from {} to {} surfaced {} changed row(s); category totals: {}",
+        before_anchor_label, after_anchor_label, changed_rows, counts
+    )
 }
 
 impl SnapshotMetadata {
@@ -647,11 +856,77 @@ mod tests {
         );
         assert!(diff.caution.contains("does not prove consensus or truth"));
     }
+
+    #[test]
+    fn semantic_diff_inspect_surface_exposes_changed_rows_and_explanations() {
+        let namespace = NamespaceId::new("tests.semantic_diff").unwrap();
+        let before_anchor = SnapshotAnchor::Tick { as_of_tick: 10 };
+        let after_anchor = SnapshotAnchor::Named {
+            snapshot_id: SnapshotId(8),
+            snapshot_name: "after".to_string(),
+            as_of_tick: 20,
+        };
+        let diff = SemanticDiff {
+            namespace: namespace.clone(),
+            before_anchor: before_anchor.clone(),
+            after_anchor: after_anchor.clone(),
+            category_counts: vec![
+                (SemanticDiffCategory::New, 1),
+                (SemanticDiffCategory::Conflicting, 1),
+            ],
+            entries: vec![
+                SemanticDiffEntry {
+                    category: SemanticDiffCategory::New,
+                    summary: "fresh supporting fact appeared".to_string(),
+                    memory_id: Some(MemoryId(4)),
+                    audit_kind: Some(AuditEventKind::EncodeAccepted),
+                    before_anchor: before_anchor.clone(),
+                    after_anchor: after_anchor.clone(),
+                    unresolved: false,
+                },
+                SemanticDiffEntry {
+                    category: SemanticDiffCategory::Conflicting,
+                    summary: "conflicting belief surfaced for memory=7".to_string(),
+                    memory_id: Some(MemoryId(7)),
+                    audit_kind: Some(AuditEventKind::EncodeRejected),
+                    before_anchor: before_anchor.clone(),
+                    after_anchor: after_anchor.clone(),
+                    unresolved: true,
+                },
+            ],
+            caution: "semantic diff summarizes bounded historical evidence and does not prove consensus or truth",
+        };
+
+        let inspect = diff.inspect_surface();
+
+        assert_eq!(inspect.namespace, namespace);
+        assert_eq!(inspect.before_anchor_label, "tick:10");
+        assert_eq!(inspect.after_anchor_label, "snapshot:after");
+        assert_eq!(
+            inspect.category_counts,
+            vec![("new".to_string(), 1), ("conflicting".to_string(), 1)]
+        );
+        assert_eq!(inspect.changed_rows.len(), 2);
+        assert!(inspect.changed_rows.iter().any(|row| {
+            row.category_name == "conflicting"
+                && row.unresolved
+                && row
+                    .explanation
+                    .contains("unresolved contradiction or rejection evidence")
+        }));
+        assert!(inspect
+            .explanation_summary
+            .contains("semantic diff from tick:10 to snapshot:after surfaced 2 changed row(s)"));
+    }
 }
 
 /// Stable identifier for one session-local hot window.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
 pub struct SessionId(pub u64);
+
+/// Stable identity handle for one persisted blackboard snapshot artifact.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
+pub struct BlackboardSnapshotId(pub u64);
 
 /// Payload residency state for Tier1 metadata entries.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -744,4 +1019,177 @@ impl WorkingMemoryItem {
         self.pinned = true;
         self
     }
+}
+
+/// Compact evidence handle promoted into visible working-state surfaces.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct BlackboardEvidenceHandle {
+    /// Durable memory id referenced by the working-state projection.
+    pub memory_id: MemoryId,
+    /// Machine-readable role for this evidence in the active task.
+    pub role: String,
+    /// Whether the evidence is pinned in the visible blackboard.
+    pub pinned: bool,
+}
+
+impl BlackboardEvidenceHandle {
+    /// Builds a new blackboard evidence handle with one stable role label.
+    pub fn new(memory_id: MemoryId, role: impl Into<String>) -> Self {
+        Self {
+            memory_id,
+            role: role.into(),
+            pinned: false,
+        }
+    }
+
+    /// Marks this evidence handle as pinned in the blackboard projection.
+    pub fn pinned(mut self) -> Self {
+        self.pinned = true;
+        self
+    }
+}
+
+/// Visible working-state projection for one active task or session.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct BlackboardState {
+    /// Namespace owning the active work.
+    pub namespace: NamespaceId,
+    /// Optional governing task identity for this projection.
+    pub task_id: Option<TaskId>,
+    /// Optional session identity associated with the active work.
+    pub session_id: Option<SessionId>,
+    /// Current primary goal shown in the blackboard.
+    pub current_goal: String,
+    /// Ordered active subgoals visible for steering and handoff.
+    pub subgoals: Vec<String>,
+    /// Selected evidence handles promoted into active working state.
+    pub active_evidence: Vec<BlackboardEvidenceHandle>,
+    /// Compact active beliefs surfaced for inspect and handoff.
+    pub active_beliefs: Vec<String>,
+    /// Explicit unknowns preserved instead of guessed away.
+    pub unknowns: Vec<String>,
+    /// Next intended bounded action, when one is known.
+    pub next_action: Option<String>,
+    /// Explicit blocked reason when progress is currently impeded.
+    pub blocked_reason: Option<String>,
+    /// Stable label proving this object is a projection, not durable truth.
+    pub projection_kind: &'static str,
+    /// Stable label naming where authoritative truth still lives.
+    pub authoritative_truth: &'static str,
+}
+
+impl BlackboardState {
+    /// Builds a new visible working-state projection for one task or session.
+    pub fn new(
+        namespace: NamespaceId,
+        task_id: Option<TaskId>,
+        session_id: Option<SessionId>,
+        current_goal: impl Into<String>,
+    ) -> Self {
+        Self {
+            namespace,
+            task_id,
+            session_id,
+            current_goal: current_goal.into(),
+            subgoals: Vec::new(),
+            active_evidence: Vec::new(),
+            active_beliefs: Vec::new(),
+            unknowns: Vec::new(),
+            next_action: None,
+            blocked_reason: None,
+            projection_kind: "working_state_projection",
+            authoritative_truth: "durable_memory",
+        }
+    }
+}
+
+/// One frame in the bounded active goal stack.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct GoalStackFrame {
+    /// Human-readable goal label for the frame.
+    pub goal: String,
+    /// Optional parent goal label for hierarchy inspection.
+    pub parent_goal: Option<String>,
+    /// Optional bounded priority within the current stack.
+    pub priority: Option<u8>,
+    /// Explicit blocked reason for this frame when one exists.
+    pub blocked_reason: Option<String>,
+}
+
+impl GoalStackFrame {
+    /// Builds a new goal-stack frame with one goal label.
+    pub fn new(goal: impl Into<String>) -> Self {
+        Self {
+            goal: goal.into(),
+            parent_goal: None,
+            priority: None,
+            blocked_reason: None,
+        }
+    }
+}
+
+/// Explicit lifecycle state for active resumable work.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum GoalLifecycleStatus {
+    Active,
+    Dormant,
+    Stale,
+    Abandoned,
+}
+
+impl GoalLifecycleStatus {
+    /// Returns the stable machine-readable name for this lifecycle state.
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Active => "active",
+            Self::Dormant => "dormant",
+            Self::Stale => "stale",
+            Self::Abandoned => "abandoned",
+        }
+    }
+}
+
+/// Bounded resumability checkpoint for active work.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct GoalCheckpoint {
+    /// Stable checkpoint identifier for inspect and handoff.
+    pub checkpoint_id: String,
+    /// Logical tick or request-derived anchor where the checkpoint was produced.
+    pub created_tick: u64,
+    /// Lifecycle state captured by this checkpoint.
+    pub status: GoalLifecycleStatus,
+    /// Selected evidence handles preserved for resume without copying authority.
+    pub evidence_handles: Vec<MemoryId>,
+    /// Pending dependency handles or labels required before work can continue.
+    pub pending_dependencies: Vec<String>,
+    /// Explicit blocked reason preserved in the checkpoint when present.
+    pub blocked_reason: Option<String>,
+    /// Compact blackboard summary for inspect, resume, and handoff.
+    pub blackboard_summary: Option<String>,
+    /// Whether the checkpoint is stale relative to the active runtime surface.
+    pub stale: bool,
+    /// Namespace owning the checkpointed work.
+    pub namespace: NamespaceId,
+    /// Optional governing task for the checkpoint.
+    pub task_id: Option<TaskId>,
+    /// Stable label proving the checkpoint is a working-state anchor only.
+    pub authoritative_truth: &'static str,
+}
+
+/// Persisted blackboard snapshot artifact for inspect, resume, or handoff.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct BlackboardSnapshotArtifact {
+    /// Stable snapshot identifier.
+    pub snapshot_id: String,
+    /// Logical tick or request-derived anchor where the snapshot was emitted.
+    pub created_tick: u64,
+    /// Evidence handles referenced by the snapshot.
+    pub evidence_handles: Vec<MemoryId>,
+    /// Compact human-readable note about the snapshot.
+    pub note: Option<String>,
+    /// Stable label proving this snapshot is derived and rebuildable.
+    pub artifact_kind: &'static str,
+    /// Stable label naming where authoritative truth still lives.
+    pub authoritative_truth: &'static str,
 }

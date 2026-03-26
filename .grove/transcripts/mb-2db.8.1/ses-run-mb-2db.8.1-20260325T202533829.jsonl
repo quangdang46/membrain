@@ -1,0 +1,89 @@
+{"ts":"2026-03-25T20:25:33.843408828Z","kind":"session_started","session_id":"ses-run-mb-2db.8.1-20260325T202533829"}
+{"ts":"2026-03-25T20:56:36.540776203Z","kind":"stdout","line":"Implemented the first durable affect layer."}
+{"ts":"2026-03-25T20:56:36.583965852Z","kind":"stdout","line":""}
+{"ts":"2026-03-25T20:56:36.583981123Z","kind":"stdout","line":"GROVE_RESULT: success"}
+{"ts":"2026-03-25T20:56:36.583981123Z","kind":"protocol","event":{"type":"result","summary":"success"}}
+{"ts":"2026-03-25T20:56:36.584421324Z","kind":"stdout","line":""}
+{"ts":"2026-03-25T20:56:36.584432537Z","kind":"stdout","line":"Changed:"}
+{"ts":"2026-03-25T20:56:36.584435634Z","kind":"stdout","line":"- `crates/membrain-core/src/types.rs`"}
+{"ts":"2026-03-25T20:56:36.584441187Z","kind":"stdout","line":"  - added `AffectSignals`"}
+{"ts":"2026-03-25T20:56:36.584444284Z","kind":"stdout","line":"  - added `AffectTrajectoryRow`"}
+{"ts":"2026-03-25T20:56:36.584447168Z","kind":"stdout","line":"  - added `AffectTrajectoryHistory`"}
+{"ts":"2026-03-25T20:56:36.584449410Z","kind":"stdout","line":"  - extended `RawEncodeInput` with optional `affect_signals`"}
+{"ts":"2026-03-25T20:56:36.584483905Z","kind":"stdout","line":"  - extended `NormalizedMemoryEnvelope` with optional `affect`"}
+{"ts":"2026-03-25T20:56:36.584490633Z","kind":"stdout","line":"- `crates/membrain-core/src/engine/encode.rs`"}
+{"ts":"2026-03-25T20:56:36.584493730Z","kind":"stdout","line":"  - normalize/preserve affect signals on the encode fast path"}
+{"ts":"2026-03-25T20:56:36.584496186Z","kind":"stdout","line":"- `crates/membrain-core/src/brain_store.rs`"}
+{"ts":"2026-03-25T20:56:36.584498749Z","kind":"stdout","line":"  - added in-memory durable core surface for affect trajectory storage/query"}
+{"ts":"2026-03-25T20:56:36.584500991Z","kind":"stdout","line":"  - added `record_affect_trajectory(...)`"}
+{"ts":"2026-03-25T20:56:36.584503127Z","kind":"stdout","line":"  - added `mood_history(...)`"}
+{"ts":"2026-03-25T20:56:36.584505263Z","kind":"stdout","line":"- `crates/membrain-core/src/store/tier2.rs`"}
+{"ts":"2026-03-25T20:56:36.584507506Z","kind":"stdout","line":"  - Tier2 metadata now carries optional affect"}
+{"ts":"2026-03-25T20:56:36.584509749Z","kind":"stdout","line":"- `crates/membrain-core/src/engine/diff.rs`"}
+{"ts":"2026-03-25T20:56:36.584511778Z","kind":"stdout","line":"  - updated fixture initializer for the new normalized field"}
+{"ts":"2026-03-25T20:56:36.584513700Z","kind":"stdout","line":"- `crates/membrain-core/tests/tier2_item_layout.rs`"}
+{"ts":"2026-03-25T20:56:36.584515836Z","kind":"stdout","line":"  - updated fixture initializer for the new normalized field"}
+{"ts":"2026-03-25T20:56:36.584517865Z","kind":"stdout","line":"- `crates/membrain-daemon/src/rpc.rs`"}
+{"ts":"2026-03-25T20:56:36.584519894Z","kind":"stdout","line":"  - `encode` now accepts `emotional_annotations`"}
+{"ts":"2026-03-25T20:56:36.584522030Z","kind":"stdout","line":"  - added `mood_history` runtime request parsing"}
+{"ts":"2026-03-25T20:56:36.584524059Z","kind":"stdout","line":"- `crates/membrain-daemon/src/daemon.rs`"}
+{"ts":"2026-03-25T20:56:36.584526088Z","kind":"stdout","line":"  - encode path parses `emotional_annotations` into affect signals"}
+{"ts":"2026-03-25T20:56:36.584528117Z","kind":"stdout","line":"  - records trajectory rows into core store"}
+{"ts":"2026-03-25T20:56:36.584530146Z","kind":"stdout","line":"  - serves `mood_history`"}
+{"ts":"2026-03-25T20:56:36.584532282Z","kind":"stdout","line":"  - added focused daemon integration test"}
+{"ts":"2026-03-25T20:56:36.584534418Z","kind":"stdout","line":""}
+{"ts":"2026-03-25T20:56:36.584536554Z","kind":"stdout","line":"Validation:"}
+{"ts":"2026-03-25T20:56:36.584538796Z","kind":"stdout","line":"- `cargo test -p membrain-core mood_history_returns_recorded_affect_trajectory_rows -- --nocapture`"}
+{"ts":"2026-03-25T20:56:36.584541039Z","kind":"stdout","line":"- `cargo test -p membrain-daemon parse_method_accepts_mood_history_params -- --nocapture`"}
+{"ts":"2026-03-25T20:56:36.584543175Z","kind":"stdout","line":"- `cargo test -p membrain-daemon runtime_encode_records_affect_history_and_serves_mood_history -- --nocapture`"}
+{"ts":"2026-03-25T20:56:36.584844011Z","kind":"stdout","line":"- `cargo check --all-targets`"}
+{"ts":"2026-03-25T20:56:36.584847962Z","kind":"stdout","line":""}
+{"ts":"2026-03-25T20:56:36.584849884Z","kind":"stdout","line":"Key refs:"}
+{"ts":"2026-03-25T20:56:36.584851700Z","kind":"stdout","line":"- `crates/membrain-core/src/types.rs`"}
+{"ts":"2026-03-25T20:56:36.584853408Z","kind":"stdout","line":"- `crates/membrain-core/src/brain_store.rs`"}
+{"ts":"2026-03-25T20:56:36.584854797Z","kind":"stdout","line":"- `crates/membrain-daemon/src/rpc.rs`"}
+{"ts":"2026-03-25T20:56:36.584856078Z","kind":"stdout","line":"- `crates/membrain-daemon/src/daemon.rs`"}
+{"ts":"2026-03-25T20:56:36.584857680Z","kind":"stdout","line":""}
+{"ts":"2026-03-25T20:56:36.584858962Z","kind":"stdout","line":"GROVE_ARTIFACTS:"}
+{"ts":"2026-03-25T20:56:36.584858962Z","kind":"protocol","event":{"type":"artifacts","items":[]}}
+{"ts":"2026-03-25T20:56:36.585343054Z","kind":"stdout","line":"- `crates/membrain-core/src/types.rs`"}
+{"ts":"2026-03-25T20:56:36.585343054Z","kind":"protocol","event":{"type":"artifacts","items":["`crates/membrain-core/src/types.rs`"]}}
+{"ts":"2026-03-25T20:56:36.585348073Z","kind":"stdout","line":"- `crates/membrain-core/src/engine/encode.rs`"}
+{"ts":"2026-03-25T20:56:36.585348073Z","kind":"protocol","event":{"type":"artifacts","items":["`crates/membrain-core/src/engine/encode.rs`"]}}
+{"ts":"2026-03-25T20:56:36.585351170Z","kind":"stdout","line":"- `crates/membrain-core/src/brain_store.rs`"}
+{"ts":"2026-03-25T20:56:36.585351170Z","kind":"protocol","event":{"type":"artifacts","items":["`crates/membrain-core/src/brain_store.rs`"]}}
+{"ts":"2026-03-25T20:56:36.585355869Z","kind":"stdout","line":"- `crates/membrain-core/src/store/tier2.rs`"}
+{"ts":"2026-03-25T20:56:36.585355869Z","kind":"protocol","event":{"type":"artifacts","items":["`crates/membrain-core/src/store/tier2.rs`"]}}
+{"ts":"2026-03-25T20:56:36.585358753Z","kind":"stdout","line":"- `crates/membrain-daemon/src/rpc.rs`"}
+{"ts":"2026-03-25T20:56:36.585358753Z","kind":"protocol","event":{"type":"artifacts","items":["`crates/membrain-daemon/src/rpc.rs`"]}}
+{"ts":"2026-03-25T20:56:36.585361743Z","kind":"stdout","line":"- `crates/membrain-daemon/src/daemon.rs`"}
+{"ts":"2026-03-25T20:56:36.585361743Z","kind":"protocol","event":{"type":"artifacts","items":["`crates/membrain-daemon/src/daemon.rs`"]}}
+{"ts":"2026-03-25T20:56:36.585364306Z","kind":"stdout","line":""}
+{"ts":"2026-03-25T20:56:36.585365801Z","kind":"stdout","line":"GROVE_LESSONS:"}
+{"ts":"2026-03-25T20:56:36.585365801Z","kind":"protocol","event":{"type":"lessons","items":[]}}
+{"ts":"2026-03-25T20:56:36.585369432Z","kind":"stdout","line":"- The repo already had a latent `emotional_timeline` durable schema hook, but no core row/history model or daemon dispatch using it."}
+{"ts":"2026-03-25T20:56:36.585369432Z","kind":"protocol","event":{"type":"lessons","items":["The repo already had a latent `emotional_timeline` durable schema hook, but no core row/history model or daemon dispatch using it."]}}
+{"ts":"2026-03-25T20:56:36.585402538Z","kind":"stdout","line":"- The smallest safe implementation was to extend the existing encode → normalized envelope → Tier2/daemon path, not invent a second storage flow."}
+{"ts":"2026-03-25T20:56:36.585402538Z","kind":"protocol","event":{"type":"lessons","items":["The smallest safe implementation was to extend the existing encode → normalized envelope → Tier2/daemon path, not invent a second storage flow."]}}
+{"ts":"2026-03-25T20:56:36.585407878Z","kind":"stdout","line":""}
+{"ts":"2026-03-25T20:56:36.585409586Z","kind":"stdout","line":"GROVE_DECISIONS:"}
+{"ts":"2026-03-25T20:56:36.585409586Z","kind":"protocol","event":{"type":"decision","items":[]}}
+{"ts":"2026-03-25T20:56:36.585415780Z","kind":"stdout","line":"- Kept this bead scoped to the first durable layer only: capture + representation + history storage/query."}
+{"ts":"2026-03-25T20:56:36.585415780Z","kind":"protocol","event":{"type":"decision","items":["Kept this bead scoped to the first durable layer only: capture + representation + history storage/query."]}}
+{"ts":"2026-03-25T20:56:36.585425178Z","kind":"stdout","line":"- Did not implement retrieval-side `mood_congruent` ranking yet."}
+{"ts":"2026-03-25T20:56:36.585425178Z","kind":"protocol","event":{"type":"decision","items":["Did not implement retrieval-side `mood_congruent` ranking yet."]}}
+{"ts":"2026-03-25T20:56:36.585428382Z","kind":"stdout","line":"- Did not broaden into full CLI persistence of `--valence/--arousal`; those flags still need a follow-on wiring pass."}
+{"ts":"2026-03-25T20:56:36.585428382Z","kind":"protocol","event":{"type":"decision","items":["Did not broaden into full CLI persistence of `--valence/--arousal`; those flags still need a follow-on wiring pass."]}}
+{"ts":"2026-03-25T20:56:36.585431586Z","kind":"stdout","line":""}
+{"ts":"2026-03-25T20:56:36.585433081Z","kind":"stdout","line":"GROVE_WARNINGS:"}
+{"ts":"2026-03-25T20:56:36.585433081Z","kind":"protocol","event":{"type":"warning","items":[]}}
+{"ts":"2026-03-25T20:56:36.585435964Z","kind":"stdout","line":"- `mood_history` currently returns the durable history surface, but MCP-specific typed payload polish is still thin."}
+{"ts":"2026-03-25T20:56:36.585435964Z","kind":"protocol","event":{"type":"warning","items":["`mood_history` currently returns the durable history surface, but MCP-specific typed payload polish is still thin."]}}
+{"ts":"2026-03-25T20:56:36.585440022Z","kind":"stdout","line":"- CLI parses emotional inputs but still does not feed them into the shared core/daemon path."}
+{"ts":"2026-03-25T20:56:36.585440022Z","kind":"protocol","event":{"type":"warning","items":["CLI parses emotional inputs but still does not feed them into the shared core/daemon path."]}}
+{"ts":"2026-03-25T20:56:36.585443012Z","kind":"stdout","line":"- Ranking behavior for `mood_congruent` remains unimplemented."}
+{"ts":"2026-03-25T20:56:36.585443012Z","kind":"protocol","event":{"type":"warning","items":["Ranking behavior for `mood_congruent` remains unimplemented."]}}
+{"ts":"2026-03-25T20:56:36.585445789Z","kind":"stdout","line":""}
+{"ts":"2026-03-25T20:56:36.585447071Z","kind":"stdout","line":"GROVE_EXIT: false"}
+{"ts":"2026-03-25T20:56:36.585447071Z","kind":"protocol","event":{"type":"exit","value":false}}
+{"ts":"2026-03-25T20:56:37.402029001Z","kind":"session_ended","exit_code":0}

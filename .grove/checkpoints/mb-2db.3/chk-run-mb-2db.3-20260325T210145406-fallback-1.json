@@ -1,0 +1,45 @@
+{
+  "id": "chk-run-mb-2db.3-20260325T210145406-fallback-1",
+  "bead_id": "mb-2db.3",
+  "run_id": "run-mb-2db.3-20260325T210145406",
+  "session_id": "ses-run-mb-2db.3-20260325T210145406",
+  "progress": "Synthetic fallback checkpoint after NoProgress",
+  "next_step": "Resume from the transcript tail, avoid repeating completed setup, and continue with the smallest safe remaining step.",
+  "payload": {
+    "claimed_paths": [],
+    "confidence": 0.25,
+    "context": {
+      "failure_class": "NoProgress",
+      "failure_detail": "session ended with Unknown",
+      "stderr_tail": [],
+      "stdout_tail": [
+        "Done.",
+        "",
+        "Changed:",
+        "- `crates/membrain-daemon/src/daemon.rs`",
+        "- `crates/membrain-daemon/tests/runtime_doctor_parity.rs`",
+        "",
+        "What I landed:",
+        "- Recall-time prefetch hint submission now follows predicted hot-path guidance instead of the old unconditional fallback in `crates/membrain-daemon/src/daemon.rs:4628`.",
+        "- It only queues when predicted `prewarm_action != \"observe_only\"` and maps the predicted trigger to bounded `PrefetchTrigger` values.",
+        "- Prewarm remains advisory/non-authoritative.",
+        "- I also fixed the local daemon-side `normalize_recall_contract(...)` compile drift from the new `mood_congruent` arg in `crates/membrain-daemon/src/daemon.rs:3152`, `3222`, `4091`, and unit-test call sites around `6889`.",
+        "",
+        "Validation:",
+        "- `cargo check -p membrain-daemon --lib` ✅",
+        "- `cargo test -p membrain-daemon --test runtime_doctor_parity runtime_health_jsonrpc_response_matches_shared_health_contract_fields -- --exact` ✅",
+        "",
+        "Notes:",
+        "- I kept `runtime_doctor_parity` aligned with actual doctor/health behavior; that path still reports `hints_submitted=0` for the exercised scenario.",
+        "- Additional daemon unit-test runs are currently blocked by unrelated pre-existing drift in `crates/membrain-core/src/brain_store.rs:357` (`BrainStore` initializer missing `compression`).",
+        ""
+      ],
+      "synthetic": true
+    },
+    "next_step": "Resume from the transcript tail, avoid repeating completed setup, and continue with the smallest safe remaining step.",
+    "open_questions": [],
+    "progress": "Synthetic fallback checkpoint after NoProgress"
+  },
+  "saved_at": "2026-03-25T21:22:14.074019396Z",
+  "resume_generation": 1
+}

@@ -1,0 +1,32 @@
+{
+  "id": "chk-run-mb-2db.7-20260325T204649308-fallback-1",
+  "bead_id": "mb-2db.7",
+  "run_id": "run-mb-2db.7-20260325T204649308",
+  "session_id": "ses-run-mb-2db.7-20260325T204649308",
+  "progress": "Synthetic fallback checkpoint after NoProgress",
+  "next_step": "Resume from the transcript tail, avoid repeating completed setup, and continue with the smallest safe remaining step.",
+  "payload": {
+    "claimed_paths": [],
+    "confidence": 0.25,
+    "context": {
+      "failure_class": "NoProgress",
+      "failure_detail": "session ended with Unknown",
+      "stderr_tail": [],
+      "stdout_tail": [
+        "Read it. The focused test passed:",
+        "",
+        "- `store::tests::tier2_store_schema_objects_include_compression_log_table` ✅",
+        "- Exit code: `0`",
+        "",
+        "Notable detail:",
+        "- Cargo waited on an artifact-directory file lock first, then compiled and ran successfully."
+      ],
+      "synthetic": true
+    },
+    "next_step": "Resume from the transcript tail, avoid repeating completed setup, and continue with the smallest safe remaining step.",
+    "open_questions": [],
+    "progress": "Synthetic fallback checkpoint after NoProgress"
+  },
+  "saved_at": "2026-03-25T21:02:31.786710603Z",
+  "resume_generation": 1
+}

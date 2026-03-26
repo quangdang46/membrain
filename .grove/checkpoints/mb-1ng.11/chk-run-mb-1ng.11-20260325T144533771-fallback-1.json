@@ -1,0 +1,45 @@
+{
+  "id": "chk-run-mb-1ng.11-20260325T144533771-fallback-1",
+  "bead_id": "mb-1ng.11",
+  "run_id": "run-mb-1ng.11-20260325T144533771",
+  "session_id": "ses-run-mb-1ng.11-20260325T144533771",
+  "progress": "Synthetic fallback checkpoint after NoProgress",
+  "next_step": "Resume from the transcript tail, avoid repeating completed setup, and continue with the smallest safe remaining step.",
+  "payload": {
+    "claimed_paths": [],
+    "confidence": 0.25,
+    "context": {
+      "failure_class": "NoProgress",
+      "failure_detail": "session ended with Unknown",
+      "stderr_tail": [],
+      "stdout_tail": [
+        "    \"possible MCP resource/examples parity beyond request envelopes\"",
+        "  ],",
+        "  \"files_touched\": [",
+        "    \"crates/membrain-core/src/types.rs\",",
+        "    \"crates/membrain-core/src/api.rs\",",
+        "    \"crates/membrain-daemon/src/rpc.rs\",",
+        "    \"crates/membrain-daemon/src/daemon.rs\",",
+        "    \"crates/membrain-core/tests/working_memory_admission.rs\"",
+        "  ],",
+        "  \"validation\": {",
+        "    \"passed\": [",
+        "      \"cargo test -p membrain-daemon runtime_goal_pause_and_resume_surface_checkpointed_working_state -- --nocapture\",",
+        "      \"cargo test -p membrain-daemon runtime_goal_resume_without_checkpoint_reports_stale_explicitly -- --nocapture\",",
+        "      \"cargo test -p membrain-core --test working_memory_admission -- --nocapture\",",
+        "      \"cargo check -p membrain-daemon\"",
+        "    ]",
+        "  }",
+        "}",
+        "```",
+        ""
+      ],
+      "synthetic": true
+    },
+    "next_step": "Resume from the transcript tail, avoid repeating completed setup, and continue with the smallest safe remaining step.",
+    "open_questions": [],
+    "progress": "Synthetic fallback checkpoint after NoProgress"
+  },
+  "saved_at": "2026-03-25T15:29:33.650415836Z",
+  "resume_generation": 1
+}

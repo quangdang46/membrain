@@ -169,8 +169,9 @@ Normalization and safety rules:
 - Snapshot-scoped recall is not a restore guarantee; it can answer only from durable evidence still retained and policy-visible at inspection time, and should return partial or degraded markers rather than fabricate a complete past state when retention, redaction, or repair loss removed authoritative evidence.
 - `--include-public` does not bypass namespace ACLs or expose private cross-namespace data.
 - `--cold-tier allow` may enable Tier3 candidate generation, but it does not permit pre-cut cold payload fetch.
-- `--explain summary` should surface major route choices, omitted-result reasons, freshness/conflict markers, and any cache bypass, stale-warning, or degraded-mode outcome that materially affected returned results.
-- `--explain full` should preserve machine-readable routing-trace parity with daemon, IPC/JSON-RPC, and MCP surfaces, including candidate counts, cache family or event data, and exclusion reasons where those surfaces exist.
+- `--explain summary` should surface major route choices, omitted-result reasons, freshness/conflict markers, and any cache bypass, stale-warning, degraded-mode outcome, or predictive pre-recall bypass/trigger that materially affected returned results.
+- `--explain full` should preserve machine-readable routing-trace parity with daemon, IPC/JSON-RPC, and MCP surfaces, including candidate counts, cache family or event data, exclusion reasons, and predictive pre-recall/fallback semantics where those surfaces exist.
+- When predictive pre-recall is evaluated, the explain surface must make three things inspectable instead of leaving them as background magic: whether predictive work triggered, why it was bypassed when it did not trigger, and which fallback behavior (`predictive_prefetch_then_deeper_route`, `predictive_bypassed_then_tier3_fallback`, etc.) governed the final bounded route.
 - Confidence affects retrieval in two visible ways: it contributes to ranking order through the confidence score family, and `--min-confidence` can suppress low-confidence results after ranking while recording `confidence_filtered` / `low_confidence_suppressed` in omission and explain surfaces.
 - Human CLI recall output should show per-item confidence, optional confidence intervals, and uncertainty breakdowns such as `freshness`, `contradiction`, `missing_evidence`, `corroboration`, and `reconsolidation` when explain/detail mode requests them.
 
@@ -278,6 +279,7 @@ Dream Mode is a later-stage, background-only offline synthesis surface layered o
 CLI expectations:
 - `membrain dream` should make its maintenance-class posture visible: it is an explicit manual trigger for an idle-window synthesis pass, not a foreground recall or encode shortcut.
 - `membrain dream --status` should expose enough operator detail to inspect the current bounded scheduler state, including whether the feature is enabled, the last run tick, cumulative links created, idle ticks observed versus threshold, and any degraded or paused posture that prevented a new cycle.
+- Accepted `membrain dream` runs should return inspect handles for the bounded run plus each surfaced artifact, along with lineage fields that cite source memory ids, citation kinds, the `idle_synthesis_pass` derivation, and the fact that durable memory remains authoritative truth.
 - `membrain dream --disable` should pause future background dreaming without deleting canonical memories, graph edges, or lineage-bearing evidence already created by prior accepted runs.
 - The initial scheduler slice should stay bounded and explicit: status and manual runs report bounded poll budget, bounded candidate batches, and bounded link creation instead of implying unconstrained background work.
 - Any candidate expansion, similarity search, or merge follow-on must remain bounded, namespace-aware, policy-aware, and lineage-backed; the CLI surface should not imply full-corpus scans or silent promotion of synthetic links into sole authoritative truth.
@@ -301,6 +303,12 @@ Health contract:
 - `membrain health` is the operator dashboard rendering of the same bounded `BrainHealthReport` exposed through daemon/JSON-RPC and MCP `health()`.
 - `--json`, `--brief`, and `--watch` are presentation variants over one machine-readable report; they must preserve the same tier/capacity, quality/conflict/uncertainty, activity/runtime, repair/backpressure, availability-posture, degraded-status, and feature-availability meaning.
 - The report should make degraded posture, repair-queue growth, backpressure state, surviving query or mutation paths, and the next recommended runbook inspectable enough that operators can tell whether to continue normal work, inspect `doctor`, or switch to a runbook instead of inferring that state from prose.
+- The canonical machine-readable report should also expose `dashboard_views`, `alerts`, and `drill_down_paths` so the overview, alert queue, subsystem cards, and operator follow-up paths stay parity-consistent across CLI, daemon/JSON-RPC, and MCP instead of relying on transport-local heuristics.
+- `dashboard_views` should identify the main operator views (`overview`, `alerts`, `subsystems`, `trends`, `attention`, `affect_trajectory`, and `degraded_mode` when applicable), each with summary text, alert counts, and named drill-down targets.
+- `attention` should surface the ranked attention heatmap and bounded prewarm state: hotspot counts, max score, heat buckets/bands, explicit hotspot-driven prewarm actions, target warm families, and the `/health/attention` drill-down path.
+- `affect_trajectory` should surface the bounded emotional-trajectory summary used by recall introspection: total stored rows, latest tick, current bounded mood snapshot when available, and a canonical `/mood_history` drill-down so operators can inspect the same history surface that powers `--mood-congruent` ranking hints.
+- `alerts` should be derived from bounded subsystem health state, with stable severity, reason codes, optional recommended runbook, and an explicit drill-down path for the next operator step.
+- `drill_down_paths` should map a subsystem or alert to the canonical follow-up surface (`health`, `doctor`, `inspect`, `why`, or `audit`) so operators can trace one subsystem problem into the narrower diagnostic surface without guessing the route.
 - If historical scope, policy limits, or degraded serving change what can be shown, the surface should say so through warnings or availability markers instead of silently pretending the dashboard is complete.
 
 ```bash
@@ -542,11 +550,14 @@ membrain snapshot delete before-refactor
 Resumable goal-stack commands are a later-stage working-state surface for long-running tasks. They expose explicit goal checkpoints for the current goal stack, selected evidence, pending dependencies, and blocked reason so work can pause, resume, hand off, or be intentionally abandoned without reconstructing state from scratch.
 
 CLI expectations:
-- `membrain goal show [--task <id>]` should return the current active or dormant goal stack plus the newest resumability checkpoint metadata for the effective namespace or task scope.
+- `membrain goal show [--task <id>]` returns the current active or dormant goal stack plus the newest resumability checkpoint metadata for the effective task scope, including `projection_kind = "working_state_projection"` and `authoritative_truth = "durable_memory"` in `--json` mode.
+- `membrain goal pin --task <id> --memory-id <memory-id>` pins one explicit durable evidence handle into the visible blackboard projection without copying authoritative memory into the checkpoint surface.
+- `membrain goal dismiss --task <id> --memory-id <memory-id>` removes one explicit evidence handle from the visible blackboard projection and keeps the projection-vs-authority distinction intact.
+- `membrain goal snapshot --task <id> [--note <text>]` emits a bounded `blackboard_snapshot` artifact for inspect, handoff, or resume support while preserving `authoritative_truth = "durable_memory"`.
 - `membrain goal pause [--task <id>] [--note <text>]` persists the latest resumability checkpoint and marks the active goal dormant without widening scope or mutating authoritative durable truth beyond checkpoint metadata.
 - `membrain goal resume [--task <id>]` rehydrates from the newest valid checkpoint, restores explicit selected-evidence handles and pending dependencies when possible, and surfaces stale, missing, or policy-incompatible checkpoint state explicitly instead of guessing a fresh plan.
 - `membrain goal abandon [--task <id>] [--reason <text>]` ends the active goal intentionally, preserves the checkpoint or audit trail needed for later inspection, and must not silently delete authoritative evidence or leave the goal implicitly active.
-- Goal-stack checkpoints are resumability anchors for active work. They must stay distinct from Feature 12 named historical snapshots and should remain bounded, inspectable, namespace-aware, and policy-aware in both text and `--json` modes.
+- Goal-stack checkpoints are resumability anchors for active work. They stay distinct from Feature 12 named historical snapshots and remain bounded, inspectable, namespace-aware, and policy-aware in both text and `--json` modes. CLI JSON responses also carry `debug.goal_log` entries for get, pin, dismiss, snapshot, pause, resume, and abandon flows so logging-heavy parity artifacts can prove explicit working-state transitions.
 
 ```bash
 membrain goal show

@@ -1,0 +1,74 @@
+{"ts":"2026-03-25T21:01:52.162935971Z","kind":"session_started","session_id":"ses-run-mb-34l.7-20260325T210152142"}
+{"ts":"2026-03-25T21:13:39.147797817Z","kind":"stdout","line":"GROVE_RESULT:"}
+{"ts":"2026-03-25T21:13:39.996509240Z","kind":"stdout","line":"Completed `mb-34l.7.1` end-to-end and closed the bead."}
+{"ts":"2026-03-25T21:13:39.996536969Z","kind":"stdout","line":""}
+{"ts":"2026-03-25T21:13:39.996539441Z","kind":"stdout","line":"GROVE_ARTIFACTS:"}
+{"ts":"2026-03-25T21:13:39.996539441Z","kind":"protocol","event":{"type":"artifacts","items":[]}}
+{"ts":"2026-03-25T21:13:40.026295627Z","kind":"stdout","line":"- Updated `docs/SHARDING_AND_DISTRIBUTION.md:16`"}
+{"ts":"2026-03-25T21:13:40.026295627Z","kind":"protocol","event":{"type":"artifacts","items":["Updated `docs/SHARDING_AND_DISTRIBUTION.md:16`"]}}
+{"ts":"2026-03-25T21:13:40.026340015Z","kind":"stdout","line":"- Updated `docs/ROADMAP.md:97`"}
+{"ts":"2026-03-25T21:13:40.026340015Z","kind":"protocol","event":{"type":"artifacts","items":["Updated `docs/ROADMAP.md:97`"]}}
+{"ts":"2026-03-25T21:13:40.026344959Z","kind":"stdout","line":"- Updated `docs/OPERATIONS.md:333`"}
+{"ts":"2026-03-25T21:13:40.026344959Z","kind":"protocol","event":{"type":"artifacts","items":["Updated `docs/OPERATIONS.md:333`"]}}
+{"ts":"2026-03-25T21:13:40.026349150Z","kind":"stdout","line":"- Updated `docs/TEST_STRATEGY.md:249`"}
+{"ts":"2026-03-25T21:13:40.026349150Z","kind":"protocol","event":{"type":"artifacts","items":["Updated `docs/TEST_STRATEGY.md:249`"]}}
+{"ts":"2026-03-25T21:13:40.026354309Z","kind":"stdout","line":""}
+{"ts":"2026-03-25T21:13:40.026356459Z","kind":"stdout","line":"GROVE_DECISIONS:"}
+{"ts":"2026-03-25T21:13:40.026356459Z","kind":"protocol","event":{"type":"decision","items":[]}}
+{"ts":"2026-03-25T21:13:40.026361725Z","kind":"stdout","line":"- Kept sharding/distribution explicitly gated behind measured demand."}
+{"ts":"2026-03-25T21:13:40.026361725Z","kind":"protocol","event":{"type":"decision","items":["Kept sharding/distribution explicitly gated behind measured demand."]}}
+{"ts":"2026-03-25T21:13:40.026366454Z","kind":"stdout","line":"- Required rerunnable, machine-readable benchmark artifacts for promotion."}
+{"ts":"2026-03-25T21:13:40.026366454Z","kind":"protocol","event":{"type":"decision","items":["Required rerunnable, machine-readable benchmark artifacts for promotion."]}}
+{"ts":"2026-03-25T21:13:40.026370646Z","kind":"stdout","line":"- Required before/after single-node comparisons so scale-out cannot justify itself without first exhausting bounded local remedies."}
+{"ts":"2026-03-25T21:13:40.026370646Z","kind":"protocol","event":{"type":"decision","items":["Required before/after single-node comparisons so scale-out cannot justify itself without first exhausting bounded local remedies."]}}
+{"ts":"2026-03-25T21:13:40.026417721Z","kind":"stdout","line":"- Made the gate explicitly depend on the single-node system being benchmarked, repairable from durable truth, and operationally understood."}
+{"ts":"2026-03-25T21:13:40.026417721Z","kind":"protocol","event":{"type":"decision","items":["Made the gate explicitly depend on the single-node system being benchmarked, repairable from durable truth, and operationally understood."]}}
+{"ts":"2026-03-25T21:13:40.026457809Z","kind":"stdout","line":"- Aligned docs with current CLI benchmark shape: `membrain benchmark tier2 --json`."}
+{"ts":"2026-03-25T21:13:40.026457809Z","kind":"protocol","event":{"type":"decision","items":["Aligned docs with current CLI benchmark shape: `membrain benchmark tier2 --json`."]}}
+{"ts":"2026-03-25T21:13:40.026464795Z","kind":"stdout","line":""}
+{"ts":"2026-03-25T21:13:40.026467590Z","kind":"stdout","line":"GROVE_LESSONS:"}
+{"ts":"2026-03-25T21:13:40.026467590Z","kind":"protocol","event":{"type":"lessons","items":[]}}
+{"ts":"2026-03-25T21:13:40.026472211Z","kind":"stdout","line":"- The repo already had the right architectural stance, but “measured demand” needed sharper acceptance language."}
+{"ts":"2026-03-25T21:13:40.026472211Z","kind":"protocol","event":{"type":"lessons","items":["The repo already had the right architectural stance, but “measured demand” needed sharper acceptance language."]}}
+{"ts":"2026-03-25T21:13:40.026494029Z","kind":"stdout","line":"- Docs had a real mismatch: `docs/OPERATIONS.md` used `benchmark --target tier2`, while the CLI currently supports `--target` as an option and examples elsewhere already leaned positional; I normalized the ops/runbook examples to the current CLI form actually used in the file and checked that no stale `benchmark --target tier2` references remain in `docs/`."}
+{"ts":"2026-03-25T21:13:40.026494029Z","kind":"protocol","event":{"type":"lessons","items":["Docs had a real mismatch: `docs/OPERATIONS.md` used `benchmark --target tier2`, while the CLI currently supports `--target` as an option and examples elsewhere already leaned positional; I normalized the ops/runbook examples to the current CLI form actually used in the file and checked that no stale `benchmark --target tier2` references remain in `docs/`."]}}
+{"ts":"2026-03-25T21:13:40.026518104Z","kind":"stdout","line":"- The checkpoint/snapshot distinction was already solid enough that this task only needed to reinforce surrounding gate language, not add new surfaces."}
+{"ts":"2026-03-25T21:13:40.026518104Z","kind":"protocol","event":{"type":"lessons","items":["The checkpoint/snapshot distinction was already solid enough that this task only needed to reinforce surrounding gate language, not add new surfaces."]}}
+{"ts":"2026-03-25T21:13:40.026521650Z","kind":"stdout","line":""}
+{"ts":"2026-03-25T21:13:40.026523155Z","kind":"stdout","line":"GROVE_WARNINGS:"}
+{"ts":"2026-03-25T21:13:40.026523155Z","kind":"protocol","event":{"type":"warning","items":[]}}
+{"ts":"2026-03-25T21:13:40.026526272Z","kind":"stdout","line":"- `cargo check --all-targets` is currently failing for unrelated pre-existing code outside this task:"}
+{"ts":"2026-03-25T21:13:40.026526272Z","kind":"protocol","event":{"type":"warning","items":["`cargo check --all-targets` is currently failing for unrelated pre-existing code outside this task:"]}}
+{"ts":"2026-03-25T21:13:40.026531216Z","kind":"stdout","line":"  - `crates/membrain-daemon/src/daemon.rs:6820`"}
+{"ts":"2026-03-25T21:13:40.026531216Z","kind":"protocol","event":{"type":"warning","items":["`crates/membrain-daemon/src/daemon.rs:6820`"]}}
+{"ts":"2026-03-25T21:13:40.026546263Z","kind":"stdout","line":"  - `crates/membrain-daemon/src/daemon.rs:6855`"}
+{"ts":"2026-03-25T21:13:40.026546263Z","kind":"protocol","event":{"type":"warning","items":["`crates/membrain-daemon/src/daemon.rs:6855`"]}}
+{"ts":"2026-03-25T21:13:40.026550132Z","kind":"stdout","line":"  - `crates/membrain-daemon/src/daemon.rs:6870`"}
+{"ts":"2026-03-25T21:13:40.026550132Z","kind":"protocol","event":{"type":"warning","items":["`crates/membrain-daemon/src/daemon.rs:6870`"]}}
+{"ts":"2026-03-25T21:13:40.026553141Z","kind":"stdout","line":"  - `crates/membrain-daemon/src/daemon.rs:6888`"}
+{"ts":"2026-03-25T21:13:40.026553141Z","kind":"protocol","event":{"type":"warning","items":["`crates/membrain-daemon/src/daemon.rs:6888`"]}}
+{"ts":"2026-03-25T21:13:40.026556258Z","kind":"stdout","line":"- Those failures come from `DaemonRuntime::normalize_recall_contract(...)` test calls missing the new `mood_congruent: Option<bool>` argument."}
+{"ts":"2026-03-25T21:13:40.026556258Z","kind":"protocol","event":{"type":"warning","items":["Those failures come from `DaemonRuntime::normalize_recall_contract(...)` test calls missing the new `mood_congruent: Option<bool>` argument."]}}
+{"ts":"2026-03-25T21:13:40.026559267Z","kind":"stdout","line":"- UBS on the changed Markdown files reported no recognizable code languages, which is expected for docs-only changes."}
+{"ts":"2026-03-25T21:13:40.026559267Z","kind":"protocol","event":{"type":"warning","items":["UBS on the changed Markdown files reported no recognizable code languages, which is expected for docs-only changes."]}}
+{"ts":"2026-03-25T21:13:40.026562062Z","kind":"stdout","line":""}
+{"ts":"2026-03-25T21:13:40.026577431Z","kind":"stdout","line":"GROVE_EXIT: true"}
+{"ts":"2026-03-25T21:13:40.026577431Z","kind":"protocol","event":{"type":"exit","value":true}}
+{"ts":"2026-03-25T21:13:40.240943483Z","kind":"stdout","line":""}
+{"ts":"2026-03-25T21:13:40.339150978Z","kind":"stdout","line":"Changed summary:"}
+{"ts":"2026-03-25T21:13:40.339188702Z","kind":"stdout","line":"- `docs/SHARDING_AND_DISTRIBUTION.md:16` now requires:"}
+{"ts":"2026-03-25T21:13:40.339190744Z","kind":"stdout","line":"  - rerunnable benchmark artifacts"}
+{"ts":"2026-03-25T21:13:40.339193001Z","kind":"stdout","line":"  - before/after bounded single-node comparisons"}
+{"ts":"2026-03-25T21:13:40.339194398Z","kind":"stdout","line":"  - proof that single-node remains benchmarked, repairable, and operationally understood before scale-out starts"}
+{"ts":"2026-03-25T21:13:40.339196655Z","kind":"stdout","line":"- `docs/ROADMAP.md:97` now names the required benchmark fields:"}
+{"ts":"2026-03-25T21:13:40.339198267Z","kind":"stdout","line":"  - `target`"}
+{"ts":"2026-03-25T21:13:40.339200417Z","kind":"stdout","line":"  - `iterations`"}
+{"ts":"2026-03-25T21:13:40.339201922Z","kind":"stdout","line":"  - `total_duration_ms`"}
+{"ts":"2026-03-25T21:13:40.339203749Z","kind":"stdout","line":"  - `avg_duration_us`"}
+{"ts":"2026-03-25T21:13:40.339205361Z","kind":"stdout","line":"  - `p50_duration_us`"}
+{"ts":"2026-03-25T21:13:40.339206865Z","kind":"stdout","line":"  - `p95_duration_us`"}
+{"ts":"2026-03-25T21:13:40.339208370Z","kind":"stdout","line":"- `docs/OPERATIONS.md:338` now uses `membrain benchmark tier2 --json` consistently."}
+{"ts":"2026-03-25T21:13:40.339211702Z","kind":"stdout","line":"- `docs/TEST_STRATEGY.md:260` now requires measured-demand validation for shard-readiness proposals."}
+{"ts":"2026-03-25T21:13:40.339214281Z","kind":"stdout","line":""}
+{"ts":"2026-03-25T21:13:40.339215786Z","kind":"stdout","line":"If you want, I can take the next bead in this chain (`mb-34l.7.2`)."}
+{"ts":"2026-03-25T21:13:43.521016277Z","kind":"session_ended","exit_code":0}

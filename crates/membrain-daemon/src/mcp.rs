@@ -154,6 +154,8 @@ pub enum McpRequest {
     MergeFork(MergeForkParams),
     #[serde(rename = "compress")]
     Compress(CompressParams),
+    #[serde(rename = "schemas")]
+    Schemas(SchemasParams),
     #[serde(rename = "hot_paths")]
     HotPaths(HotPathsParams),
     #[serde(rename = "dead_zones")]
@@ -170,6 +172,12 @@ pub enum McpRequest {
     GoalState(GoalStateParams),
     #[serde(rename = "goal_pause")]
     GoalPause(GoalPauseParams),
+    #[serde(rename = "goal_pin")]
+    GoalPin(GoalPinParams),
+    #[serde(rename = "goal_dismiss")]
+    GoalDismiss(GoalDismissParams),
+    #[serde(rename = "goal_snapshot")]
+    GoalSnapshot(GoalSnapshotParams),
     #[serde(rename = "goal_resume")]
     GoalResume(GoalResumeParams),
     #[serde(rename = "goal_abandon")]
@@ -681,7 +689,7 @@ pub struct ForkParams {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub parent_namespace: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub inherit: Option<bool>,
+    pub inherit: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub note: Option<String>,
     #[serde(flatten)]
@@ -709,6 +717,17 @@ pub struct CompressParams {
     pub namespace: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub dry_run: Option<bool>,
+    #[serde(flatten)]
+    pub common: CommonRequestFields,
+}
+
+/// Preview the highest-confidence schema artifacts without applying compression.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct SchemasParams {
+    pub namespace: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub top_n: Option<usize>,
     #[serde(flatten)]
     pub common: CommonRequestFields,
 }
@@ -801,6 +820,40 @@ pub struct GoalStateParams {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct GoalPauseParams {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub task_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub note: Option<String>,
+    #[serde(flatten)]
+    pub common: CommonRequestFields,
+}
+
+/// Pin one evidence handle into the visible goal blackboard projection.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct GoalPinParams {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub task_id: Option<String>,
+    pub memory_id: u64,
+    #[serde(flatten)]
+    pub common: CommonRequestFields,
+}
+
+/// Dismiss one evidence handle from the visible goal blackboard projection.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct GoalDismissParams {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub task_id: Option<String>,
+    pub memory_id: u64,
+    #[serde(flatten)]
+    pub common: CommonRequestFields,
+}
+
+/// Emit a derived blackboard snapshot artifact for one task.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct GoalSnapshotParams {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub task_id: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -1200,11 +1253,11 @@ pub struct McpStreamListing {
 #[cfg(test)]
 mod tests {
     use super::{
-        CommonRequestFields, ContextBudgetParams, EncodeParams, ExplainParams, InspectParams,
-        McpAuditView, McpError, McpInspectExplainTrace, McpInspectPayload, McpRequest, McpResource,
-        McpResourceListing, McpResourceReadPayload, McpResponse, McpRetrievalPayload,
-        McpSharePayload, McpStream, McpStreamListing, ObserveParams, PolicyContextHint,
-        ProceduresParams, RecallParams,
+        CommonRequestFields, CompressParams, ContextBudgetParams, EncodeParams, ExplainParams,
+        InspectParams, McpAuditView, McpError, McpInspectExplainTrace, McpInspectPayload,
+        McpRequest, McpResource, McpResourceListing, McpResourceReadPayload, McpResponse,
+        McpRetrievalPayload, McpSharePayload, McpStream, McpStreamListing, ObserveParams,
+        PolicyContextHint, ProceduresParams, RecallParams, SchemasParams,
     };
     use membrain_core::api::{
         FieldPresence, NamespaceId, PassiveObservationInspectSummary, PolicyFilterSummary,
@@ -2177,7 +2230,7 @@ mod tests {
                 assert_eq!(params.like_id, Some(42));
                 assert_eq!(params.mood_congruent, Some(true));
                 let mut expected = sample_common();
-                expected.time_budget_ms = Some(100);
+                expected.time_budget_ms = None;
                 assert_eq!(params.common, expected);
             }
             _ => std::process::abort(),
@@ -2273,6 +2326,20 @@ mod tests {
             "shared"
         );
 
+        // Fork
+        let fork_json = serde_json::to_value(McpRequest::Fork(
+            serde_json::from_value(serde_json::json!({
+                "name": "agent-specialist",
+                "namespace": "team.alpha",
+                "inherit": "shared",
+                "note": "testing"
+            }))
+            .unwrap(),
+        ))
+        .unwrap();
+        assert_eq!(fork_json["method"], "fork");
+        assert_eq!(fork_json["params"]["inherit"], "shared");
+
         // Unshare
         let unshare_json = serde_json::to_value(McpRequest::Unshare(
             serde_json::from_value(serde_json::json!({
@@ -2331,6 +2398,70 @@ mod tests {
         .unwrap();
         assert_eq!(repair_json["method"], "repair");
         assert_eq!(repair_json["params"]["dry_run"], true);
+
+        // Compress
+        let compress_common = sample_common();
+        let compress_json = serde_json::to_value(McpRequest::Compress(CompressParams {
+            namespace: "team.alpha".to_string(),
+            dry_run: Some(true),
+            common: compress_common.clone(),
+        }))
+        .unwrap();
+        assert_eq!(compress_json["method"], "compress");
+        assert_eq!(compress_json["params"]["namespace"], "team.alpha");
+        assert_eq!(compress_json["params"]["dry_run"], true);
+        assert_eq!(compress_json["params"]["request_id"], "test-req-1");
+        assert_eq!(compress_json["params"]["workspace_id"], "ws-7");
+        assert_eq!(compress_json["params"]["agent_id"], "agent-3");
+        assert_eq!(compress_json["params"]["session_id"], "session-9");
+        assert_eq!(compress_json["params"]["task_id"], "task-2");
+        assert_eq!(compress_json["params"]["time_budget_ms"], 75);
+        assert_eq!(
+            compress_json["params"]["policy_context"]["sharing_visibility"],
+            "public"
+        );
+
+        let decoded_compress: McpRequest = serde_json::from_value(compress_json).unwrap();
+        match decoded_compress {
+            McpRequest::Compress(params) => {
+                assert_eq!(params.namespace, "team.alpha");
+                assert_eq!(params.dry_run, Some(true));
+                assert_eq!(params.common, compress_common);
+            }
+            _ => std::process::abort(),
+        }
+
+        // Schemas
+        let schemas_common = sample_common();
+        let schemas_json = serde_json::to_value(McpRequest::Schemas(SchemasParams {
+            namespace: "team.alpha".to_string(),
+            top_n: Some(4),
+            common: schemas_common.clone(),
+        }))
+        .unwrap();
+        assert_eq!(schemas_json["method"], "schemas");
+        assert_eq!(schemas_json["params"]["namespace"], "team.alpha");
+        assert_eq!(schemas_json["params"]["top_n"], 4);
+        assert_eq!(schemas_json["params"]["request_id"], "test-req-1");
+        assert_eq!(schemas_json["params"]["workspace_id"], "ws-7");
+        assert_eq!(schemas_json["params"]["agent_id"], "agent-3");
+        assert_eq!(schemas_json["params"]["session_id"], "session-9");
+        assert_eq!(schemas_json["params"]["task_id"], "task-2");
+        assert_eq!(schemas_json["params"]["time_budget_ms"], 75);
+        assert_eq!(
+            schemas_json["params"]["policy_context"]["sharing_visibility"],
+            "public"
+        );
+
+        let decoded_schemas: McpRequest = serde_json::from_value(schemas_json).unwrap();
+        match decoded_schemas {
+            McpRequest::Schemas(params) => {
+                assert_eq!(params.namespace, "team.alpha");
+                assert_eq!(params.top_n, Some(4));
+                assert_eq!(params.common, schemas_common);
+            }
+            _ => std::process::abort(),
+        }
 
         // Preflight run
         let preflight_run_json = serde_json::to_value(McpRequest::PreflightRun(
@@ -2496,6 +2627,42 @@ mod tests {
         assert_eq!(pause["method"], "goal_pause");
         assert_eq!(pause["params"]["note"], "waiting for review");
 
+        // goal_pin
+        let pin = serde_json::to_value(McpRequest::GoalPin(
+            serde_json::from_value(serde_json::json!({
+                "task_id": "task-42",
+                "memory_id": 7
+            }))
+            .unwrap(),
+        ))
+        .unwrap();
+        assert_eq!(pin["method"], "goal_pin");
+        assert_eq!(pin["params"]["memory_id"], 7);
+
+        // goal_dismiss
+        let dismiss = serde_json::to_value(McpRequest::GoalDismiss(
+            serde_json::from_value(serde_json::json!({
+                "task_id": "task-42",
+                "memory_id": 7
+            }))
+            .unwrap(),
+        ))
+        .unwrap();
+        assert_eq!(dismiss["method"], "goal_dismiss");
+        assert_eq!(dismiss["params"]["memory_id"], 7);
+
+        // goal_snapshot
+        let snapshot = serde_json::to_value(McpRequest::GoalSnapshot(
+            serde_json::from_value(serde_json::json!({
+                "task_id": "task-42",
+                "note": "handoff"
+            }))
+            .unwrap(),
+        ))
+        .unwrap();
+        assert_eq!(snapshot["method"], "goal_snapshot");
+        assert_eq!(snapshot["params"]["note"], "handoff");
+
         // goal_resume
         let resume = serde_json::to_value(McpRequest::GoalResume(
             serde_json::from_value(serde_json::json!({"task_id": "task-42"})).unwrap(),
@@ -2530,6 +2697,16 @@ mod tests {
         let error = serde_json::from_value::<super::GoalPauseParams>(serde_json::json!({
             "task_id": "task-42",
             "note": "paused",
+            "unexpected": true
+        }))
+        .unwrap_err();
+        assert!(
+            error.to_string().contains("unknown field") && error.to_string().contains("unexpected")
+        );
+
+        let error = serde_json::from_value::<super::GoalPinParams>(serde_json::json!({
+            "task_id": "task-42",
+            "memory_id": 9,
             "unexpected": true
         }))
         .unwrap_err();

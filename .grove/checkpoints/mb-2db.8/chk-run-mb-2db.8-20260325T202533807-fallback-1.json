@@ -1,0 +1,45 @@
+{
+  "id": "chk-run-mb-2db.8-20260325T202533807-fallback-1",
+  "bead_id": "mb-2db.8",
+  "run_id": "run-mb-2db.8-20260325T202533807",
+  "session_id": "ses-run-mb-2db.8-20260325T202533807",
+  "progress": "Synthetic fallback checkpoint after NoProgress",
+  "next_step": "Resume from the transcript tail, avoid repeating completed setup, and continue with the smallest safe remaining step.",
+  "payload": {
+    "claimed_paths": [],
+    "confidence": 0.25,
+    "context": {
+      "failure_class": "NoProgress",
+      "failure_detail": "session ended with Unknown",
+      "stderr_tail": [],
+      "stdout_tail": [
+        "What I found:",
+        "- F18 core storage/model work is actively being taken by another agent, so I’m avoiding collision there.",
+        "- The next wrapper-side seam is real and specific:",
+        "  - `crates/membrain-daemon/src/mcp.rs:761` already defines `MoodHistoryParams`",
+        "  - `crates/membrain-daemon/src/rpc.rs:1541` has no `RuntimeRequest::MoodHistory`",
+        "  - `crates/membrain-daemon/src/daemon.rs:3045` handles `recall`, but `mood_history` still has no execution path",
+        "  - `crates/membrain-daemon/src/daemon.rs:4685` only threads inert `mood_congruent` degraded-summary facets today",
+        "- CLI/docs already expect this surface:",
+        "  - `crates/membrain-cli/src/main.rs:278` encode exposes `--valence/--arousal` but they’re unused at `crates/membrain-cli/src/main.rs:2371`",
+        "  - `docs/CLI.md:337` already specifies `membrain mood`",
+        "  - `docs/MCP_API.md:625` already specifies `mood_history(...)`",
+        "",
+        "I’ve coordinated with the overlapping agents and am waiting on final ownership confirmation before editing the shared wrapper files, to avoid stomping active work in `rpc.rs` / `daemon.rs` / `main.rs`.",
+        "",
+        "Smallest next code slice, once cleared:",
+        "1. add `RuntimeRequest::MoodHistory`",
+        "2. parse `\"mood_history\"` in `rpc.rs`",
+        "3. add `handle_mood_history(...)` in `daemon.rs`",
+        "4. wire parity tests",
+        ""
+      ],
+      "synthetic": true
+    },
+    "next_step": "Resume from the transcript tail, avoid repeating completed setup, and continue with the smallest safe remaining step.",
+    "open_questions": [],
+    "progress": "Synthetic fallback checkpoint after NoProgress"
+  },
+  "saved_at": "2026-03-25T20:36:02.305885028Z",
+  "resume_generation": 1
+}

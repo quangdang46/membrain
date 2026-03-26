@@ -11,8 +11,9 @@ use crate::policy::{
     IngestMode, ObservationWriteOutcome, PassiveObservationDecision, PolicyGateway,
 };
 use crate::types::{
-    CanonicalMemoryType, FastPathRouteFamily, LandmarkMetadata, LandmarkSignals, MemoryId,
-    NormalizedMemoryEnvelope, RawEncodeInput, SharingMetadata, WorkingMemoryId, WorkingMemoryItem,
+    CanonicalMemoryType, CompressionMetadata, FastPathRouteFamily, LandmarkMetadata,
+    LandmarkSignals, MemoryId, NormalizedMemoryEnvelope, RawEncodeInput, SharingMetadata,
+    WorkingMemoryId, WorkingMemoryItem,
 };
 use xxhash_rust::xxh64::xxh64;
 
@@ -525,6 +526,9 @@ impl EncodeEngine {
             .join(" ");
         let payload_size_bytes = input.raw_text.len();
 
+        let affect = input
+            .affect_signals
+            .map(crate::types::AffectSignals::clamped);
         let landmark = self.derive_landmark_metadata(
             &compact_text,
             input.landmark_signals,
@@ -544,11 +548,13 @@ impl EncodeEngine {
             compact_text,
             normalization_generation: NORMALIZATION_GENERATION,
             payload_size_bytes,
+            affect,
             landmark,
             observation_source,
             observation_chunk_id,
             has_causal_parents: false,
             has_causal_children: false,
+            compression: CompressionMetadata::default(),
             sharing: SharingMetadata::default(),
         }
     }

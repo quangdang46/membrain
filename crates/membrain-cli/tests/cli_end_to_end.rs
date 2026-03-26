@@ -190,6 +190,139 @@ fn cli_observe_json_surfaces_passive_observation_retention_and_provenance() {
 }
 
 #[test]
+fn cli_schemas_json_lists_bounded_schema_artifacts() {
+    let (ok, stdout, stderr) = run_membrain(&[
+        "schemas",
+        "--namespace",
+        "test_ns",
+        "--top",
+        "2",
+        "--min-episode-count",
+        "3",
+        "--json",
+    ]);
+
+    assert!(ok, "stderr: {stderr}");
+    let json = parse_json(&stdout);
+    assert_eq!(json["ok"], true);
+    assert_eq!(json["namespace"], "test_ns");
+    assert_eq!(json["result"]["outcome"], "accepted");
+    assert_eq!(json["result"]["namespace"], "test_ns");
+    assert_eq!(json["result"]["top"], 2);
+    assert!(json["result"]["schemas"].is_array());
+    assert_eq!(json["result"]["schemas"].as_array().map(Vec::len), Some(1));
+    assert_eq!(json["result"]["schemas"][0]["source_count"], 3);
+    assert_eq!(json["result"]["schemas"][0]["confidence"], 740);
+    assert!(json["result"]["schemas"][0]["content"]
+        .as_str()
+        .is_some_and(|content| content.contains("schema pattern")));
+    assert_eq!(
+        json["result"]["schemas"][0]["keywords"],
+        json!(["deploy", "rollback", "canary"])
+    );
+    assert_eq!(
+        json["result"]["schemas"][0]["compressed_member_ids"],
+        json!([1, 2, 3])
+    );
+}
+
+#[test]
+fn cli_goal_show_json_surfaces_blackboard_projection_and_authoritative_truth() {
+    let (ok, stdout, stderr) =
+        run_membrain(&["goal", "show", "--task", "deploy-incident", "--json"]);
+
+    assert!(ok, "stderr: {stderr}");
+    let json = parse_json(&stdout);
+    assert_eq!(json["ok"], true);
+    assert_eq!(json["namespace"], "default");
+    assert_eq!(json["result"]["status"], "active");
+    assert_eq!(json["result"]["authoritative_truth"], "durable_memory");
+    assert_eq!(
+        json["result"]["blackboard_state"]["Present"]["projection_kind"],
+        "working_state_projection"
+    );
+    assert_eq!(
+        json["result"]["blackboard_state"]["Present"]["authoritative_truth"],
+        "durable_memory"
+    );
+    assert_eq!(json["warnings"][0]["code"], "goal_get");
+}
+
+#[test]
+fn cli_goal_pause_resume_snapshot_and_abandon_json_emit_checkpointed_surfaces() {
+    let (ok_pause, stdout_pause, stderr_pause) = run_membrain(&[
+        "goal",
+        "pause",
+        "--task",
+        "deploy-incident",
+        "--note",
+        "waiting for approval",
+        "--json",
+    ]);
+    assert!(ok_pause, "stderr: {stderr_pause}");
+    let pause = parse_json(&stdout_pause);
+    assert_eq!(pause["result"]["status"], "dormant");
+    assert_eq!(
+        pause["result"]["checkpoint"]["authoritative_truth"],
+        "durable_memory"
+    );
+    assert_eq!(pause["warnings"][0]["code"], "goal_pause");
+
+    let (ok_resume, stdout_resume, stderr_resume) =
+        run_membrain(&["goal", "resume", "--task", "deploy-incident", "--json"]);
+    assert!(ok_resume, "stderr: {stderr_resume}");
+    let resume = parse_json(&stdout_resume);
+    assert_eq!(resume["result"]["status"], "active");
+    assert_eq!(resume["result"]["restored_evidence_handles"], json!([1, 2]));
+    assert_eq!(resume["warnings"][0]["code"], "goal_resume");
+
+    let (ok_snapshot, stdout_snapshot, stderr_snapshot) = run_membrain(&[
+        "goal",
+        "snapshot",
+        "--task",
+        "deploy-incident",
+        "--note",
+        "handoff",
+        "--json",
+    ]);
+    assert!(ok_snapshot, "stderr: {stderr_snapshot}");
+    let snapshot = parse_json(&stdout_snapshot);
+    assert_eq!(
+        snapshot["result"]["snapshot"]["artifact_kind"],
+        "blackboard_snapshot"
+    );
+    assert_eq!(snapshot["result"]["authoritative_truth"], "durable_memory");
+    assert_eq!(snapshot["warnings"][0]["code"], "goal_snapshot");
+
+    let (ok_abandon, stdout_abandon, stderr_abandon) = run_membrain(&[
+        "goal",
+        "abandon",
+        "--task",
+        "deploy-incident",
+        "--reason",
+        "superseded by rollback",
+        "--json",
+    ]);
+    assert!(ok_abandon, "stderr: {stderr_abandon}");
+    let abandon = parse_json(&stdout_abandon);
+    assert_eq!(abandon["result"]["status"], "abandoned");
+    assert_eq!(abandon["result"]["authoritative_truth"], "durable_memory");
+    assert_eq!(abandon["warnings"][0]["code"], "goal_abandon");
+}
+
+#[test]
+fn cli_goal_resume_without_checkpoint_reports_stale_explicitly() {
+    let (ok, stdout, stderr) = run_membrain(&["goal", "resume", "--json"]);
+
+    assert!(ok, "stderr: {stderr}");
+    let json = parse_json(&stdout);
+    assert_eq!(json["result"]["status"], "stale");
+    assert_eq!(json["result"]["checkpoint"]["stale"], true);
+    assert_eq!(json["result"]["warnings"][0]["code"], "not_dormant");
+    assert_eq!(json["warnings"][0]["code"], "goal_resume");
+}
+
+#[test]
 fn cli_maintenance_json_reports_rebuild_outputs() {
     let (ok, stdout, stderr) = run_membrain(&[
         "maintenance",
@@ -382,6 +515,147 @@ fn cli_doctor_json_reports_health_and_repair_state() {
     assert_eq!(json["error_kind"], json!(null));
     assert_eq!(json["availability"], json!(null));
     assert!(json["health"].is_object());
+}
+
+#[test]
+fn cli_health_json_reports_dashboard_contract_fields() {
+    let (ok, stdout, stderr) = run_membrain(&["health", "--json"]);
+
+    assert!(ok, "stderr: {stderr}");
+    let json = parse_json(&stdout);
+    assert_eq!(json["hot_memories"], 76);
+    assert_eq!(json["hot_capacity"], 100);
+    assert_eq!(json["cold_memories"], 12);
+    assert_eq!(json["unresolved_conflicts"], 1);
+    assert_eq!(json["availability_posture"], json!(null));
+    assert_eq!(json["backpressure_state"], "normal");
+    assert_eq!(json["attention"]["total_recall_count"], 29);
+    assert_eq!(json["attention"]["hotspot_count"], 2);
+    assert_eq!(json["attention"]["highest_namespace_pressure"], 6);
+    assert_eq!(json["attention"]["max_attention_score"], 254);
+    assert_eq!(json["attention"]["warming_candidate_count"], 1);
+    assert_eq!(json["attention"]["hot_candidate_count"], 1);
+    assert_eq!(json["attention"]["hotspots"][0]["namespace"], "team.alpha");
+    assert_eq!(json["attention"]["hotspots"][0]["rank"], 1);
+    assert_eq!(json["attention"]["hotspots"][0]["status"], "hot");
+    assert_eq!(
+        json["attention"]["hotspots"][0]["dominant_signal"],
+        "recall_count"
+    );
+    assert_eq!(json["attention"]["hotspots"][0]["heat_bucket"], "hot");
+    assert_eq!(json["attention"]["hotspots"][0]["heat_band"], 3);
+    assert_eq!(
+        json["attention"]["hotspots"][0]["prewarm_trigger"],
+        "session_recency"
+    );
+    assert_eq!(
+        json["attention"]["hotspots"][0]["prewarm_action"],
+        "bounded_session_rewarm"
+    );
+    assert_eq!(
+        json["attention"]["hotspots"][0]["prewarm_target_family"],
+        "session_warmup"
+    );
+    assert_eq!(json["cache"]["prefetch_capacity"], 4);
+    assert_eq!(json["cache"]["adaptive_prewarm_state"], "active");
+    assert!(json["cache"]["adaptive_prewarm_summary"]
+        .as_str()
+        .expect("prewarm summary string")
+        .contains("state=active queue_depth=1/4"));
+    assert!(json["dashboard_views"]
+        .as_array()
+        .expect("dashboard views")
+        .iter()
+        .any(|view| view["view"] == "attention"));
+    assert!(json["drill_down_paths"]
+        .as_array()
+        .expect("drill down paths")
+        .iter()
+        .any(|path| path["path"] == "/health/attention"));
+    assert!(json["feature_availability"].is_array());
+    assert!(json["subsystem_status"].is_array());
+    assert!(json["trend_summary"].is_array());
+    assert!(json["cache"].is_object());
+    assert!(json["indexes"].is_object());
+}
+
+#[test]
+fn cli_health_human_output_renders_operator_dashboard_sections() {
+    let (ok, stdout, stderr) = run_membrain(&["health"]);
+
+    assert!(ok, "stderr: {stderr}");
+    assert!(stdout.contains("membrain — Brain Health"));
+    assert!(stdout.contains("TIER UTILIZATION"));
+    assert!(stdout.contains("QUALITY"));
+    assert!(stdout.contains("ENGRAMS & SIGNALS"));
+    assert!(stdout.contains("OPERATIONS"));
+    assert!(stdout.contains("Prewarm       active  queue=1/4"));
+    assert!(stdout.contains("Attention heatmap"));
+    assert!(stdout.contains("#1 team.alpha [hot|band=3] score=254 dominant=recall_count prewarm=bounded_session_rewarm via session_recency -> session_warmup"));
+    assert!(stdout.contains("summary: state=active queue_depth=1/4"));
+    assert!(stdout.contains("SUBSYSTEM STATUS"));
+    assert!(stdout.contains("ACTIVITY"));
+    assert!(stdout.contains("Features      health:full"));
+    assert!(stdout.contains("Cache=unavailable"));
+    assert!(stdout.contains("Index=healthy"));
+}
+
+#[test]
+fn cli_mood_json_surfaces_current_snapshot() {
+    let (ok, stdout, stderr) = run_membrain(&["mood", "--namespace", "default", "--json"]);
+
+    assert!(ok, "stderr: {stderr}");
+    let json = parse_json(&stdout);
+    assert_eq!(json["ok"], true);
+    assert_eq!(json["namespace"], "default");
+    assert_eq!(json["result"]["namespace"], "default");
+    assert_eq!(json["result"]["history_rows"], 0);
+    assert_eq!(json["result"]["authoritative_truth"], "emotional_timeline");
+    assert!(json["result"]["current_mood"].is_null());
+    assert!(json["result"]["latest_tick"].is_null());
+}
+
+#[test]
+fn cli_mood_history_json_surfaces_emotional_trajectory_rows() {
+    let (ok, stdout, stderr) = run_membrain(&[
+        "mood",
+        "--history",
+        "--namespace",
+        "default",
+        "--since",
+        "1",
+        "--json",
+    ]);
+
+    assert!(ok, "stderr: {stderr}");
+    let json = parse_json(&stdout);
+    assert_eq!(json["ok"], true);
+    assert_eq!(json["namespace"], "default");
+    assert_eq!(json["result"]["namespace"], "default");
+    assert_eq!(json["result"]["since_tick"], 1);
+    assert_eq!(json["result"]["total_rows"], 0);
+    assert_eq!(json["result"]["authoritative_truth"], "emotional_timeline");
+    assert!(json["result"]["rows"]
+        .as_array()
+        .expect("rows array")
+        .is_empty());
+}
+
+#[test]
+fn cli_mood_history_human_output_preserves_empty_history_contract() {
+    let (ok, stdout, stderr) = run_membrain(&[
+        "mood",
+        "--history",
+        "--namespace",
+        "default",
+        "--since",
+        "1",
+    ]);
+
+    assert!(ok, "stderr: {stderr}");
+    assert!(stdout.contains("Mood history namespace=default rows=0"));
+    assert!(stdout.contains("since_tick: Some(1)"));
+    assert!(stdout.contains("authoritative_truth: emotional_timeline"));
 }
 
 #[test]

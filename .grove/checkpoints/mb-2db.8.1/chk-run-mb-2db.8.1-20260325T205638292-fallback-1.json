@@ -1,0 +1,42 @@
+{
+  "id": "chk-run-mb-2db.8.1-20260325T205638292-fallback-1",
+  "bead_id": "mb-2db.8.1",
+  "run_id": "run-mb-2db.8.1-20260325T205638292",
+  "session_id": "ses-run-mb-2db.8.1-20260325T205638292",
+  "progress": "Synthetic fallback checkpoint after NoProgress",
+  "next_step": "Resume from the transcript tail, avoid repeating completed setup, and continue with the smallest safe remaining step.",
+  "payload": {
+    "claimed_paths": [],
+    "confidence": 0.25,
+    "context": {
+      "failure_class": "NoProgress",
+      "failure_detail": "session ended with Unknown",
+      "stderr_tail": [],
+      "stdout_tail": [
+        "",
+        "",
+        "",
+        "",
+        "",
+        "Validated:",
+        "- `cargo test -p membrain-core mood_history_returns_recorded_affect_trajectory_rows -- --nocapture`",
+        "- `cargo test -p membrain-daemon parse_method_accepts_mood_history_params -- --nocapture`",
+        "- `cargo test -p membrain-daemon runtime_encode_records_affect_history_and_serves_mood_history -- --nocapture`",
+        "- `cargo test -p membrain-daemon --test runtime_share_unshare_parity runtime_encode_and_mood_history_preserve_emotional_trajectory_contract -- --nocapture`",
+        "- `cargo check --all-targets`",
+        "",
+        "Key refs:",
+        "- `crates/membrain-core/src/brain_store.rs:79`",
+        "- `crates/membrain-core/src/store/tier2.rs:76`",
+        "- `crates/membrain-daemon/tests/runtime_share_unshare_parity.rs:193`",
+        ""
+      ],
+      "synthetic": true
+    },
+    "next_step": "Resume from the transcript tail, avoid repeating completed setup, and continue with the smallest safe remaining step.",
+    "open_questions": [],
+    "progress": "Synthetic fallback checkpoint after NoProgress"
+  },
+  "saved_at": "2026-03-25T21:11:11.677376765Z",
+  "resume_generation": 1
+}

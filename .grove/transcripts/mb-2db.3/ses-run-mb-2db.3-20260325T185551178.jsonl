@@ -1,0 +1,42 @@
+{"ts":"2026-03-25T18:55:51.259411979Z","kind":"session_started","session_id":"ses-run-mb-2db.3-20260325T185551178"}
+{"ts":"2026-03-25T19:10:36.860701631Z","kind":"stdout","line":"Daemon-side result is good:"}
+{"ts":"2026-03-25T19:10:36.942208900Z","kind":"stdout","line":""}
+{"ts":"2026-03-25T19:10:36.942221550Z","kind":"stdout","line":"- `cargo test -p membrain-daemon runtime_recall_records_attention_signals_for_hot_paths_and_dead_zones`"}
+{"ts":"2026-03-25T19:10:36.942224633Z","kind":"stdout","line":"- passed at `crates/membrain-daemon/src/daemon.rs`"}
+{"ts":"2026-03-25T19:10:36.942227291Z","kind":"stdout","line":""}
+{"ts":"2026-03-25T19:10:36.942229842Z","kind":"stdout","line":"So current validation status is:"}
+{"ts":"2026-03-25T19:10:36.942232181Z","kind":"stdout","line":""}
+{"ts":"2026-03-25T19:10:36.942234307Z","kind":"stdout","line":"- passed: focused daemon F13 runtime test"}
+{"ts":"2026-03-25T19:10:36.942236540Z","kind":"stdout","line":"- blocked: focused core test run, due to unrelated compile drift in `crates/membrain-core/src/engine/compression.rs:209` and `:216` (`CompressionMemoryKind` missing `Hash`)"}
+{"ts":"2026-03-25T19:10:36.942239197Z","kind":"stdout","line":""}
+{"ts":"2026-03-25T19:10:36.942241324Z","kind":"stdout","line":"Net result:"}
+{"ts":"2026-03-25T19:10:36.942243662Z","kind":"stdout","line":"- the F13 runtime/policy alignment change is live and daemon-test-backed"}
+{"ts":"2026-03-25T19:10:36.942246320Z","kind":"stdout","line":"- core-wide verification is still not a clean signal because of unrelated compile failures elsewhere"}
+{"ts":"2026-03-25T19:10:36.942248446Z","kind":"stdout","line":""}
+{"ts":"2026-03-25T19:10:36.942250572Z","kind":"stdout","line":"GROVE_RESULT: daemon F13 runtime/policy alignment test passed; core verification remains blocked by unrelated `CompressionMemoryKind: Hash` compile failure"}
+{"ts":"2026-03-25T19:10:36.942250572Z","kind":"protocol","event":{"type":"result","summary":"daemon F13 runtime/policy alignment test passed; core verification remains blocked by unrelated `CompressionMemoryKind: Hash` compile failure"}}
+{"ts":"2026-03-25T19:10:36.943515956Z","kind":"stdout","line":"GROVE_ARTIFACTS:"}
+{"ts":"2026-03-25T19:10:36.943515956Z","kind":"protocol","event":{"type":"artifacts","items":[]}}
+{"ts":"2026-03-25T19:10:36.944071415Z","kind":"stdout","line":"- updated `crates/membrain-core/src/brain_store.rs`"}
+{"ts":"2026-03-25T19:10:36.944071415Z","kind":"protocol","event":{"type":"artifacts","items":["updated `crates/membrain-core/src/brain_store.rs`"]}}
+{"ts":"2026-03-25T19:10:36.944102563Z","kind":"stdout","line":"- updated `crates/membrain-daemon/src/daemon.rs`"}
+{"ts":"2026-03-25T19:10:36.944102563Z","kind":"protocol","event":{"type":"artifacts","items":["updated `crates/membrain-daemon/src/daemon.rs`"]}}
+{"ts":"2026-03-25T19:10:36.944109048Z","kind":"stdout","line":"GROVE_LESSONS:"}
+{"ts":"2026-03-25T19:10:36.944109048Z","kind":"protocol","event":{"type":"lessons","items":[]}}
+{"ts":"2026-03-25T19:10:36.944116064Z","kind":"stdout","line":"- The smallest remaining F13 slice was runtime audit alignment, not new aggregation logic."}
+{"ts":"2026-03-25T19:10:36.944116064Z","kind":"protocol","event":{"type":"lessons","items":["The smallest remaining F13 slice was runtime audit alignment, not new aggregation logic."]}}
+{"ts":"2026-03-25T19:10:36.944121699Z","kind":"stdout","line":"- Reusing canonical hot-path scoring/guidance removed drift without changing the advisory-only prewarm model."}
+{"ts":"2026-03-25T19:10:36.944121699Z","kind":"protocol","event":{"type":"lessons","items":["Reusing canonical hot-path scoring/guidance removed drift without changing the advisory-only prewarm model."]}}
+{"ts":"2026-03-25T19:10:36.944127014Z","kind":"stdout","line":"GROVE_DECISIONS:"}
+{"ts":"2026-03-25T19:10:36.944127014Z","kind":"protocol","event":{"type":"decision","items":[]}}
+{"ts":"2026-03-25T19:10:36.944131904Z","kind":"stdout","line":"- Kept prewarm advisory, not authoritative."}
+{"ts":"2026-03-25T19:10:36.944131904Z","kind":"protocol","event":{"type":"decision","items":["Kept prewarm advisory, not authoritative."]}}
+{"ts":"2026-03-25T19:10:36.944152103Z","kind":"stdout","line":"- Reused core hot-path policy for runtime audit annotation."}
+{"ts":"2026-03-25T19:10:36.944152103Z","kind":"protocol","event":{"type":"decision","items":["Reused core hot-path policy for runtime audit annotation."]}}
+{"ts":"2026-03-25T19:10:36.944155717Z","kind":"stdout","line":"GROVE_WARNINGS:"}
+{"ts":"2026-03-25T19:10:36.944155717Z","kind":"protocol","event":{"type":"warning","items":[]}}
+{"ts":"2026-03-25T19:10:36.944158800Z","kind":"stdout","line":"- `cargo test -p membrain-core ...` is still not a trustworthy F13 completion signal until unrelated `compression.rs` compile drift is cleared."}
+{"ts":"2026-03-25T19:10:36.944158800Z","kind":"protocol","event":{"type":"warning","items":["`cargo test -p membrain-core ...` is still not a trustworthy F13 completion signal until unrelated `compression.rs` compile drift is cleared."]}}
+{"ts":"2026-03-25T19:10:36.944166667Z","kind":"stdout","line":"GROVE_EXIT: false"}
+{"ts":"2026-03-25T19:10:36.944166667Z","kind":"protocol","event":{"type":"exit","value":false}}
+{"ts":"2026-03-25T19:10:37.725242268Z","kind":"session_ended","exit_code":0}

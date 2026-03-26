@@ -142,6 +142,8 @@ When degraded or repair-aware serving changes what can still be queried or mutat
 
 When an operation returns embedded explanation rather than only an `explain_handle`, the machine-readable explanation contract should reuse the canonical field families from `docs/RETRIEVAL.md` where relevant rather than inventing per-tool envelopes. The stable families are `route_summary`, `result_reasons`, `omitted_summary`, `policy_summary`, `provenance_summary`, `freshness_markers`, `conflict_markers`, and `trace_stages` when full routing detail is requested.
 
+For predictive pre-recall work, MCP explain output must keep bypass and fallback behavior inspectable rather than treating prediction as invisible background behavior. At minimum, callers must be able to distinguish predictive trigger versus bypass, the stable bypass reason when prediction was skipped, and the stable fallback behavior that governed the bounded route after prediction was considered.
+
 For recall-facing operations, the tool-specific `result` payload should reuse one canonical `RetrievalResult` envelope rather than inventing separate MCP-only answer shapes. That shared object carries `outcome_class`, bounded `evidence_pack`, optional `action_pack`, explicit `output_mode`, omission/deferred-payload state, policy/provenance/freshness/conflict summaries, packaging metadata, and either embedded explanation families or an `explain_handle`.
 
 When MCP callers provide `mode` or `effort`, implementations may map those labels onto the dual-output packaging modes from Section 10.1: `strict`/`high` suppresses unsafe derived actions, `balanced`/`normal` preserves ordinary evidence-plus-action packaging, and `fast` keeps action suggestions available unless other policy gates remove them.
@@ -437,12 +439,13 @@ Visible intent classes should cover the canonical Feature 20 set: `semantic_broa
 
 Trigger a later-stage offline synthesis cycle.
 
-**Returns**: `{ links_created, engrams_merged, last_run_tick }`
+**Returns**: `{ links_created, links_created_total, last_run_tick, inspect }`
 
 **Rules**:
 - `dream()` is a background maintenance mutation, not a request-path retrieval shortcut. It stays optional, explicitly triggered or idle-window scheduled, and non-blocking with respect to the core encode, recall, repair, and governance spine.
 - The operation may add bounded synthetic links or merge follow-on work only from an already-authorized, bounded candidate set; it must not scan the full corpus, widen namespace scope, or bypass policy checks just because the caller asked for synthesis.
 - Any emitted dream links, merge decisions, or related synthesis artifacts must remain inspectable, lineage-backed, and repairable from durable evidence rather than becoming hidden authoritative truth.
+- The `inspect` payload should expose a stable run handle plus per-artifact inspect paths, summaries, and lineage (`source_memory_ids`, citation kinds, `derived_from`, and `authoritative_truth`) so wrappers preserve the same operator evidence surface as the core dream summary.
 - Transport-specific wrappers may differ in how they present status or operator warnings, but they must preserve the same mutation semantics, enable/disable posture, and bounded-work expectations as CLI `membrain dream` and daemon equivalents.
 
 ### `belief_history(query)` — Feature 2
@@ -539,6 +542,9 @@ Adjust visibility for cross-agent access without changing the memory's canonical
 - `health()` is the bounded machine-readable operator dashboard shared with CLI `membrain health`; transport-specific rendering may differ, but the underlying report semantics must not.
 - The report should preserve tier and capacity counters, quality/conflict/uncertainty signals, runtime activity, repair/backpressure indicators, availability posture, explicit degraded-status guidance, and feature-availability facts strongly enough that automation can make the same decisions a human operator would make from the CLI dashboard.
 - The machine-readable view should expose enough detail to distinguish healthy service from degraded-but-servable posture, including repair-queue growth or backlog signals, backpressure state, which read or write paths still survive, and which feature surfaces are unavailable or maturity-gated.
+- The canonical `BrainHealthReport` should expose `dashboard_views`, `alerts`, and `drill_down_paths` in addition to raw counters so MCP clients can render the same overview, alerting, and subsystem-investigation flow as CLI and daemon surfaces without inventing wrapper-local logic.
+- `dashboard_views` should enumerate the main operator views with stable identifiers, summaries, alert counts, and drill-down targets; the `attention` view should surface hotspot counts, max score, bounded prewarm state, and the canonical `/health/attention` drill-down; `alerts` should carry stable severity, reason codes, runbook hints, and drill-down paths.
+- `attention.hotspots[*]` should expose stable heatmap fields (`heat_bucket`, `heat_band`) plus explicit bounded prewarm guidance (`prewarm_trigger`, `prewarm_action`, `prewarm_target_family`) so MCP operators can inspect hotspot-driven warming decisions without guessing hidden heuristics.
 - When policy scope, historical anchors, or degraded serving limit visibility, `health()` should return explicit warnings or `availability` state instead of silently fabricating a fully healthy view.
 
 ### `why(id)` — Feature 11
@@ -581,10 +587,12 @@ Manage later-stage resumable goal-stack state for long-running work without turn
 **Rules**:
 - these tools are later-stage working-state surfaces layered on top of stable task/session identity, namespace binding, and policy enforcement; they do not create hidden workflow scope or a second memory authority
 - goal-stack checkpoints are bounded resumability anchors for active work and must stay distinct from Feature 12 named historical inspection anchors
+- `goal_state()` should surface a visible blackboard projection with `projection_kind = "working_state_projection"` and `authoritative_truth = "durable_memory"` so clients can distinguish working-state views from authoritative memory truth
 - checkpoint payloads should preserve explicit selected-evidence handles, pending dependencies, blocked reason, and compact blackboard summary or equivalent working-state metadata rather than copying authoritative memories into a second store
 - `goal_pause()` persists the latest valid resumability checkpoint and marks the task dormant without widening scope or mutating durable truth beyond checkpoint metadata
 - `goal_resume()` rehydrates only from the newest valid checkpoint, restores referenced evidence and dependency handles when still readable, and must surface stale, missing, or policy-incompatible checkpoint state explicitly instead of guessing from scratch
 - `goal_abandon()` ends the active goal intentionally, preserves the checkpoint or audit trail needed for later inspection and handoff, and never silently deletes authoritative evidence or leaves the goal implicitly active
+- related inspectable parity artifacts may expose structured per-action logs for get, pin, dismiss, snapshot, pause, resume, and abandon flows, but those logs remain derived operator evidence rather than authoritative memory state
 - when resumability state is unavailable, disabled, or blocked by policy, the response should fail explicitly or return a degraded/blocked posture rather than silently fabricating a reconstructed plan
 
 ### `hot_paths(top_n?)` / `dead_zones(min_age_ticks?)` — Feature 13
@@ -605,15 +613,20 @@ Manage later-stage resumable goal-stack state for long-running work without turn
 
 ### `compress(dry_run?)` / `schemas(top_n?)` — Feature 17
 
+**Inputs**:
+- `compress(dry_run?)` → `namespace`, optional `dry_run`, plus the common request envelope fields
+- `schemas(top_n?)` → `namespace`, optional `top_n`, plus any bounded policy/context envelope fields exposed by the wrapper
+
 **Returns**:
-- `compress(dry_run?)` → `{ schemas_created, episodes_compressed, candidate_clusters?, storage_reduction_pct, blocked_reasons?, related_run? }`
+- `compress(dry_run?)` → `{ namespace, dry_run, decision, schemas_created, episodes_compressed, storage_reduction_pct, blocked_reasons?, related_run?, schema_artifact?, verification?, compression_log_entries? }`
 - `schemas(top_n?)` → `{ schemas: [{id, content, source_count, confidence, keywords, compressed_member_ids?}] }`
 
 **Rules**:
 - Schema compression is a later-stage, consolidation-adjacent follow-on rather than a prerequisite for the bounded core retrieval path.
-- `compress()` should preserve repairable lineage by keeping source-memory links, `compressed_into` relationships, and audit-visible before/after effects inspectable rather than flattening many episodes into an opaque summary.
+- `compress()` should preserve repairable lineage by keeping source-memory links, `compressed_into` relationships, verification state, and audit-visible before/after effects inspectable rather than flattening many episodes into an opaque summary.
 - Compression reduces or reroutes source-episode prominence; it does not silently hard-delete the underlying episodic evidence.
 - `dry_run` should surface candidate cluster counts, affected source-memory estimates, expected schema creations, and any maintenance or policy blockers before mutation.
+- Accepted non-dry-run `compress()` results should keep the chosen candidate decision, emitted schema artifact, reconstructability verification, and bounded compression-log history machine-readable so MCP, daemon/JSON-RPC, and CLI stay parity-aligned.
 - `schemas()` should make the resulting abstract pattern memories inspectable as schema artifacts with source counts, confidence, and dominant keywords or equivalent summaries.
 
 ### `mood_history(since_tick?, namespace_id?)` — Feature 18
@@ -624,6 +637,7 @@ Manage later-stage resumable goal-stack state for long-running work without turn
 - `mood_history()` is a later-stage, read-only introspection surface over emotional trajectory rows; it does not mutate memories, synthesize a new canonical mood object, or bypass the ordinary namespace and policy contract.
 - Returned timeline rows should stay bounded to one effective namespace and the requested time window, with explicit degraded or omission signaling when history is partial, redacted, or unavailable.
 - Retrieval-side `mood_congruent` behavior may consume the same underlying emotional metadata, but the read-only history view must remain semantically separate from the optional ranking hint so callers can inspect history without silently changing recall behavior.
+- `health()` should expose the corresponding bounded summary through the `affect_trajectory` dashboard view plus a `/mood_history` drill-down target, so MCP clients can render the same recall-facing trajectory context without inventing transport-local history cards.
 
 ### `audit(memory_id?, since_tick?, op?, limit?)` — Feature 19
 
@@ -659,7 +673,7 @@ Core MCP tools (`memory_put`, `memory_get`, `memory_search`, `memory_recall`, `m
 
 ### Feature Discovery
 
-The `health()` tool returns a `BrainHealthReport` that includes available features. Clients should check feature availability before calling feature-specific tools.
+The `health()` tool returns a `BrainHealthReport` that includes available features. Clients should check feature availability before calling feature-specific tools. Operators that render heatmaps or prewarm state should also consume `attention.hotspots`, `dashboard_views`, `drill_down_paths`, and `cache.adaptive_prewarm_*` from the same report instead of inventing transport-local summaries.
 
 ### Degraded and Unsupported Behavior
 

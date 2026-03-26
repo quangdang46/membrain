@@ -406,11 +406,17 @@ fn retrieval_result_envelope_projects_stable_route_policy_and_provenance_labels(
     let result_set = recent_tier1_result_set();
 
     let (route, stages) = result_set.explain_route();
+    let reasons = result_set.explain_result_reasons();
     let (policy, provenance) = result_set.explain_policy_and_provenance();
 
     assert_eq!(route.route_family, "recent_tier1_then_tier2_exact");
     assert_eq!(route.route_reason, "small_session_lookup");
     assert!(route.tier1_consulted_first);
+    assert_eq!(route.pre_route_candidate_count, Some(8));
+    assert_eq!(route.post_route_candidate_count, Some(0));
+    assert!(!route.predictive_triggered);
+    assert_eq!(route.predictive_skip_reason, None);
+    assert_eq!(route.predictive_fallback_behavior, None);
     assert_eq!(
         stages,
         vec![
@@ -429,6 +435,7 @@ fn retrieval_result_envelope_projects_stable_route_policy_and_provenance_labels(
     assert_eq!(provenance.source_kind, "retrieval_pipeline");
     assert_eq!(provenance.source_reference, "result_set");
     assert_eq!(provenance.lineage_ancestors, vec![11, 17]);
+    assert!(reasons.is_empty());
 }
 
 #[test]

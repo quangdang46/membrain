@@ -1,0 +1,45 @@
+{
+  "id": "chk-run-mb-1ng.11-20260325T152935405-fallback-1",
+  "bead_id": "mb-1ng.11",
+  "run_id": "run-mb-1ng.11-20260325T152935405",
+  "session_id": "ses-run-mb-1ng.11-20260325T152935405",
+  "progress": "Synthetic fallback checkpoint after NoProgress",
+  "next_step": "Resume from the transcript tail, avoid repeating completed setup, and continue with the smallest safe remaining step.",
+  "payload": {
+    "claimed_paths": [],
+    "confidence": 0.25,
+    "context": {
+      "failure_class": "NoProgress",
+      "failure_detail": "session ended with Unknown",
+      "stderr_tail": [],
+      "stdout_tail": [
+        "- `crates/membrain-cli/tests/cli_end_to_end.rs`",
+        "  - added focused JSON parity tests for goal/working-state flows",
+        "- `crates/membrain-cli/tests/e2e_cli.sh`",
+        "  - added logging-heavy goal flow coverage",
+        "- `docs/CLI.md`",
+        "  - updated `membrain goal` contract",
+        "- `docs/MCP_API.md`",
+        "  - clarified projection-vs-authority semantics for goal-state surfaces",
+        "",
+        "Validation passed:",
+        "",
+        "- `cargo check -p membrain-cli`",
+        "- `cargo test -p membrain-cli goal_commands_parse_canonical_fields -- --nocapture`",
+        "- `cargo test -p membrain-cli --test cli_end_to_end -- --nocapture`",
+        "- `bash crates/membrain-cli/tests/e2e_cli.sh`",
+        "",
+        "Key outcome:",
+        "- working-state CLI now exposes explicit blackboard/checkpoint lifecycle surfaces while keeping `authoritative_truth = \"durable_memory\"` and `projection_kind = \"working_state_projection\"` visible in JSON.",
+        "",
+        "I also coordinated via MCP Agent Mail, acknowledged pending messages, and released my file reservations."
+      ],
+      "synthetic": true
+    },
+    "next_step": "Resume from the transcript tail, avoid repeating completed setup, and continue with the smallest safe remaining step.",
+    "open_questions": [],
+    "progress": "Synthetic fallback checkpoint after NoProgress"
+  },
+  "saved_at": "2026-03-25T16:05:26.762236381Z",
+  "resume_generation": 1
+}

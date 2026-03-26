@@ -34,5 +34,19 @@ pub mod types;
 pub use brain_store::BrainStore;
 /// Shared runtime configuration carried by the core facade.
 pub use config::RuntimeConfig;
+/// Shared fork and merge engine summaries exposed to wrappers.
+pub use engine::fork::{ForkInfo, MergeReport};
+/// Shared intent-taxonomy and classification surfaces exposed to wrappers.
+pub use engine::intent::{
+    IntentClassification, IntentClassificationLog, IntentEngine, IntentRankingProfile,
+    IntentRouteInputs, IntentSignalKind, IntentSignalMatch, IntentTaxonomyRecord, QueryIntent,
+};
+/// Shared predictive pre-recall surfaces exposed to wrappers.
+pub use engine::predictive::{
+    PredictivePrewarmAction, PredictivePrewarmDecision, PredictiveRecallConfig,
+    PredictiveRecallEngine,
+};
+/// Shared working-state engine surfaces exposed to wrappers.
+pub use engine::working_state::{GoalWorkingState, ResumeWarning, WorkingStateEngine};
 /// Shared API version exposed to wrapper crates.
 pub use types::CoreApiVersion;

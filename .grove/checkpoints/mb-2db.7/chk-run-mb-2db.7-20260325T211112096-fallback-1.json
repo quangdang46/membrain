@@ -1,0 +1,45 @@
+{
+  "id": "chk-run-mb-2db.7-20260325T211112096-fallback-1",
+  "bead_id": "mb-2db.7",
+  "run_id": "run-mb-2db.7-20260325T211112096",
+  "session_id": "ses-run-mb-2db.7-20260325T211112096",
+  "progress": "Synthetic fallback checkpoint after NoProgress",
+  "next_step": "Resume from the transcript tail, avoid repeating completed setup, and continue with the smallest safe remaining step.",
+  "payload": {
+    "claimed_paths": [],
+    "confidence": 0.25,
+    "context": {
+      "failure_class": "NoProgress",
+      "failure_detail": "session ended with Unknown",
+      "stderr_tail": [],
+      "stdout_tail": [
+        "- Did not broaden into:",
+        "  - durable `compression_log` persistence",
+        "  - daemon RPC",
+        "  - MCP API compression endpoints",
+        "- Kept behavior bounded and inspectable, aligned with the existing `dream` command pattern.",
+        "",
+        "GROVE_WARNINGS",
+        "",
+        "- `compression_log` durable schema exists, but this slice does not yet persist compression apply results there.",
+        "- Daemon/MCP/API compression surfaces are still not wired.",
+        "- Advisory file reservations showed overlapping holders on `brain_store.rs` and `main.rs`, so these edits were intentionally minimal and localized.",
+        "",
+        "Changed references:",
+        "- `crates/membrain-core/src/engine/compression.rs:623`",
+        "- `crates/membrain-core/src/brain_store.rs:314`",
+        "- `crates/membrain-core/src/brain_store.rs:729`",
+        "- `crates/membrain-cli/src/main.rs:395`",
+        "- `crates/membrain-cli/src/main.rs:847`",
+        "- `crates/membrain-cli/src/main.rs:5299`",
+        ""
+      ],
+      "synthetic": true
+    },
+    "next_step": "Resume from the transcript tail, avoid repeating completed setup, and continue with the smallest safe remaining step.",
+    "open_questions": [],
+    "progress": "Synthetic fallback checkpoint after NoProgress"
+  },
+  "saved_at": "2026-03-25T21:31:32.254040176Z",
+  "resume_generation": 1
+}

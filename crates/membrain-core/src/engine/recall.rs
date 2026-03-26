@@ -1,5 +1,6 @@
 use crate::config::RuntimeConfig;
 use crate::engine::intent::IntentClassification;
+use crate::engine::retrieval_planner::QueryPath;
 use crate::types::{MemoryId, SessionId};
 
 /// Canonical request shape for deterministic Tier1 planner routing.
@@ -54,6 +55,17 @@ pub enum RecallPlanKind {
     RecentTier1ThenTier2Exact,
     Tier2ExactThenGraphExpansion,
     Tier2ExactThenTier3Fallback,
+}
+
+impl RecallPlanKind {
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::ExactIdTier1 => "exact_id_tier1",
+            Self::RecentTier1ThenTier2Exact => "recent_tier1_then_tier2_exact",
+            Self::Tier2ExactThenGraphExpansion => "tier2_exact_then_graph_expansion",
+            Self::Tier2ExactThenTier3Fallback => "tier2_exact_then_tier3_fallback",
+        }
+    }
 }
 
 /// Stage-level route facts preserved for explain and inspect surfaces.
@@ -126,10 +138,31 @@ impl RecallPlan {
     }
 }
 
+/// Stable bounded heuristic signals that may trigger predictive pre-recall preparation.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PredictivePrerollSignal {
+    SessionRecency,
+    HighValueRecent,
+    TemporalAnchor,
+    ProceduralSequence,
+}
+
+impl PredictivePrerollSignal {
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::SessionRecency => "session_recency",
+            Self::HighValueRecent => "high_value_recent",
+            Self::TemporalAnchor => "temporal_anchor",
+            Self::ProceduralSequence => "procedural_sequence",
+        }
+    }
+}
+
 /// Stable predictive pre-recall trigger contract derived from shallow intent classification.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct PredictivePrerollDecision {
     pub should_trigger: bool,
+    pub signal: Option<PredictivePrerollSignal>,
     pub skip_reason: &'static str,
 }
 
@@ -137,9 +170,105 @@ impl PredictivePrerollDecision {
     pub const fn skipped(reason: &'static str) -> Self {
         Self {
             should_trigger: false,
+            signal: None,
             skip_reason: reason,
         }
     }
+}
+
+/// Manual override modes that can bypass automatic intent-to-route mapping.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub enum RouteOverride {
+    ExactId(MemoryId),
+    SmallSessionLookup(SessionId),
+    GraphExpansion,
+    Tier2Fallback,
+}
+
+impl RouteOverride {
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::ExactId(_) => "exact_id",
+            Self::SmallSessionLookup(_) => "small_session_lookup",
+            Self::GraphExpansion => "graph_expansion",
+            Self::Tier2Fallback => "tier2_fallback",
+        }
+    }
+}
+
+/// Inputs to the auto-routing layer that maps classified intent onto a bounded recall request.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct AutoRouteRequest {
+    pub exact_memory_id: Option<MemoryId>,
+    pub session_id: Option<SessionId>,
+    pub allow_graph_expansion: bool,
+    pub enable_predictive_preroll: bool,
+    pub override_mode: Option<RouteOverride>,
+}
+
+impl AutoRouteRequest {
+    pub const fn new() -> Self {
+        Self {
+            exact_memory_id: None,
+            session_id: None,
+            allow_graph_expansion: false,
+            enable_predictive_preroll: false,
+            override_mode: None,
+        }
+    }
+
+    pub const fn with_session(mut self, session_id: SessionId) -> Self {
+        self.session_id = Some(session_id);
+        self
+    }
+
+    pub const fn with_exact_memory(mut self, memory_id: MemoryId) -> Self {
+        self.exact_memory_id = Some(memory_id);
+        self
+    }
+
+    pub const fn with_graph_expansion(mut self, enabled: bool) -> Self {
+        self.allow_graph_expansion = enabled;
+        self
+    }
+
+    pub const fn with_predictive_preroll(mut self, enabled: bool) -> Self {
+        self.enable_predictive_preroll = enabled;
+        self
+    }
+
+    pub const fn with_override(mut self, override_mode: RouteOverride) -> Self {
+        self.override_mode = Some(override_mode);
+        self
+    }
+}
+
+impl Default for AutoRouteRequest {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+/// Structured explain output for one auto-routing decision.
+#[derive(Debug, Clone, PartialEq)]
+pub struct AutoRouteExplain {
+    pub intent: &'static str,
+    pub confidence: f32,
+    pub query_path: &'static str,
+    pub ranking_profile: &'static str,
+    pub override_applied: bool,
+    pub override_mode: Option<&'static str>,
+    pub request_summary: &'static str,
+    pub selected_plan: &'static str,
+    pub planner_reason: &'static str,
+}
+
+/// Full bounded auto-routing decision from intent classification to planner route.
+#[derive(Debug, Clone, PartialEq)]
+pub struct AutoRouteDecision {
+    pub request: RecallRequest,
+    pub plan: RecallPlan,
+    pub explain: AutoRouteExplain,
 }
 
 /// Shared interface for Tier1 recall orchestration owned by `membrain-core`.
@@ -170,11 +299,106 @@ impl RecallEngine {
         RecallTraceStage::Tier3Fallback,
     ];
 
+    /// Maps explicit intent classification plus optional override inputs onto one bounded recall plan.
+    pub fn auto_route(
+        &self,
+        classification: &IntentClassification,
+        request: AutoRouteRequest,
+        config: RuntimeConfig,
+    ) -> AutoRouteDecision {
+        let recall_request = if let Some(override_mode) = request.override_mode {
+            match override_mode {
+                RouteOverride::ExactId(memory_id) => RecallRequest::exact(memory_id),
+                RouteOverride::SmallSessionLookup(session_id) => {
+                    let mut recall_request = RecallRequest::small_session_lookup(session_id);
+                    recall_request.predictive_preroll = request.enable_predictive_preroll;
+                    recall_request
+                }
+                RouteOverride::GraphExpansion => RecallRequest {
+                    exact_memory_id: None,
+                    session_id: request.session_id,
+                    small_lookup: false,
+                    graph_expansion: true,
+                    predictive_preroll: false,
+                },
+                RouteOverride::Tier2Fallback => RecallRequest {
+                    exact_memory_id: None,
+                    session_id: request.session_id,
+                    small_lookup: false,
+                    graph_expansion: false,
+                    predictive_preroll: request.enable_predictive_preroll,
+                },
+            }
+        } else if let Some(memory_id) = request.exact_memory_id {
+            RecallRequest::exact(memory_id)
+        } else {
+            RecallRequest {
+                exact_memory_id: None,
+                session_id: request.session_id,
+                small_lookup: classification.route_inputs.prefer_small_lookup
+                    && request.session_id.is_some(),
+                graph_expansion: request.allow_graph_expansion
+                    && matches!(
+                        classification.route_inputs.query_path,
+                        QueryPath::EntityHeavy
+                    ),
+                predictive_preroll: request.enable_predictive_preroll
+                    && classification.route_inputs.predictive_preroll_candidate,
+            }
+        };
+        let plan = self.plan_recall(recall_request, config);
+        let explain = AutoRouteExplain {
+            intent: classification.intent.as_str(),
+            confidence: classification.confidence,
+            query_path: classification.route_inputs.query_path.as_str(),
+            ranking_profile: classification.route_inputs.ranking_profile.as_str(),
+            override_applied: request.override_mode.is_some(),
+            override_mode: request.override_mode.map(RouteOverride::as_str),
+            request_summary: if recall_request.exact_memory_id.is_some() {
+                "exact_id_request"
+            } else if recall_request.small_lookup {
+                "small_session_lookup"
+            } else if recall_request.graph_expansion {
+                "graph_expansion_request"
+            } else {
+                "tier2_fallback_request"
+            },
+            selected_plan: plan.kind.as_str(),
+            planner_reason: plan.route_summary.reason,
+        };
+
+        AutoRouteDecision {
+            request: recall_request,
+            plan,
+            explain,
+        }
+    }
+
     const fn trace_preroll(request: RecallRequest) -> (bool, &'static str) {
         if request.predictive_preroll {
             (true, "predictive_preroll_enabled")
         } else {
             (false, "request_not_opted_in")
+        }
+    }
+
+    const fn predictive_preroll_signal(
+        classification: &IntentClassification,
+    ) -> Option<PredictivePrerollSignal> {
+        match classification.intent {
+            crate::engine::intent::QueryIntent::RecentFirst => {
+                Some(PredictivePrerollSignal::SessionRecency)
+            }
+            crate::engine::intent::QueryIntent::StrengthWeighted => {
+                Some(PredictivePrerollSignal::HighValueRecent)
+            }
+            crate::engine::intent::QueryIntent::TemporalAnchor => {
+                Some(PredictivePrerollSignal::TemporalAnchor)
+            }
+            crate::engine::intent::QueryIntent::ProceduralLookup => {
+                Some(PredictivePrerollSignal::ProceduralSequence)
+            }
+            _ => None,
         }
     }
 
@@ -204,9 +428,18 @@ impl RecallEngine {
             return PredictivePrerollDecision::skipped("tier1_budget_disabled");
         }
 
+        if config.prefetch_queue_capacity == 0 {
+            return PredictivePrerollDecision::skipped("prefetch_budget_disabled");
+        }
+
+        let Some(signal) = Self::predictive_preroll_signal(classification) else {
+            return PredictivePrerollDecision::skipped("intent_not_predictive_candidate");
+        };
+
         if request.predictive_preroll {
             return PredictivePrerollDecision {
                 should_trigger: true,
+                signal: Some(signal),
                 skip_reason: "predictive_preroll_enabled",
             };
         }
@@ -335,8 +568,12 @@ impl RecallRuntime for RecallEngine {
 
 #[cfg(test)]
 mod tests {
-    use super::{RecallEngine, RecallPlanKind, RecallRequest, RecallRuntime, RecallTraceStage};
+    use super::{
+        AutoRouteRequest, PredictivePrerollSignal, RecallEngine, RecallPlanKind, RecallRequest,
+        RecallRuntime, RecallTraceStage, RouteOverride,
+    };
     use crate::config::RuntimeConfig;
+    use crate::engine::intent::IntentEngine;
     use crate::types::{MemoryId, SessionId};
 
     #[test]
@@ -619,5 +856,202 @@ mod tests {
             graph.trace.predictive_preroll_skip_reason,
             "graph_expansion_not_predictive"
         );
+    }
+
+    #[test]
+    fn predictive_preroll_decision_maps_predictive_intents_to_bounded_signals() {
+        let engine = RecallEngine;
+        let intent_engine = IntentEngine;
+        let config = RuntimeConfig::default();
+
+        let recent = intent_engine.classify("what happened recently with the release pipeline?");
+        let recent_decision = engine.predictive_preroll_decision(
+            &recent,
+            RecallRequest {
+                predictive_preroll: true,
+                ..RecallRequest::small_session_lookup(SessionId(51))
+            },
+            config,
+        );
+        assert!(recent_decision.should_trigger);
+        assert_eq!(
+            recent_decision.signal,
+            Some(PredictivePrerollSignal::SessionRecency)
+        );
+
+        let important = intent_engine.classify("what is most important about the rollback plan?");
+        let important_decision = engine.predictive_preroll_decision(
+            &important,
+            RecallRequest {
+                session_id: Some(SessionId(52)),
+                predictive_preroll: true,
+                ..RecallRequest::default()
+            },
+            config,
+        );
+        assert!(important_decision.should_trigger);
+        assert_eq!(
+            important_decision.signal,
+            Some(PredictivePrerollSignal::HighValueRecent)
+        );
+
+        let temporal = intent_engine.classify("what changed before the march deploy?");
+        let temporal_decision = engine.predictive_preroll_decision(
+            &temporal,
+            RecallRequest {
+                session_id: Some(SessionId(53)),
+                predictive_preroll: true,
+                ..RecallRequest::default()
+            },
+            config,
+        );
+        assert!(temporal_decision.should_trigger);
+        assert_eq!(
+            temporal_decision.signal,
+            Some(PredictivePrerollSignal::TemporalAnchor)
+        );
+
+        let procedural = intent_engine.classify("how to rotate the credentials safely");
+        let procedural_decision = engine.predictive_preroll_decision(
+            &procedural,
+            RecallRequest {
+                session_id: Some(SessionId(54)),
+                predictive_preroll: true,
+                ..RecallRequest::default()
+            },
+            config,
+        );
+        assert!(procedural_decision.should_trigger);
+        assert_eq!(
+            procedural_decision.signal,
+            Some(PredictivePrerollSignal::ProceduralSequence)
+        );
+    }
+
+    #[test]
+    fn predictive_preroll_decision_respects_prefetch_budget_bound() {
+        let engine = RecallEngine;
+        let classification =
+            IntentEngine.classify("what happened recently with the release pipeline?");
+        let decision = engine.predictive_preroll_decision(
+            &classification,
+            RecallRequest {
+                predictive_preroll: true,
+                ..RecallRequest::small_session_lookup(SessionId(61))
+            },
+            RuntimeConfig {
+                prefetch_queue_capacity: 0,
+                ..RuntimeConfig::default()
+            },
+        );
+
+        assert!(!decision.should_trigger);
+        assert_eq!(decision.signal, None);
+        assert_eq!(decision.skip_reason, "prefetch_budget_disabled");
+    }
+
+    #[test]
+    fn auto_route_maps_different_intents_to_different_bounded_plans() {
+        let engine = RecallEngine;
+        let config = RuntimeConfig::default();
+
+        let recent = IntentEngine.classify("what happened recently with the release pipeline?");
+        let recent_decision = engine.auto_route(
+            &recent,
+            AutoRouteRequest::new()
+                .with_session(SessionId(71))
+                .with_predictive_preroll(true),
+            config,
+        );
+
+        let causal = IntentEngine.classify("why do I believe this service should stay split?");
+        let causal_decision = engine.auto_route(
+            &causal,
+            AutoRouteRequest::new().with_graph_expansion(true),
+            config,
+        );
+
+        assert_eq!(
+            recent_decision.plan.kind,
+            RecallPlanKind::RecentTier1ThenTier2Exact
+        );
+        assert_eq!(
+            recent_decision.explain.request_summary,
+            "small_session_lookup"
+        );
+        assert_eq!(
+            recent_decision.explain.selected_plan,
+            "recent_tier1_then_tier2_exact"
+        );
+        assert!(!recent_decision.explain.override_applied);
+
+        assert_eq!(
+            causal_decision.plan.kind,
+            RecallPlanKind::Tier2ExactThenGraphExpansion
+        );
+        assert_eq!(
+            causal_decision.explain.request_summary,
+            "graph_expansion_request"
+        );
+        assert_eq!(
+            causal_decision.explain.selected_plan,
+            "tier2_exact_then_graph_expansion"
+        );
+        assert!(!causal_decision.explain.override_applied);
+    }
+
+    #[test]
+    fn auto_route_override_bypasses_intent_selected_route() {
+        let engine = RecallEngine;
+        let classification =
+            IntentEngine.classify("what happened recently with the release pipeline?");
+        let decision = engine.auto_route(
+            &classification,
+            AutoRouteRequest::new().with_override(RouteOverride::Tier2Fallback),
+            RuntimeConfig::default(),
+        );
+
+        assert_eq!(
+            decision.plan.kind,
+            RecallPlanKind::Tier2ExactThenTier3Fallback
+        );
+        assert!(decision.explain.override_applied);
+        assert_eq!(decision.explain.override_mode, Some("tier2_fallback"));
+        assert_eq!(decision.explain.request_summary, "tier2_fallback_request");
+    }
+
+    #[test]
+    fn graph_and_fallback_overrides_do_not_get_forced_back_to_exact_id() {
+        let engine = RecallEngine;
+        let classification = IntentEngine.classify("what do I know about rust lifetimes?");
+
+        let graph = engine.auto_route(
+            &classification,
+            AutoRouteRequest::new()
+                .with_exact_memory(MemoryId(9))
+                .with_override(RouteOverride::GraphExpansion),
+            RuntimeConfig::default(),
+        );
+        let fallback = engine.auto_route(
+            &classification,
+            AutoRouteRequest::new()
+                .with_exact_memory(MemoryId(9))
+                .with_override(RouteOverride::Tier2Fallback),
+            RuntimeConfig::default(),
+        );
+
+        assert_eq!(
+            graph.plan.kind,
+            RecallPlanKind::Tier2ExactThenGraphExpansion
+        );
+        assert_eq!(graph.request.exact_memory_id, None);
+        assert!(graph.request.graph_expansion);
+
+        assert_eq!(
+            fallback.plan.kind,
+            RecallPlanKind::Tier2ExactThenTier3Fallback
+        );
+        assert_eq!(fallback.request.exact_memory_id, None);
+        assert!(!fallback.request.graph_expansion);
     }
 }

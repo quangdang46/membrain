@@ -5,6 +5,7 @@
 //! score. It produces explain payloads that downstream surfaces can inspect.
 
 use crate::engine::contradiction::ContradictionExplain;
+use crate::types::AffectSignals;
 
 // ── Score components ─────────────────────────────────────────────────────────
 
@@ -137,11 +138,78 @@ impl RankingProfile {
             confidence_weight: 40,
         }
     }
+
+    /// Mood-congruent profile for opt-in affect-aware retrieval.
+    pub const fn mood_congruent() -> Self {
+        Self {
+            recency_weight: 20,
+            salience_weight: 34,
+            strength_weight: 24,
+            provenance_weight: 7,
+            conflict_weight: 3,
+            confidence_weight: 12,
+        }
+    }
 }
 
 impl Default for RankingProfile {
     fn default() -> Self {
         Self::balanced()
+    }
+}
+
+/// Returns the ranking profile for one recall candidate under the opt-in mood-congruent mode.
+pub const fn ranking_profile_for_recall(
+    mood_congruent: bool,
+    current_mood: Option<AffectSignals>,
+    candidate_affect: Option<AffectSignals>,
+) -> RankingProfile {
+    if mood_congruent && current_mood.is_some() && candidate_affect.is_some() {
+        RankingProfile::mood_congruent()
+    } else {
+        RankingProfile::balanced()
+    }
+}
+
+/// Returns the stable ranking-profile label for one recall candidate.
+pub const fn ranking_profile_name_for_recall(
+    mood_congruent: bool,
+    current_mood: Option<AffectSignals>,
+    candidate_affect: Option<AffectSignals>,
+) -> &'static str {
+    if mood_congruent && current_mood.is_some() && candidate_affect.is_some() {
+        "mood_congruent"
+    } else {
+        "balanced"
+    }
+}
+
+/// Returns the bounded affect congruence boost between the current mood and one candidate.
+pub fn mood_congruence_boost(current: AffectSignals, candidate: AffectSignals) -> u16 {
+    let valence_gap = (current.valence - candidate.valence).abs() / 2.0;
+    let arousal_gap = (current.arousal - candidate.arousal).abs();
+    let closeness = (1.0 - ((valence_gap + arousal_gap) / 2.0)).clamp(0.0, 1.0);
+    (closeness * 180.0).round() as u16
+}
+
+/// Applies the bounded opt-in affect adjustment to a ranking input.
+pub fn adjusted_ranking_input_for_affect(
+    base: RankingInput,
+    mood_congruent: bool,
+    current_mood: Option<AffectSignals>,
+    candidate_affect: Option<AffectSignals>,
+) -> RankingInput {
+    let Some(current_mood) = current_mood.filter(|_| mood_congruent) else {
+        return base;
+    };
+    let Some(candidate_affect) = candidate_affect else {
+        return base;
+    };
+    let boost = mood_congruence_boost(current_mood, candidate_affect);
+    RankingInput {
+        salience: base.salience.saturating_add(boost).min(1000),
+        strength: base.strength.saturating_add(boost / 2).min(1000),
+        ..base
     }
 }
 
@@ -255,6 +323,8 @@ pub fn fuse_scores(input: RankingInput, profile: RankingProfile) -> RankingResul
         "strength_biased"
     } else if profile == RankingProfile::confidence_biased() {
         "confidence_biased"
+    } else if profile == RankingProfile::mood_congruent() {
+        "mood_congruent"
     } else {
         "custom"
     };
@@ -573,6 +643,76 @@ mod tests {
         };
         let result = fuse_scores(input, RankingProfile::balanced());
         assert_eq!(result.final_score, 0);
+    }
+
+    #[test]
+    fn mood_congruent_profile_name_is_stable() {
+        let input = RankingInput {
+            recency: 500,
+            salience: 500,
+            strength: 500,
+            provenance: 500,
+            conflict: 500,
+            confidence: 500,
+        };
+        let result = fuse_scores(input, RankingProfile::mood_congruent());
+        assert_eq!(result.profile_name, "mood_congruent");
+    }
+
+    #[test]
+    fn recall_profile_stays_balanced_without_full_opt_in_affect_inputs() {
+        let current = Some(AffectSignals::new(0.4, 0.9));
+        let candidate = Some(AffectSignals::new(0.35, 0.85));
+
+        assert_eq!(
+            ranking_profile_name_for_recall(false, current, candidate),
+            "balanced"
+        );
+        assert_eq!(
+            ranking_profile_name_for_recall(true, current, None),
+            "balanced"
+        );
+        assert_eq!(
+            ranking_profile_name_for_recall(true, None, candidate),
+            "balanced"
+        );
+        assert_eq!(
+            ranking_profile_name_for_recall(true, current, candidate),
+            "mood_congruent"
+        );
+    }
+
+    #[test]
+    fn affect_adjustment_is_opt_in_and_bounded() {
+        let base = RankingInput {
+            recency: 640,
+            salience: 900,
+            strength: 940,
+            provenance: 600,
+            conflict: 500,
+            confidence: 720,
+        };
+        let current = AffectSignals::new(0.4, 0.9);
+        let candidate = AffectSignals::new(0.35, 0.85);
+
+        assert_eq!(
+            adjusted_ranking_input_for_affect(base, false, Some(current), Some(candidate)),
+            base
+        );
+        assert_eq!(
+            adjusted_ranking_input_for_affect(base, true, Some(current), None),
+            base
+        );
+
+        let adjusted =
+            adjusted_ranking_input_for_affect(base, true, Some(current), Some(candidate));
+        assert!(adjusted.salience >= base.salience);
+        assert!(adjusted.strength >= base.strength);
+        assert!(adjusted.salience <= 1000);
+        assert!(adjusted.strength <= 1000);
+        assert_eq!(adjusted.provenance, base.provenance);
+        assert_eq!(adjusted.conflict, base.conflict);
+        assert_eq!(adjusted.confidence, base.confidence);
     }
 
     #[test]

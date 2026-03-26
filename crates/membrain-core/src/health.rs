@@ -82,6 +82,229 @@ pub struct FeatureAvailabilityEntry {
     pub note: Option<String>,
 }
 
+/// Stable alert severity for operator-facing health alerts.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
+pub enum HealthAlertSeverity {
+    Info,
+    Warning,
+    Critical,
+}
+
+impl HealthAlertSeverity {
+    /// Returns the stable machine-readable alert severity.
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Info => "info",
+            Self::Warning => "warning",
+            Self::Critical => "critical",
+        }
+    }
+}
+
+/// Stable dashboard view identifier exposed by health surfaces.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum DashboardViewId {
+    Overview,
+    Alerts,
+    Subsystems,
+    Trends,
+    Attention,
+    AffectTrajectory,
+    DegradedMode,
+}
+
+impl DashboardViewId {
+    /// Returns the stable machine-readable view identifier.
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Overview => "overview",
+            Self::Alerts => "alerts",
+            Self::Subsystems => "subsystems",
+            Self::Trends => "trends",
+            Self::Attention => "attention",
+            Self::AffectTrajectory => "affect_trajectory",
+            Self::DegradedMode => "degraded_mode",
+        }
+    }
+}
+
+/// One canonical dashboard view definition.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+pub struct DashboardView {
+    pub view: DashboardViewId,
+    pub title: &'static str,
+    pub summary: String,
+    pub alert_count: usize,
+    pub drill_down_targets: Vec<&'static str>,
+}
+
+/// Explicit contribution counts that explain one attention hotspot.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+pub struct AttentionSignalBreakdown {
+    pub recall_count: u64,
+    pub encode_count: u64,
+    pub working_memory_pressure: usize,
+    pub promotion_count: u64,
+    pub overflow_count: u64,
+}
+
+/// One ranked hotspot entry derived from inspectable attention inputs.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+pub struct AttentionHotspot {
+    pub namespace: String,
+    pub attention_score: u64,
+    pub rank: usize,
+    pub status: &'static str,
+    pub dominant_signal: &'static str,
+    pub heat_bucket: &'static str,
+    pub heat_band: u8,
+    pub prewarm_trigger: &'static str,
+    pub prewarm_action: &'static str,
+    pub prewarm_target_family: &'static str,
+    pub contributing_signals: AttentionSignalBreakdown,
+    pub sample_log: String,
+}
+
+/// Shared input row for one namespace-scoped attention aggregate.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AttentionNamespaceInputs {
+    pub namespace: String,
+    pub recall_count: u64,
+    pub encode_count: u64,
+    pub working_memory_pressure: usize,
+    pub promotion_count: u64,
+    pub overflow_count: u64,
+}
+
+/// Canonical attention aggregate shared across health and future heatmap surfaces.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+pub struct AttentionAggregateReport {
+    pub total_recall_count: u64,
+    pub total_encode_count: u64,
+    pub total_promotion_count: u64,
+    pub total_overflow_count: u64,
+    pub highest_namespace_pressure: usize,
+    pub hotspot_count: usize,
+    pub max_attention_score: u64,
+    pub warming_candidate_count: usize,
+    pub hot_candidate_count: usize,
+    pub hotspots: Vec<AttentionHotspot>,
+}
+
+impl AttentionAggregateReport {
+    /// Builds the inspectable hotspot report from explicit namespace inputs.
+    pub fn from_inputs(inputs: &[AttentionNamespaceInputs]) -> Self {
+        let mut hotspots = inputs
+            .iter()
+            .map(|row| {
+                let attention_score = row.recall_count * 5
+                    + row.encode_count * 3
+                    + row.promotion_count * 11
+                    + row.overflow_count * 13
+                    + (row.working_memory_pressure as u64 * 17);
+                let dominant_signal = dominant_signal(row);
+                let status = hotspot_status(attention_score, row.working_memory_pressure);
+                let heat_band = attention_heat_band(attention_score, row.working_memory_pressure);
+                let heat_bucket = attention_heat_bucket(heat_band);
+                let (prewarm_trigger, prewarm_action, prewarm_target_family) =
+                    attention_prewarm_policy(status, dominant_signal);
+                AttentionHotspot {
+                    namespace: row.namespace.clone(),
+                    attention_score,
+                    rank: 0,
+                    status,
+                    dominant_signal,
+                    heat_bucket,
+                    heat_band,
+                    prewarm_trigger,
+                    prewarm_action,
+                    prewarm_target_family,
+                    contributing_signals: AttentionSignalBreakdown {
+                        recall_count: row.recall_count,
+                        encode_count: row.encode_count,
+                        working_memory_pressure: row.working_memory_pressure,
+                        promotion_count: row.promotion_count,
+                        overflow_count: row.overflow_count,
+                    },
+                    sample_log: format!(
+                        "namespace={} attention_score={} dominant_signal={} recalls={} encodes={} pressure={} promotions={} overflows={}",
+                        row.namespace,
+                        attention_score,
+                        dominant_signal,
+                        row.recall_count,
+                        row.encode_count,
+                        row.working_memory_pressure,
+                        row.promotion_count,
+                        row.overflow_count
+                    ),
+                }
+            })
+            .collect::<Vec<_>>();
+        hotspots.sort_by(|left, right| {
+            right
+                .attention_score
+                .cmp(&left.attention_score)
+                .then_with(|| left.namespace.cmp(&right.namespace))
+        });
+        for (index, hotspot) in hotspots.iter_mut().enumerate() {
+            hotspot.rank = index + 1;
+        }
+        let max_attention_score = hotspots
+            .iter()
+            .map(|hotspot| hotspot.attention_score)
+            .max()
+            .unwrap_or(0);
+        let warming_candidate_count = hotspots
+            .iter()
+            .filter(|hotspot| hotspot.status == "warming")
+            .count();
+        let hot_candidate_count = hotspots
+            .iter()
+            .filter(|hotspot| hotspot.status == "hot")
+            .count();
+        Self {
+            total_recall_count: inputs.iter().map(|row| row.recall_count).sum(),
+            total_encode_count: inputs.iter().map(|row| row.encode_count).sum(),
+            total_promotion_count: inputs.iter().map(|row| row.promotion_count).sum(),
+            total_overflow_count: inputs.iter().map(|row| row.overflow_count).sum(),
+            highest_namespace_pressure: inputs
+                .iter()
+                .map(|row| row.working_memory_pressure)
+                .max()
+                .unwrap_or(0),
+            hotspot_count: hotspots.len(),
+            max_attention_score,
+            warming_candidate_count,
+            hot_candidate_count,
+            hotspots,
+        }
+    }
+}
+
+/// One machine-readable operator alert derived from aggregate health state.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+pub struct HealthAlert {
+    pub alert_id: String,
+    pub subsystem: &'static str,
+    pub severity: HealthAlertSeverity,
+    pub summary: String,
+    pub reason_codes: Vec<&'static str>,
+    pub recommended_runbook: Option<&'static str>,
+    pub drill_down_path: &'static str,
+}
+
+/// One machine-readable drill-down path for operator follow-up.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+pub struct HealthDrillDownPath {
+    pub path: &'static str,
+    pub label: &'static str,
+    pub target_surface: &'static str,
+    pub target_ref: &'static str,
+    pub summary: String,
+    pub related_subsystems: Vec<&'static str>,
+}
+
 /// One machine-readable subsystem status row.
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
 pub struct SubsystemStatus {
@@ -128,6 +351,7 @@ pub struct CacheHealthReport {
     pub total_invalidation_count: u64,
     pub total_stale_warning_count: u64,
     pub prefetch_queue_depth: usize,
+    pub prefetch_capacity: usize,
     pub hints_submitted: u64,
     pub hints_consumed: u64,
     pub hints_dropped: u64,
@@ -135,6 +359,8 @@ pub struct CacheHealthReport {
     pub drop_intent_changed_count: u64,
     pub drop_scope_changed_count: u64,
     pub drop_disabled_count: u64,
+    pub adaptive_prewarm_state: &'static str,
+    pub adaptive_prewarm_summary: String,
 }
 
 /// Aggregate index health summary derived from managed index reports.
@@ -194,6 +420,10 @@ pub struct BrainHealthInputs {
     pub uncertain_count: usize,
     pub dream_links_total: usize,
     pub last_dream_tick: Option<u64>,
+    pub affect_history_rows: usize,
+    pub latest_affect_snapshot: Option<(f32, f32)>,
+    pub latest_affect_tick: Option<u64>,
+    pub attention_namespaces: Vec<AttentionNamespaceInputs>,
     pub total_recalls: u64,
     pub total_encodes: u64,
     pub current_tick: u64,
@@ -239,6 +469,10 @@ pub struct BrainHealthReport {
     pub uncertain_count: usize,
     pub dream_links_total: usize,
     pub last_dream_tick: Option<u64>,
+    pub affect_history_rows: usize,
+    pub latest_affect_snapshot: Option<(f32, f32)>,
+    pub latest_affect_tick: Option<u64>,
+    pub attention: AttentionAggregateReport,
     pub repair_queue_depth: Option<u64>,
     pub backpressure_state: Option<&'static str>,
     pub feature_availability: Vec<FeatureAvailabilityEntry>,
@@ -249,6 +483,9 @@ pub struct BrainHealthReport {
     pub indexes: IndexHealthSummary,
     pub repair: Option<RepairHealthReport>,
     pub subsystem_status: Vec<SubsystemStatus>,
+    pub dashboard_views: Vec<DashboardView>,
+    pub alerts: Vec<HealthAlert>,
+    pub drill_down_paths: Vec<HealthDrillDownPath>,
     pub trend_summary: Vec<SubsystemTrendSummary>,
     pub trends: Vec<HealthTrend>,
     pub total_recalls: u64,
@@ -267,6 +504,7 @@ impl BrainHealthReport {
         let cache = CacheHealthReport::from_cache_manager(cache);
         let indexes = IndexHealthSummary::from_reports(inputs.index_reports);
         let repair = repair_summary.map(RepairHealthReport::from_summary);
+        let attention = AttentionAggregateReport::from_inputs(&inputs.attention_namespaces);
         let repair_queue_depth = repair.as_ref().map(|report| report.queue_depth);
         let availability_posture = inputs.availability.as_ref().map(|a| a.posture);
         let availability_notes = inputs.availability.as_ref().map(availability_note);
@@ -287,12 +525,16 @@ impl BrainHealthReport {
                 inputs.uncertain_count,
             ),
             detail: format!(
-                "hot_memories={} hot_utilization_pct={} low_confidence={} conflicts={} uncertain={}",
+                "hot_memories={} hot_utilization_pct={} low_confidence={} conflicts={} uncertain={} hotspots={} highest_pressure={} affect_rows={} latest_affect_tick={}",
                 inputs.hot_memories,
                 hot_utilization_pct.round() as u64,
                 inputs.low_confidence_count,
                 inputs.unresolved_conflicts,
-                inputs.uncertain_count
+                inputs.uncertain_count,
+                attention.hotspot_count,
+                attention.highest_namespace_pressure,
+                inputs.affect_history_rows,
+                inputs.latest_affect_tick.unwrap_or(0)
             ),
             metrics: vec![
                 SubsystemMetric {
@@ -318,6 +560,22 @@ impl BrainHealthReport {
                 SubsystemMetric {
                     metric: "uncertain_count",
                     value: inputs.uncertain_count as u64,
+                },
+                SubsystemMetric {
+                    metric: "attention_hotspot_count",
+                    value: attention.hotspot_count as u64,
+                },
+                SubsystemMetric {
+                    metric: "attention_highest_namespace_pressure",
+                    value: attention.highest_namespace_pressure as u64,
+                },
+                SubsystemMetric {
+                    metric: "affect_history_rows",
+                    value: inputs.affect_history_rows as u64,
+                },
+                SubsystemMetric {
+                    metric: "latest_affect_tick",
+                    value: inputs.latest_affect_tick.unwrap_or(0),
                 },
             ],
             reasons: memory_reasons(
@@ -476,7 +734,9 @@ impl BrainHealthReport {
             &mut trends,
             "memory",
             "low_confidence_count",
-            inputs.previous_low_confidence_count.map(|value| value as u64),
+            inputs
+                .previous_low_confidence_count
+                .map(|value| value as u64),
             Some(inputs.low_confidence_count as u64),
             lower_is_better,
         );
@@ -484,7 +744,9 @@ impl BrainHealthReport {
             &mut trends,
             "memory",
             "unresolved_conflicts",
-            inputs.previous_unresolved_conflicts.map(|value| value as u64),
+            inputs
+                .previous_unresolved_conflicts
+                .map(|value| value as u64),
             Some(inputs.unresolved_conflicts as u64),
             lower_is_better,
         );
@@ -540,7 +802,9 @@ impl BrainHealthReport {
             &mut trends,
             "cache",
             "prefetch_queue_depth",
-            inputs.previous_prefetch_queue_depth.map(|value| value as u64),
+            inputs
+                .previous_prefetch_queue_depth
+                .map(|value| value as u64),
             Some(cache.prefetch_queue_depth as u64),
             lower_is_better,
         );
@@ -564,7 +828,9 @@ impl BrainHealthReport {
             &mut trends,
             "index",
             "missing_count",
-            inputs.previous_index_missing_count.map(|value| value as u64),
+            inputs
+                .previous_index_missing_count
+                .map(|value| value as u64),
             Some(indexes.missing_count as u64),
             lower_is_better,
         );
@@ -596,6 +862,20 @@ impl BrainHealthReport {
             availability_posture.map(|posture| availability_rank(posture) as u64),
             lower_is_better,
         );
+        let alerts = derive_health_alerts(&subsystem_status, degraded_status.as_ref());
+        let dashboard_views = derive_dashboard_views(
+            &subsystem_status,
+            &alerts,
+            &trends,
+            &attention,
+            &cache,
+            inputs.affect_history_rows,
+            inputs.latest_affect_snapshot,
+            inputs.latest_affect_tick,
+            degraded_status.as_ref(),
+        );
+        let drill_down_paths =
+            derive_drill_down_paths(&subsystem_status, &alerts, degraded_status.as_ref());
         let trend_summary = summarize_trends(&trends, &subsystem_status);
 
         Self {
@@ -616,6 +896,7 @@ impl BrainHealthReport {
             uncertain_count: inputs.uncertain_count,
             dream_links_total: inputs.dream_links_total,
             last_dream_tick: inputs.last_dream_tick,
+            attention,
             repair_queue_depth,
             backpressure_state,
             feature_availability: inputs.feature_availability,
@@ -626,8 +907,14 @@ impl BrainHealthReport {
             indexes,
             repair,
             subsystem_status,
+            dashboard_views,
+            alerts,
+            drill_down_paths,
             trend_summary,
             trends,
+            affect_history_rows: inputs.affect_history_rows,
+            latest_affect_snapshot: inputs.latest_affect_snapshot,
+            latest_affect_tick: inputs.latest_affect_tick,
             total_recalls: inputs.total_recalls,
             total_encodes: inputs.total_encodes,
             current_tick: inputs.current_tick,
@@ -708,6 +995,20 @@ impl CacheHealthReport {
         } else {
             SubsystemHealthState::Healthy
         };
+        let prefetch_queue_depth = cache.prefetch.queue_depth();
+        let prefetch_capacity = cache.prefetch.capacity();
+        let adaptive_prewarm_state = adaptive_prewarm_state(
+            cache.prefetch.is_enabled(),
+            prefetch_queue_depth,
+            prefetch_capacity,
+            cache.prefetch.metrics.hints_dropped,
+        );
+        let adaptive_prewarm_summary = adaptive_prewarm_summary(
+            adaptive_prewarm_state,
+            prefetch_queue_depth,
+            prefetch_capacity,
+            &cache.prefetch.metrics,
+        );
         Self {
             state,
             family_status,
@@ -716,7 +1017,8 @@ impl CacheHealthReport {
             total_bypass_count,
             total_invalidation_count,
             total_stale_warning_count,
-            prefetch_queue_depth: cache.prefetch.queue_depth(),
+            prefetch_queue_depth,
+            prefetch_capacity,
             hints_submitted: cache.prefetch.metrics.hints_submitted,
             hints_consumed: cache.prefetch.metrics.hints_consumed,
             hints_dropped: cache.prefetch.metrics.hints_dropped,
@@ -724,6 +1026,8 @@ impl CacheHealthReport {
             drop_intent_changed_count: cache.prefetch.metrics.dropped_intent_changed,
             drop_scope_changed_count: cache.prefetch.metrics.dropped_scope_changed,
             drop_disabled_count: cache.prefetch.metrics.dropped_disabled,
+            adaptive_prewarm_state,
+            adaptive_prewarm_summary,
         }
     }
 }
@@ -1034,6 +1338,408 @@ fn summarize_trends(
         .collect()
 }
 
+fn derive_health_alerts(
+    subsystem_status: &[SubsystemStatus],
+    degraded_status: Option<&DegradedStatusSurface>,
+) -> Vec<HealthAlert> {
+    let mut alerts = Vec::new();
+    for status in subsystem_status {
+        if status.state == SubsystemHealthState::Healthy {
+            continue;
+        }
+        let severity = match status.state {
+            SubsystemHealthState::Blocked | SubsystemHealthState::Unavailable => {
+                HealthAlertSeverity::Critical
+            }
+            SubsystemHealthState::Degraded => HealthAlertSeverity::Warning,
+            SubsystemHealthState::Healthy => HealthAlertSeverity::Info,
+        };
+        let recommended_runbook =
+            recommended_runbook_for_subsystem(status.subsystem, degraded_status);
+        alerts.push(HealthAlert {
+            alert_id: format!("{}-{}", status.subsystem, severity.as_str()),
+            subsystem: status.subsystem,
+            severity,
+            summary: format!(
+                "{} [{}] {}",
+                status.subsystem,
+                status.state.as_str(),
+                status.detail
+            ),
+            reason_codes: status.reasons.clone(),
+            recommended_runbook,
+            drill_down_path: drill_down_path_for_subsystem(status.subsystem),
+        });
+    }
+    alerts
+}
+
+fn derive_dashboard_views(
+    subsystem_status: &[SubsystemStatus],
+    alerts: &[HealthAlert],
+    trends: &[HealthTrend],
+    attention: &AttentionAggregateReport,
+    cache: &CacheHealthReport,
+    affect_history_rows: usize,
+    latest_affect_snapshot: Option<(f32, f32)>,
+    latest_affect_tick: Option<u64>,
+    degraded_status: Option<&DegradedStatusSurface>,
+) -> Vec<DashboardView> {
+    let degraded_count = subsystem_status
+        .iter()
+        .filter(|status| status.state != SubsystemHealthState::Healthy)
+        .count();
+    let worsening_trends = trends
+        .iter()
+        .filter(|trend| trend.direction == TrendDirection::Worsening)
+        .count();
+    let mut views = vec![
+        DashboardView {
+            view: DashboardViewId::Overview,
+            title: "Overview",
+            summary: format!(
+                "subsystems={} non_healthy={} alerts={}",
+                subsystem_status.len(),
+                degraded_count,
+                alerts.len()
+            ),
+            alert_count: alerts.len(),
+            drill_down_targets: vec!["/health/subsystems", "/health/alerts"],
+        },
+        DashboardView {
+            view: DashboardViewId::Alerts,
+            title: "Alerts",
+            summary: format!(
+                "active_alerts={} critical_alerts={}",
+                alerts.len(),
+                alerts
+                    .iter()
+                    .filter(|alert| alert.severity == HealthAlertSeverity::Critical)
+                    .count()
+            ),
+            alert_count: alerts.len(),
+            drill_down_targets: vec!["/health/alerts", "/doctor", "/audit"],
+        },
+        DashboardView {
+            view: DashboardViewId::Subsystems,
+            title: "Subsystems",
+            summary: format!(
+                "tracked_subsystems={} non_healthy={}",
+                subsystem_status.len(),
+                degraded_count
+            ),
+            alert_count: alerts.len(),
+            drill_down_targets: vec!["/health/subsystems", "/inspect"],
+        },
+        DashboardView {
+            view: DashboardViewId::Trends,
+            title: "Trends",
+            summary: format!(
+                "tracked_trends={} worsening={}",
+                trends.len(),
+                worsening_trends
+            ),
+            alert_count: worsening_trends,
+            drill_down_targets: vec!["/health/trends", "/why"],
+        },
+        DashboardView {
+            view: DashboardViewId::Attention,
+            title: "Attention heatmap",
+            summary: format!(
+                "hotspots={} hot={} warming={} max_score={} prewarm={} queue={}/{}",
+                attention.hotspot_count,
+                attention.hot_candidate_count,
+                attention.warming_candidate_count,
+                attention.max_attention_score,
+                cache.adaptive_prewarm_state,
+                cache.prefetch_queue_depth,
+                cache.prefetch_capacity,
+            ),
+            alert_count: attention.hot_candidate_count,
+            drill_down_targets: vec!["/health/attention", "/health/subsystems/cache"],
+        },
+        DashboardView {
+            view: DashboardViewId::AffectTrajectory,
+            title: "Affect trajectory",
+            summary: match latest_affect_snapshot {
+                Some((valence, arousal)) => format!(
+                    "rows={} latest_tick={} current_mood=({:.2},{:.2}) history=/mood_history",
+                    affect_history_rows,
+                    latest_affect_tick.unwrap_or(0),
+                    valence,
+                    arousal,
+                ),
+                None => format!(
+                    "rows={} latest_tick={} current_mood=unavailable history=/mood_history",
+                    affect_history_rows,
+                    latest_affect_tick.unwrap_or(0),
+                ),
+            },
+            alert_count: 0,
+            drill_down_targets: vec!["/mood_history", "/health/subsystems/memory"],
+        },
+    ];
+    if let Some(degraded) = degraded_status {
+        views.push(DashboardView {
+            view: DashboardViewId::DegradedMode,
+            title: "Degraded mode",
+            summary: degraded.summary.clone(),
+            alert_count: alerts.len(),
+            drill_down_targets: vec!["/health/degraded", "/doctor", "/audit"],
+        });
+    }
+    views
+}
+
+fn derive_drill_down_paths(
+    subsystem_status: &[SubsystemStatus],
+    alerts: &[HealthAlert],
+    degraded_status: Option<&DegradedStatusSurface>,
+) -> Vec<HealthDrillDownPath> {
+    let mut paths = subsystem_status
+        .iter()
+        .map(|status| HealthDrillDownPath {
+            path: drill_down_path_for_subsystem(status.subsystem),
+            label: drill_down_label_for_subsystem(status.subsystem),
+            target_surface: drill_down_surface_for_subsystem(status.subsystem),
+            target_ref: status.subsystem,
+            summary: status.detail.clone(),
+            related_subsystems: vec![status.subsystem],
+        })
+        .collect::<Vec<_>>();
+    if !alerts.is_empty() {
+        paths.push(HealthDrillDownPath {
+            path: "/health/alerts",
+            label: "Alert queue",
+            target_surface: "doctor",
+            target_ref: "alerts",
+            summary: format!(
+                "active_alerts={} inspect the alert queue before repair",
+                alerts.len()
+            ),
+            related_subsystems: alerts.iter().map(|alert| alert.subsystem).collect(),
+        });
+    }
+    let attention_hotspots = subsystem_status
+        .iter()
+        .find(|status| status.subsystem == "memory")
+        .and_then(|status| {
+            status
+                .metrics
+                .iter()
+                .find(|metric| metric.metric == "attention_hotspot_count")
+                .map(|metric| metric.value)
+        })
+        .unwrap_or(0);
+    paths.push(HealthDrillDownPath {
+        path: "/health/attention",
+        label: "Attention heatmap",
+        target_surface: "health",
+        target_ref: "attention",
+        summary: format!(
+            "attention_hotspots={} inspect hotspot-ranked namespaces and prewarm targets",
+            attention_hotspots
+        ),
+        related_subsystems: vec!["memory", "cache"],
+    });
+    paths.push(HealthDrillDownPath {
+        path: "/mood_history",
+        label: "Affect trajectory history",
+        target_surface: "health",
+        target_ref: "mood_history",
+        summary:
+            "inspect bounded emotional trajectory rows and the latest recall-facing mood snapshot"
+                .to_string(),
+        related_subsystems: vec!["memory"],
+    });
+    if let Some(degraded) = degraded_status {
+        paths.push(HealthDrillDownPath {
+            path: "/health/degraded",
+            label: "Degraded-mode posture",
+            target_surface: "doctor",
+            target_ref: "degraded_status",
+            summary: degraded.summary.clone(),
+            related_subsystems: degraded.affected_subsystems.clone(),
+        });
+    }
+    paths
+}
+
+fn recommended_runbook_for_subsystem(
+    subsystem: &'static str,
+    degraded_status: Option<&DegradedStatusSurface>,
+) -> Option<&'static str> {
+    if let Some(degraded) = degraded_status {
+        if let Some(runbook) = degraded.recommended_runbooks.first().copied() {
+            match subsystem {
+                "availability" => return Some(runbook),
+                "repair" if degraded.affected_subsystems.contains(&"repair") => {
+                    return Some(runbook)
+                }
+                "index" if degraded.affected_subsystems.contains(&"index") => return Some(runbook),
+                "cache" if degraded.affected_subsystems.contains(&"cache") => return Some(runbook),
+                _ => {}
+            }
+        }
+    }
+    match subsystem {
+        "memory" => Some("daily_health_review"),
+        "cache" => Some("index_rebuild_operations"),
+        "index" => Some("tier2_index_drift"),
+        "repair" => Some("repair_backlog_growth"),
+        "availability" => Some("incident_response"),
+        _ => None,
+    }
+}
+
+fn dominant_signal(row: &AttentionNamespaceInputs) -> &'static str {
+    let candidates = [
+        (
+            "working_memory_pressure",
+            row.working_memory_pressure as u64 * 17,
+        ),
+        ("overflow_count", row.overflow_count * 13),
+        ("promotion_count", row.promotion_count * 11),
+        ("recall_count", row.recall_count * 5),
+        ("encode_count", row.encode_count * 3),
+    ];
+    candidates
+        .into_iter()
+        .max_by_key(|(_, weight)| *weight)
+        .map(|(signal, _)| signal)
+        .unwrap_or("recall_count")
+}
+
+fn hotspot_status(attention_score: u64, working_memory_pressure: usize) -> &'static str {
+    if attention_score >= 200 || working_memory_pressure >= 8 {
+        "hot"
+    } else if attention_score >= 80 || working_memory_pressure >= 4 {
+        "warming"
+    } else {
+        "stable"
+    }
+}
+
+fn attention_heat_band(attention_score: u64, working_memory_pressure: usize) -> u8 {
+    if attention_score >= 260 || working_memory_pressure >= 10 {
+        4
+    } else if attention_score >= 200 || working_memory_pressure >= 8 {
+        3
+    } else if attention_score >= 80 || working_memory_pressure >= 4 {
+        2
+    } else if attention_score > 0 || working_memory_pressure > 0 {
+        1
+    } else {
+        0
+    }
+}
+
+fn attention_heat_bucket(heat_band: u8) -> &'static str {
+    match heat_band {
+        4 => "critical",
+        3 => "hot",
+        2 => "warming",
+        1 => "warm",
+        _ => "idle",
+    }
+}
+
+fn attention_prewarm_policy(
+    status: &'static str,
+    dominant_signal: &'static str,
+) -> (&'static str, &'static str, &'static str) {
+    match (status, dominant_signal) {
+        ("hot", "working_memory_pressure") | ("hot", "overflow_count") => {
+            ("task_intent", "bounded_goal_rewarm", "goal_conditioned")
+        }
+        ("hot", _) | ("warming", "recall_count") => (
+            "session_recency",
+            "bounded_session_rewarm",
+            "session_warmup",
+        ),
+        ("warming", "promotion_count") => (
+            "entity_follow",
+            "bounded_neighborhood_rewarm",
+            "goal_conditioned",
+        ),
+        ("warming", _) => ("session_recency", "queue_prefetch_hint", "prefetch_hints"),
+        _ => ("none", "observe_only", "none"),
+    }
+}
+
+fn adaptive_prewarm_state(
+    prefetch_enabled: bool,
+    prefetch_queue_depth: usize,
+    prefetch_capacity: usize,
+    hints_dropped: u64,
+) -> &'static str {
+    if !prefetch_enabled {
+        "disabled"
+    } else if hints_dropped > 0 {
+        "constrained"
+    } else if prefetch_queue_depth >= prefetch_capacity && prefetch_capacity > 0 {
+        "saturated"
+    } else if prefetch_queue_depth > 0 {
+        "active"
+    } else {
+        "idle"
+    }
+}
+
+fn adaptive_prewarm_summary(
+    adaptive_prewarm_state: &'static str,
+    prefetch_queue_depth: usize,
+    prefetch_capacity: usize,
+    metrics: &crate::store::cache::PrefetchMetrics,
+) -> String {
+    format!(
+        "state={} queue_depth={}/{} hints_submitted={} hints_consumed={} hints_dropped={} drop_budget={} drop_intent={} drop_scope={} drop_disabled={}",
+        adaptive_prewarm_state,
+        prefetch_queue_depth,
+        prefetch_capacity,
+        metrics.hints_submitted,
+        metrics.hints_consumed,
+        metrics.hints_dropped,
+        metrics.dropped_budget_exhausted,
+        metrics.dropped_intent_changed,
+        metrics.dropped_scope_changed,
+        metrics.dropped_disabled,
+    )
+}
+
+fn drill_down_path_for_subsystem(subsystem: &'static str) -> &'static str {
+    match subsystem {
+        "memory" => "/health/subsystems/memory",
+        "cache" => "/health/subsystems/cache",
+        "index" => "/health/subsystems/index",
+        "repair" => "/health/subsystems/repair",
+        "availability" => "/health/subsystems/availability",
+        "affect_trajectory" => "/mood_history",
+        _ => "/health/subsystems",
+    }
+}
+
+fn drill_down_label_for_subsystem(subsystem: &'static str) -> &'static str {
+    match subsystem {
+        "memory" => "Memory quality",
+        "cache" => "Cache health",
+        "index" => "Index health",
+        "repair" => "Repair backlog",
+        "availability" => "Availability posture",
+        "affect_trajectory" => "Affect trajectory history",
+        _ => "Subsystem health",
+    }
+}
+
+fn drill_down_surface_for_subsystem(subsystem: &'static str) -> &'static str {
+    match subsystem {
+        "memory" => "inspect",
+        "affect_trajectory" => "health",
+        "cache" | "index" | "repair" | "availability" => "doctor",
+        _ => "health",
+    }
+}
+
 fn degraded_status_surface(
     availability: Option<&AvailabilitySummary>,
     cache: &CacheHealthReport,
@@ -1176,8 +1882,8 @@ fn lower_is_better(previous: u64, current: u64) -> TrendDirection {
 #[cfg(test)]
 mod tests {
     use super::{
-        BrainHealthInputs, BrainHealthReport, FeatureAvailabilityEntry, RepairHealthReport,
-        SubsystemHealthState, TrendDirection,
+        AttentionNamespaceInputs, BrainHealthInputs, BrainHealthReport, FeatureAvailabilityEntry,
+        RepairHealthReport, SubsystemHealthState, TrendDirection,
     };
     use crate::api::{
         AvailabilityPosture, AvailabilityReason, AvailabilitySummary, NamespaceId, RemediationStep,
@@ -1360,6 +2066,17 @@ mod tests {
                 uncertain_count: 3,
                 dream_links_total: 9,
                 last_dream_tick: Some(42),
+                affect_history_rows: 2,
+                latest_affect_snapshot: Some((0.4, 0.9)),
+                latest_affect_tick: Some(198),
+                attention_namespaces: vec![AttentionNamespaceInputs {
+                    namespace: "team.alpha".to_string(),
+                    recall_count: 21,
+                    encode_count: 4,
+                    working_memory_pressure: 6,
+                    promotion_count: 2,
+                    overflow_count: 1,
+                }],
                 total_recalls: 55,
                 total_encodes: 12,
                 current_tick: 200,
@@ -1398,6 +2115,36 @@ mod tests {
         );
 
         assert_eq!(report.hot_utilization_pct, 76.0);
+        assert_eq!(report.attention.total_recall_count, 21);
+        assert_eq!(report.attention.total_encode_count, 4);
+        assert_eq!(report.attention.total_promotion_count, 2);
+        assert_eq!(report.attention.total_overflow_count, 1);
+        assert_eq!(report.attention.highest_namespace_pressure, 6);
+        assert_eq!(report.attention.hotspot_count, 1);
+        assert_eq!(report.attention.hotspots[0].namespace, "team.alpha");
+        assert_eq!(report.attention.hotspots[0].attention_score, 254);
+        assert_eq!(report.attention.hotspots[0].status, "hot");
+        assert_eq!(report.attention.hotspots[0].dominant_signal, "recall_count");
+        assert_eq!(report.attention.max_attention_score, 254);
+        assert_eq!(report.attention.warming_candidate_count, 0);
+        assert_eq!(report.attention.hot_candidate_count, 1);
+        assert_eq!(report.attention.hotspots[0].heat_bucket, "hot");
+        assert_eq!(report.attention.hotspots[0].heat_band, 3);
+        assert_eq!(
+            report.attention.hotspots[0].prewarm_trigger,
+            "session_recency"
+        );
+        assert_eq!(
+            report.attention.hotspots[0].prewarm_action,
+            "bounded_session_rewarm"
+        );
+        assert_eq!(
+            report.attention.hotspots[0].prewarm_target_family,
+            "session_warmup"
+        );
+        assert_eq!(report.affect_history_rows, 2);
+        assert_eq!(report.latest_affect_snapshot, Some((0.4, 0.9)));
+        assert_eq!(report.latest_affect_tick, Some(198));
         assert_eq!(
             report.availability_posture,
             Some(AvailabilityPosture::Degraded)
@@ -1442,8 +2189,10 @@ mod tests {
                         .detail
                         .contains("rollback_trigger=verification_mismatch")
                     && status.reasons.contains(&"repair_corrupt_targets_present")
-                    && status.metrics.iter().any(|metric| metric.metric == "queue_depth"
-                        && metric.value == 2)
+                    && status
+                        .metrics
+                        .iter()
+                        .any(|metric| metric.metric == "queue_depth" && metric.value == 2)
             }));
         assert_eq!(report.cache.state, SubsystemHealthState::Unavailable);
         assert_eq!(report.indexes.state, SubsystemHealthState::Degraded);
@@ -1469,24 +2218,21 @@ mod tests {
             .any(|trend| trend.subsystem == "activity"
                 && trend.metric == "total_recalls"
                 && trend.direction == TrendDirection::Improving));
-        assert!(report
-            .trends
-            .iter()
-            .any(|trend| trend.subsystem == "repair"
-                && trend.metric == "repair_queue_depth"
-                && trend.direction == TrendDirection::Worsening));
-        assert!(report
-            .trends
-            .iter()
-            .any(|trend| trend.subsystem == "memory"
-                && trend.metric == "unresolved_conflicts"
-                && trend.direction == TrendDirection::Improving));
+        assert!(report.trends.iter().any(|trend| trend.subsystem == "repair"
+            && trend.metric == "repair_queue_depth"
+            && trend.direction == TrendDirection::Worsening));
+        assert!(report.trends.iter().any(|trend| trend.subsystem == "memory"
+            && trend.metric == "unresolved_conflicts"
+            && trend.direction == TrendDirection::Improving));
         assert!(report
             .trend_summary
             .iter()
             .find(|summary| summary.subsystem == "cache")
             .is_some_and(|summary| summary.state == SubsystemHealthState::Unavailable
-                && summary.trends.iter().any(|trend| trend.metric == "cache_hit_count")));
+                && summary
+                    .trends
+                    .iter()
+                    .any(|trend| trend.metric == "cache_hit_count")));
         assert!(report
             .cache
             .family_status
@@ -1498,6 +2244,56 @@ mod tests {
             && family.state == SubsystemHealthState::Healthy
             && family.hit_count == 0
             && family.bypass_count == 0));
+        assert!(report
+            .dashboard_views
+            .iter()
+            .any(|view| view.view.as_str() == "overview"
+                && view.drill_down_targets.contains(&"/health/subsystems")
+                && view.drill_down_targets.contains(&"/health/alerts")));
+        assert!(report
+            .dashboard_views
+            .iter()
+            .any(|view| view.view.as_str() == "attention"
+                && view.summary.contains("hotspots=1")
+                && view.drill_down_targets.contains(&"/health/attention")));
+        assert!(report.dashboard_views.iter().any(|view| view.view.as_str()
+            == "affect_trajectory"
+            && view.summary.contains("rows=2")
+            && view.summary.contains("current_mood=(0.40,0.90)")
+            && view.drill_down_targets.contains(&"/mood_history")));
+        assert!(report
+            .dashboard_views
+            .iter()
+            .any(|view| view.view.as_str() == "degraded_mode"));
+        assert!(report.alerts.iter().any(|alert| alert.subsystem == "memory"
+            && alert.severity.as_str() == "critical"
+            && alert.drill_down_path == "/health/subsystems/memory"
+            && alert.reason_codes.contains(&"conflicts_unresolved")));
+        assert!(report.alerts.iter().any(|alert| alert.subsystem == "index"
+            && alert.recommended_runbook.is_some()
+            && (alert.recommended_runbook == Some("tier2_index_drift")
+                || alert.recommended_runbook == Some("repair_backlog_growth"))));
+        assert!(report
+            .drill_down_paths
+            .iter()
+            .any(|path| path.path == "/health/alerts" && path.target_surface == "doctor"));
+        assert!(report
+            .drill_down_paths
+            .iter()
+            .any(|path| path.path == "/health/attention"
+                && path.target_surface == "health"
+                && path.related_subsystems.contains(&"memory")
+                && path.related_subsystems.contains(&"cache")));
+        assert!(report
+            .drill_down_paths
+            .iter()
+            .any(|path| path.path == "/mood_history"
+                && path.target_surface == "health"
+                && path.related_subsystems == vec!["memory"]));
+        assert!(report
+            .drill_down_paths
+            .iter()
+            .any(|path| path.path == "/health/degraded" && path.target_ref == "degraded_status"));
     }
 
     #[test]
@@ -1537,6 +2333,17 @@ mod tests {
                 uncertain_count: 0,
                 dream_links_total: 0,
                 last_dream_tick: None,
+                affect_history_rows: 0,
+                latest_affect_snapshot: None,
+                latest_affect_tick: None,
+                attention_namespaces: vec![AttentionNamespaceInputs {
+                    namespace: "health".to_string(),
+                    recall_count: 2,
+                    encode_count: 0,
+                    working_memory_pressure: 1,
+                    promotion_count: 0,
+                    overflow_count: 0,
+                }],
                 total_recalls: 0,
                 total_encodes: 0,
                 current_tick: 0,
@@ -1572,7 +2379,23 @@ mod tests {
             .find(|family| family.family == CacheFamily::PrefetchHints.as_str())
             .expect("prefetch family should be reported");
         assert_eq!(prefetch_family.state, SubsystemHealthState::Degraded);
-        assert_eq!(prefetch_family.hit_count, 0);
+        assert_eq!(report.attention.hotspot_count, 1);
+        assert_eq!(report.attention.hotspots[0].namespace, "health");
+        assert_eq!(report.attention.hotspots[0].attention_score, 27);
+        assert_eq!(report.attention.hotspots[0].status, "stable");
+        assert_eq!(report.attention.max_attention_score, 27);
+        assert_eq!(report.attention.warming_candidate_count, 0);
+        assert_eq!(report.attention.hot_candidate_count, 0);
+        assert_eq!(report.attention.hotspots[0].heat_bucket, "warm");
+        assert_eq!(report.attention.hotspots[0].heat_band, 1);
+        assert_eq!(report.attention.hotspots[0].prewarm_action, "observe_only");
+        assert_eq!(report.cache.prefetch_capacity, 4);
+        assert_eq!(report.cache.adaptive_prewarm_state, "constrained");
+        assert!(report
+            .cache
+            .adaptive_prewarm_summary
+            .contains("state=constrained queue_depth=0/4"));
+        assert!(prefetch_family.hit_count == 0);
         assert_eq!(prefetch_family.bypass_count, 2);
         assert_eq!(report.cache.hints_submitted, 2);
         assert_eq!(report.cache.hints_dropped, 2);
@@ -1584,7 +2407,9 @@ mod tests {
             .iter()
             .find(|row| row.subsystem == "cache")
             .is_some_and(|row| row.reasons.contains(&"prefetch_drop_detected")
-                && row.metrics.iter().any(|metric| metric.metric == "prefetch_drop_count"
-                    && metric.value == 2)));
+                && row
+                    .metrics
+                    .iter()
+                    .any(|metric| metric.metric == "prefetch_drop_count" && metric.value == 2)));
     }
 }

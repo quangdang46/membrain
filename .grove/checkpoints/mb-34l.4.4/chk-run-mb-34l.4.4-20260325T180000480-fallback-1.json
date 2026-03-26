@@ -1,0 +1,45 @@
+{
+  "id": "chk-run-mb-34l.4.4-20260325T180000480-fallback-1",
+  "bead_id": "mb-34l.4.4",
+  "run_id": "run-mb-34l.4.4-20260325T180000480",
+  "session_id": "ses-run-mb-34l.4.4-20260325T180000480",
+  "progress": "Synthetic fallback checkpoint after NoProgress",
+  "next_step": "Resume from the transcript tail, avoid repeating completed setup, and continue with the smallest safe remaining step.",
+  "payload": {
+    "claimed_paths": [],
+    "confidence": 0.25,
+    "context": {
+      "failure_class": "NoProgress",
+      "failure_detail": "session ended with Unknown",
+      "stderr_tail": [],
+      "stdout_tail": [
+        "",
+        "Errors in this run:",
+        "- `crates/membrain-daemon/src/daemon.rs:3252` missing `RuntimeState::ensure_goal_working_state`",
+        "- `crates/membrain-daemon/src/daemon.rs:3310` missing `RuntimeState::task_key`",
+        "- `crates/membrain-daemon/src/daemon.rs:3312` missing field `goal_checkpoints`",
+        "- `crates/membrain-daemon/src/daemon.rs:3455` missing `RuntimeState::task_key`",
+        "- `crates/membrain-daemon/src/daemon.rs:3457` missing field `goal_checkpoints`",
+        "- `crates/membrain-daemon/src/daemon.rs:3500` type inference error in `.map(|task| ...)`",
+        "- `crates/membrain-daemon/src/daemon.rs:3538` missing `RuntimeState::task_key`",
+        "- `crates/membrain-daemon/src/daemon.rs:3540` missing field `goal_checkpoints`",
+        "",
+        "So the current state is:",
+        "",
+        "- `crates/membrain-daemon/tests/e2e_mcp.sh` passes end-to-end in isolated-target validation",
+        "- ad hoc `cargo run -p membrain-cli ...` probes can fail because the shared workspace currently recompiles broken `membrain-daemon` code",
+        "- these failed background probes do not give trustworthy evidence about current CLI JSON drift by themselves",
+        "",
+        "The most reliable conclusion remains:",
+        "- daemon proof layer is green",
+        "- CLI side still needs validation once the shared compile drift settles or via a fully isolated route under the current script owner’s reservation"
+      ],
+      "synthetic": true
+    },
+    "next_step": "Resume from the transcript tail, avoid repeating completed setup, and continue with the smallest safe remaining step.",
+    "open_questions": [],
+    "progress": "Synthetic fallback checkpoint after NoProgress"
+  },
+  "saved_at": "2026-03-25T18:30:42.372990944Z",
+  "resume_generation": 1
+}

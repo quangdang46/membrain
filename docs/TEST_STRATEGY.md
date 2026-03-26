@@ -149,6 +149,7 @@ Use this checklist when assembling the validation payload for a PR, bead handoff
 - add parity, restart, isolation, or boundedness suites whenever the changed contract crosses those surfaces
 - add benchmark or representative workload evidence only for the paths that need elapsed-performance proof
 - attach at least one logging-heavy end-to-end artifact when reviewers need to inspect route traces, denial or redaction evidence, degraded markers, migration safeguards, or other machine-readable operator signals
+- when a bead or PR names a logging-heavy script as the canonical proof layer, the proof bundle should also name the script path, the major workflow sections it logs, and the concrete acceptance artifacts it emits (for example: live stdout/stderr sections, deterministic JSON assertions, named parity tests, and a closing checklist mapping proof coverage back to the contract)
 - reject the proof bundle if any named gate is replaced by prose, screenshots without structured output, or CI status without a fixture or artifact identity
 
 ### Change-class to minimum tier mapping
@@ -256,6 +257,7 @@ Any change to repair, rebuild, migration, retention, namespace policy, or other 
 - preview / blocked / degraded / rejected safeguard parity across CLI, daemon, IPC, and MCP surfaces whenever the changed operation can mutate authoritative state, widen scope, or emit irreversible-loss records
 - differentiation between `policy_denied` or malformed-request rejection versus confirmation-missing, snapshot-missing, stale-preflight, or other blocked-readiness outcomes
 - force-confirmed flows proving that local confirmation changes only the confirmation state while policy, namespace, retention, confidence, and legal-hold checks continue to apply unchanged
+- any scale-out or shard-readiness proposal proving measured-demand promotion with rerunnable benchmark artifacts, bounded single-node before/after comparisons, shard movement or repair drills, and explicit degraded or blocked semantics when cross-shard governance or recovery guarantees are not yet met
 
 ## Restart, rebuild, and recovery verification minimum matrix
 
@@ -331,7 +333,7 @@ Any change to startup bootstrap, durable-state replay, derived-surface rebuild, 
 - same-namespace allow paths, explicit shared/public allow paths, and cross-namespace or policy-denied paths all preserve the same bounded candidate-generation and omission semantics without existence leakage
 - redacted or policy-filtered winning candidates degrade explicitly to omission, preview, partial, or miss semantics rather than silently substituting unauthorized payloads
 - explain outputs preserve returned-result reasons, omitted-result reasons, provenance summaries, freshness or conflict markers, and stable routing-trace fields without cross-surface semantic drift
-- if `mood_congruent` is enabled, the emotional bonus remains opt-in, bounded to already-eligible candidates, and inspectable enough to show whether it changed ordering or was non-decisive
+- if `mood_congruent` is enabled, the emotional bonus remains opt-in, bounded to already-eligible candidates, and inspectable enough to show whether it changed ordering or was non-decisive (for example via machine-readable result flags such as `mood_boost_applied`)
 
 ### Stage 5 — Reconsolidation
 
@@ -368,12 +370,15 @@ Any change to startup bootstrap, durable-state replay, derived-surface rebuild, 
 - property tests for traversal caps, centroid stability, and bounded Dream Mode candidate or link-creation caps when that feature is enabled
 - restart tests for serialization integrity, including interrupted or paused Dream Mode state if Stage 7 promotion includes the offline synthesis path
 - latency tests for graph-assisted retrieval overhead
+- operator-surface parity tests for Dream Mode status or manual-run outputs when the feature is surfaced through CLI, daemon/JSON-RPC, or MCP, including enable/disable posture, paused reasons, bounded poll budgets, and inspect handles for emitted artifacts
 
 **Must prove before closing the stage**
 - graph-assisted retrieval stays bounded under declared caps
 - graph persistence survives restart without corruption
 - split logic remains reproducible enough for operational debugging
 - if Dream Mode is included, the synthesis pass remains background-only, namespace/policy-aware, lineage-backed, and visibly non-blocking to foreground latency budgets
+- accepted dream outputs preserve inspectable lineage to source memories, stable run or artifact handles, and enough operator-visible evidence to distinguish derived synthesis from authoritative durable truth
+- disabling or pausing Dream Mode changes only maintenance posture; it must not rewrite canonical memories, silently drop prior accepted outputs, or hide why a cycle was skipped or blocked
 
 ### Later-stage human-like-memory evaluation families
 

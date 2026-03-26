@@ -231,7 +231,10 @@ membrain health --json | jq '{
   repair_queue_depth: .repair_queue_depth,
   backpressure_state: .backpressure_state,
   availability_posture: .availability_posture,
-  feature_availability: .feature_availability
+  feature_availability: .feature_availability,
+  dashboard_views: .dashboard_views,
+  alerts: .alerts,
+  drill_down_paths: .drill_down_paths
 }'
 membrain doctor run
 ```
@@ -323,22 +326,67 @@ membrain skills --extract
 
 ## 5. Index Rebuild Operations
 
+### Current operator entrypoints
+
+The current implemented operator-facing rebuild path is the **doctor → maintenance repair → benchmark** sequence below. The `membrain repair <surface>` family remains the long-term CLI contract, but incident response today should anchor on the commands that already exist in the shipped CLI and tests.
+
+| Runbook need | Current command | Expected proof fields |
+|---|---|---|
+| Diagnose rebuild need | `membrain doctor run --json` | `summary`, `checks`, `runbook_hints`, `repair_reports[*].verification_artifact_name`, `repair_reports[*].parity_check`, `availability`, `health.repair_queue_depth` |
+| Apply derived-surface repair | `membrain maintenance --action repair --namespace <scope> --json` | `outcome`, `action`, `targets_checked`, `rebuilt`, `affected_item_count`, `rebuild_duration_ms`, `queue_depth_before`, `queue_depth_after`, `results[*].verification_artifact_name`, `results[*].parity_check`, `warnings` |
+| Confirm operator posture | `membrain health --json` or `membrain health --brief` | `availability_posture`, `degraded_status`, `repair_queue_depth`, `backpressure_state`, `alerts`, `drill_down_paths`, `attention.hotspots`, `dashboard_views[*].view=="affect_trajectory"`, `cache.adaptive_prewarm_state` |
+| Verify latency recovery | `membrain benchmark tier2 --json` | `target`, `iterations`, `total_duration_ms`, `avg_duration_us`, `min_duration_us`, `max_duration_us`, `p50_duration_us`, `p95_duration_us` |
+
 ### Command Sequence
 ```bash
-membrain doctor run                    # diagnose issues first
-membrain repair index --dry-run       # preview
-membrain repair index --namespace default
-membrain benchmark tier2              # verify performance restored
+membrain doctor run --json
+membrain maintenance --action repair --namespace default --json
+membrain health --json | jq '{
+  availability_posture: .availability_posture,
+  degraded_status: .degraded_status,
+  repair_queue_depth: .repair_queue_depth,
+  backpressure_state: .backpressure_state,
+  alerts: .alerts,
+  hotspots: .attention.hotspots,
+  prewarm: .cache.adaptive_prewarm_state
+}'
+membrain benchmark tier2 --json
 ```
 
 ### Metrics to Watch
 - Index count vs durable record count (must match)
 - Search latency before/after rebuild
 - Any orphan embeddings or missing vectors
+- `repair_queue_depth`, `queue_depth_before`, and `queue_depth_after`
+- Verification artifact and parity-check coverage for each rebuilt target
+
+### Rollback Conditions
+- `doctor` still reports failing or degraded rebuild checks after repair
+- `maintenance --action repair` returns warnings that leave the affected target unverified
+- `health` remains in degraded posture for the rebuilt scope
+- `benchmark tier2 --json` regresses materially relative to the pre-incident baseline
 
 ### Post-run Validation
 ```bash
-membrain benchmark tier2 --json | jq '.p99_us'
+membrain doctor run --json | jq '{
+  summary: .summary,
+  repair_reports: .repair_reports,
+  runbook_hints: .runbook_hints
+}'
+membrain maintenance --action repair --namespace default --json | jq '{
+  outcome: .outcome,
+  rebuilt: .rebuilt,
+  queue_depth_before: .queue_depth_before,
+  queue_depth_after: .queue_depth_after,
+  verification_artifacts: [.results[].verification_artifact_name],
+  parity_checks: [.results[].parity_check]
+}'
+membrain benchmark tier2 --json | jq '{
+  target: .target,
+  avg_duration_us: .avg_duration_us,
+  p50_duration_us: .p50_duration_us,
+  p95_duration_us: .p95_duration_us
+}'
 ```
 
 ---
@@ -511,11 +559,28 @@ membrain health --brief
 
 ## 6. Retention Enforcement
 
+### Current archive and restore guidance
+
+Archive and restore are currently **operator review and incident-guidance surfaces**, not a fully landed first-class CLI apply path. During incidents or validation work, operators should use the existing audit, inspect, and health surfaces to prove archive state, freeze retention-affecting work when markers look ambiguous, and treat restore as a rollback- or recovery-owned action that must remain explicit in the change record.
+
+| Need | Current command or surface | What operators must confirm |
+|---|---|---|
+| Review archived activity | `membrain audit --op archive --since <last_check_tick> --json` | archive events, affected scope, related snapshot or run ids, and any degraded or redacted history markers |
+| Inspect whether archived evidence remains visible enough for safe recovery | `membrain inspect <id> --namespace <scope> --json` | archive reason, restore eligibility, degraded-fidelity markers, provenance, and policy summary |
+| Check whether retention bugs or repair drift require a freeze | `membrain health --json` and `membrain doctor run --json` | `availability_posture`, `degraded_status`, retention-related warnings, and runbook hints pointing to containment or repair |
+| Prepare for manual restore or rollback decision | change record + fresh snapshot / backup reference + audit correlation | exact scope, retained authoritative evidence still available, and whether recovery will be partial or degraded |
+
 ### Command Sequence
 ```bash
-membrain audit --op archive --since <last_check_tick>   # what was archived
-membrain uncertain --top 50                              # low-confidence review
-membrain dead-zones --min-age 10000                     # very old unaccessed
+membrain audit --op archive --since <last_check_tick> --json
+membrain inspect <id> --namespace default --json
+membrain doctor run --json
+membrain health --json | jq '{
+  availability_posture: .availability_posture,
+  degraded_status: .degraded_status,
+  alerts: .alerts,
+  drill_down_paths: .drill_down_paths
+}'
 ```
 
 ### Metrics to Watch
@@ -523,6 +588,19 @@ membrain dead-zones --min-age 10000                     # very old unaccessed
 - Pinned memory count growth (unbounded pinning is an anti-pattern)
 - Legal-hold or purge-eligibility count drift after policy or migration changes
 - Tombstone and retention-audit anomalies that suggest a hold, purge, or archive marker was lost in repair
+- Any degraded or read-only posture that freezes retention-affecting workflows pending validation
+
+### Rollback / restore conditions
+- Archive or retention markers drift from durable expectations after migration, repair, or rollback rehearsal
+- `doctor` or `health` indicates degraded, blocked, or fail-closed posture for retention-bearing scope
+- Archived evidence is no longer fully reconstructible from retained authoritative inputs; record the degraded recovery boundary before proceeding
+- The only apparent recovery path would trust derived artifacts over durable truth
+
+### Post-run Validation
+- Archive-related audit entries remain inspectable and correlated to the triggering run or incident
+- `inspect` still exposes archive reason, restore eligibility, and degraded-fidelity markers when only partial recovery is possible
+- Any restore decision is recorded with the snapshot / backup anchor and explicit scope, rather than implied by recall or ordinary audit output
+- If retention-affecting work remains frozen, `health`, `doctor`, and the incident record all say so consistently
 
 ---
 
@@ -659,6 +737,10 @@ membrain benchmark tier2
 
 Operational snapshots are safety anchors for maintenance, rollback, and diff-based verification. They support safe operations around authoritative durable state, but they do not replace lineage, audit records, or durable-truth validation, and they do not make derived artifacts authoritative.
 
+### Current implementation note
+
+The runbooks in this document assume an eventual first-class operational snapshot CLI. The currently implemented `membrain goal snapshot ...` surface is a **working-state / blackboard checkpoint**, not an operator restore point for authoritative maintenance. Until dedicated operational snapshot commands land, treat the snapshot requirement in these runbooks as a requirement for an external durable backup, export artifact, or equivalent restorable safety anchor recorded in the change or incident record.
+
 ### Snapshot requirement rules
 A fresh pre-run snapshot or equivalent durable backup is required before:
 - compaction, compression, or any other authoritative layout rewrite,
@@ -672,23 +754,26 @@ A snapshot is optional for:
 - bounded online repair that can be safely paused without restore.
 
 ### Handling rules
-- Name snapshots for the event and scope (`pre-compaction`, `pre-migration`, `pre-upgrade`).
-- Record the reason, affected namespace or shard, and related incident or change identifier in the snapshot note or adjacent runbook artifact.
-- Keep the last known-good pre-run snapshot until post-run validation passes and the rollback decision window closes.
-- Do not delete the last restorable snapshot for a scope while migration, compaction, or incident recovery remains unresolved.
+- Name the safety anchor for the event and scope (`pre-compaction`, `pre-migration`, `pre-upgrade`) even when it currently lives outside a first-class snapshot CLI.
+- Record the reason, affected namespace or shard, and related incident or change identifier in the backup note, export manifest, or adjacent runbook artifact.
+- Keep the last known-good pre-run safety anchor until post-run validation passes and the rollback decision window closes.
+- Do not delete the last restorable backup for a scope while migration, compaction, or incident recovery remains unresolved.
+- Do not treat `goal snapshot` artifacts as a substitute for authoritative restore support.
 
-### Command Sequence
+### Current command sequence
 ```bash
-membrain snapshot list                              # review existing
-membrain snapshot --name weekly-$(date +%Y%m%d)    # create periodic
-membrain snapshot --name pre-maintenance --note "Before authoritative rewrite"
-membrain snapshot delete <old-snapshot>            # clean up only after validation clears the restore point
+membrain export --format ndjson > pre-maintenance.ndjson
+membrain audit --recent 100 --json > pre-maintenance-audit.json
+membrain doctor run --json
 ```
 
+When a dedicated operational snapshot surface lands, replace this backup/export sequence with the canonical snapshot create/list/delete flow for the protected scope.
+
 ### Post-run Validation
-- The intended pre-run snapshot is present, named clearly, and restorable for the affected scope.
-- The change record links the snapshot to the maintenance window, migration, or rollout it protects.
-- Snapshot retention still leaves at least one recent restorable anchor for each actively managed scope.
+- The intended pre-run backup or export artifact is present, named clearly, and restorable for the affected scope.
+- The change record links the safety anchor to the maintenance window, migration, or rollout it protects.
+- Backup retention still leaves at least one recent restorable anchor for each actively managed scope.
+- Any use of `goal snapshot` remains limited to resumability and handoff, not maintenance rollback proof.
 
 ---
 

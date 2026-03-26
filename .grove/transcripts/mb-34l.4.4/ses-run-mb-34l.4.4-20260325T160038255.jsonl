@@ -1,0 +1,51 @@
+{"ts":"2026-03-25T16:00:38.268110093Z","kind":"session_started","session_id":"ses-run-mb-34l.4.4-20260325T160038255"}
+{"ts":"2026-03-25T16:08:21.850022792Z","kind":"stdout","line":"GROVE_RESULT: partial"}
+{"ts":"2026-03-25T16:08:21.850022792Z","kind":"protocol","event":{"type":"result","summary":"partial"}}
+{"ts":"2026-03-25T16:08:21.881588223Z","kind":"stdout","line":""}
+{"ts":"2026-03-25T16:08:21.881601814Z","kind":"stdout","line":"Updated `crates/membrain-daemon/tests/e2e_mcp.sh`."}
+{"ts":"2026-03-25T16:08:21.881604574Z","kind":"stdout","line":""}
+{"ts":"2026-03-25T16:08:21.881606804Z","kind":"stdout","line":"GROVE_ARTIFACTS:"}
+{"ts":"2026-03-25T16:08:21.881606804Z","kind":"protocol","event":{"type":"artifacts","items":[]}}
+{"ts":"2026-03-25T16:08:21.881689409Z","kind":"stdout","line":"- `crates/membrain-daemon/tests/e2e_mcp.sh`"}
+{"ts":"2026-03-25T16:08:21.881689409Z","kind":"protocol","event":{"type":"artifacts","items":["`crates/membrain-daemon/tests/e2e_mcp.sh`"]}}
+{"ts":"2026-03-25T16:08:21.881696417Z","kind":"stdout","line":"- Added `runtime_health_jsonrpc_response_matches_shared_health_contract_fields` to the daemon proof script."}
+{"ts":"2026-03-25T16:08:21.881696417Z","kind":"protocol","event":{"type":"artifacts","items":["Added `runtime_health_jsonrpc_response_matches_shared_health_contract_fields` to the daemon proof script."]}}
+{"ts":"2026-03-25T16:08:21.881701619Z","kind":"stdout","line":"- Removed the stale warning carve-out that said the broader health parity case was still expected to drift."}
+{"ts":"2026-03-25T16:08:21.881701619Z","kind":"protocol","event":{"type":"artifacts","items":["Removed the stale warning carve-out that said the broader health parity case was still expected to drift."]}}
+{"ts":"2026-03-25T16:08:21.881707459Z","kind":"stdout","line":""}
+{"ts":"2026-03-25T16:08:21.881709795Z","kind":"stdout","line":"GROVE_LESSONS:"}
+{"ts":"2026-03-25T16:08:21.881709795Z","kind":"protocol","event":{"type":"lessons","items":[]}}
+{"ts":"2026-03-25T16:08:21.881714467Z","kind":"stdout","line":"- The remaining proof-layer drift in the daemon script was stale documentation/execution scope, not a runtime parity failure."}
+{"ts":"2026-03-25T16:08:21.881714467Z","kind":"protocol","event":{"type":"lessons","items":["The remaining proof-layer drift in the daemon script was stale documentation/execution scope, not a runtime parity failure."]}}
+{"ts":"2026-03-25T16:08:21.881740268Z","kind":"stdout","line":"- The health JSON-RPC parity test now passes when run directly in isolation."}
+{"ts":"2026-03-25T16:08:21.881740268Z","kind":"protocol","event":{"type":"lessons","items":["The health JSON-RPC parity test now passes when run directly in isolation."]}}
+{"ts":"2026-03-25T16:08:21.881746851Z","kind":"stdout","line":""}
+{"ts":"2026-03-25T16:08:21.881750142Z","kind":"stdout","line":"GROVE_DECISIONS:"}
+{"ts":"2026-03-25T16:08:21.881750142Z","kind":"protocol","event":{"type":"decision","items":[]}}
+{"ts":"2026-03-25T16:08:21.881755557Z","kind":"stdout","line":"- Claimed only `crates/membrain-daemon/tests/e2e_mcp.sh`, because `runtime_doctor_parity.rs` had already been handled by another agent."}
+{"ts":"2026-03-25T16:08:21.881755557Z","kind":"protocol","event":{"type":"decision","items":["Claimed only `crates/membrain-daemon/tests/e2e_mcp.sh`, because `runtime_doctor_parity.rs` had already been handled by another agent."]}}
+{"ts":"2026-03-25T16:08:21.881760547Z","kind":"stdout","line":"- Kept the change minimal and released the reservation immediately after verification."}
+{"ts":"2026-03-25T16:08:21.881760547Z","kind":"protocol","event":{"type":"decision","items":["Kept the change minimal and released the reservation immediately after verification."]}}
+{"ts":"2026-03-25T16:08:21.881765007Z","kind":"stdout","line":""}
+{"ts":"2026-03-25T16:08:21.881767130Z","kind":"stdout","line":"GROVE_WARNINGS:"}
+{"ts":"2026-03-25T16:08:21.881767130Z","kind":"protocol","event":{"type":"warning","items":[]}}
+{"ts":"2026-03-25T16:08:21.881771271Z","kind":"stdout","line":"- Full daemon proof-script rerun is currently blocked by unrelated compile errors in `crates/membrain-core/src/engine/dream.rs`:"}
+{"ts":"2026-03-25T16:08:21.881771271Z","kind":"protocol","event":{"type":"warning","items":["Full daemon proof-script rerun is currently blocked by unrelated compile errors in `crates/membrain-core/src/engine/dream.rs`:"]}}
+{"ts":"2026-03-25T16:08:21.882192897Z","kind":"stdout","line":"  - missing `text_similarity`"}
+{"ts":"2026-03-25T16:08:21.882192897Z","kind":"protocol","event":{"type":"warning","items":["missing `text_similarity`"]}}
+{"ts":"2026-03-25T16:08:21.882196719Z","kind":"stdout","line":"  - `DreamSyntheticLink` missing `Eq`"}
+{"ts":"2026-03-25T16:08:21.882196719Z","kind":"protocol","event":{"type":"warning","items":["`DreamSyntheticLink` missing `Eq`"]}}
+{"ts":"2026-03-25T16:08:21.882199480Z","kind":"stdout","line":"  - `DreamRun` initializer missing `candidate_memories`, `next_pair_index`, `synthetic_links`"}
+{"ts":"2026-03-25T16:08:21.882199480Z","kind":"protocol","event":{"type":"warning","items":["`DreamRun` initializer missing `candidate_memories`, `next_pair_index`, `synthetic_links`"]}}
+{"ts":"2026-03-25T16:08:21.882202877Z","kind":"stdout","line":""}
+{"ts":"2026-03-25T16:08:21.882204364Z","kind":"stdout","line":"Targeted verification:"}
+{"ts":"2026-03-25T16:08:21.882205744Z","kind":"stdout","line":"- Passed: `CARGO_TARGET_DIR=/tmp/membrain-blacklantern-target cargo test -p membrain-daemon --test runtime_doctor_parity runtime_health_jsonrpc_response_matches_shared_health_contract_fields -- --nocapture`"}
+{"ts":"2026-03-25T16:08:21.882559311Z","kind":"stdout","line":"- Blocked full script: `CARGO_TARGET_DIR=/tmp/membrain-blacklantern-target bash crates/membrain-daemon/tests/e2e_mcp.sh`"}
+{"ts":"2026-03-25T16:08:21.882562496Z","kind":"stdout","line":""}
+{"ts":"2026-03-25T16:08:21.882564088Z","kind":"stdout","line":"Changed location:"}
+{"ts":"2026-03-25T16:08:21.882565787Z","kind":"stdout","line":"- `crates/membrain-daemon/tests/e2e_mcp.sh:137`"}
+{"ts":"2026-03-25T16:08:21.882567380Z","kind":"stdout","line":"- `crates/membrain-daemon/tests/e2e_mcp.sh:171`"}
+{"ts":"2026-03-25T16:08:21.882569397Z","kind":"stdout","line":""}
+{"ts":"2026-03-25T16:08:21.882570671Z","kind":"stdout","line":"GROVE_EXIT: false"}
+{"ts":"2026-03-25T16:08:21.882570671Z","kind":"protocol","event":{"type":"exit","value":false}}
+{"ts":"2026-03-25T16:08:22.356863643Z","kind":"session_ended","exit_code":0}

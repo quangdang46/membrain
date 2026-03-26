@@ -10,7 +10,9 @@ use membrain_core::engine::maintenance::{
 };
 use membrain_core::engine::ranking::RankingRuntime;
 use membrain_core::engine::ranking::{ConfidenceDisplayConfig, ConfidenceExplain};
-use membrain_core::engine::recall::{RecallRuntime, RecallTraceStage};
+use membrain_core::engine::recall::{
+    AutoRouteRequest, RecallRuntime, RecallTraceStage, RouteOverride,
+};
 use membrain_core::engine::repair::{IndexRepairEntrypoint, RepairTarget};
 use membrain_core::engine::result::RetrievalExplain;
 use membrain_core::engine::retrieval_planner::{
@@ -228,6 +230,43 @@ fn cli_can_exercise_intent_taxonomy_and_classification_logs_through_core() {
         fallback.log_record().matched_patterns,
         vec!["default_semantic_broad"]
     );
+}
+
+#[test]
+fn cli_can_exercise_auto_routing_overrides_and_explain_outputs_through_core() {
+    let store = BrainStore::new(RuntimeConfig::default());
+    let classification = store
+        .intent_engine()
+        .classify("what happened recently with the release pipeline?");
+
+    let auto = store.recall_engine().auto_route(
+        &classification,
+        AutoRouteRequest::new()
+            .with_session(SessionId(77))
+            .with_predictive_preroll(true),
+        store.config(),
+    );
+    let overridden = store.recall_engine().auto_route(
+        &classification,
+        AutoRouteRequest::new().with_override(RouteOverride::Tier2Fallback),
+        store.config(),
+    );
+    let explain = RetrievalExplain::from_auto_route(&overridden);
+
+    assert_eq!(auto.plan.kind.as_str(), "recent_tier1_then_tier2_exact");
+    assert_eq!(auto.explain.request_summary, "small_session_lookup");
+    assert!(!auto.explain.override_applied);
+
+    assert_eq!(
+        overridden.plan.kind.as_str(),
+        "tier2_exact_then_tier3_fallback"
+    );
+    assert!(overridden.explain.override_applied);
+    assert_eq!(overridden.explain.override_mode, Some("tier2_fallback"));
+    assert!(explain
+        .result_reasons
+        .iter()
+        .any(|reason| reason.reason_code == "route_override_applied"));
 }
 
 #[test]

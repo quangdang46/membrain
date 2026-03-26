@@ -48,6 +48,7 @@ pub trait Tier2StoreApi {
             DurableSchemaObject::ConflictRecordsTable,
             DurableSchemaObject::DurableMemoryRecords,
             DurableSchemaObject::SnapshotMetadataTable,
+            DurableSchemaObject::CompressionLogTable,
             DurableSchemaObject::LandmarksTable,
         ]
     }
@@ -176,7 +177,8 @@ impl CoreStores {
 
 #[cfg(test)]
 mod tests {
-    use super::{CoreStores, HotStoreApi, ProceduralStoreApi};
+    use super::{CoreStores, HotStoreApi, ProceduralStoreApi, Tier2StoreApi};
+    use crate::migrate::DurableSchemaObject;
 
     #[test]
     fn core_stores_exposes_hot_store_component_identity() {
@@ -227,5 +229,17 @@ mod tests {
             stores.procedural_authoritative_schema_objects(),
             stores.procedural().authoritative_schema_objects()
         );
+    }
+
+    #[test]
+    fn tier2_store_schema_objects_include_compression_log_table() {
+        let stores = CoreStores::default();
+        let schema_objects = stores.tier2_authoritative_schema_objects();
+
+        assert_eq!(
+            schema_objects,
+            stores.tier2().authoritative_schema_objects()
+        );
+        assert!(schema_objects.contains(&DurableSchemaObject::CompressionLogTable));
     }
 }

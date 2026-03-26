@@ -245,8 +245,8 @@ impl AuditLogEntry {
     }
 
     /// Attaches an optional session correlation id.
-    pub fn with_session_id(mut self, session_id: SessionId) -> Self {
-        self.session_id = Some(session_id);
+    pub fn with_session_id(mut self, session_id: impl Into<Option<SessionId>>) -> Self {
+        self.session_id = session_id.into();
         self
     }
 
@@ -1284,8 +1284,8 @@ mod tests {
             forgetting_engine.append_only_audit_entries(forgetting_handle.operation());
         assert_eq!(forgetting_rows.len(), 1);
         assert_eq!(forgetting_rows[0].tick, Some(77));
-        assert_eq!(forgetting_rows[0].before_strength, None);
-        assert_eq!(forgetting_rows[0].after_strength, None);
+        assert_eq!(forgetting_rows[0].before_strength, Some(30));
+        assert_eq!(forgetting_rows[0].after_strength, Some(0));
         assert_eq!(forgetting_rows[0].before_confidence, None);
         assert_eq!(forgetting_rows[0].after_confidence, None);
 

@@ -1,0 +1,45 @@
+{
+  "id": "chk-run-mb-1ng.11-20260325T180028502-fallback-1",
+  "bead_id": "mb-1ng.11",
+  "run_id": "run-mb-1ng.11-20260325T180028502",
+  "session_id": "ses-run-mb-1ng.11-20260325T180028502",
+  "progress": "Synthetic fallback checkpoint after NoProgress",
+  "next_step": "Resume from the transcript tail, avoid repeating completed setup, and continue with the smallest safe remaining step.",
+  "payload": {
+    "claimed_paths": [],
+    "confidence": 0.25,
+    "context": {
+      "failure_class": "NoProgress",
+      "failure_detail": "session ended with Unknown",
+      "stderr_tail": [],
+      "stdout_tail": [
+        "- New test: `public_brain_store_goal_resume_surfaces_explicit_degraded_checkpoint_warnings`",
+        "",
+        "What that test proves:",
+        "- `BrainStore::goal_resume()` surfaces explicit degraded checkpoint warnings instead of guessing",
+        "- stale checkpoint state stays explicit",
+        "- mismatched evidence surfaces `missing_evidence`",
+        "- mismatched dependencies surface `partial_dependencies`",
+        "- audit trail still records the degraded resume",
+        "",
+        "Validation:",
+        "- `rustfmt --edition 2024 --check crates/membrain-core/tests/working_memory_admission.rs`",
+        "- `cargo test -p membrain-core --test working_memory_admission public_brain_store_goal_resume_surfaces_explicit_degraded_checkpoint_warnings -- --nocapture`",
+        "",
+        "Key references:",
+        "- `crates/membrain-core/tests/working_memory_admission.rs:355`",
+        "- `crates/membrain-core/src/engine/working_state.rs:210`",
+        "- `crates/membrain-core/src/brain_store.rs:2147`",
+        "- `crates/membrain-cli/src/main.rs:5515`",
+        "- `docs/CLI.md:558`",
+        ""
+      ],
+      "synthetic": true
+    },
+    "next_step": "Resume from the transcript tail, avoid repeating completed setup, and continue with the smallest safe remaining step.",
+    "open_questions": [],
+    "progress": "Synthetic fallback checkpoint after NoProgress"
+  },
+  "saved_at": "2026-03-25T18:13:40.601090444Z",
+  "resume_generation": 1
+}

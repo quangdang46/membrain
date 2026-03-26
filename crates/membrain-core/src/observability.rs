@@ -310,13 +310,70 @@ pub struct RouteSummary {
     pub route_family: &'static str,
     pub route_reason: &'static str,
     pub tier1_consulted_first: bool,
+    pub tier1_answered_directly: bool,
     pub routes_to_deeper_tiers: bool,
+    pub candidate_budget: Option<usize>,
+    pub pre_route_candidate_count: Option<usize>,
+    pub post_route_candidate_count: Option<usize>,
+    pub fallback_reason: Option<&'static str>,
+    pub predictive_triggered: bool,
+    pub predictive_signal: crate::api::FieldPresence<&'static str>,
+    pub predictive_skip_reason: Option<&'static str>,
+    pub predictive_fallback_behavior: Option<&'static str>,
 }
 
 impl RouteSummary {
     /// Builds a shared route summary from the canonical retrieval result envelope.
     pub fn from_result_set(result_set: &RetrievalResultSet) -> Self {
         let explain = &result_set.explain;
+        let predictive_trigger_reason = explain
+            .result_reasons
+            .iter()
+            .find(|reason| reason.reason_code == "predictive_preroll_triggered");
+        let predictive_bypass_reason = explain
+            .result_reasons
+            .iter()
+            .find(|reason| reason.reason_code == "predictive_preroll_bypassed");
+        let predictive_fallback_reason = explain
+            .result_reasons
+            .iter()
+            .find(|reason| reason.reason_code == "predictive_fallback_behavior");
+        let predictive_signal = predictive_trigger_reason.and_then(|reason| {
+            [
+                "session_recency",
+                "high_value_recent",
+                "temporal_anchor",
+                "procedural_sequence",
+            ]
+            .into_iter()
+            .find(|signal| reason.detail.contains(signal))
+        });
+        let predictive_skip_reason = predictive_bypass_reason.and_then(|reason| {
+            [
+                "predictive_preroll_enabled",
+                "request_not_opted_in",
+                "exact_id_direct_lookup",
+                "graph_expansion_not_predictive",
+                "tier1_budget_disabled",
+                "prefetch_budget_disabled",
+                "intent_not_predictive_candidate",
+                "low_confidence_fallback",
+                "predictive_not_evaluated",
+            ]
+            .into_iter()
+            .find(|skip_reason| reason.detail.contains(skip_reason))
+        });
+        let predictive_fallback_behavior = predictive_fallback_reason.and_then(|reason| {
+            [
+                "predictive_prefetch_then_deeper_route",
+                "predictive_prefetch_only",
+                "predictive_bypassed_then_tier3_fallback",
+                "predictive_bypassed_then_deeper_route",
+                "predictive_bypassed_without_fallback",
+            ]
+            .into_iter()
+            .find(|behavior| reason.detail.contains(behavior))
+        });
         Self {
             route_family: route_family(explain.recall_plan),
             route_reason: route_reason_label(&explain.route_reason),
@@ -350,6 +407,7 @@ impl RouteSummary {
                         })
                         .is_none_or(|deeper_pos| tier1_pos < deeper_pos)
                 }),
+            tier1_answered_directly: explain.tier1_answered_directly,
             routes_to_deeper_tiers: explain.trace_stages.iter().any(|stage| {
                 matches!(
                     stage,
@@ -358,6 +416,29 @@ impl RouteSummary {
                         | RecallTraceStage::Tier3Fallback
                 )
             }),
+            candidate_budget: Some(explain.candidate_budget),
+            pre_route_candidate_count: Some(result_set.total_candidates),
+            post_route_candidate_count: Some(result_set.evidence_pack.len()),
+            fallback_reason: match explain.trace_stages.last() {
+                Some(RecallTraceStage::GraphExpansion) => Some("bounded_graph_expansion"),
+                Some(RecallTraceStage::Tier3Fallback) => Some("tier3_fallback"),
+                Some(RecallTraceStage::Tier2Exact)
+                    if !explain.tier1_answered_directly
+                        && explain
+                            .trace_stages
+                            .iter()
+                            .any(|stage| matches!(stage, RecallTraceStage::Tier1RecentWindow)) =>
+                {
+                    Some("tier1_recent_insufficient")
+                }
+                _ => None,
+            },
+            predictive_triggered: predictive_trigger_reason.is_some(),
+            predictive_signal: predictive_signal
+                .map(crate::api::FieldPresence::Present)
+                .unwrap_or(crate::api::FieldPresence::Absent),
+            predictive_skip_reason,
+            predictive_fallback_behavior,
         }
     }
 }
@@ -367,6 +448,7 @@ impl RouteSummary {
 pub enum TraceStage {
     Tier1ExactHandle,
     Tier1RecentWindow,
+    PredictivePreroll,
     Tier2Exact,
     GraphExpansion,
     Tier3Fallback,
@@ -380,6 +462,7 @@ impl TraceStage {
         match self {
             Self::Tier1ExactHandle => "tier1_exact_handle",
             Self::Tier1RecentWindow => "tier1_recent_window",
+            Self::PredictivePreroll => "predictive_preroll",
             Self::Tier2Exact => "tier2_exact",
             Self::GraphExpansion => "graph_expansion",
             Self::Tier3Fallback => "tier3_fallback",
@@ -492,15 +575,39 @@ impl TraceProvenanceSummary {
 pub struct ExplainResultReason {
     pub memory_id: Option<u64>,
     pub reason_code: &'static str,
+    pub reason_family: &'static str,
+    pub route_stage: TraceStage,
     pub detail: String,
 }
 
 impl ExplainResultReason {
     /// Builds a shared explain reason from canonical retrieval reasoning.
     pub fn from_result_reason(reason: &ResultReason) -> Self {
+        let api_reason = crate::api::ResultReason::from_result_reason(reason);
         Self {
-            memory_id: reason.memory_id.map(|memory_id| memory_id.0),
+            memory_id: api_reason.memory_id.map(|memory_id| memory_id.0),
             reason_code: reason_code_label(&reason.reason_code),
+            reason_family: match api_reason.reason_family.as_str() {
+                "selection" => "selection",
+                "query_by_example" => "query_by_example",
+                "temporal" => "temporal",
+                "conflict" => "conflict",
+                "graph" => "graph",
+                "threshold" => "threshold",
+                "predictive" => "predictive",
+                "routing" => "routing",
+                _ => "custom",
+            },
+            route_stage: match api_reason.route_stage {
+                crate::api::TraceStage::Tier1ExactHandle => TraceStage::Tier1ExactHandle,
+                crate::api::TraceStage::Tier1RecentWindow => TraceStage::Tier1RecentWindow,
+                crate::api::TraceStage::PredictivePreroll => TraceStage::PredictivePreroll,
+                crate::api::TraceStage::Tier2Exact => TraceStage::Tier2Exact,
+                crate::api::TraceStage::GraphExpansion => TraceStage::GraphExpansion,
+                crate::api::TraceStage::Tier3Fallback => TraceStage::Tier3Fallback,
+                crate::api::TraceStage::PolicyGate => TraceStage::PolicyGate,
+                crate::api::TraceStage::Packaging => TraceStage::Packaging,
+            },
             detail: reason.detail.clone(),
         }
     }
@@ -717,6 +824,9 @@ fn reason_code_label(reason_code: &str) -> &'static str {
         "confidence_display_rule" => "confidence_display_rule",
         "strength_threshold_applied" => "strength_threshold_applied",
         "below_min_strength" => "below_min_strength",
+        "intent_classification" => "intent_classification",
+        "route_override_applied" => "route_override_applied",
+        "route_override_not_applied" => "route_override_not_applied",
         _ => "custom_reason_code",
     }
 }
@@ -1529,6 +1639,8 @@ mod tests {
             vec![ExplainResultReason {
                 memory_id: None,
                 reason_code: "tier2_exact_match",
+                reason_family: "selection",
+                route_stage: TraceStage::Tier2Exact,
                 detail: "candidate survived bounded ranking".to_string(),
             }]
         );
@@ -1755,6 +1867,8 @@ mod tests {
             vec![ExplainResultReason {
                 memory_id: Some(21),
                 reason_code: "temporal_payload_deferred",
+                reason_family: "temporal",
+                route_stage: TraceStage::Tier2Exact,
                 detail: "heavyweight Tier2 payload remained deferred until hydration path tier2://team.gamma/payload/0015/21".to_string(),
             }]
         );
@@ -1852,6 +1966,8 @@ mod tests {
             vec![ExplainResultReason {
                 memory_id: Some(21),
                 reason_code: "temporal_landmark_selected",
+                reason_family: "temporal",
+                route_stage: TraceStage::Tier2Exact,
                 detail: "landmark \"launch milestone\" opened era \"era-launch-milestone-0001\" while staying on metadata-only Tier2 planning".to_string(),
             }]
         );
@@ -1860,6 +1976,8 @@ mod tests {
             vec![ExplainResultReason {
                 memory_id: Some(34),
                 reason_code: "temporal_landmark_not_selected",
+                reason_family: "temporal",
+                route_stage: TraceStage::Tier2Exact,
                 detail: "memory stayed recallable without landmark promotion or era creation"
                     .to_string(),
             }]
@@ -1881,6 +1999,8 @@ mod tests {
             vec![ExplainResultReason {
                 memory_id: None,
                 reason_code: "era_filter_applied",
+                reason_family: "temporal",
+                route_stage: TraceStage::Tier2Exact,
                 detail: "bounded retrieval stayed inside era `era-launch-0042` opened by landmark(s) launch day pivot (#7)".to_string(),
             }]
         );

@@ -188,3 +188,95 @@ async fn runtime_share_and_unshare_preserve_sharing_scope_contract() {
 
     shutdown_runtime(&socket_path, handle).await;
 }
+
+#[tokio::test]
+async fn runtime_encode_and_mood_history_preserve_emotional_trajectory_contract() {
+    let (socket_path, handle) = spawn_runtime("mood-history-parity").await;
+
+    let encode_response = send_request(
+        &socket_path,
+        json!({
+            "jsonrpc":"2.0",
+            "method":"encode",
+            "params":{
+                "content":"emotionally salient incident summary",
+                "namespace":"default",
+                "emotional_annotations":{"valence":0.4,"arousal":0.9}
+            },
+            "id":"encode-affect"
+        }),
+    )
+    .await;
+    assert_eq!(encode_response["result"]["status"], json!("accepted"));
+
+    let mood_history_response = send_request(
+        &socket_path,
+        json!({
+            "jsonrpc":"2.0",
+            "method":"mood_history",
+            "params":{
+                "namespace":"default",
+                "since_tick":1
+            },
+            "id":"mood-history"
+        }),
+    )
+    .await;
+    assert!(mood_history_response["error"].is_null());
+    assert_eq!(
+        mood_history_response["result"]["namespace"],
+        json!("default")
+    );
+    assert_eq!(mood_history_response["result"]["since_tick"], json!(1));
+    assert_eq!(
+        mood_history_response["result"]["authoritative_truth"],
+        json!("emotional_timeline")
+    );
+    assert_eq!(mood_history_response["result"]["total_rows"], json!(1));
+
+    let health_response = send_request(
+        &socket_path,
+        json!({"jsonrpc":"2.0","method":"health","params":{},"id":"health"}),
+    )
+    .await;
+    assert!(health_response["error"].is_null());
+    let affect_view = health_response["result"]["dashboard_views"]
+        .as_array()
+        .expect("dashboard views should be present")
+        .iter()
+        .find(|view| view["view"] == json!("affect_trajectory"))
+        .expect("affect trajectory dashboard view should be present");
+    let summary = affect_view["summary"]
+        .as_str()
+        .expect("affect trajectory summary should be a string");
+    let latest_tick = mood_history_response["result"]["rows"][0]["tick_start"]
+        .as_u64()
+        .expect("tick_start should be numeric");
+    assert!(summary.contains("rows=1"));
+    assert!(summary.contains(&format!("latest_tick={latest_tick}")));
+    assert!(summary.contains("current_mood=(0.40,0.90)"));
+    assert!(summary.contains("history=/mood_history"));
+    assert!(health_response["result"]["drill_down_paths"]
+        .as_array()
+        .expect("drill-down paths should be present")
+        .iter()
+        .any(|path| path["path"] == json!("/mood_history")));
+    let avg_valence = mood_history_response["result"]["rows"][0]["avg_valence"]
+        .as_f64()
+        .expect("avg_valence should be numeric");
+    let avg_arousal = mood_history_response["result"]["rows"][0]["avg_arousal"]
+        .as_f64()
+        .expect("avg_arousal should be numeric");
+    assert!((avg_valence - 0.4).abs() < 1e-6);
+    assert!((avg_arousal - 0.9).abs() < 1e-6);
+    assert_eq!(
+        mood_history_response["result"]["rows"][0]["memory_count"],
+        json!(1)
+    );
+    assert_eq!(
+        mood_history_response["result"]["rows"][0]["authoritative_truth"],
+        json!("emotional_timeline")
+    );
+
+    shutdown_runtime(&socket_path, handle).await;
+}

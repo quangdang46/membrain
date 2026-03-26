@@ -1,0 +1,45 @@
+{
+  "id": "chk-run-mb-1ng.11-20260325T161810976-fallback-1",
+  "bead_id": "mb-1ng.11",
+  "run_id": "run-mb-1ng.11-20260325T161810976",
+  "session_id": "ses-run-mb-1ng.11-20260325T161810976",
+  "progress": "Synthetic fallback checkpoint after NoProgress",
+  "next_step": "Resume from the transcript tail, avoid repeating completed setup, and continue with the smallest safe remaining step.",
+  "payload": {
+    "claimed_paths": [],
+    "confidence": 0.25,
+    "context": {
+      "failure_class": "NoProgress",
+      "failure_detail": "session ended with Unknown",
+      "stderr_tail": [],
+      "stdout_tail": [
+        "  \"validation\": {",
+        "    \"attempted\": [",
+        "      \"cargo test -p membrain-daemon runtime_goal_working_state_methods_surface_blackboard_projection_parity -- --nocapture\",",
+        "      \"cargo test -p membrain-core --test working_memory_admission -- --nocapture\",",
+        "      \"cargo test -p membrain-cli goal_commands_parse_canonical_fields -- --nocapture\"",
+        "    ],",
+        "    \"blocked\": [",
+        "      \"crates/membrain-daemon/src/rpc.rs:920 missing parse_required_positive_u64\",",
+        "      \"crates/membrain-daemon/src/rpc.rs:935 missing parse_required_positive_u64\"",
+        "    ]",
+        "  },",
+        "  \"coordination\": {",
+        "    \"agent_name\": \"DarkSnow\",",
+        "    \"thread_id\": \"mb-1ng.11\",",
+        "    \"reported_blocker_to_agents\": true,",
+        "    \"released_reservations\": true",
+        "  }",
+        "}",
+        "```",
+        ""
+      ],
+      "synthetic": true
+    },
+    "next_step": "Resume from the transcript tail, avoid repeating completed setup, and continue with the smallest safe remaining step.",
+    "open_questions": [],
+    "progress": "Synthetic fallback checkpoint after NoProgress"
+  },
+  "saved_at": "2026-03-25T16:32:27.555516158Z",
+  "resume_generation": 1
+}

@@ -5,8 +5,8 @@ use membrain_core::engine::encode::{EncodeEngine, EncodeRuntime, EncodeWriteBran
 use membrain_core::observability::EncodeFastPathStage;
 use membrain_core::policy::{IngestMode, PassiveObservationDecision};
 use membrain_core::types::{
-    CanonicalMemoryType, FastPathRouteFamily, LandmarkMetadata, LandmarkSignals, MemoryId,
-    RawEncodeInput, RawIntakeKind,
+    AffectSignals, CanonicalMemoryType, FastPathRouteFamily, LandmarkMetadata, LandmarkSignals,
+    MemoryId, RawEncodeInput, RawIntakeKind,
 };
 use membrain_core::RuntimeConfig;
 
@@ -101,6 +101,24 @@ fn provisional_salience_stays_bounded_and_inspectable() {
         preference.trace.route_family,
         FastPathRouteFamily::UserPreference
     );
+}
+
+#[test]
+fn affect_signals_are_clamped_and_preserved_in_fast_path_normalization() {
+    let engine = test_engine();
+    let prepared = engine.prepare_fast_path(
+        RawEncodeInput::new(RawIntakeKind::Event, "emotionally charged milestone")
+            .with_affect_signals(AffectSignals::new(1.4, 1.7)),
+    );
+
+    assert_eq!(
+        prepared.normalized.affect,
+        Some(AffectSignals::new(1.0, 1.0))
+    );
+    assert_eq!(prepared.trace.route_family, FastPathRouteFamily::Event);
+    assert_eq!(prepared.write_decision, PassiveObservationDecision::Capture);
+    assert!(!prepared.captured_as_observation);
+    assert!(prepared.trace.stayed_within_latency_budget);
 }
 
 #[test]

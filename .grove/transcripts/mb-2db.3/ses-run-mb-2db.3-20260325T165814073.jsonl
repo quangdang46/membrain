@@ -1,0 +1,21 @@
+{"ts":"2026-03-25T16:58:14.140138142Z","kind":"session_started","session_id":"ses-run-mb-2db.3-20260325T165814073"}
+{"ts":"2026-03-25T17:15:06.013874263Z","kind":"stdout","line":"Done."}
+{"ts":"2026-03-25T17:15:06.046134542Z","kind":"stdout","line":""}
+{"ts":"2026-03-25T17:15:06.046146686Z","kind":"stdout","line":"- Fixed the stale F13 test expectations in `crates/membrain-core/src/brain_store.rs:3280`."}
+{"ts":"2026-03-25T17:15:06.046150095Z","kind":"stdout","line":"- The current bounded semantics for that signal mix are:"}
+{"ts":"2026-03-25T17:15:06.046152545Z","kind":"stdout","line":"  - `heat_bucket = \"warming\"`"}
+{"ts":"2026-03-25T17:15:06.046156273Z","kind":"stdout","line":"  - `prewarm_action = \"bounded_session_rewarm\"`"}
+{"ts":"2026-03-25T17:15:06.046158723Z","kind":"stdout","line":"  - `prewarm_target_family = \"session_warmup\"`"}
+{"ts":"2026-03-25T17:15:06.046161173Z","kind":"stdout","line":""}
+{"ts":"2026-03-25T17:15:06.046163410Z","kind":"stdout","line":"Validation passed:"}
+{"ts":"2026-03-25T17:15:06.046166180Z","kind":"stdout","line":"- `CARGO_TARGET_DIR=/tmp/membrain-target-f13 cargo test -p membrain-core brain_store_hot_paths_and_dead_zones_follow_bounded_attention_signals -- --nocapture`"}
+{"ts":"2026-03-25T17:15:06.046190148Z","kind":"stdout","line":"- `CARGO_TARGET_DIR=/tmp/membrain-target-f13 cargo check -p membrain-core`"}
+{"ts":"2026-03-25T17:15:06.046193770Z","kind":"stdout","line":""}
+{"ts":"2026-03-25T17:15:06.046196539Z","kind":"stdout","line":"Coordination:"}
+{"ts":"2026-03-25T17:15:06.046199309Z","kind":"stdout","line":"- Registered on Agent Mail as `PurpleCanyon`"}
+{"ts":"2026-03-25T17:15:06.046201865Z","kind":"stdout","line":"- Announced the narrow F13 slice in thread `mb-2db.9`"}
+{"ts":"2026-03-25T17:15:06.046204209Z","kind":"stdout","line":"- Reported the validated fix back to overlapping agents"}
+{"ts":"2026-03-25T17:15:06.046206552Z","kind":"stdout","line":""}
+{"ts":"2026-03-25T17:15:06.046209216Z","kind":"stdout","line":"One note:"}
+{"ts":"2026-03-25T17:15:06.046211666Z","kind":"stdout","line":"- `br show mb-2db.9` appears to point at F19 audit-log work, while the active F13 checkpoint/work is under `mb-2db.3` / `mb-2db.9` thread context. I didn’t change bead state because that mapping looks inconsistent."}
+{"ts":"2026-03-25T17:15:06.644258626Z","kind":"session_ended","exit_code":0}

@@ -1,0 +1,9 @@
+{"ts":"2026-03-25T20:46:49.343353992Z","kind":"session_started","session_id":"ses-run-mb-2db.7-20260325T204649308"}
+{"ts":"2026-03-25T21:02:29.181722671Z","kind":"stdout","line":"Read it. The focused test passed:"}
+{"ts":"2026-03-25T21:02:29.445455143Z","kind":"stdout","line":""}
+{"ts":"2026-03-25T21:02:29.445472269Z","kind":"stdout","line":"- `store::tests::tier2_store_schema_objects_include_compression_log_table` ✅"}
+{"ts":"2026-03-25T21:02:29.445478193Z","kind":"stdout","line":"- Exit code: `0`"}
+{"ts":"2026-03-25T21:02:29.445483040Z","kind":"stdout","line":""}
+{"ts":"2026-03-25T21:02:29.445488425Z","kind":"stdout","line":"Notable detail:"}
+{"ts":"2026-03-25T21:02:29.445492949Z","kind":"stdout","line":"- Cargo waited on an artifact-directory file lock first, then compiled and ran successfully."}
+{"ts":"2026-03-25T21:02:31.786710603Z","kind":"session_ended","exit_code":0}

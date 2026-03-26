@@ -1,0 +1,39 @@
+{
+  "id": "chk-run-mb-2db.3-20260325T185551178-fallback-1",
+  "bead_id": "mb-2db.3",
+  "run_id": "run-mb-2db.3-20260325T185551178",
+  "session_id": "ses-run-mb-2db.3-20260325T185551178",
+  "progress": "Synthetic fallback checkpoint after NoProgress",
+  "next_step": "Resume from the transcript tail, avoid repeating completed setup, and continue with the smallest safe remaining step.",
+  "payload": {
+    "claimed_paths": [],
+    "confidence": 0.25,
+    "context": {
+      "failure_class": "NoProgress",
+      "failure_detail": "session ended with Unknown",
+      "stderr_tail": [],
+      "stdout_tail": [
+        "Daemon-side result is good:",
+        "",
+        "- `cargo test -p membrain-daemon runtime_recall_records_attention_signals_for_hot_paths_and_dead_zones`",
+        "- passed at `crates/membrain-daemon/src/daemon.rs`",
+        "",
+        "So current validation status is:",
+        "",
+        "- passed: focused daemon F13 runtime test",
+        "- blocked: focused core test run, due to unrelated compile drift in `crates/membrain-core/src/engine/compression.rs:209` and `:216` (`CompressionMemoryKind` missing `Hash`)",
+        "",
+        "Net result:",
+        "- the F13 runtime/policy alignment change is live and daemon-test-backed",
+        "- core-wide verification is still not a clean signal because of unrelated compile failures elsewhere",
+        ""
+      ],
+      "synthetic": true
+    },
+    "next_step": "Resume from the transcript tail, avoid repeating completed setup, and continue with the smallest safe remaining step.",
+    "open_questions": [],
+    "progress": "Synthetic fallback checkpoint after NoProgress"
+  },
+  "saved_at": "2026-03-25T19:10:37.725242268Z",
+  "resume_generation": 1
+}

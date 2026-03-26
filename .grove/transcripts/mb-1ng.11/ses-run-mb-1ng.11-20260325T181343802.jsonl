@@ -1,0 +1,50 @@
+{"ts":"2026-03-25T18:13:43.859792392Z","kind":"session_started","session_id":"ses-run-mb-1ng.11-20260325T181343802"}
+{"ts":"2026-03-25T18:55:34.012260904Z","kind":"stdout","line":"Done."}
+{"ts":"2026-03-25T18:55:34.060056613Z","kind":"stdout","line":""}
+{"ts":"2026-03-25T18:55:34.060069893Z","kind":"stdout","line":"I resumed `mb-1ng.11`, registered as `BrightGlacier`, coordinated via Agent Mail, claimed the bead, and closed the daemon/core parity gap for working-state lifecycle handling."}
+{"ts":"2026-03-25T18:55:34.060073106Z","kind":"stdout","line":""}
+{"ts":"2026-03-25T18:55:34.060075355Z","kind":"stdout","line":"What changed"}
+{"ts":"2026-03-25T18:55:34.060426633Z","kind":"stdout","line":"- `crates/membrain-daemon/src/daemon.rs`"}
+{"ts":"2026-03-25T18:55:34.060433594Z","kind":"stdout","line":"  - removed daemon-local synthetic checkpoint storage from `RuntimeState` at `crates/membrain-daemon/src/daemon.rs:269`"}
+{"ts":"2026-03-25T18:55:34.060437235Z","kind":"stdout","line":"  - added `ensure_goal_working_state(...)` seeding helper at `crates/membrain-daemon/src/daemon.rs:1337`"}
+{"ts":"2026-03-25T18:55:34.060439913Z","kind":"stdout","line":"  - rewired:"}
+{"ts":"2026-03-25T18:55:34.060638899Z","kind":"stdout","line":"    - `handle_goal_state` at `crates/membrain-daemon/src/daemon.rs:3261`"}
+{"ts":"2026-03-25T18:55:34.060645860Z","kind":"stdout","line":"    - `handle_goal_pause` at `crates/membrain-daemon/src/daemon.rs:3321`"}
+{"ts":"2026-03-25T18:55:34.060648644Z","kind":"stdout","line":"    - `handle_goal_pin` at `crates/membrain-daemon/src/daemon.rs:3346`"}
+{"ts":"2026-03-25T18:55:34.060651001Z","kind":"stdout","line":"    - `handle_goal_dismiss` at `crates/membrain-daemon/src/daemon.rs:3371`"}
+{"ts":"2026-03-25T18:55:34.060653250Z","kind":"stdout","line":"    - `handle_goal_resume` at `crates/membrain-daemon/src/daemon.rs:3435`"}
+{"ts":"2026-03-25T18:55:34.060655499Z","kind":"stdout","line":"    - `handle_goal_abandon` at `crates/membrain-daemon/src/daemon.rs:3498`"}
+{"ts":"2026-03-25T18:55:34.060658069Z","kind":"stdout","line":"  - these now use shared `BrainStore` working-state lifecycle methods instead of daemon-only synthesized state"}
+{"ts":"2026-03-25T18:55:34.060660318Z","kind":"stdout","line":"  - preserved explicit stale degradation on resume when no checkpoint exists"}
+{"ts":"2026-03-25T18:55:34.060662888Z","kind":"stdout","line":""}
+{"ts":"2026-03-25T18:55:34.060665352Z","kind":"stdout","line":"Validation"}
+{"ts":"2026-03-25T18:55:34.060668029Z","kind":"stdout","line":"- `cargo check -p membrain-daemon`"}
+{"ts":"2026-03-25T18:55:34.060670278Z","kind":"stdout","line":"- `cargo test -p membrain-daemon runtime_goal_pause_and_resume_surface_checkpointed_working_state -- --nocapture`"}
+{"ts":"2026-03-25T18:55:34.060672634Z","kind":"stdout","line":"- `cargo test -p membrain-daemon runtime_goal_resume_without_checkpoint_reports_stale_explicitly -- --nocapture`"}
+{"ts":"2026-03-25T18:55:34.060674883Z","kind":"stdout","line":"- `cargo test -p membrain-daemon --test runtime_doctor_parity runtime_goal_working_state_methods_surface_blackboard_projection_parity -- --nocapture`"}
+{"ts":"2026-03-25T18:55:34.060677989Z","kind":"stdout","line":""}
+{"ts":"2026-03-25T18:55:34.060680131Z","kind":"stdout","line":"GROVE_RESULT: success"}
+{"ts":"2026-03-25T18:55:34.060680131Z","kind":"protocol","event":{"type":"result","summary":"success"}}
+{"ts":"2026-03-25T18:55:34.060692447Z","kind":"stdout","line":"GROVE_ARTIFACTS:"}
+{"ts":"2026-03-25T18:55:34.060692447Z","kind":"protocol","event":{"type":"artifacts","items":[]}}
+{"ts":"2026-03-25T18:55:34.060705299Z","kind":"stdout","line":"- `crates/membrain-daemon/src/daemon.rs`"}
+{"ts":"2026-03-25T18:55:34.060705299Z","kind":"protocol","event":{"type":"artifacts","items":["`crates/membrain-daemon/src/daemon.rs`"]}}
+{"ts":"2026-03-25T18:55:34.060710439Z","kind":"stdout","line":"GROVE_LESSONS:"}
+{"ts":"2026-03-25T18:55:34.060710439Z","kind":"protocol","event":{"type":"lessons","items":[]}}
+{"ts":"2026-03-25T18:55:34.060715366Z","kind":"stdout","line":"- daemon goal lifecycle parity is now backed by shared core working-state semantics instead of transport-local checkpoint fabrication"}
+{"ts":"2026-03-25T18:55:34.060715366Z","kind":"protocol","event":{"type":"lessons","items":["daemon goal lifecycle parity is now backed by shared core working-state semantics instead of transport-local checkpoint fabrication"]}}
+{"ts":"2026-03-25T18:55:34.060737535Z","kind":"stdout","line":"- clean resume now follows the core contract (`warnings == []`) while missing-checkpoint resume still degrades explicitly as stale"}
+{"ts":"2026-03-25T18:55:34.060737535Z","kind":"protocol","event":{"type":"lessons","items":["clean resume now follows the core contract (`warnings == []`) while missing-checkpoint resume still degrades explicitly as stale"]}}
+{"ts":"2026-03-25T18:55:34.060741176Z","kind":"stdout","line":"GROVE_DECISIONS:"}
+{"ts":"2026-03-25T18:55:34.060741176Z","kind":"protocol","event":{"type":"decision","items":[]}}
+{"ts":"2026-03-25T18:55:34.060744710Z","kind":"stdout","line":"- kept `goal_snapshot` as a derived artifact surface for this slice"}
+{"ts":"2026-03-25T18:55:34.060744710Z","kind":"protocol","event":{"type":"decision","items":["kept `goal_snapshot` as a derived artifact surface for this slice"]}}
+{"ts":"2026-03-25T18:55:34.060748459Z","kind":"stdout","line":"- did not introduce new durable checkpoint schema; reused existing `BrainStore` lifecycle facade only"}
+{"ts":"2026-03-25T18:55:34.060748459Z","kind":"protocol","event":{"type":"decision","items":["did not introduce new durable checkpoint schema; reused existing `BrainStore` lifecycle facade only"]}}
+{"ts":"2026-03-25T18:55:34.060753706Z","kind":"stdout","line":"GROVE_WARNINGS:"}
+{"ts":"2026-03-25T18:55:34.060753706Z","kind":"protocol","event":{"type":"warning","items":[]}}
+{"ts":"2026-03-25T18:55:34.060756491Z","kind":"stdout","line":"- snapshot creation in daemon still uses local derived blackboard materialization rather than a dedicated `BrainStore` snapshot facade"}
+{"ts":"2026-03-25T18:55:34.060756491Z","kind":"protocol","event":{"type":"warning","items":["snapshot creation in daemon still uses local derived blackboard materialization rather than a dedicated `BrainStore` snapshot facade"]}}
+{"ts":"2026-03-25T18:55:34.060759918Z","kind":"stdout","line":"GROVE_EXIT: false"}
+{"ts":"2026-03-25T18:55:34.060759918Z","kind":"protocol","event":{"type":"exit","value":false}}
+{"ts":"2026-03-25T18:55:34.797416256Z","kind":"session_ended","exit_code":0}

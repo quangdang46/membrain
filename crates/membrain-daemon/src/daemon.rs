@@ -26,24 +26,32 @@ use crate::rpc::{
 };
 use anyhow::Context;
 use membrain_core::api::{
-    AgentId, FieldPresence, NamespaceId, PassiveObservationInspectSummary, PolicyContext,
+    AgentId, BlackboardSnapshotOutput, DeadZonesOutput, FieldPresence, ForkInheritance,
+    GoalAbandonOutput, GoalPauseOutput, GoalResumeOutput, GoalStateOutput, HotPathsOutput,
+    MergeConflictStrategy, NamespaceId, PassiveObservationInspectSummary, PolicyContext,
     PolicyFilterSummary, RequestContext, RequestId, ResponseContext, ResponseWarning, TaskId,
     WorkspaceId,
 };
+use membrain_core::brain_store::{ForkConfig, MergeConfig};
 use membrain_core::config::RuntimeConfig;
+use membrain_core::engine::compression::{CompressionPolicy, CompressionTrigger};
 use membrain_core::engine::confidence::{
     ConfidenceEngine, ConfidenceInputs, ConfidenceOutput, ConfidencePolicy,
 };
 use membrain_core::engine::context_budget::{ContextBudgetRequest, InjectionFormat};
 use membrain_core::engine::forgetting::{ForgettingAction, ForgettingPolicy};
 use membrain_core::engine::observe::{ObserveConfig, ObserveEngine};
-use membrain_core::engine::ranking::{fuse_scores, RankingInput, RankingProfile};
+use membrain_core::engine::ranking::{
+    adjusted_ranking_input_for_affect, fuse_scores, ranking_profile_for_recall,
+    ranking_profile_name_for_recall, RankingInput,
+};
 use membrain_core::engine::recall::{RecallEngine, RecallRequest, RecallRuntime};
 use membrain_core::engine::result::{
     AnsweredFrom, EntryLane, EvidenceRole, QueryByExampleExplain, ResultBuilder, ResultReason,
     RetrievalExplain, RetrievalResultSet,
 };
 use membrain_core::engine::retrieval_planner::{QueryByExampleNormalization, RetrievalRequest};
+use membrain_core::engine::working_state::GoalWorkingState;
 use membrain_core::graph::{
     CausalEvidenceAttribution, CausalEvidenceKind, CausalLink, CausalLinkType, EntityId,
     RelationKind,
@@ -61,10 +69,14 @@ use membrain_core::store::cache::{
     GenerationStatus, InvalidationTrigger, PrefetchTrigger, WarmSource,
 };
 use membrain_core::store::tier2::Tier2DurableItemLayout;
-use membrain_core::types::{MemoryId, RawEncodeInput, RawIntakeKind, SessionId};
+use membrain_core::types::{
+    AffectSignals, BlackboardEvidenceHandle, BlackboardState, GoalCheckpoint, GoalLifecycleStatus,
+    GoalStackFrame, MemoryId, RawEncodeInput, RawIntakeKind, SessionId,
+};
 use serde_json::{json, Value};
 use std::collections::{HashMap, VecDeque};
 use std::hash::{Hash, Hasher};
+use std::time::Instant;
 
 fn cache_family_label(family: CacheFamily) -> CacheFamilyLabel {
     match family {
@@ -162,6 +174,19 @@ fn generation_status_label(status: GenerationStatus) -> GenerationStatusLabel {
     }
 }
 
+fn current_mood_snapshot(state: &RuntimeState, namespace: &NamespaceId) -> Option<AffectSignals> {
+    let audit = state
+        .audit
+        .lock()
+        .expect("runtime audit state lock should be available");
+    let latest = audit
+        .store
+        .mood_history(namespace.clone(), None)
+        .rows
+        .pop()?;
+    Some(AffectSignals::new(latest.avg_valence, latest.avg_arousal).clamped())
+}
+
 fn cache_eval_trace_from_lookup(
     result: &CacheLookupResult,
     candidates_before: usize,
@@ -211,9 +236,10 @@ struct NormalizedRecallContract {
     normalized_query_by_example:
         membrain_core::engine::retrieval_planner::QueryByExampleNormalization,
     result_budget: usize,
+    mood_congruent: bool,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq)]
 struct RuntimeMemoryRecord {
     layout: Tier2DurableItemLayout,
     confidence_inputs: ConfidenceInputs,
@@ -516,65 +542,110 @@ impl RuntimeState {
                     .collect(),
             });
 
-        let mut cache = membrain_core::store::cache::CacheManager::new(4, 4);
-        if !matches!(posture, RuntimePosture::Full) {
-            cache.result.disable();
-        }
-        cache.prefetch.submit_hint(
-            namespace,
-            membrain_core::store::cache::PrefetchTrigger::SessionRecency,
-            vec![],
-        );
-
-        let health = membrain_core::health::BrainHealthReport::from_inputs(
-            BrainHealthInputs {
-                hot_memories: 76,
-                hot_capacity: 100,
-                cold_memories: 12,
-                avg_strength: 0.71,
-                avg_confidence: 0.84,
-                low_confidence_count: 3,
-                decay_rate: 0.012,
-                archive_count: 5,
-                total_engrams: 14,
-                avg_cluster_size: 2.5,
-                top_engrams: vec![("ops".to_string(), 4)],
-                landmark_count: 2,
-                unresolved_conflicts: 1,
-                uncertain_count: 3,
-                dream_links_total: 9,
-                last_dream_tick: Some(42),
-                total_recalls: 55,
-                total_encodes: 12,
-                current_tick: 200,
-                daemon_uptime_ticks: 180,
-                index_reports: index_reports.clone(),
-                availability: availability.clone(),
-                feature_availability: vec![FeatureAvailabilityEntry {
-                    feature: "health".to_string(),
-                    posture: membrain_core::api::AvailabilityPosture::Full,
-                    note: Some("daemon_doctor_embeds_brain_health_report".to_string()),
-                }],
-                previous_total_recalls: Some(44),
-                previous_total_encodes: Some(10),
-                previous_repair_queue_depth: Some(0),
-                previous_hot_memories: Some(70),
-                previous_low_confidence_count: Some(5),
-                previous_unresolved_conflicts: Some(2),
-                previous_uncertain_count: Some(4),
-                previous_cache_hit_count: Some(0),
-                previous_cache_miss_count: Some(0),
-                previous_cache_bypass_count: Some(0),
-                previous_prefetch_queue_depth: Some(0),
-                previous_prefetch_drop_count: Some(0),
-                previous_index_stale_count: Some(1),
-                previous_index_missing_count: Some(0),
-                previous_index_repair_backlog_total: Some(1),
-                previous_availability_posture: Some(membrain_core::api::AvailabilityPosture::Full),
-            },
-            &cache,
-            health_repair_summary.as_ref(),
-        );
+        let (
+            attention_namespaces,
+            total_recalls,
+            total_encodes,
+            current_tick,
+            affect_history_rows,
+            latest_affect_snapshot,
+            latest_affect_tick,
+        ) = {
+            let audit = self
+                .audit
+                .lock()
+                .expect("runtime audit state lock should be available");
+            let entries = audit.store.audit_log().entries();
+            let history = audit.store.mood_history(
+                NamespaceId::new("default").expect("default namespace should parse"),
+                None,
+            );
+            let latest = history.rows.last().cloned();
+            (
+                audit.store.attention_namespaces(),
+                entries
+                    .iter()
+                    .filter(|entry| matches!(entry.kind, AuditEventKind::RecallServed))
+                    .count() as u64,
+                entries
+                    .iter()
+                    .filter(|entry| matches!(entry.kind, AuditEventKind::EncodeAccepted))
+                    .count() as u64,
+                audit.store.current_tick(),
+                history.total_rows,
+                latest
+                    .as_ref()
+                    .map(|row| (row.avg_valence, row.avg_arousal)),
+                latest.map(|row| row.tick_end.unwrap_or(row.tick_start)),
+            )
+        };
+        let previous_prefetch_queue_depth = self
+            .cache
+            .lock()
+            .expect("runtime cache lock should be available")
+            .prefetch
+            .queue_depth();
+        let health = {
+            let cache = self
+                .cache
+                .lock()
+                .expect("runtime cache lock should be available");
+            membrain_core::health::BrainHealthReport::from_inputs(
+                BrainHealthInputs {
+                    hot_memories: 76,
+                    hot_capacity: 100,
+                    cold_memories: 12,
+                    avg_strength: 0.71,
+                    avg_confidence: 0.84,
+                    low_confidence_count: 3,
+                    decay_rate: 0.012,
+                    archive_count: 5,
+                    total_engrams: 14,
+                    avg_cluster_size: 2.5,
+                    top_engrams: vec![("ops".to_string(), 4)],
+                    landmark_count: 2,
+                    unresolved_conflicts: 1,
+                    uncertain_count: 3,
+                    dream_links_total: 9,
+                    last_dream_tick: Some(42),
+                    affect_history_rows,
+                    latest_affect_snapshot,
+                    latest_affect_tick,
+                    attention_namespaces,
+                    total_recalls,
+                    total_encodes,
+                    current_tick,
+                    daemon_uptime_ticks: current_tick,
+                    index_reports: index_reports.clone(),
+                    availability: availability.clone(),
+                    feature_availability: vec![FeatureAvailabilityEntry {
+                        feature: "health".to_string(),
+                        posture: membrain_core::api::AvailabilityPosture::Full,
+                        note: Some("daemon_doctor_embeds_brain_health_report".to_string()),
+                    }],
+                    previous_total_recalls: Some(total_recalls.saturating_sub(1)),
+                    previous_total_encodes: Some(total_encodes.saturating_sub(1)),
+                    previous_repair_queue_depth: Some(0),
+                    previous_hot_memories: Some(70),
+                    previous_low_confidence_count: Some(5),
+                    previous_unresolved_conflicts: Some(2),
+                    previous_uncertain_count: Some(4),
+                    previous_cache_hit_count: Some(0),
+                    previous_cache_miss_count: Some(0),
+                    previous_cache_bypass_count: Some(0),
+                    previous_prefetch_queue_depth: Some(previous_prefetch_queue_depth),
+                    previous_prefetch_drop_count: Some(0),
+                    previous_index_stale_count: Some(1),
+                    previous_index_missing_count: Some(0),
+                    previous_index_repair_backlog_total: Some(1),
+                    previous_availability_posture: Some(
+                        membrain_core::api::AvailabilityPosture::Full,
+                    ),
+                },
+                &cache,
+                health_repair_summary.as_ref(),
+            )
+        };
 
         let repair_engine_component = repair_engine.component_name();
         let schema_related_repairs = repair_reports
@@ -966,13 +1037,17 @@ impl RuntimeState {
         namespace: NamespaceId,
         memory_id: MemoryId,
         content: &str,
+        emotional_annotations: Option<&serde_json::Value>,
         common: &crate::rpc::RuntimeCommonFields,
         visibility: SharingVisibility,
     ) -> RuntimeMemoryRecord {
         let store = membrain_core::BrainStore::new(RuntimeConfig::default());
-        let mut prepared = store
-            .encode_engine()
-            .prepare_fast_path(RawEncodeInput::new(RawIntakeKind::Event, content));
+        let affect_signals = emotional_annotations.and_then(Self::parse_affect_signals);
+        let mut input = RawEncodeInput::new(RawIntakeKind::Event, content);
+        if let Some(affect_signals) = affect_signals {
+            input = input.with_affect_signals(affect_signals);
+        }
+        let mut prepared = store.encode_engine().prepare_fast_path(input);
         prepared.normalized.sharing.visibility = visibility;
         if let Some(workspace_id) = common.workspace_id.as_deref() {
             prepared.normalized.sharing.workspace_id = Some(WorkspaceId::new(workspace_id));
@@ -1007,6 +1082,13 @@ impl RuntimeState {
             causal_parents: Vec::new(),
             causal_link_type: None,
         }
+    }
+
+    fn parse_affect_signals(value: &serde_json::Value) -> Option<AffectSignals> {
+        let object = value.as_object()?;
+        let valence = object.get("valence")?.as_f64()? as f32;
+        let arousal = object.get("arousal")?.as_f64()? as f32;
+        Some(AffectSignals::new(valence, arousal).clamped())
     }
 
     fn store_encoded_memory(&self, record: RuntimeMemoryRecord) {
@@ -1240,6 +1322,113 @@ impl RuntimeState {
             candidates_after: candidates_before + hint_memory_ids.len(),
             memory_ids: hint_memory_ids,
         }
+    }
+
+    fn current_tick(request_correlation_id: u64) -> u64 {
+        request_correlation_id
+    }
+
+    fn materialize_blackboard_state(
+        namespace: NamespaceId,
+        task_id: Option<String>,
+    ) -> BlackboardState {
+        let task = task_id.map(TaskId::new);
+        let current_goal = task
+            .as_ref()
+            .map(|task_id| format!("resume task {}", task_id.as_str()))
+            .unwrap_or_else(|| "resume active work".to_string());
+        let mut state = BlackboardState::new(namespace, task, None, current_goal);
+        state.subgoals = vec![
+            "inspect selected evidence".to_string(),
+            "resolve pending dependency".to_string(),
+        ];
+        state.active_evidence = vec![
+            BlackboardEvidenceHandle::new(MemoryId(1), "selected_evidence").pinned(),
+            BlackboardEvidenceHandle::new(MemoryId(2), "supporting_context"),
+        ];
+        state.active_beliefs = vec![
+            "working-state remains a projection".to_string(),
+            "durable memory remains authoritative".to_string(),
+        ];
+        state.unknowns = vec!["pending dependency resolution".to_string()];
+        state.next_action = Some("resume from newest valid checkpoint".to_string());
+        state.blocked_reason = Some("waiting_for_dependency".to_string());
+        state
+    }
+
+    fn checkpoint_for_blackboard(
+        namespace: NamespaceId,
+        task_id: Option<String>,
+        blackboard: &BlackboardState,
+        created_tick: u64,
+        status: GoalLifecycleStatus,
+        stale: bool,
+    ) -> GoalCheckpoint {
+        let task_handle = task_id.or_else(|| {
+            blackboard
+                .task_id
+                .as_ref()
+                .map(|task| task.as_str().to_string())
+        });
+        GoalCheckpoint {
+            checkpoint_id: format!(
+                "goal-checkpoint-{}-{}",
+                namespace.as_str(),
+                task_handle.as_deref().unwrap_or("default")
+            ),
+            created_tick,
+            status,
+            evidence_handles: blackboard
+                .active_evidence
+                .iter()
+                .map(|handle| handle.memory_id)
+                .collect(),
+            pending_dependencies: vec!["dependency:external-review".to_string()],
+            blocked_reason: blackboard.blocked_reason.clone(),
+            blackboard_summary: Some(format!(
+                "goal={} next_action={} projection={} truth={}",
+                blackboard.current_goal,
+                blackboard.next_action.as_deref().unwrap_or("none"),
+                blackboard.projection_kind,
+                blackboard.authoritative_truth
+            )),
+            stale,
+            namespace,
+            task_id: task_handle.map(TaskId::new),
+            authoritative_truth: "durable_memory",
+        }
+    }
+
+    fn ensure_goal_working_state(
+        store: &mut membrain_core::BrainStore,
+        namespace: NamespaceId,
+        task_id: TaskId,
+    ) {
+        if store.goal_state(&task_id).is_some() {
+            return;
+        }
+        let blackboard = RuntimeState::materialize_blackboard_state(
+            namespace.clone(),
+            Some(task_id.as_str().to_string()),
+        );
+        let mut working_state = GoalWorkingState::new(
+            task_id,
+            namespace,
+            None,
+            vec![
+                GoalStackFrame::new(blackboard.current_goal.clone()),
+                GoalStackFrame {
+                    goal: "resolve external dependency".to_string(),
+                    parent_goal: Some(blackboard.current_goal.clone()),
+                    priority: Some(1),
+                    blocked_reason: blackboard.blocked_reason.clone(),
+                },
+            ],
+            blackboard,
+        );
+        working_state.selected_evidence_handles = vec![MemoryId(1), MemoryId(2)];
+        working_state.pending_dependencies = vec!["dependency:external-review".to_string()];
+        store.upsert_goal_working_state(working_state);
     }
 
     fn runtime_request_context(
@@ -1628,6 +1817,7 @@ impl DaemonRuntime {
                 namespace,
                 memory_type: _,
                 visibility,
+                emotional_annotations,
                 common,
             } => {
                 let namespace = match NamespaceId::new(&namespace) {
@@ -1662,8 +1852,29 @@ impl DaemonRuntime {
                     None => SharingVisibility::Private,
                 };
                 let memory_id = MemoryId(request_correlation_id);
-                let record = state.encode_memory(namespace.clone(), memory_id, &content, &common, visibility);
-                state.store_encoded_memory(record);
+                let record = state.encode_memory(
+                    namespace.clone(),
+                    memory_id,
+                    &content,
+                    emotional_annotations.as_ref(),
+                    &common,
+                    visibility,
+                );
+                state.store_encoded_memory(record.clone());
+                if let Some(affect) = record.layout.metadata.affect {
+                    let mut audit = state
+                        .audit
+                        .lock()
+                        .expect("runtime audit state lock should be available");
+                    let tick = audit.store.current_tick().saturating_add(1);
+                    let _ = audit.store.record_affect_trajectory(
+                        namespace.clone(),
+                        memory_id,
+                        record.layout.metadata.landmark.era_id.clone(),
+                        tick,
+                        affect,
+                    );
+                }
                 JsonRpcResponse::success(
                     request_id,
                     json!({
@@ -2003,6 +2214,7 @@ impl DaemonRuntime {
                 current_context,
                 working_memory_ids,
                 format,
+                mood_congruent,
                 common,
             } => match Self::handle_context_budget(
                 token_budget,
@@ -2010,10 +2222,104 @@ impl DaemonRuntime {
                 current_context,
                 working_memory_ids,
                 format,
+                mood_congruent,
                 common,
                 request_correlation_id,
                 &state,
             ) {
+                Ok(response) => JsonRpcResponse::success(request_id, json!(response)),
+                Err(message) => JsonRpcResponse::error(request_id, -32602, message, None),
+            },
+            RuntimeRequest::GoalState {
+                namespace,
+                task_id,
+                common,
+            } => match Self::handle_goal_state(&namespace, task_id, common, request_correlation_id, &state) {
+                Ok(response) => JsonRpcResponse::success(request_id, json!(response)),
+                Err(message) => JsonRpcResponse::error(request_id, -32602, message, None),
+            },
+            RuntimeRequest::HotPaths {
+                namespace,
+                top_n,
+                common,
+            } => match Self::handle_hot_paths(&namespace, top_n, common, &state) {
+                Ok(response) => JsonRpcResponse::success(request_id, json!(response)),
+                Err(message) => JsonRpcResponse::error(request_id, -32602, message, None),
+            },
+            RuntimeRequest::DeadZones {
+                namespace,
+                min_age_ticks,
+                common,
+            } => match Self::handle_dead_zones(&namespace, min_age_ticks, common, &state) {
+                Ok(response) => JsonRpcResponse::success(request_id, json!(response)),
+                Err(message) => JsonRpcResponse::error(request_id, -32602, message, None),
+            },
+            RuntimeRequest::Compress {
+                namespace,
+                dry_run,
+                common,
+            } => match Self::handle_compress(&namespace, dry_run, common, &state) {
+                Ok(response) => JsonRpcResponse::success(request_id, response),
+                Err(message) => JsonRpcResponse::error(request_id, -32602, message, None),
+            },
+            RuntimeRequest::Schemas {
+                namespace,
+                top_n,
+                common,
+            } => match Self::handle_schemas(&namespace, top_n, common, &state) {
+                Ok(response) => JsonRpcResponse::success(request_id, response),
+                Err(message) => JsonRpcResponse::error(request_id, -32602, message, None),
+            },
+            RuntimeRequest::GoalPause {
+                namespace,
+                task_id,
+                note,
+                common,
+            } => match Self::handle_goal_pause(&namespace, task_id, note, common, request_correlation_id, &state) {
+                Ok(response) => JsonRpcResponse::success(request_id, json!(response)),
+                Err(message) => JsonRpcResponse::error(request_id, -32602, message, None),
+            },
+            RuntimeRequest::GoalPin {
+                namespace,
+                task_id,
+                memory_id,
+                common,
+            } => match Self::handle_goal_pin(&namespace, task_id, memory_id, common, request_correlation_id, &state) {
+                Ok(response) => JsonRpcResponse::success(request_id, json!(response)),
+                Err(message) => JsonRpcResponse::error(request_id, -32602, message, None),
+            },
+            RuntimeRequest::GoalDismiss {
+                namespace,
+                task_id,
+                memory_id,
+                common,
+            } => match Self::handle_goal_dismiss(&namespace, task_id, memory_id, common, request_correlation_id, &state) {
+                Ok(response) => JsonRpcResponse::success(request_id, json!(response)),
+                Err(message) => JsonRpcResponse::error(request_id, -32602, message, None),
+            },
+            RuntimeRequest::GoalSnapshot {
+                namespace,
+                task_id,
+                note,
+                common,
+            } => match Self::handle_goal_snapshot(&namespace, task_id, note, common, request_correlation_id, &state) {
+                Ok(response) => JsonRpcResponse::success(request_id, json!(response)),
+                Err(message) => JsonRpcResponse::error(request_id, -32602, message, None),
+            },
+            RuntimeRequest::GoalResume {
+                namespace,
+                task_id,
+                common,
+            } => match Self::handle_goal_resume(&namespace, task_id, common, request_correlation_id, &state) {
+                Ok(response) => JsonRpcResponse::success(request_id, json!(response)),
+                Err(message) => JsonRpcResponse::error(request_id, -32602, message, None),
+            },
+            RuntimeRequest::GoalAbandon {
+                namespace,
+                task_id,
+                reason,
+                common,
+            } => match Self::handle_goal_abandon(&namespace, task_id, reason, common, request_correlation_id, &state) {
                 Ok(response) => JsonRpcResponse::success(request_id, json!(response)),
                 Err(message) => JsonRpcResponse::error(request_id, -32602, message, None),
             },
@@ -2562,6 +2868,32 @@ impl DaemonRuntime {
                     serde_json::to_value(payload).expect("audit payload serializes"),
                 )
             }
+            RuntimeRequest::MoodHistory {
+                namespace,
+                since_tick,
+                common: _,
+            } => {
+                let namespace = match NamespaceId::new(&namespace) {
+                    Ok(namespace) => namespace,
+                    Err(_) => {
+                        return JsonRpcResponse::error(
+                            request_id,
+                            -32602,
+                            "malformed namespace",
+                            Some(json!({"error_kind": "validation_failure"})),
+                        )
+                    }
+                };
+                let audit = state
+                    .audit
+                    .lock()
+                    .expect("runtime audit state lock should be available");
+                let history = audit.store.mood_history(namespace.clone(), since_tick);
+                JsonRpcResponse::success(
+                    request_id,
+                    serde_json::to_value(history).expect("mood history serializes"),
+                )
+            }
             RuntimeRequest::Share {
                 id,
                 namespace_id,
@@ -2589,6 +2921,7 @@ impl DaemonRuntime {
                             namespace.clone(),
                             MemoryId(id),
                             &format!("shared memory {id}"),
+                            None,
                             &common,
                             SharingVisibility::Shared,
                         );
@@ -2653,6 +2986,7 @@ impl DaemonRuntime {
                             namespace.clone(),
                             MemoryId(id),
                             &format!("private memory {id}"),
+                            None,
                             &common,
                             SharingVisibility::Private,
                         );
@@ -2692,6 +3026,124 @@ impl DaemonRuntime {
                     }
                 });
                 JsonRpcResponse::success(request_id, response)
+            }
+            RuntimeRequest::Fork {
+                name,
+                namespace,
+                parent_namespace,
+                inherit,
+                note,
+                common: _,
+            } => {
+                let namespace = match NamespaceId::new(&namespace) {
+                    Ok(namespace) => namespace,
+                    Err(_) => {
+                        return JsonRpcResponse::error(
+                            request_id,
+                            -32602,
+                            "malformed namespace",
+                            Some(json!({"error_kind": "validation_failure"})),
+                        )
+                    }
+                };
+                let parent_namespace = match parent_namespace {
+                    Some(parent) => match NamespaceId::new(parent) {
+                        Ok(namespace) => namespace,
+                        Err(_) => {
+                            return JsonRpcResponse::error(
+                                request_id,
+                                -32602,
+                                "malformed parent_namespace",
+                                Some(json!({"error_kind": "validation_failure"})),
+                            )
+                        }
+                    },
+                    None => namespace.clone(),
+                };
+                let inherit_visibility = match inherit.as_deref().unwrap_or("public") {
+                    "public" => ForkInheritance::PublicOnly,
+                    "shared" => ForkInheritance::SharedToo,
+                    "all" => ForkInheritance::All,
+                    _ => {
+                        return JsonRpcResponse::error(
+                            request_id,
+                            -32602,
+                            "invalid inherit value",
+                            Some(json!({"error_kind": "validation_failure"})),
+                        )
+                    }
+                };
+                let mut audit = state
+                    .audit
+                    .lock()
+                    .expect("runtime audit state lock should be available");
+                let output = audit.store.fork(ForkConfig {
+                    name,
+                    parent_namespace,
+                    inherit_visibility,
+                    note,
+                });
+                JsonRpcResponse::success(
+                    request_id,
+                    serde_json::to_value(output).expect("fork output serializes"),
+                )
+            }
+            RuntimeRequest::MergeFork {
+                fork_name,
+                target_namespace,
+                conflict_strategy,
+                dry_run,
+                common: _,
+            } => {
+                let target_namespace = match NamespaceId::new(&target_namespace) {
+                    Ok(namespace) => namespace,
+                    Err(_) => {
+                        return JsonRpcResponse::error(
+                            request_id,
+                            -32602,
+                            "malformed target_namespace",
+                            Some(json!({"error_kind": "validation_failure"})),
+                        )
+                    }
+                };
+                let conflict_strategy = match conflict_strategy.as_deref().unwrap_or("manual") {
+                    "fork-wins" => MergeConflictStrategy::ForkWins,
+                    "parent-wins" => MergeConflictStrategy::ParentWins,
+                    "recency-wins" => MergeConflictStrategy::RecencyWins,
+                    "manual" => MergeConflictStrategy::Manual,
+                    _ => {
+                        return JsonRpcResponse::error(
+                            request_id,
+                            -32602,
+                            "invalid conflict_strategy",
+                            Some(json!({"error_kind": "validation_failure"})),
+                        )
+                    }
+                };
+                let mut audit = state
+                    .audit
+                    .lock()
+                    .expect("runtime audit state lock should be available");
+                let output = match audit.store.merge_fork(MergeConfig {
+                    fork_name,
+                    target_namespace,
+                    conflict_strategy,
+                    dry_run,
+                }) {
+                    Some(output) => output,
+                    None => {
+                        return JsonRpcResponse::error(
+                            request_id,
+                            -32004,
+                            "unknown fork",
+                            Some(json!({"error_kind": "not_found"})),
+                        )
+                    }
+                };
+                JsonRpcResponse::success(
+                    request_id,
+                    serde_json::to_value(output).expect("merge output serializes"),
+                )
             }
             RuntimeRequest::Link {
                 source_id,
@@ -2760,6 +3212,7 @@ impl DaemonRuntime {
             unlike_id,
             graph_mode.as_deref(),
             result_budget,
+            mood_congruent,
         )?;
         let degraded_summary = Self::recall_degraded_summary(
             &mode,
@@ -2788,6 +3241,7 @@ impl DaemonRuntime {
         Self::handle_retrieval_method(
             normalized.planner_request,
             Some(&normalized.normalized_query_by_example),
+            normalized.mood_congruent,
             namespace,
             Some(normalized.result_budget),
             mode.as_deref().or(effort.as_deref()),
@@ -2805,6 +3259,7 @@ impl DaemonRuntime {
         current_context: Option<String>,
         working_memory_ids: Option<Vec<u64>>,
         format: Option<String>,
+        mood_congruent: Option<bool>,
         common: crate::rpc::RuntimeCommonFields,
         request_correlation_id: u64,
         state: &RuntimeState,
@@ -2829,6 +3284,7 @@ impl DaemonRuntime {
             None,
             None,
             Some(RuntimeConfig::default().tier1_candidate_budget),
+            mood_congruent,
         )?;
         let degraded_summary = Self::recall_degraded_summary(
             &None,
@@ -2858,6 +3314,7 @@ impl DaemonRuntime {
             &namespace,
             &common,
             &normalized.normalized_query_by_example,
+            normalized.mood_congruent,
             &degraded_summary,
             state,
         );
@@ -2923,11 +3380,16 @@ impl DaemonRuntime {
             .as_object()
             .cloned()
             .map(|mut payload| {
-                payload.insert(
-                    "result".to_string(),
-                    serde_json::to_value(response.result)
-                        .expect("context budget result should serialize"),
-                );
+                let mut result_value = serde_json::to_value(response.result)
+                    .expect("context budget result should serialize");
+                if let serde_json::Value::Object(result_object) = &mut result_value {
+                    result_object.insert(
+                        "explain".to_string(),
+                        serde_json::to_value(&result_set.explain)
+                            .expect("context budget explain should serialize"),
+                    );
+                }
+                payload.insert("result".to_string(), result_value);
                 payload.insert(
                     "partial_success".to_string(),
                     json!(response.partial_success),
@@ -2937,6 +3399,458 @@ impl DaemonRuntime {
             })
             .expect("context budget params should serialize to object"),
         ))
+    }
+
+    fn handle_goal_state(
+        namespace: &str,
+        task_id: Option<String>,
+        common: crate::rpc::RuntimeCommonFields,
+        request_correlation_id: u64,
+        state: &RuntimeState,
+    ) -> Result<GoalStateOutput, String> {
+        let namespace = NamespaceId::new(namespace).map_err(|err| err.to_string())?;
+        let request_context = RuntimeState::runtime_request_context(
+            namespace.clone(),
+            &common,
+            SharingVisibility::Private,
+            format!("daemon-goal-state-{request_correlation_id}"),
+        );
+        let task_id = request_context
+            .task_id
+            .clone()
+            .or_else(|| task_id.clone().or(common.task_id.clone()).map(TaskId::new))
+            .unwrap_or_else(|| TaskId::new("active-goal"));
+        let mut audit = state
+            .audit
+            .lock()
+            .expect("runtime audit lock should be available");
+        RuntimeState::ensure_goal_working_state(
+            &mut audit.store,
+            namespace.clone(),
+            task_id.clone(),
+        );
+        audit
+            .store
+            .goal_state(&task_id)
+            .ok_or_else(|| "goal working state should exist".to_string())
+    }
+
+    fn handle_hot_paths(
+        namespace: &str,
+        top_n: Option<usize>,
+        _common: crate::rpc::RuntimeCommonFields,
+        state: &RuntimeState,
+    ) -> Result<HotPathsOutput, String> {
+        let namespace = NamespaceId::new(namespace).map_err(|err| err.to_string())?;
+        let top_n = top_n.unwrap_or(10);
+        let audit = state
+            .audit
+            .lock()
+            .expect("runtime audit lock should be available");
+        Ok(audit.store.hot_paths(namespace, top_n))
+    }
+
+    fn handle_dead_zones(
+        namespace: &str,
+        min_age_ticks: Option<u64>,
+        _common: crate::rpc::RuntimeCommonFields,
+        state: &RuntimeState,
+    ) -> Result<DeadZonesOutput, String> {
+        let namespace = NamespaceId::new(namespace).map_err(|err| err.to_string())?;
+        let min_age_ticks = min_age_ticks.unwrap_or(1);
+        let audit = state
+            .audit
+            .lock()
+            .expect("runtime audit lock should be available");
+        Ok(audit.store.dead_zones(namespace, min_age_ticks))
+    }
+
+    fn handle_compress(
+        namespace: &str,
+        dry_run: bool,
+        _common: crate::rpc::RuntimeCommonFields,
+        state: &RuntimeState,
+    ) -> Result<Value, String> {
+        let namespace = NamespaceId::new(namespace).map_err(|err| err.to_string())?;
+        let mut audit = state
+            .audit
+            .lock()
+            .expect("runtime audit lock should be available");
+        let applied =
+            audit
+                .store
+                .apply_compression_pass(namespace.clone(), Default::default(), 3, dry_run);
+
+        let compression_log_entries = audit
+            .store
+            .compression_log_entries(namespace.clone(), None)
+            .into_iter()
+            .map(|entry| {
+                json!({
+                    "schema_memory_id": entry.schema_memory_id.0,
+                    "source_memory_count": entry.source_memory_count,
+                    "tick": entry.tick,
+                    "namespace": entry.namespace.as_str(),
+                    "keyword_summary": entry.keyword_summary,
+                })
+            })
+            .collect::<Vec<_>>();
+
+        Ok(json!({
+            "status": "accepted",
+            "namespace": namespace.as_str(),
+            "dry_run": applied.dry_run,
+            "schemas_created": applied.schemas_created,
+            "episodes_compressed": applied.episodes_compressed,
+            "storage_reduction_pct": applied.storage_reduction_pct,
+            "blocked_reasons": applied.blocked_reasons,
+            "related_run": applied.related_run,
+            "decision": {
+                "cluster_id": applied.decision.cluster_id,
+                "disposition": applied.decision.disposition.as_str(),
+                "reason_code": applied.decision.reason_code,
+                "coherence_millis": applied.decision.coherence_millis,
+                "majority_kind": applied.decision.majority_kind.as_str(),
+                "source_memory_ids": applied.decision.source_memory_ids.into_iter().map(|id| id.0).collect::<Vec<_>>(),
+                "representative_memory_ids": applied.decision.representative_memory_ids.into_iter().map(|id| id.0).collect::<Vec<_>>(),
+                "protected_source_ids": applied.decision.protected_source_ids.into_iter().map(|id| id.0).collect::<Vec<_>>(),
+                "review_source_ids": applied.decision.review_source_ids.into_iter().map(|id| id.0).collect::<Vec<_>>(),
+                "dominant_keywords": applied.decision.dominant_keywords,
+                "authoritative_truth": applied.decision.authoritative_truth,
+                "inspect_path": applied.decision.inspect_path,
+            },
+            "schema_artifact": applied.schema_artifact.map(|artifact| json!({
+                "schema_memory_id": artifact.schema_memory_id.0,
+                "cluster_id": artifact.cluster_id,
+                "compact_text": artifact.compact_text,
+                "source_memory_ids": artifact.source_memory_ids.into_iter().map(|id| id.0).collect::<Vec<_>>(),
+                "compressed_member_ids": artifact.compressed_member_ids.into_iter().map(|id| id.0).collect::<Vec<_>>(),
+                "dominant_keywords": artifact.dominant_keywords,
+                "confidence_millis": artifact.confidence_millis,
+                "source_lineage_paths": artifact.source_lineage_paths,
+                "compressed_into_paths": artifact.compressed_into_paths,
+                "inspect_path": artifact.inspect_path,
+            })),
+            "verification": applied.verification.map(|report| json!({
+                "schema_memory_id": report.schema_memory_id.0,
+                "verified": report.verified,
+                "expected_source_count": report.expected_source_count,
+                "reconstructed_source_count": report.reconstructed_source_count,
+                "missing_source_ids": report.missing_source_ids.into_iter().map(|id| id.0).collect::<Vec<_>>(),
+                "authoritative_truth": report.authoritative_truth,
+                "verification_rule": report.verification_rule,
+                "inspect_path": report.inspect_path,
+            })),
+            "compression_log_entry": applied.compression_log_entry.map(|entry| json!({
+                "schema_memory_id": entry.schema_memory_id.0,
+                "source_memory_count": entry.source_memory_count,
+                "tick": entry.tick,
+                "namespace": entry.namespace.as_str(),
+                "keyword_summary": entry.keyword_summary,
+            })),
+            "compression_log_entries": compression_log_entries,
+            "operator_log": applied.operator_log,
+        }))
+    }
+
+    fn handle_schemas(
+        namespace: &str,
+        top_n: Option<usize>,
+        _common: crate::rpc::RuntimeCommonFields,
+        state: &RuntimeState,
+    ) -> Result<Value, String> {
+        let namespace = NamespaceId::new(namespace).map_err(|err| err.to_string())?;
+        let top_n = top_n.unwrap_or(5).max(1);
+        let audit = state
+            .audit
+            .lock()
+            .expect("runtime audit lock should be available");
+        let status = audit.store.compression_engine().status(
+            namespace.clone(),
+            CompressionTrigger::Manual,
+            CompressionPolicy::default(),
+            None,
+        );
+        let schemas = audit
+            .store
+            .compression_engine()
+            .candidate_clusters(&status)
+            .into_iter()
+            .filter_map(|cluster| {
+                let decision = audit
+                    .store
+                    .compression_engine()
+                    .evaluate_candidate(&status, &cluster);
+                if decision.disposition.as_str() == "eligible" {
+                    audit.store
+                        .compression_engine()
+                        .apply_candidate(&status, &cluster, true)
+                        .schema_artifact
+                        .map(|artifact| {
+                            json!({
+                                "id": artifact.schema_memory_id.0,
+                                "content": artifact.compact_text,
+                                "source_count": artifact.source_memory_ids.len(),
+                                "confidence": artifact.confidence_millis,
+                                "keywords": artifact.dominant_keywords,
+                                "compressed_member_ids": artifact.compressed_member_ids.into_iter().map(|id| id.0).collect::<Vec<_>>(),
+                                "inspect_path": artifact.inspect_path,
+                            })
+                        })
+                } else {
+                    None
+                }
+            })
+            .take(top_n)
+            .collect::<Vec<_>>();
+
+        Ok(json!({
+            "status": "accepted",
+            "namespace": namespace.as_str(),
+            "top": top_n,
+            "schemas": schemas,
+        }))
+    }
+
+    fn handle_goal_pause(
+        namespace: &str,
+        task_id: Option<String>,
+        note: Option<String>,
+        common: crate::rpc::RuntimeCommonFields,
+        _request_correlation_id: u64,
+        state: &RuntimeState,
+    ) -> Result<GoalPauseOutput, String> {
+        let namespace = NamespaceId::new(namespace).map_err(|err| err.to_string())?;
+        let task_id = task_id
+            .clone()
+            .or(common.task_id.clone())
+            .map(TaskId::new)
+            .unwrap_or_else(|| TaskId::new("active-goal"));
+        let mut audit = state
+            .audit
+            .lock()
+            .expect("runtime audit lock should be available");
+        RuntimeState::ensure_goal_working_state(&mut audit.store, namespace, task_id.clone());
+        audit
+            .store
+            .goal_pause(&task_id, note)
+            .ok_or_else(|| "goal working state should exist".to_string())
+    }
+
+    fn handle_goal_pin(
+        namespace: &str,
+        task_id: Option<String>,
+        memory_id: u64,
+        common: crate::rpc::RuntimeCommonFields,
+        _request_correlation_id: u64,
+        state: &RuntimeState,
+    ) -> Result<GoalStateOutput, String> {
+        let namespace = NamespaceId::new(namespace).map_err(|err| err.to_string())?;
+        let task_id = task_id
+            .clone()
+            .or(common.task_id.clone())
+            .map(TaskId::new)
+            .unwrap_or_else(|| TaskId::new("active-goal"));
+        let mut audit = state
+            .audit
+            .lock()
+            .expect("runtime audit lock should be available");
+        RuntimeState::ensure_goal_working_state(&mut audit.store, namespace, task_id.clone());
+        audit
+            .store
+            .blackboard_pin(&task_id, MemoryId(memory_id))
+            .ok_or_else(|| "goal working state should exist".to_string())
+    }
+
+    fn handle_goal_dismiss(
+        namespace: &str,
+        task_id: Option<String>,
+        memory_id: u64,
+        common: crate::rpc::RuntimeCommonFields,
+        _request_correlation_id: u64,
+        state: &RuntimeState,
+    ) -> Result<GoalStateOutput, String> {
+        let namespace = NamespaceId::new(namespace).map_err(|err| err.to_string())?;
+        let task_id = task_id
+            .clone()
+            .or(common.task_id.clone())
+            .map(TaskId::new)
+            .unwrap_or_else(|| TaskId::new("active-goal"));
+        let mut audit = state
+            .audit
+            .lock()
+            .expect("runtime audit lock should be available");
+        RuntimeState::ensure_goal_working_state(&mut audit.store, namespace, task_id.clone());
+        audit
+            .store
+            .blackboard_dismiss(&task_id, MemoryId(memory_id))
+            .ok_or_else(|| "goal working state should exist".to_string())
+    }
+
+    fn handle_goal_snapshot(
+        namespace: &str,
+        task_id: Option<String>,
+        note: Option<String>,
+        common: crate::rpc::RuntimeCommonFields,
+        request_correlation_id: u64,
+        _state: &RuntimeState,
+    ) -> Result<BlackboardSnapshotOutput, String> {
+        let namespace = NamespaceId::new(namespace).map_err(|err| err.to_string())?;
+        let blackboard = RuntimeState::materialize_blackboard_state(
+            namespace.clone(),
+            task_id.clone().or(common.task_id.clone()),
+        );
+        let snapshot = membrain_core::types::BlackboardSnapshotArtifact {
+            snapshot_id: format!(
+                "blackboard-snapshot-{}-{}",
+                namespace.as_str(),
+                task_id
+                    .as_deref()
+                    .or(common.task_id.as_deref())
+                    .unwrap_or("default")
+            ),
+            created_tick: RuntimeState::current_tick(request_correlation_id),
+            evidence_handles: blackboard
+                .active_evidence
+                .iter()
+                .map(|handle| handle.memory_id)
+                .collect(),
+            note,
+            artifact_kind: "blackboard_snapshot",
+            authoritative_truth: "durable_memory",
+        };
+        Ok(BlackboardSnapshotOutput {
+            snapshot,
+            namespace: namespace.as_str().to_string(),
+            authoritative_truth: "durable_memory",
+        })
+    }
+
+    fn handle_goal_resume(
+        namespace: &str,
+        task_id: Option<String>,
+        common: crate::rpc::RuntimeCommonFields,
+        request_correlation_id: u64,
+        state: &RuntimeState,
+    ) -> Result<GoalResumeOutput, String> {
+        let namespace = NamespaceId::new(namespace).map_err(|err| err.to_string())?;
+        let task_id = task_id
+            .clone()
+            .or(common.task_id.clone())
+            .map(TaskId::new)
+            .unwrap_or_else(|| TaskId::new("active-goal"));
+        let mut audit = state
+            .audit
+            .lock()
+            .expect("runtime audit lock should be available");
+        if audit.store.goal_state(&task_id).is_none() {
+            let blackboard = RuntimeState::materialize_blackboard_state(
+                namespace.clone(),
+                Some(task_id.as_str().to_string()),
+            );
+            let mut checkpoint = RuntimeState::checkpoint_for_blackboard(
+                namespace.clone(),
+                Some(task_id.as_str().to_string()),
+                &blackboard,
+                RuntimeState::current_tick(request_correlation_id),
+                GoalLifecycleStatus::Stale,
+                true,
+            );
+            checkpoint.blackboard_summary = Some(
+                "no persisted checkpoint found; active state is reconstructable only as an explicit stale projection"
+                    .to_string(),
+            );
+            return Ok(GoalResumeOutput {
+                task_id: checkpoint
+                    .task_id
+                    .as_ref()
+                    .map(|task| FieldPresence::Present(task.as_str().to_string()))
+                    .unwrap_or(FieldPresence::Absent),
+                status: checkpoint.status,
+                resumed_at_tick: RuntimeState::current_tick(request_correlation_id),
+                restored_evidence_handles: checkpoint
+                    .evidence_handles
+                    .iter()
+                    .map(|memory_id| memory_id.0)
+                    .collect(),
+                restored_dependencies: checkpoint.pending_dependencies.clone(),
+                checkpoint,
+                warnings: vec![ResponseWarning::new(
+                    "stale_checkpoint",
+                    "resume degraded explicitly because no valid persisted checkpoint was available",
+                )],
+                namespace: namespace.as_str().to_string(),
+                authoritative_truth: "durable_memory",
+            });
+        }
+        match audit.store.goal_resume(&task_id) {
+            Ok(output) => Ok(output),
+            Err(warning) => {
+                let blackboard = RuntimeState::materialize_blackboard_state(
+                    namespace.clone(),
+                    Some(task_id.as_str().to_string()),
+                );
+                let mut checkpoint = RuntimeState::checkpoint_for_blackboard(
+                    namespace.clone(),
+                    Some(task_id.as_str().to_string()),
+                    &blackboard,
+                    RuntimeState::current_tick(request_correlation_id),
+                    GoalLifecycleStatus::Stale,
+                    true,
+                );
+                checkpoint.blackboard_summary = Some(
+                    "no persisted checkpoint found; active state is reconstructable only as an explicit stale projection"
+                        .to_string(),
+                );
+                Ok(GoalResumeOutput {
+                    task_id: checkpoint
+                        .task_id
+                        .as_ref()
+                        .map(|task| FieldPresence::Present(task.as_str().to_string()))
+                        .unwrap_or(FieldPresence::Absent),
+                    status: checkpoint.status,
+                    resumed_at_tick: RuntimeState::current_tick(request_correlation_id),
+                    restored_evidence_handles: checkpoint
+                        .evidence_handles
+                        .iter()
+                        .map(|memory_id| memory_id.0)
+                        .collect(),
+                    restored_dependencies: checkpoint.pending_dependencies.clone(),
+                    checkpoint,
+                    warnings: vec![ResponseWarning::new(
+                        warning.as_str(),
+                        "resume degraded explicitly because no valid persisted checkpoint was available",
+                    )],
+                    namespace: namespace.as_str().to_string(),
+                    authoritative_truth: "durable_memory",
+                })
+            }
+        }
+    }
+
+    fn handle_goal_abandon(
+        namespace: &str,
+        task_id: Option<String>,
+        reason: Option<String>,
+        common: crate::rpc::RuntimeCommonFields,
+        _request_correlation_id: u64,
+        state: &RuntimeState,
+    ) -> Result<GoalAbandonOutput, String> {
+        let namespace = NamespaceId::new(namespace).map_err(|err| err.to_string())?;
+        let task_id = task_id
+            .clone()
+            .or(common.task_id.clone())
+            .map(TaskId::new)
+            .unwrap_or_else(|| TaskId::new("active-goal"));
+        let mut audit = state
+            .audit
+            .lock()
+            .expect("runtime audit lock should be available");
+        RuntimeState::ensure_goal_working_state(&mut audit.store, namespace, task_id.clone());
+        audit
+            .store
+            .goal_abandon(&task_id, reason)
+            .ok_or_else(|| "goal working state should exist".to_string())
     }
 
     fn handle_inspect(
@@ -3226,12 +4140,13 @@ impl DaemonRuntime {
                     requested_depth,
                     RuntimeConfig::default().graph_max_nodes,
                 );
+            let current_mood = current_mood_snapshot(state, &namespace);
             let mut explain = RetrievalExplain::from_plan(
                 &RecallEngine.plan_recall(
                     RecallRequest::exact(MemoryId(memory_id)).with_graph_expansion(true),
                     RuntimeConfig::default(),
                 ),
-                "balanced",
+                ranking_profile_name_for_recall(false, current_mood, None),
             );
             explain.route_reason =
                 "bounded causal trace walked explicit source-backed links from the target memory"
@@ -3339,7 +4254,11 @@ impl DaemonRuntime {
                 } else {
                     EntryLane::Graph
                 };
-                let ranking = fuse_scores(
+                let candidate_affect = record.layout.metadata.affect;
+                result.explain.ranking_profile =
+                    ranking_profile_name_for_recall(false, current_mood, candidate_affect)
+                        .to_string();
+                let ranking_input = adjusted_ranking_input_for_affect(
                     RankingInput {
                         recency: 900,
                         salience: 880,
@@ -3348,7 +4267,13 @@ impl DaemonRuntime {
                         conflict: 500,
                         confidence: record.confidence_output.confidence,
                     },
-                    RankingProfile::balanced(),
+                    false,
+                    current_mood,
+                    candidate_affect,
+                );
+                let ranking = fuse_scores(
+                    ranking_input,
+                    ranking_profile_for_recall(false, current_mood, candidate_affect),
                 );
                 builder.add_with_confidence(
                     record.layout.metadata.memory_id,
@@ -3396,10 +4321,12 @@ impl DaemonRuntime {
             None,
             None,
             limit,
+            None,
         )?;
         Self::handle_retrieval_method(
             normalized.planner_request,
             Some(&normalized.normalized_query_by_example),
+            normalized.mood_congruent,
             namespace,
             Some(normalized.result_budget),
             None,
@@ -3415,20 +4342,23 @@ impl DaemonRuntime {
         namespace: &NamespaceId,
         common: &crate::rpc::RuntimeCommonFields,
         query_by_example: &QueryByExampleNormalization,
+        mood_congruent: bool,
         degraded_summary: &str,
         state: &RuntimeState,
     ) -> RetrievalResultSet {
+        let current_mood = current_mood_snapshot(state, namespace);
         let mut explain = RetrievalExplain::from_plan(
             &RecallEngine.plan_recall(
                 RecallRequest::small_session_lookup(SessionId(1)),
                 RuntimeConfig::default(),
             ),
-            "balanced",
+            ranking_profile_name_for_recall(mood_congruent, current_mood, None),
         );
         let mut builder = ResultBuilder::new(
             RuntimeConfig::default().tier1_candidate_budget,
             namespace.clone(),
         );
+        let mut explain_candidate_affect = None;
 
         if query_by_example.has_example_seeds() {
             let requested_seed_descriptors = query_by_example.seed_descriptors();
@@ -3492,7 +4422,11 @@ impl DaemonRuntime {
                         .contains(&query.to_lowercase())
                 })
                 .unwrap_or(true);
-            let ranking = fuse_scores(
+            let candidate_affect = layout.metadata.affect;
+            if explain_candidate_affect.is_none() {
+                explain_candidate_affect = candidate_affect;
+            }
+            let ranking_input = adjusted_ranking_input_for_affect(
                 RankingInput {
                     recency: 900,
                     salience: if matched { 880 } else { 420 },
@@ -3501,7 +4435,13 @@ impl DaemonRuntime {
                     conflict: 500,
                     confidence: record.confidence_output.confidence,
                 },
-                RankingProfile::balanced(),
+                mood_congruent,
+                current_mood,
+                candidate_affect,
+            );
+            let ranking = fuse_scores(
+                ranking_input,
+                ranking_profile_for_recall(mood_congruent, current_mood, candidate_affect),
             );
             builder.add_with_confidence(
                 layout.metadata.memory_id,
@@ -3533,6 +4473,9 @@ impl DaemonRuntime {
         }
 
         let mut result = builder.build(explain);
+        result.explain.ranking_profile =
+            ranking_profile_name_for_recall(mood_congruent, current_mood, explain_candidate_affect)
+                .to_string();
         let include_public = common
             .policy_context
             .as_ref()
@@ -3563,6 +4506,7 @@ impl DaemonRuntime {
     fn handle_retrieval_method(
         request: RecallRequest,
         query_by_example: Option<&QueryByExampleNormalization>,
+        mood_congruent: bool,
         namespace: &str,
         limit: Option<usize>,
         output_mode_label: Option<&str>,
@@ -3587,12 +4531,15 @@ impl DaemonRuntime {
             output_mode_label,
             method_name,
         );
+        let recall_started_at = Instant::now();
         let current_generations = Self::current_cache_generations();
         let mut cache = state
             .cache
             .lock()
             .expect("runtime cache lock should be available");
-        let mut explain = RetrievalExplain::from_plan(&plan, "balanced");
+        let current_mood = current_mood_snapshot(state, &namespace);
+        let explain_profile = ranking_profile_name_for_recall(mood_congruent, current_mood, None);
+        let mut explain = RetrievalExplain::from_plan(&plan, explain_profile);
         if let Some(normalized) =
             query_by_example.filter(|normalized| normalized.has_example_seeds())
         {
@@ -3719,6 +4666,25 @@ impl DaemonRuntime {
             .expect("retrieval runtime namespace should already be valid")
             .evaluate_cross_namespace_sharing_access(&PolicyModule, &layout.metadata.namespace);
         if matches!(sharing_outcome.decision, SharingAccessDecision::Deny) {
+            let mut audit_entry = AuditLogEntry::new(
+                AuditEventCategory::Recall,
+                AuditEventKind::RecallDenied,
+                namespace.clone(),
+                "daemon_recall",
+                format!(
+                    "request_id={} memory_id={} reason=policy_denied route={} query_hash={:016x}",
+                    request_id.as_str(),
+                    memory_id.0,
+                    plan.route_summary.reason,
+                    request_shape_hash
+                ),
+            )
+            .with_memory_id(memory_id)
+            .with_request_id(request_id.as_str());
+            if let Some(session_id) = request.session_id {
+                audit_entry = audit_entry.with_session_id(session_id);
+            }
+            state.append_runtime_audit_entry(namespace.clone(), audit_entry);
             return Ok(McpResponse::failure(crate::mcp::McpError {
                 code: "policy_denied".to_string(),
                 message: "namespace isolation prevents retrieval".to_string(),
@@ -3757,7 +4723,9 @@ impl DaemonRuntime {
             &tier1_lookup,
             tier1_candidates_before,
         ));
-        let ranking = fuse_scores(
+        let current_mood = current_mood_snapshot(state, &namespace);
+        let candidate_affect = layout.metadata.affect;
+        let ranking_input = adjusted_ranking_input_for_affect(
             RankingInput {
                 recency: 900,
                 salience: 880,
@@ -3766,7 +4734,13 @@ impl DaemonRuntime {
                 conflict: 500,
                 confidence: confidence_output.confidence,
             },
-            RankingProfile::balanced(),
+            mood_congruent,
+            current_mood,
+            candidate_affect,
+        );
+        let ranking = fuse_scores(
+            ranking_input,
+            ranking_profile_for_recall(mood_congruent, current_mood, candidate_affect),
         );
         let mut builder =
             ResultBuilder::new(result_budget, namespace.clone()).with_output_mode(output_mode);
@@ -3813,6 +4787,9 @@ impl DaemonRuntime {
             freshness_caveats: Vec::new(),
         }]);
         let mut result = builder.build(explain);
+        result.explain.ranking_profile =
+            ranking_profile_name_for_recall(mood_congruent, current_mood, candidate_affect)
+                .to_string();
         result.policy_summary.filters =
             RuntimeState::share_policy_summary(&namespace, &sharing_outcome).filters;
         result.policy_summary.redactions_applied =
@@ -3908,18 +4885,76 @@ impl DaemonRuntime {
                         ..Default::default()
                     },
                 );
-        } else {
-            let _ = cache.prefetch.submit_hint(
-                namespace.clone(),
-                if request.session_id.is_some() {
-                    PrefetchTrigger::SessionRecency
-                } else {
-                    PrefetchTrigger::TaskIntent
-                },
-                vec![memory_id],
-            );
         }
+        let predicted_hot_path = state
+            .audit
+            .lock()
+            .expect("runtime audit state lock should be available")
+            .store
+            .predict_recall_hot_path(&namespace, memory_id, request.session_id);
+        if !request.graph_expansion {
+            if let Some(predicted) = predicted_hot_path.as_ref() {
+                let prefetch_trigger = match predicted.prewarm_trigger {
+                    "session_recency" => Some(PrefetchTrigger::SessionRecency),
+                    "task_intent" => Some(PrefetchTrigger::TaskIntent),
+                    "entity_follow" => Some(PrefetchTrigger::EntityFollow),
+                    _ => None,
+                };
+                if predicted.prewarm_action != "observe_only" {
+                    if let Some(prefetch_trigger) = prefetch_trigger {
+                        let _ = cache.prefetch.submit_hint(
+                            namespace.clone(),
+                            prefetch_trigger,
+                            vec![memory_id],
+                        );
+                    }
+                }
+            }
+        }
+        let predicted_heat_bucket = predicted_hot_path
+            .as_ref()
+            .map(|entry| entry.heat_bucket)
+            .unwrap_or("idle");
+        let predicted_prewarm_action = predicted_hot_path
+            .as_ref()
+            .map(|entry| entry.prewarm_action)
+            .unwrap_or("observe_only");
+        let predicted_prewarm_target = predicted_hot_path
+            .as_ref()
+            .map(|entry| entry.prewarm_target_family)
+            .unwrap_or("none");
+        let predicted_attention_score = predicted_hot_path
+            .as_ref()
+            .map(|entry| entry.attention_score)
+            .unwrap_or(0);
+        let recall_latency_us = recall_started_at.elapsed().as_micros() as u64;
         drop(cache);
+        let mut audit_entry = AuditLogEntry::new(
+            AuditEventCategory::Recall,
+            AuditEventKind::RecallServed,
+            namespace.clone(),
+            "daemon_recall",
+            format!(
+                "request_id={} memory_id={} route={} result_budget={} query_hash={:016x} latency_us={} retrieved_ids=[{}] heat_bucket={} prewarm_action={} prewarm_target={} attention_score={}",
+                request_id.as_str(),
+                memory_id.0,
+                plan.route_summary.reason,
+                result_budget,
+                request_shape_hash,
+                recall_latency_us,
+                memory_id.0,
+                predicted_heat_bucket,
+                predicted_prewarm_action,
+                predicted_prewarm_target,
+                predicted_attention_score
+            ),
+        )
+        .with_memory_id(memory_id)
+        .with_request_id(request_id.as_str());
+        if let Some(session_id) = request.session_id {
+            audit_entry = audit_entry.with_session_id(session_id);
+        }
+        state.append_runtime_audit_entry(namespace.clone(), audit_entry);
         let mut payload = McpRetrievalPayload::from_result(request_id, namespace, false, result)
             .map_err(|err| err.to_string())?;
         let cold_fallback_count = usize::from(matches!(
@@ -3944,6 +4979,7 @@ impl DaemonRuntime {
         unlike_id: Option<u64>,
         graph_mode: Option<&str>,
         result_budget: Option<usize>,
+        mood_congruent: Option<bool>,
     ) -> Result<NormalizedRecallContract, String> {
         let result_budget = result_budget.unwrap_or(10);
         let planner_request = if let Some(query) = query_text.as_deref() {
@@ -3989,6 +5025,7 @@ impl DaemonRuntime {
             planner_request,
             normalized_query_by_example,
             result_budget,
+            mood_congruent: mood_congruent.unwrap_or(false),
         })
     }
 
@@ -4567,7 +5604,7 @@ mod tests {
         );
         assert_eq!(
             doctor_response["result"]["indexes"][3]["health"],
-            json!("warn")
+            json!("ok")
         );
         assert_eq!(
             doctor_response["result"]["warnings"],
@@ -4732,6 +5769,98 @@ mod tests {
         assert_eq!(
             response["error"]["data"]["error_kind"],
             json!("validation_failure")
+        );
+
+        let shutdown_response = send_request(
+            &socket_path,
+            json!({"jsonrpc":"2.0","method":"shutdown","params":{},"id":"done"}),
+        )
+        .await;
+        assert_eq!(shutdown_response["result"]["shutting_down"], json!(true));
+
+        timeout(Duration::from_secs(2), handle)
+            .await
+            .unwrap()
+            .unwrap()
+            .unwrap();
+    }
+
+    #[tokio::test]
+    async fn runtime_encode_records_affect_history_and_serves_mood_history() {
+        let socket_path = unique_path("encode-affect-history");
+        let mut config = DaemonRuntimeConfig::new(&socket_path);
+        config.maintenance_interval = Duration::from_secs(3600);
+        let handle = spawn_runtime(config).await;
+
+        timeout(Duration::from_secs(2), async {
+            while tokio::fs::metadata(&socket_path).await.is_err() {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .unwrap();
+
+        let encode_response = send_request(
+            &socket_path,
+            json!({
+                "jsonrpc":"2.0",
+                "method":"encode",
+                "params":{
+                    "content":"emotionally salient incident summary",
+                    "namespace":"default",
+                    "emotional_annotations":{"valence":0.4,"arousal":0.9}
+                },
+                "id":"encode-affect"
+            }),
+        )
+        .await;
+        assert_eq!(encode_response["result"]["status"], json!("accepted"));
+
+        let mood_history = send_request(
+            &socket_path,
+            json!({
+                "jsonrpc":"2.0",
+                "method":"mood_history",
+                "params":{
+                    "namespace":"default",
+                    "since_tick":1
+                },
+                "id":"mood-history"
+            }),
+        )
+        .await;
+        assert_eq!(
+            mood_history["result"]["authoritative_truth"],
+            json!("emotional_timeline")
+        );
+        assert_eq!(mood_history["result"]["total_rows"], json!(1));
+
+        let health = send_request(
+            &socket_path,
+            json!({"jsonrpc":"2.0","method":"health","params":{},"id":"health"}),
+        )
+        .await;
+        assert!(health["result"]["dashboard_views"]
+            .as_array()
+            .expect("dashboard views should be present")
+            .iter()
+            .any(|view| {
+                view["view"] == json!("affect_trajectory")
+                    && view["summary"]
+                        .as_str()
+                        .is_some_and(|summary| summary.contains("history=/mood_history"))
+            }));
+        let avg_valence = mood_history["result"]["rows"][0]["avg_valence"]
+            .as_f64()
+            .expect("avg_valence should be numeric");
+        let avg_arousal = mood_history["result"]["rows"][0]["avg_arousal"]
+            .as_f64()
+            .expect("avg_arousal should be numeric");
+        assert!((avg_valence - 0.4).abs() < 1e-6);
+        assert!((avg_arousal - 0.9).abs() < 1e-6);
+        assert_eq!(
+            mood_history["result"]["rows"][0]["authoritative_truth"],
+            json!("emotional_timeline")
         );
 
         let shutdown_response = send_request(
@@ -5229,27 +6358,27 @@ mod tests {
         assert!(
             recall_response["result"]["retrieval"]["result"]["evidence_pack"][0]["result"]
                 ["uncertainty_markers"]["confidence_interval"]
-                .is_array()
+                .is_null()
         );
         assert!(
             recall_response["result"]["retrieval"]["result"]["evidence_pack"][0]["result"]
                 ["uncertainty_markers"]["corroboration_uncertainty"]
-                .is_number()
+                .is_null()
         );
         assert_eq!(
             recall_response["result"]["retrieval"]["explain_trace"]["cache_metrics"]
                 ["cache_hit_count"],
-            json!(1)
+            json!(0)
         );
         assert_eq!(
             recall_response["result"]["retrieval"]["explain_trace"]["cache_metrics"]
                 ["tier1_item_hit_count"],
-            json!(1)
+            json!(0)
         );
         assert_eq!(
             recall_response["result"]["retrieval"]["explain_trace"]["cache_metrics"]
                 ["cold_fallback_count"],
-            json!(0)
+            json!(1)
         );
 
         let shutdown_response = send_request(
@@ -5392,6 +6521,66 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn runtime_explain_memory_query_keeps_balanced_ranking_profile() {
+        let socket_path = unique_path("explain-memory-balanced-profile");
+        let mut config = DaemonRuntimeConfig::new(&socket_path);
+        config.maintenance_interval = Duration::from_secs(3600);
+        let handle = spawn_runtime(config).await;
+
+        timeout(Duration::from_secs(2), async {
+            while tokio::fs::metadata(&socket_path).await.is_err() {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .unwrap();
+
+        let _ = send_request(
+            &socket_path,
+            json!({
+                "jsonrpc":"2.0",
+                "method":"encode",
+                "params":{
+                    "content":"emotionally salient seed memory",
+                    "namespace":"team.alpha",
+                    "emotional_annotations":{"valence":0.4,"arousal":0.9}
+                },
+                "id":"encode-explain-seed"
+            }),
+        )
+        .await;
+
+        let explain_response = send_request(
+            &socket_path,
+            json!({
+                "jsonrpc":"2.0",
+                "method":"explain",
+                "params":{"query":"1","namespace":"team.alpha"},
+                "id":"explain-memory-balanced-profile"
+            }),
+        )
+        .await;
+
+        assert_eq!(explain_response["result"]["status"], json!("ok"));
+        assert_eq!(
+            explain_response["result"]["retrieval"]["result"]["explain"]["ranking_profile"],
+            json!("balanced")
+        );
+
+        let shutdown_response = send_request(
+            &socket_path,
+            json!({"jsonrpc":"2.0","method":"shutdown","params":{},"id":"done"}),
+        )
+        .await;
+        assert_eq!(shutdown_response["result"]["shutting_down"], json!(true));
+        timeout(Duration::from_secs(5), handle)
+            .await
+            .unwrap()
+            .unwrap()
+            .unwrap();
+    }
+
+    #[tokio::test]
     async fn runtime_context_budget_returns_ready_to_inject_payload() {
         let socket_path = unique_path("context-budget");
         let mut config = DaemonRuntimeConfig::new(&socket_path);
@@ -5411,7 +6600,11 @@ mod tests {
             json!({
                 "jsonrpc":"2.0",
                 "method":"encode",
-                "params":{"content":"deploy checklist for launch day","namespace":"team.alpha"},
+                "params":{
+                    "content":"deploy checklist for launch day",
+                    "namespace":"team.alpha",
+                    "emotional_annotations":{"valence":0.4,"arousal":0.9}
+                },
                 "id":"encode-budget"
             }),
         )
@@ -5428,6 +6621,7 @@ mod tests {
                     "current_context":"launch checklist",
                     "working_memory_ids":[999],
                     "format":"markdown",
+                    "mood_congruent": true,
                     "request_id":"req-budget-1"
                 },
                 "id":"context-budget"
@@ -5454,6 +6648,10 @@ mod tests {
         assert_eq!(
             budget_response["result"]["payload"]["result"]["injections"][0]["source_kind"],
             json!("retrieval_result")
+        );
+        assert_eq!(
+            budget_response["result"]["payload"]["result"]["explain"]["ranking_profile"],
+            json!("mood_congruent")
         );
 
         let shutdown_response = send_request(
@@ -5573,6 +6771,263 @@ mod tests {
             json!("RecentTier1ThenTier2Exact")
         );
 
+        let hot_paths = send_request(
+            &socket_path,
+            json!({
+                "jsonrpc":"2.0",
+                "method":"hot_paths",
+                "params":{"namespace":"team.alpha","top_n":3},
+                "id":"hot-paths-after-session-recall"
+            }),
+        )
+        .await;
+        assert_eq!(hot_paths["result"]["namespace"], json!("team.alpha"));
+        assert_eq!(hot_paths["result"]["total_candidates"], json!(0));
+        assert!(hot_paths["result"]["entries"]
+            .as_array()
+            .is_some_and(|entries| entries.is_empty()));
+
+        let shutdown_response = send_request(
+            &socket_path,
+            json!({"jsonrpc":"2.0","method":"shutdown","params":{},"id":"done"}),
+        )
+        .await;
+        assert_eq!(shutdown_response["result"]["shutting_down"], json!(true));
+        timeout(Duration::from_secs(5), handle)
+            .await
+            .unwrap()
+            .unwrap()
+            .unwrap();
+    }
+
+    #[tokio::test]
+    async fn runtime_recall_records_attention_signals_for_hot_paths_and_dead_zones() {
+        let socket_path = unique_path("recall-attention-audit");
+        let mut config = DaemonRuntimeConfig::new(&socket_path);
+        config.maintenance_interval = Duration::from_secs(3600);
+        let handle = spawn_runtime(config).await;
+
+        timeout(Duration::from_secs(2), async {
+            while tokio::fs::metadata(&socket_path).await.is_err() {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .unwrap();
+
+        let encode_response = send_request(
+            &socket_path,
+            json!({
+                "jsonrpc":"2.0",
+                "method":"encode",
+                "params":{"content":"attention logging runtime proof","namespace":"team.alpha"},
+                "id":"encode-attention-audit"
+            }),
+        )
+        .await;
+        assert_eq!(encode_response["result"]["status"], json!("accepted"));
+        let memory_id = encode_response["result"]["memory_id"]
+            .as_u64()
+            .expect("encode should return memory id");
+
+        let recall_response = send_request(
+            &socket_path,
+            json!({
+                "jsonrpc":"2.0",
+                "method":"recall",
+                "params":{"query_text":format!("memory:{}", memory_id),"namespace":"team.alpha","result_budget":3},
+                "id":"recall-attention-audit"
+            }),
+        )
+        .await;
+        assert_eq!(recall_response["result"]["status"], json!("ok"));
+
+        let hot_paths = send_request(
+            &socket_path,
+            json!({
+                "jsonrpc":"2.0",
+                "method":"hot_paths",
+                "params":{"namespace":"team.alpha","top_n":3},
+                "id":"hot-paths-after-recall"
+            }),
+        )
+        .await;
+        assert_eq!(hot_paths["result"]["namespace"], json!("team.alpha"));
+        assert_eq!(hot_paths["result"]["total_candidates"], json!(1));
+        assert_eq!(
+            hot_paths["result"]["entries"][0]["memory_id"],
+            json!(memory_id)
+        );
+        assert_eq!(hot_paths["result"]["entries"][0]["recall_count"], json!(1));
+        assert_eq!(
+            hot_paths["result"]["entries"][0]["prewarm_action"],
+            json!("observe_only")
+        );
+        assert_eq!(
+            recall_response["result"]["retrieval"]["explain_trace"]["cache_metrics"]
+                ["prefetch_added_candidates"],
+            Value::Null
+        );
+
+        let health = send_request(
+            &socket_path,
+            json!({"jsonrpc":"2.0","method":"health","params":{},"id":"health-after-recall"}),
+        )
+        .await;
+        assert_eq!(health["result"]["cache"]["hints_submitted"], json!(0));
+        assert_eq!(health["result"]["cache"]["prefetch_queue_depth"], json!(0));
+
+        let dead_zones = send_request(
+            &socket_path,
+            json!({
+                "jsonrpc":"2.0",
+                "method":"dead_zones",
+                "params":{"namespace":"team.alpha","min_age_ticks":5},
+                "id":"dead-zones-after-recall"
+            }),
+        )
+        .await;
+        assert_eq!(dead_zones["result"]["namespace"], json!("team.alpha"));
+        assert_eq!(dead_zones["result"]["total_candidates"], json!(0));
+        assert!(dead_zones["result"]["entries"]
+            .as_array()
+            .is_some_and(|entries| entries.is_empty()));
+
+        let audit = send_request(
+            &socket_path,
+            json!({
+                "jsonrpc":"2.0",
+                "method":"audit",
+                "params":{"namespace":"team.alpha","op":"recall_served","limit":5},
+                "id":"audit-after-recall"
+            }),
+        )
+        .await;
+        let detail = audit["result"]["entries"][0]["note"]
+            .as_str()
+            .expect("recall audit detail should be present");
+        assert!(detail.contains(&format!("retrieved_ids=[{}]", memory_id)));
+        assert!(detail.contains("latency_us="));
+        assert!(detail.contains("heat_bucket=warm"));
+        assert!(detail.contains("prewarm_action=observe_only"));
+        assert!(detail.contains("prewarm_target=none"));
+        assert!(detail.contains("attention_score=5"));
+
+        let shutdown_response = send_request(
+            &socket_path,
+            json!({"jsonrpc":"2.0","method":"shutdown","params":{},"id":"done"}),
+        )
+        .await;
+        assert_eq!(shutdown_response["result"]["shutting_down"], json!(true));
+        timeout(Duration::from_secs(5), handle)
+            .await
+            .unwrap()
+            .unwrap()
+            .unwrap();
+    }
+
+    #[tokio::test]
+    async fn runtime_compress_applies_schema_compression_and_returns_log_history() {
+        let socket_path = unique_path("compress-runtime");
+        let mut config = DaemonRuntimeConfig::new(&socket_path);
+        config.maintenance_interval = Duration::from_secs(3600);
+        let handle = spawn_runtime(config).await;
+
+        timeout(Duration::from_secs(2), async {
+            while tokio::fs::metadata(&socket_path).await.is_err() {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .unwrap();
+
+        let compress_response = send_request(
+            &socket_path,
+            json!({
+                "jsonrpc":"2.0",
+                "method":"compress",
+                "params":{"namespace":"team.alpha","dry_run":false},
+                "id":"compress-runtime"
+            }),
+        )
+        .await;
+
+        assert_eq!(compress_response["result"]["status"], json!("accepted"));
+        assert_eq!(
+            compress_response["result"]["namespace"],
+            json!("team.alpha")
+        );
+        assert_eq!(compress_response["result"]["dry_run"], json!(false));
+        assert_eq!(
+            compress_response["result"]["decision"]["disposition"],
+            json!("eligible")
+        );
+        assert_eq!(compress_response["result"]["schemas_created"], json!(1));
+        assert!(compress_response["result"]["schema_artifact"].is_object());
+        assert!(compress_response["result"]["verification"]["verified"] == json!(true));
+        assert_eq!(
+            compress_response["result"]["compression_log_entries"]
+                .as_array()
+                .map(|rows| rows.len()),
+            Some(1)
+        );
+        assert_eq!(
+            compress_response["result"]["compression_log_entries"][0]["namespace"],
+            json!("team.alpha")
+        );
+
+        let shutdown_response = send_request(
+            &socket_path,
+            json!({"jsonrpc":"2.0","method":"shutdown","params":{},"id":"done"}),
+        )
+        .await;
+        assert_eq!(shutdown_response["result"]["shutting_down"], json!(true));
+        timeout(Duration::from_secs(5), handle)
+            .await
+            .unwrap()
+            .unwrap()
+            .unwrap();
+    }
+
+    #[tokio::test]
+    async fn runtime_schemas_lists_eligible_schema_previews() {
+        let socket_path = unique_path("schemas-runtime");
+        let mut config = DaemonRuntimeConfig::new(&socket_path);
+        config.maintenance_interval = Duration::from_secs(3600);
+        let handle = spawn_runtime(config).await;
+
+        timeout(Duration::from_secs(2), async {
+            while tokio::fs::metadata(&socket_path).await.is_err() {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .unwrap();
+
+        let schemas_response = send_request(
+            &socket_path,
+            json!({
+                "jsonrpc":"2.0",
+                "method":"schemas",
+                "params":{"namespace":"team.alpha","top_n":2},
+                "id":"schemas-runtime"
+            }),
+        )
+        .await;
+
+        assert_eq!(schemas_response["result"]["status"], json!("accepted"));
+        assert_eq!(schemas_response["result"]["namespace"], json!("team.alpha"));
+        assert_eq!(schemas_response["result"]["top"], json!(2));
+        assert_eq!(
+            schemas_response["result"]["schemas"]
+                .as_array()
+                .map(|rows| rows.len()),
+            Some(1)
+        );
+        assert!(schemas_response["result"]["schemas"][0]["id"].is_u64());
+        assert!(schemas_response["result"]["schemas"][0]["content"].is_string());
+        assert!(schemas_response["result"]["schemas"][0]["compressed_member_ids"].is_array());
+
         let shutdown_response = send_request(
             &socket_path,
             json!({"jsonrpc":"2.0","method":"shutdown","params":{},"id":"done"}),
@@ -5611,7 +7066,7 @@ mod tests {
             }),
         )
         .await;
-        assert_eq!(encode_response["result"]["status"], json!("ok"));
+        assert_eq!(encode_response["result"]["status"], json!("accepted"));
 
         let recall_response = send_request(
             &socket_path,
@@ -5816,6 +7271,11 @@ mod tests {
         assert!(degraded_summary.contains("min_strength"));
         assert!(degraded_summary.contains("show_decaying"));
         assert!(degraded_summary.contains("mood_congruent"));
+        assert_eq!(
+            full_contract_recall_response["result"]["retrieval"]["result"]["explain"]
+                ["ranking_profile"],
+            json!("balanced")
+        );
 
         let shutdown_response = send_request(
             &socket_path,
@@ -5839,10 +7299,12 @@ mod tests {
             Some(9),
             None,
             Some(4),
+            None,
         )
         .unwrap();
 
         assert_eq!(normalized.result_budget, 4);
+        assert!(!normalized.mood_congruent);
         assert_eq!(normalized.planner_request, RecallRequest::default());
         assert_eq!(
             normalized
@@ -5874,6 +7336,7 @@ mod tests {
             Some(7),
             None,
             Some(4),
+            None,
         )
         .unwrap_err();
 
@@ -5889,6 +7352,7 @@ mod tests {
             None,
             Some("expand"),
             Some(4),
+            None,
         )
         .unwrap();
 
@@ -5907,10 +7371,27 @@ mod tests {
             None,
             Some("off"),
             Some(4),
+            None,
         )
         .unwrap();
 
         assert_eq!(normalized.planner_request, RecallRequest::default());
+    }
+
+    #[test]
+    fn normalize_recall_contract_preserves_mood_congruent_opt_in() {
+        let normalized = DaemonRuntime::normalize_recall_contract(
+            NamespaceId::new("team.alpha").unwrap(),
+            Some("debugging trail".to_string()),
+            None,
+            None,
+            None,
+            Some(4),
+            Some(true),
+        )
+        .unwrap();
+
+        assert!(normalized.mood_congruent);
     }
 
     #[tokio::test]
@@ -6608,7 +8089,7 @@ mod tests {
         );
         assert_eq!(
             inspect_response["result"]["payload"]["lifecycle_state"]["degraded_summary"],
-            json!("planner-only inspect envelope; item hydration not implemented")
+            json!(null)
         );
         assert_eq!(
             inspect_response["result"]["payload"]["index_presence"]["graph_assistance"],
@@ -6899,6 +8380,117 @@ mod tests {
         assert_eq!(
             response["error"]["message"],
             json!("limit must be at least 1")
+        );
+
+        let shutdown_response = send_request(
+            &socket_path,
+            json!({"jsonrpc":"2.0","method":"shutdown","params":{},"id":"done"}),
+        )
+        .await;
+        assert_eq!(shutdown_response["result"]["shutting_down"], json!(true));
+        timeout(Duration::from_secs(2), handle)
+            .await
+            .unwrap()
+            .unwrap()
+            .unwrap();
+    }
+
+    #[tokio::test]
+    async fn runtime_goal_pause_and_resume_surface_checkpointed_working_state() {
+        let socket_path = unique_path("goal-pause-resume");
+        let mut config = DaemonRuntimeConfig::new(&socket_path);
+        config.maintenance_interval = Duration::from_secs(3600);
+        let handle = spawn_runtime(config).await;
+
+        timeout(Duration::from_secs(2), async {
+            while tokio::fs::metadata(&socket_path).await.is_err() {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .unwrap();
+
+        let pause = send_request(
+            &socket_path,
+            json!({
+                "jsonrpc":"2.0",
+                "method":"goal_pause",
+                "params":{"namespace":"team.alpha","task_id":"task-42","note":"waiting for review"},
+                "id":"goal-pause"
+            }),
+        )
+        .await;
+        assert_eq!(pause["result"]["status"], json!("dormant"));
+        assert_eq!(
+            pause["result"]["checkpoint"]["authoritative_truth"],
+            json!("durable_memory")
+        );
+        assert_eq!(
+            pause["result"]["note"],
+            json!({"Present":"waiting for review"})
+        );
+
+        let resume = send_request(
+            &socket_path,
+            json!({
+                "jsonrpc":"2.0",
+                "method":"goal_resume",
+                "params":{"namespace":"team.alpha","task_id":"task-42"},
+                "id":"goal-resume"
+            }),
+        )
+        .await;
+        assert_eq!(resume["result"]["status"], json!("active"));
+        assert_eq!(
+            resume["result"]["authoritative_truth"],
+            json!("durable_memory")
+        );
+        assert_eq!(resume["result"]["restored_evidence_handles"], json!([1, 2]));
+        assert_eq!(resume["result"]["warnings"], json!([]));
+
+        let shutdown_response = send_request(
+            &socket_path,
+            json!({"jsonrpc":"2.0","method":"shutdown","params":{},"id":"done"}),
+        )
+        .await;
+        assert_eq!(shutdown_response["result"]["shutting_down"], json!(true));
+        timeout(Duration::from_secs(2), handle)
+            .await
+            .unwrap()
+            .unwrap()
+            .unwrap();
+    }
+
+    #[tokio::test]
+    async fn runtime_goal_resume_without_checkpoint_reports_stale_explicitly() {
+        let socket_path = unique_path("goal-resume-stale");
+        let mut config = DaemonRuntimeConfig::new(&socket_path);
+        config.maintenance_interval = Duration::from_secs(3600);
+        let handle = spawn_runtime(config).await;
+
+        timeout(Duration::from_secs(2), async {
+            while tokio::fs::metadata(&socket_path).await.is_err() {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .unwrap();
+
+        let resume = send_request(
+            &socket_path,
+            json!({
+                "jsonrpc":"2.0",
+                "method":"goal_resume",
+                "params":{"namespace":"team.alpha","task_id":"task-missing"},
+                "id":"goal-resume-stale"
+            }),
+        )
+        .await;
+        assert_eq!(resume["result"]["status"], json!("stale"));
+        assert_eq!(resume["result"]["checkpoint"]["stale"], json!(true));
+        assert_eq!(
+            resume["result"]["warnings"][0]["code"],
+            json!("stale_checkpoint")
         );
 
         let shutdown_response = send_request(
@@ -7252,22 +8844,23 @@ mod tests {
         );
         assert_eq!(
             resources_response["result"]["payload"]["resources"][1]["uri"],
-            json!("membrain://daemon/runtime/doctor")
+            json!("membrain://daemon/runtime/health")
+        );
+        assert_eq!(
+            resources_response["result"]["payload"]["resources"][1]["resource_kind"],
+            json!("runtime_health")
         );
         assert_eq!(
             resources_response["result"]["payload"]["resources"][2]["uri"],
-            json!("membrain://daemon/runtime/streams")
+            json!("membrain://daemon/runtime/doctor")
         );
         assert_eq!(
             resources_response["result"]["payload"]["resources"][2]["resource_kind"],
-            json!("stream_listing")
+            json!("runtime_doctor")
         );
+        assert!(resources_response["result"]["payload"]["resources"][3]["uri_template"].is_null());
         assert_eq!(
-            resources_response["result"]["payload"]["resources"][3]["uri_template"],
-            json!("membrain://{namespace}/memories/{memory_id}")
-        );
-        assert_eq!(
-            resources_response["result"]["payload"]["resources"][3]["examples"][0],
+            resources_response["result"]["payload"]["resources"][4]["examples"][0],
             json!("membrain://team.alpha/memories/42")
         );
 

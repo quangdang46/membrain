@@ -1091,6 +1091,11 @@ impl PrefetchController {
         self.queue.len()
     }
 
+    /// Returns the configured queue capacity.
+    pub fn capacity(&self) -> usize {
+        self.capacity
+    }
+
     /// Disables the prefetch system and discards queued speculative hints.
     pub fn disable(&mut self) {
         if self.enabled {

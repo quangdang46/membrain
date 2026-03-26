@@ -411,9 +411,9 @@ impl ConsolidationRun {
                 unit_selection: CompactionUnitSelection {
                     unit_kind: CompactionUnitKind::EpisodeSourceSet,
                     selected_units: self.total,
-                    selection_rule: "episode_source_sets_with_lineage_and_durable_citations",
+                    selection_rule: "episode_source_sets_with_lineage_and_durable_citations_and_schema_compression",
                     durable_truth_source: "durable_memory_rows",
-                    derived_outputs: vec!["summary", "fact", "gist", "relation", "skill"],
+                    derived_outputs: vec!["summary", "fact", "gist", "relation", "skill", "schema"],
                     authoritative_evidence_retained: true,
                 },
                 batch_size: self.policy.batch_size.max(1) as u32,

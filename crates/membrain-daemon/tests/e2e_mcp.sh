@@ -9,11 +9,14 @@ set -euo pipefail
 #
 # It covers these workflow families explicitly:
 # 1. retrieval-envelope parity
-# 2. policy denial / preflight safeguard behavior
-# 3. share / unshare visibility + redaction parity
-# 4. forgetting archive / restore / policy-delete runtime parity
-# 5. repair / doctor operator-visible runtime parity
-# 6. observe / inspect provenance payload parity
+# 2. contradiction-adjacent safeguard classification / blocked-envelope behavior
+# 3. policy denial / preflight safeguard behavior
+# 4. share / unshare visibility + redaction parity
+# 5. consolidation request-envelope parity
+# 6. forgetting archive / restore / policy-delete runtime parity
+# 7. schema compression inspectability and lineage parity
+# 8. repair / doctor operator-visible runtime parity
+# 9. observe / inspect provenance payload parity
 #
 # Usage:
 #   bash crates/membrain-daemon/tests/e2e_mcp.sh
@@ -139,10 +142,14 @@ run_check "Runtime doctor JSON-RPC parity test" \
   cargo test -p membrain-daemon --test runtime_doctor_parity runtime_doctor_jsonrpc_response_matches_shared_doctor_contract_fields -- --nocapture
 run_check "Runtime doctor resource parity test" \
   cargo test -p membrain-daemon --test runtime_doctor_parity runtime_doctor_resource_read_matches_runtime_doctor_payload_shape -- --nocapture
+run_check "Runtime health JSON-RPC parity test" \
+  cargo test -p membrain-daemon --test runtime_doctor_parity runtime_health_jsonrpc_response_matches_shared_health_contract_fields -- --nocapture
 run_check "Runtime health resource parity test" \
   cargo test -p membrain-daemon --test runtime_doctor_parity runtime_health_resource_read_matches_runtime_health_payload_shape -- --nocapture
 
-section "Workflow proof: policy denial / safeguards"
+section "Workflow proof: contradiction / safeguards"
+run_check "Preflight blocked-envelope serialization tests" \
+  cargo test -p membrain-daemon force_confirm_blockers_preserve_blocked_serialization_contract -- --nocapture
 run_check "Preflight runtime parity tests" \
   cargo test -p membrain-daemon --test preflight_runtime_parity -- --nocapture
 
@@ -150,9 +157,25 @@ section "Workflow proof: share / unshare redaction"
 run_check "Share/unshare runtime parity tests" \
   cargo test -p membrain-daemon --test runtime_share_unshare_parity -- --nocapture
 
+section "Workflow proof: consolidation"
+run_check "Runtime consolidate request parsing test" \
+  cargo test -p membrain-daemon parse_method_consolidate_accepts_canonical_fields -- --nocapture
+run_check "MCP consolidate envelope round-trip test" \
+  cargo test -p membrain-daemon mutation_method_envelopes_round_trip_via_serde -- --nocapture
+
 section "Workflow proof: forgetting"
 run_check "Forget runtime parity tests" \
   cargo test -p membrain-daemon runtime_forget_distinguishes_archive_restore_and_policy_delete -- --nocapture
+
+section "Workflow proof: schema compression"
+run_check "Runtime compress parity test" \
+  cargo test -p membrain-daemon runtime_compress_applies_schema_compression_and_returns_log_history -- --nocapture
+run_check "Runtime schemas parity test" \
+  cargo test -p membrain-daemon runtime_schemas_lists_eligible_schema_previews -- --nocapture
+run_check "JSON-RPC schemas request parsing test" \
+  cargo test -p membrain-daemon parse_method_accepts_schemas_params -- --nocapture
+run_check "MCP schemas envelope round-trip test" \
+  cargo test -p membrain-daemon mcp_request_envelopes_round_trip_via_serde -- --nocapture
 
 section "Workflow proof: retrieval / inspect envelopes"
 run_check "MCP retrieval envelope tests" \
@@ -166,17 +189,30 @@ run_check "MCP observe payload tests" \
 run_check "Daemon observe/runtime inspect tests" \
   cargo test -p membrain-daemon runtime_inspect_returns_typed_mcp_inspect_payload -- --nocapture
 
+section "Workflow proof: working-state blackboard and checkpoints"
+run_check "MCP goal request round-trip tests" \
+  cargo test -p membrain-daemon mcp_goal_requests_round_trip -- --nocapture
+run_check "Runtime goal blackboard projection parity test" \
+  cargo test -p membrain-daemon --test runtime_doctor_parity runtime_goal_working_state_methods_surface_blackboard_projection_parity -- --nocapture
+run_check "Runtime goal pause/resume checkpoint parity test" \
+  cargo test -p membrain-daemon runtime_goal_pause_and_resume_surface_checkpointed_working_state -- --nocapture
+run_check "Runtime goal stale resume parity test" \
+  cargo test -p membrain-daemon runtime_goal_resume_without_checkpoint_reports_stale_explicitly -- --nocapture
+
 section "Workflow proof summary"
 cat <<'EOF'
 Validated runtime surfaces:
 - daemon CLI flag parity for runtime and maintenance knobs
 - retrieval: MCP retrieval and inspect payload families preserving canonical envelope structure, explicit output_mode, and evidence/action separation
+- contradiction: preflight blocked-envelope serialization and runtime safeguard parity for contradiction-adjacent destructive requests
 - policy denial: preflight blocked, degraded, and force-confirmed safeguard flows
 - share/unshare: visibility handling, redaction semantics, and audit-field parity
+- consolidation: runtime request parsing plus MCP consolidate envelope round-trip parity for scriptable maintenance entrypoints
 - forgetting: archive/restore/delete parity including reason_code, disposition, reversibility, audit_kind, and operator-review markers
-- repair: runtime doctor payload shape, health/doctor resource parity, repair-aware degraded markers, and operator-visible remediation
-- warning: the broader `runtime_health_jsonrpc_response_matches_shared_health_contract_fields` test currently has an in-repo expectation drift on surviving query capabilities, so this proof artifact runs the passing doctor/health parity cases that still exercise the bead’s required workflow surface without editing another agent’s reserved file
+- schema compression: runtime `compress`/`schemas` parity including inspectable schema previews, lineage-bearing compression artifacts, verification state, and compression-log history
+- repair: runtime doctor payload shape, health JSON-RPC/resource parity, repair-aware degraded markers, and operator-visible remediation
 - observe provenance: passive observation request parsing plus runtime observe/inspect provenance parity
+- working-state: MCP goal request coverage includes get/pin/dismiss/snapshot/resume/abandon request surfaces, while runtime proof currently covers blackboard projection plus snapshot, pause, resume, and stale-resume checkpoint lifecycle behavior
 EOF
 
 printf '\n=== daemon / MCP parity artifact completed ===\n'

@@ -1,0 +1,48 @@
+{"ts":"2026-03-25T17:35:45.117594690Z","kind":"session_started","session_id":"ses-run-mb-2db.3-20260325T173544888"}
+{"ts":"2026-03-25T18:07:10.990011488Z","kind":"stdout","line":"Done."}
+{"ts":"2026-03-25T18:07:11.744266067Z","kind":"stdout","line":""}
+{"ts":"2026-03-25T18:07:11.744280453Z","kind":"stdout","line":"GROVE_RESULT: daemon_recall_audit_wiring_landed"}
+{"ts":"2026-03-25T18:07:11.744280453Z","kind":"protocol","event":{"type":"result","summary":"daemon_recall_audit_wiring_landed"}}
+{"ts":"2026-03-25T18:07:11.768955439Z","kind":"stdout","line":""}
+{"ts":"2026-03-25T18:07:11.768982599Z","kind":"stdout","line":"GROVE_ARTIFACTS:"}
+{"ts":"2026-03-25T18:07:11.768982599Z","kind":"protocol","event":{"type":"artifacts","items":[]}}
+{"ts":"2026-03-25T18:07:11.771305064Z","kind":"stdout","line":"- `crates/membrain-daemon/src/daemon.rs`"}
+{"ts":"2026-03-25T18:07:11.771305064Z","kind":"protocol","event":{"type":"artifacts","items":["`crates/membrain-daemon/src/daemon.rs`"]}}
+{"ts":"2026-03-25T18:07:11.771312901Z","kind":"stdout","line":""}
+{"ts":"2026-03-25T18:07:11.771315263Z","kind":"stdout","line":"GROVE_LESSONS:"}
+{"ts":"2026-03-25T18:07:11.771315263Z","kind":"protocol","event":{"type":"lessons","items":[]}}
+{"ts":"2026-03-25T18:07:11.771319986Z","kind":"stdout","line":"- The live recall choke point is `crates/membrain-daemon/src/daemon.rs:4216`, not `BrainStore`."}
+{"ts":"2026-03-25T18:07:11.771319986Z","kind":"protocol","event":{"type":"lessons","items":["The live recall choke point is `crates/membrain-daemon/src/daemon.rs:4216`, not `BrainStore`."]}}
+{"ts":"2026-03-25T18:07:11.771326749Z","kind":"stdout","line":"- Existing `hot_paths` / `dead_zones` already derive from audit log state, so wiring daemon retrieval into recall audit rows makes those views reflect real traffic immediately."}
+{"ts":"2026-03-25T18:07:11.771326749Z","kind":"protocol","event":{"type":"lessons","items":["Existing `hot_paths` / `dead_zones` already derive from audit log state, so wiring daemon retrieval into recall audit rows makes those views reflect real traffic immediately."]}}
+{"ts":"2026-03-25T18:07:11.771331902Z","kind":"stdout","line":""}
+{"ts":"2026-03-25T18:07:11.771334586Z","kind":"stdout","line":"GROVE_DECISIONS:"}
+{"ts":"2026-03-25T18:07:11.771334586Z","kind":"protocol","event":{"type":"decision","items":[]}}
+{"ts":"2026-03-25T18:07:11.771339202Z","kind":"stdout","line":"- Kept prewarm state advisory, not authoritative."}
+{"ts":"2026-03-25T18:07:11.771339202Z","kind":"protocol","event":{"type":"decision","items":["Kept prewarm state advisory, not authoritative."]}}
+{"ts":"2026-03-25T18:07:11.771344785Z","kind":"stdout","line":"- Took the smallest safe F13 slice: daemon-side `RecallServed` / `RecallDenied` audit logging on the real retrieval path, instead of attempting larger `recall_log` / `hot_path_cache` table plumbing."}
+{"ts":"2026-03-25T18:07:11.771344785Z","kind":"protocol","event":{"type":"decision","items":["Took the smallest safe F13 slice: daemon-side `RecallServed` / `RecallDenied` audit logging on the real retrieval path, instead of attempting larger `recall_log` / `hot_path_cache` table plumbing."]}}
+{"ts":"2026-03-25T18:07:11.771355627Z","kind":"stdout","line":""}
+{"ts":"2026-03-25T18:07:11.771357882Z","kind":"stdout","line":"GROVE_WARNINGS:"}
+{"ts":"2026-03-25T18:07:11.771357882Z","kind":"protocol","event":{"type":"warning","items":[]}}
+{"ts":"2026-03-25T18:07:11.771362390Z","kind":"stdout","line":"- Full durable `recall_log` / `hot_path_cache` table writes are still not implemented."}
+{"ts":"2026-03-25T18:07:11.771362390Z","kind":"protocol","event":{"type":"warning","items":["Full durable `recall_log` / `hot_path_cache` table writes are still not implemented."]}}
+{"ts":"2026-03-25T18:07:11.771367006Z","kind":"stdout","line":"- One existing daemon regression still fails independently at `crates/membrain-daemon/src/daemon.rs:5921` when running `runtime_recall_returns_typed_mcp_retrieval_payload`; this appears unrelated to the new audit wiring."}
+{"ts":"2026-03-25T18:07:11.771367006Z","kind":"protocol","event":{"type":"warning","items":["One existing daemon regression still fails independently at `crates/membrain-daemon/src/daemon.rs:5921` when running `runtime_recall_returns_typed_mcp_retrieval_payload`; this appears unrelated to the new audit wiring."]}}
+{"ts":"2026-03-25T18:07:11.771384183Z","kind":"stdout","line":""}
+{"ts":"2026-03-25T18:07:11.771386008Z","kind":"stdout","line":"What changed:"}
+{"ts":"2026-03-25T18:07:11.771387511Z","kind":"stdout","line":"- Added recall audit append on successful daemon retrievals in `crates/membrain-daemon/src/daemon.rs:4594`."}
+{"ts":"2026-03-25T18:07:11.771389228Z","kind":"stdout","line":"- Added recall audit append on policy-denied retrievals in `crates/membrain-daemon/src/daemon.rs:4374`."}
+{"ts":"2026-03-25T18:07:11.771390731Z","kind":"stdout","line":"- Added a focused daemon test proving live recall traffic shows up through `hot_paths` / `dead_zones` in `crates/membrain-daemon/src/daemon.rs:6298`."}
+{"ts":"2026-03-25T18:07:11.771392234Z","kind":"stdout","line":""}
+{"ts":"2026-03-25T18:07:11.771393630Z","kind":"stdout","line":"Validation:"}
+{"ts":"2026-03-25T18:07:11.771394918Z","kind":"stdout","line":"- `cargo check -p membrain-daemon` passed"}
+{"ts":"2026-03-25T18:07:11.771396314Z","kind":"stdout","line":"- `cargo test -p membrain-daemon recall_records_attention_signals_for_hot_paths_and_dead_zones` passed"}
+{"ts":"2026-03-25T18:07:11.771397709Z","kind":"stdout","line":"- `cargo test -p membrain-daemon runtime_recall_preserves_requested_budget_for_non_exact_queries` passed"}
+{"ts":"2026-03-25T18:07:11.771399105Z","kind":"stdout","line":"- `cargo test -p membrain-daemon runtime_recall_returns_typed_mcp_retrieval_payload` still fails on a pre-existing uncertainty-marker assertion at `crates/membrain-daemon/src/daemon.rs:5921`"}
+{"ts":"2026-03-25T18:07:11.771400608Z","kind":"stdout","line":""}
+{"ts":"2026-03-25T18:07:11.771402218Z","kind":"stdout","line":"I also sent the status update on the `mb-2db.3` thread."}
+{"ts":"2026-03-25T18:07:11.771403721Z","kind":"stdout","line":""}
+{"ts":"2026-03-25T18:07:11.771405009Z","kind":"stdout","line":"GROVE_EXIT: false"}
+{"ts":"2026-03-25T18:07:11.771405009Z","kind":"protocol","event":{"type":"exit","value":false}}
+{"ts":"2026-03-25T18:07:16.748758342Z","kind":"session_ended","exit_code":0}

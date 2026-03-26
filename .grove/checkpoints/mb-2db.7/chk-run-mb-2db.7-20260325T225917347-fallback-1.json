@@ -1,0 +1,45 @@
+{
+  "id": "chk-run-mb-2db.7-20260325T225917347-fallback-1",
+  "bead_id": "mb-2db.7",
+  "run_id": "run-mb-2db.7-20260325T225917347",
+  "session_id": "ses-run-mb-2db.7-20260325T225917347",
+  "progress": "Synthetic fallback checkpoint after NoProgress",
+  "next_step": "Resume from the transcript tail, avoid repeating completed setup, and continue with the smallest safe remaining step.",
+  "payload": {
+    "claimed_paths": [],
+    "confidence": 0.25,
+    "context": {
+      "failure_class": "NoProgress",
+      "failure_detail": "session ended with Unknown",
+      "stderr_tail": [],
+      "stdout_tail": [
+        "GROVE_ARTIFACTS",
+        "- `crates/membrain-core/src/types.rs`",
+        "- `crates/membrain-core/src/engine/encode.rs`",
+        "- `crates/membrain-core/src/engine/diff.rs`",
+        "- `crates/membrain-core/src/store/tier2.rs`",
+        "- `crates/membrain-core/src/brain_store.rs`",
+        "- `crates/membrain-core/tests/tier2_item_layout.rs`",
+        "",
+        "GROVE_LESSONS",
+        "- The real remaining seam was canonical durable metadata propagation, not more engine logic.",
+        "- Adding one field to `NormalizedMemoryEnvelope` fans out into encode/test fixtures immediately.",
+        "",
+        "GROVE_DECISIONS",
+        "- Kept the change narrow: in-core durable persistence only.",
+        "- Did not broaden into SQLite schema migrations or real clustering.",
+        "",
+        "GROVE_WARNINGS",
+        "- Active file reservations existed on some touched files; I kept edits localized.",
+        "- Durable compression metadata is still not persisted to SQLite tables.",
+        ""
+      ],
+      "synthetic": true
+    },
+    "next_step": "Resume from the transcript tail, avoid repeating completed setup, and continue with the smallest safe remaining step.",
+    "open_questions": [],
+    "progress": "Synthetic fallback checkpoint after NoProgress"
+  },
+  "saved_at": "2026-03-25T23:13:25.327026746Z",
+  "resume_generation": 1
+}

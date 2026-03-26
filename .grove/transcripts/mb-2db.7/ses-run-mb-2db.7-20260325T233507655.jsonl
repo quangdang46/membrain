@@ -1,0 +1,51 @@
+{"ts":"2026-03-25T23:35:07.728914820Z","kind":"session_started","session_id":"ses-run-mb-2db.7-20260325T233507655"}
+{"ts":"2026-03-25T23:45:19.502877961Z","kind":"stdout","line":"GROVE_RESULT"}
+{"ts":"2026-03-25T23:45:19.531696098Z","kind":"stdout","line":""}
+{"ts":"2026-03-25T23:45:19.531709596Z","kind":"stdout","line":"Added a safe non-overlapping F17 slice: public integration coverage proving schema-compression lineage is exposed through Tier2 metadata-only views and that compression-log filtering works via the public `BrainStore` API."}
+{"ts":"2026-03-25T23:45:19.531712703Z","kind":"stdout","line":""}
+{"ts":"2026-03-25T23:45:19.531714952Z","kind":"stdout","line":"GROVE_ARTIFACTS"}
+{"ts":"2026-03-25T23:45:19.531720523Z","kind":"stdout","line":""}
+{"ts":"2026-03-25T23:45:19.531722558Z","kind":"stdout","line":"- Read fully:"}
+{"ts":"2026-03-25T23:45:19.531724701Z","kind":"stdout","line":"  - `AGENTS.md`"}
+{"ts":"2026-03-25T23:45:19.531726843Z","kind":"stdout","line":"  - `README.md`"}
+{"ts":"2026-03-25T23:45:19.531729200Z","kind":"stdout","line":"  - `docs/README.md`"}
+{"ts":"2026-03-25T23:45:19.531731343Z","kind":"stdout","line":"- Resumed from latest F17 transcripts/checkpoints and avoided redoing landed engine/facade/CLI/daemon transport work"}
+{"ts":"2026-03-25T23:45:19.531734342Z","kind":"stdout","line":"- Registered on MCP Agent Mail as `WhiteHawk`"}
+{"ts":"2026-03-25T23:45:19.531756517Z","kind":"stdout","line":"- Coordinated with active agents and avoided reserved compression/CLI surfaces"}
+{"ts":"2026-03-25T23:45:19.531759731Z","kind":"stdout","line":"- Updated:"}
+{"ts":"2026-03-25T23:45:19.531762088Z","kind":"stdout","line":"  - `crates/membrain-core/tests/tier2_item_layout.rs:692`"}
+{"ts":"2026-03-25T23:45:19.531764873Z","kind":"stdout","line":"  - `crates/membrain-core/tests/tier2_item_layout.rs:744`"}
+{"ts":"2026-03-25T23:45:19.531767016Z","kind":"stdout","line":""}
+{"ts":"2026-03-25T23:45:19.531769587Z","kind":"stdout","line":"Key additions:"}
+{"ts":"2026-03-25T23:45:19.531771729Z","kind":"stdout","line":"- `crates/membrain-core/tests/tier2_item_layout.rs:692`"}
+{"ts":"2026-03-25T23:45:19.531773872Z","kind":"stdout","line":"  - added `compression_lineage_surfaces_through_public_brain_store_and_tier2_metadata_views`"}
+{"ts":"2026-03-25T23:45:19.531776121Z","kind":"stdout","line":"  - verifies schema/source compression metadata through `prefilter_view()` and `metadata_index_key()`"}
+{"ts":"2026-03-25T23:45:19.531778157Z","kind":"stdout","line":"- `crates/membrain-core/tests/tier2_item_layout.rs:744`"}
+{"ts":"2026-03-25T23:45:19.531780192Z","kind":"stdout","line":"  - added `compression_log_entries_filter_by_namespace_and_since_tick`"}
+{"ts":"2026-03-25T23:45:19.531782335Z","kind":"stdout","line":"  - verifies namespace isolation and tick-floor filtering on public `BrainStore` log access"}
+{"ts":"2026-03-25T23:45:19.531784370Z","kind":"stdout","line":""}
+{"ts":"2026-03-25T23:45:19.531786513Z","kind":"stdout","line":"Validation:"}
+{"ts":"2026-03-25T23:45:19.531788548Z","kind":"stdout","line":"- `cargo test -p membrain-core --test tier2_item_layout -- --nocapture` ✅"}
+{"ts":"2026-03-25T23:45:19.531790584Z","kind":"stdout","line":"- `cargo check -p membrain-core` ✅"}
+{"ts":"2026-03-25T23:45:19.531792940Z","kind":"stdout","line":""}
+{"ts":"2026-03-25T23:45:19.531794976Z","kind":"stdout","line":"GROVE_LESSONS"}
+{"ts":"2026-03-25T23:45:19.531798725Z","kind":"stdout","line":""}
+{"ts":"2026-03-25T23:45:19.531800868Z","kind":"stdout","line":"- The already-closed F17 child beads (`mb-2db.7.1`, `mb-2db.7.2`) mean the right move is not more engine/storage scaffolding, but public-contract coverage for the landed behavior."}
+{"ts":"2026-03-25T23:45:19.531803439Z","kind":"stdout","line":"- The cleanest non-overlapping contribution was test-only work in `crates/membrain-core/tests/tier2_item_layout.rs`, since active agents held `compression.rs`, `brain_store.rs`, `types.rs`, and CLI surfaces."}
+{"ts":"2026-03-25T23:45:19.531806010Z","kind":"stdout","line":"- F17 still lacks real data-driven candidate discovery and richer durable integration, but this slice makes the current public contract harder to regress."}
+{"ts":"2026-03-25T23:45:19.531820579Z","kind":"stdout","line":""}
+{"ts":"2026-03-25T23:45:19.531822186Z","kind":"stdout","line":"GROVE_DECISIONS"}
+{"ts":"2026-03-25T23:45:19.531824007Z","kind":"stdout","line":""}
+{"ts":"2026-03-25T23:45:19.531825293Z","kind":"stdout","line":"- Did not redo completed compression engine, BrainStore facade, CLI `compress`, daemon `compress`, or MCP/RPC parity work."}
+{"ts":"2026-03-25T23:45:19.531827007Z","kind":"stdout","line":"- Did not touch files with active exclusive reservations from other agents."}
+{"ts":"2026-03-25T23:45:19.531828399Z","kind":"stdout","line":"- Chose a narrow public API verification slice instead of broadening scope into new persistence or schema-generation behavior."}
+{"ts":"2026-03-25T23:45:19.531829685Z","kind":"stdout","line":""}
+{"ts":"2026-03-25T23:45:19.531830970Z","kind":"stdout","line":"GROVE_WARNINGS"}
+{"ts":"2026-03-25T23:45:19.531833113Z","kind":"stdout","line":""}
+{"ts":"2026-03-25T23:45:19.531834506Z","kind":"stdout","line":"- The current compression engine still uses synthetic candidate clusters in `crates/membrain-core/src/engine/compression.rs:843`."}
+{"ts":"2026-03-25T23:45:19.531835898Z","kind":"stdout","line":"- Compression durability still flows through BrainStore-owned bounded state/layouts rather than a fuller store-backed implementation."}
+{"ts":"2026-03-25T23:45:19.531837291Z","kind":"stdout","line":"- `compression_log` remains a narrow contract surface; current coverage now verifies public filtering behavior, not expanded persistence semantics."}
+{"ts":"2026-03-25T23:45:19.531839005Z","kind":"stdout","line":""}
+{"ts":"2026-03-25T23:45:19.531840290Z","kind":"stdout","line":"GROVE_EXIT: false"}
+{"ts":"2026-03-25T23:45:19.531840290Z","kind":"protocol","event":{"type":"exit","value":false}}
+{"ts":"2026-03-25T23:45:19.894156512Z","kind":"session_ended","exit_code":0}

@@ -200,6 +200,14 @@ pub struct ForgettingAuditRecord {
     pub resulting_archive_state: Option<&'static str>,
     /// Why an archived item was archived, when applicable.
     pub archive_reason: Option<&'static str>,
+    /// Optional pre-mutation strength snapshot normalized to 0..=1000.
+    pub before_strength: Option<u16>,
+    /// Optional post-mutation strength snapshot normalized to 0..=1000.
+    pub after_strength: Option<u16>,
+    /// Optional pre-mutation confidence snapshot normalized to 0..=1000.
+    pub before_confidence: Option<u16>,
+    /// Optional post-mutation confidence snapshot normalized to 0..=1000.
+    pub after_confidence: Option<u16>,
     /// Whether restore returned degraded or partial fidelity.
     pub partial_restore: bool,
     /// Which policy surface produced the action.
@@ -694,6 +702,16 @@ impl MaintenanceOperation for ForgettingRun {
                 prior_archive_state,
                 resulting_archive_state,
                 archive_reason,
+                before_strength: Some(candidate.current_score),
+                after_strength: match action {
+                    ForgettingAction::Archive | ForgettingAction::PolicyDelete => Some(0),
+                    ForgettingAction::Demote { .. } | ForgettingAction::Restore { .. } => {
+                        Some(candidate.current_score)
+                    }
+                    ForgettingAction::Skip => Some(candidate.current_score),
+                },
+                before_confidence: None,
+                after_confidence: None,
                 partial_restore,
                 policy_surface,
                 tick: self.current_tick,
@@ -1043,6 +1061,8 @@ impl ForgettingEngine {
                 )
                 .with_memory_id(record.memory_id)
                 .with_tick(record.tick)
+                .with_strength_delta(record.before_strength, record.after_strength)
+                .with_confidence_delta(record.before_confidence, record.after_confidence)
                 .with_related_run(format!("forgetting-tick-{}", record.tick))
             })
             .collect()
@@ -1633,6 +1653,10 @@ mod tests {
         assert_eq!(rows[0].kind, AuditEventKind::MaintenanceForgettingEvaluated);
         assert_eq!(rows[0].memory_id, Some(MemoryId(1)));
         assert_eq!(rows[0].related_run.as_deref(), Some("forgetting-tick-99"));
+        assert_eq!(rows[0].before_strength, Some(30));
+        assert_eq!(rows[0].after_strength, Some(0));
+        assert_eq!(rows[0].before_confidence, None);
+        assert_eq!(rows[0].after_confidence, None);
         assert!(rows[0].detail.contains("action=archive"));
         assert!(rows[0]
             .detail

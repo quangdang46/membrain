@@ -1,0 +1,36 @@
+{
+  "id": "chk-run-mb-2db.6.1-20260325T213331004-fallback-1",
+  "bead_id": "mb-2db.6.1",
+  "run_id": "run-mb-2db.6.1-20260325T213331004",
+  "session_id": "ses-run-mb-2db.6.1-20260325T213331004",
+  "progress": "Synthetic fallback checkpoint after NoProgress",
+  "next_step": "Resume from the transcript tail, avoid repeating completed setup, and continue with the smallest safe remaining step.",
+  "payload": {
+    "claimed_paths": [],
+    "confidence": 0.25,
+    "context": {
+      "failure_class": "NoProgress",
+      "failure_detail": "session ended with Unknown",
+      "stderr_tail": [],
+      "stdout_tail": [
+        "That background run completed successfully, but it was another filtered-out invocation:",
+        "",
+        "- Output file: `/tmp/claude-1000/-home-quangdang-projects-tools-membrain/bda4eafa-b54f-4133-8d9e-d1580da3dcb5/tasks/bdvk0f34f.output`",
+        "- Result: build/test harness ran, but `0 tests` executed and `720 filtered out`",
+        "",
+        "So it does **not** add a new validation artifact beyond the exact test runs I already completed. The real passing validation remains:",
+        "",
+        "- `cargo test -p membrain-core --lib brain_store::tests::predict_recall_hot_path_reuses_canonical_attention_policy -- --exact`",
+        "- `cargo test -p membrain-core --lib brain_store::tests::predict_recall_hot_path_only_queues_prefetch_for_repeated_warming_recalls -- --exact`",
+        "- `cargo test -p membrain-core --lib brain_store::tests::brain_store_hot_paths_and_dead_zones_follow_bounded_attention_signals -- --exact`",
+        "- `cargo check -p membrain-core --all-targets`"
+      ],
+      "synthetic": true
+    },
+    "next_step": "Resume from the transcript tail, avoid repeating completed setup, and continue with the smallest safe remaining step.",
+    "open_questions": [],
+    "progress": "Synthetic fallback checkpoint after NoProgress"
+  },
+  "saved_at": "2026-03-25T22:07:55.071226734Z",
+  "resume_generation": 1
+}

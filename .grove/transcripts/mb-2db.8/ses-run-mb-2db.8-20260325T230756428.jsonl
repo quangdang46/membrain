@@ -1,0 +1,53 @@
+{"ts":"2026-03-25T23:07:56.457336450Z","kind":"session_started","session_id":"ses-run-mb-2db.8-20260325T230756428"}
+{"ts":"2026-03-25T23:18:31.225700171Z","kind":"stdout","line":"Implemented the F18 follow-on and cleared a compile blocker."}
+{"ts":"2026-03-25T23:18:31.299631791Z","kind":"stdout","line":""}
+{"ts":"2026-03-25T23:18:31.299673513Z","kind":"stdout","line":"Changed:"}
+{"ts":"2026-03-25T23:18:31.299676731Z","kind":"stdout","line":"- `crates/membrain-daemon/src/daemon.rs:604`"}
+{"ts":"2026-03-25T23:18:31.299679305Z","kind":"stdout","line":"  - health now derives `latest_affect_tick` from `tick_end.unwrap_or(tick_start)` so single-point affect rows show a real latest tick."}
+{"ts":"2026-03-25T23:18:31.300003001Z","kind":"stdout","line":"- `crates/membrain-daemon/tests/runtime_share_unshare_parity.rs:243`"}
+{"ts":"2026-03-25T23:18:31.300006969Z","kind":"stdout","line":"  - tightened parity assertions for the affect dashboard summary to verify:"}
+{"ts":"2026-03-25T23:18:31.300009222Z","kind":"stdout","line":"    - `rows=1`"}
+{"ts":"2026-03-25T23:18:31.300011259Z","kind":"stdout","line":"    - `latest_tick=<mood_history row tick_start>`"}
+{"ts":"2026-03-25T23:18:31.300013834Z","kind":"stdout","line":"    - `current_mood=(0.40,0.90)`"}
+{"ts":"2026-03-25T23:18:31.300015979Z","kind":"stdout","line":"    - `/mood_history` linkage"}
+{"ts":"2026-03-25T23:18:31.300018016Z","kind":"stdout","line":"- `crates/membrain-cli/src/main.rs:2648`"}
+{"ts":"2026-03-25T23:18:31.300020162Z","kind":"stdout","line":"  - fixed an existing compile error by removing a duplicate `affect` field in `LocalMemoryRecord`."}
+{"ts":"2026-03-25T23:18:31.300022307Z","kind":"stdout","line":""}
+{"ts":"2026-03-25T23:18:31.300024559Z","kind":"stdout","line":"Validation passed:"}
+{"ts":"2026-03-25T23:18:31.300026704Z","kind":"stdout","line":"- `cargo test -p membrain-daemon runtime_encode_and_mood_history_preserve_emotional_trajectory_contract -- --nocapture`"}
+{"ts":"2026-03-25T23:18:31.300028957Z","kind":"stdout","line":"- `cargo test -p membrain-daemon runtime_encode_records_affect_history_and_serves_mood_history -- --nocapture`"}
+{"ts":"2026-03-25T23:18:31.300031531Z","kind":"stdout","line":"- `cargo test -p membrain-cli cli_mood_history_json_surfaces_emotional_trajectory_rows -- --nocapture`"}
+{"ts":"2026-03-25T23:18:31.300033676Z","kind":"stdout","line":"- `cargo check --all-targets`"}
+{"ts":"2026-03-25T23:18:31.300035714Z","kind":"stdout","line":""}
+{"ts":"2026-03-25T23:18:31.300037859Z","kind":"stdout","line":"Remaining signal:"}
+{"ts":"2026-03-25T23:18:31.300039897Z","kind":"stdout","line":"- `crates/membrain-cli/src/main.rs:2196` still has a pre-existing unused `route_family` warning."}
+{"ts":"2026-03-25T23:18:31.300042042Z","kind":"stdout","line":""}
+{"ts":"2026-03-25T23:18:31.300043972Z","kind":"stdout","line":"GROVE_RESULT: success  "}
+{"ts":"2026-03-25T23:18:31.300043972Z","kind":"protocol","event":{"type":"result","summary":"success"}}
+{"ts":"2026-03-25T23:18:31.307522863Z","kind":"stdout","line":"GROVE_ARTIFACTS:"}
+{"ts":"2026-03-25T23:18:31.307522863Z","kind":"protocol","event":{"type":"artifacts","items":[]}}
+{"ts":"2026-03-25T23:18:31.307800010Z","kind":"stdout","line":"- `crates/membrain-daemon/src/daemon.rs`"}
+{"ts":"2026-03-25T23:18:31.307800010Z","kind":"protocol","event":{"type":"artifacts","items":["`crates/membrain-daemon/src/daemon.rs`"]}}
+{"ts":"2026-03-25T23:18:31.307810628Z","kind":"stdout","line":"- `crates/membrain-daemon/tests/runtime_share_unshare_parity.rs`"}
+{"ts":"2026-03-25T23:18:31.307810628Z","kind":"protocol","event":{"type":"artifacts","items":["`crates/membrain-daemon/tests/runtime_share_unshare_parity.rs`"]}}
+{"ts":"2026-03-25T23:18:31.307817278Z","kind":"stdout","line":"- `crates/membrain-cli/src/main.rs`"}
+{"ts":"2026-03-25T23:18:31.307817278Z","kind":"protocol","event":{"type":"artifacts","items":["`crates/membrain-cli/src/main.rs`"]}}
+{"ts":"2026-03-25T23:18:31.307824464Z","kind":"stdout","line":"GROVE_LESSONS:"}
+{"ts":"2026-03-25T23:18:31.307824464Z","kind":"protocol","event":{"type":"lessons","items":[]}}
+{"ts":"2026-03-25T23:18:31.307829827Z","kind":"stdout","line":"- The daemon health card was already wired to affect history; the remaining bug was that single-point rows only populated `tick_start`, so using `tick_end` hid the latest tick."}
+{"ts":"2026-03-25T23:18:31.307829827Z","kind":"protocol","event":{"type":"lessons","items":["The daemon health card was already wired to affect history; the remaining bug was that single-point rows only populated `tick_start`, so using `tick_end` hid the latest tick."]}}
+{"ts":"2026-03-25T23:18:31.307880237Z","kind":"stdout","line":"- Tightening the external parity test against the actual `mood_history` row makes the health summary contract inspectable without hardcoding a specific runtime tick."}
+{"ts":"2026-03-25T23:18:31.307880237Z","kind":"protocol","event":{"type":"lessons","items":["Tightening the external parity test against the actual `mood_history` row makes the health summary contract inspectable without hardcoding a specific runtime tick."]}}
+{"ts":"2026-03-25T23:18:31.307885170Z","kind":"stdout","line":"GROVE_DECISIONS:"}
+{"ts":"2026-03-25T23:18:31.307885170Z","kind":"protocol","event":{"type":"decision","items":[]}}
+{"ts":"2026-03-25T23:18:31.307894609Z","kind":"stdout","line":"- Kept scope to the smallest safe remaining F18 step in the daemon health/runtime path instead of expanding into full durable `emotional_timeline` persistence."}
+{"ts":"2026-03-25T23:18:31.307894609Z","kind":"protocol","event":{"type":"decision","items":["Kept scope to the smallest safe remaining F18 step in the daemon health/runtime path instead of expanding into full durable `emotional_timeline` persistence."]}}
+{"ts":"2026-03-25T23:18:31.307923675Z","kind":"stdout","line":"- Fixed the unrelated-but-blocking CLI duplicate-field compile error because `cargo check --all-targets` is required after changes."}
+{"ts":"2026-03-25T23:18:31.307923675Z","kind":"protocol","event":{"type":"decision","items":["Fixed the unrelated-but-blocking CLI duplicate-field compile error because `cargo check --all-targets` is required after changes."]}}
+{"ts":"2026-03-25T23:18:31.308000684Z","kind":"stdout","line":"GROVE_WARNINGS:"}
+{"ts":"2026-03-25T23:18:31.308000684Z","kind":"protocol","event":{"type":"warning","items":[]}}
+{"ts":"2026-03-25T23:18:31.308005618Z","kind":"stdout","line":"- Full compile is green, but there is still a pre-existing unused-variable warning at `crates/membrain-cli/src/main.rs:2196`."}
+{"ts":"2026-03-25T23:18:31.308005618Z","kind":"protocol","event":{"type":"warning","items":["Full compile is green, but there is still a pre-existing unused-variable warning at `crates/membrain-cli/src/main.rs:2196`."]}}
+{"ts":"2026-03-25T23:18:31.308010337Z","kind":"stdout","line":"GROVE_EXIT: false"}
+{"ts":"2026-03-25T23:18:31.308010337Z","kind":"protocol","event":{"type":"exit","value":false}}
+{"ts":"2026-03-25T23:18:31.789566823Z","kind":"session_ended","exit_code":0}

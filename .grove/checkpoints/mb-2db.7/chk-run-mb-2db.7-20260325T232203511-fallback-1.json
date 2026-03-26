@@ -1,0 +1,45 @@
+{
+  "id": "chk-run-mb-2db.7-20260325T232203511-fallback-1",
+  "bead_id": "mb-2db.7",
+  "run_id": "run-mb-2db.7-20260325T232203511",
+  "session_id": "ses-run-mb-2db.7-20260325T232203511",
+  "progress": "Synthetic fallback checkpoint after NoProgress",
+  "next_step": "Resume from the transcript tail, avoid repeating completed setup, and continue with the smallest safe remaining step.",
+  "payload": {
+    "claimed_paths": [],
+    "confidence": 0.25,
+    "context": {
+      "failure_class": "NoProgress",
+      "failure_detail": "session ended with Unknown",
+      "stderr_tail": [],
+      "stdout_tail": [
+        "  - storage-layer persistence changes",
+        "  - docs updates",
+        "  - MCP execution bridge work beyond request contract parity",
+        "",
+        "GROVE_WARNINGS",
+        "",
+        "- `schemas(top_n?)` is now wired in daemon transport, but it currently uses default compression policy rather than surfacing CLI’s extra tuning knobs.",
+        "- Runtime `schemas` preview count is bounded by actual eligible clusters, not by requested `top_n`.",
+        "- Larger F17 follow-ons still remain outside this slice, especially real candidate discovery and true durable persistence beyond facade-level state.",
+        "",
+        "Changed references:",
+        "- `crates/membrain-daemon/src/mcp.rs:155`",
+        "- `crates/membrain-daemon/src/mcp.rs:722`",
+        "- `crates/membrain-daemon/src/rpc.rs:1162`",
+        "- `crates/membrain-daemon/src/rpc.rs:1600`",
+        "- `crates/membrain-daemon/src/daemon.rs:42`",
+        "- `crates/membrain-daemon/src/daemon.rs:2307`",
+        "- `crates/membrain-daemon/src/daemon.rs:3588`",
+        "- `crates/membrain-daemon/src/daemon.rs:6997`",
+        ""
+      ],
+      "synthetic": true
+    },
+    "next_step": "Resume from the transcript tail, avoid repeating completed setup, and continue with the smallest safe remaining step.",
+    "open_questions": [],
+    "progress": "Synthetic fallback checkpoint after NoProgress"
+  },
+  "saved_at": "2026-03-25T23:35:07.042810258Z",
+  "resume_generation": 1
+}

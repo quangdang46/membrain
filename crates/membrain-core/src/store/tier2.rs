@@ -5,8 +5,8 @@ use crate::observability::{Tier2PrefilterOutcome, Tier2PrefilterTrace};
 use crate::policy::SharingVisibility;
 use crate::store::Tier2StoreApi;
 use crate::types::{
-    CanonicalMemoryType, FastPathRouteFamily, LandmarkMetadata, MemoryId, NormalizedMemoryEnvelope,
-    SessionId,
+    AffectSignals, CanonicalMemoryType, CompressionMetadata, FastPathRouteFamily, LandmarkMetadata,
+    MemoryId, NormalizedMemoryEnvelope, SessionId,
 };
 
 /// Durable Tier2 indexed store boundary owned by `membrain-core`.
@@ -39,6 +39,7 @@ impl Tier2Store {
                 fingerprint,
                 normalization_generation: envelope.normalization_generation,
                 payload_size_bytes: envelope.payload_size_bytes,
+                affect: envelope.affect,
                 landmark: envelope.landmark.clone(),
                 visibility: envelope.sharing.visibility,
                 workspace_id: envelope.sharing.workspace_id.clone(),
@@ -51,6 +52,7 @@ impl Tier2Store {
                 ),
                 has_causal_parents: envelope.has_causal_parents,
                 has_causal_children: envelope.has_causal_children,
+                compression: envelope.compression.clone(),
                 confidence_inputs,
                 confidence_output,
                 payload_locator: payload_locator.clone(),
@@ -73,7 +75,7 @@ impl Tier2StoreApi for Tier2Store {
 }
 
 /// Durable Tier2 item split into prefilter-safe metadata plus heavyweight payload storage.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct Tier2DurableItemLayout {
     pub metadata: Tier2MetadataRecord,
     pub payload: Tier2PayloadRecord,
@@ -101,6 +103,7 @@ impl Tier2DurableItemLayout {
             lease: self.metadata.lease,
             has_causal_parents: self.metadata.has_causal_parents,
             has_causal_children: self.metadata.has_causal_children,
+            compression: &self.metadata.compression,
             confidence_inputs: self.metadata.confidence_inputs.as_ref(),
             confidence_output: self.metadata.confidence_output.as_ref(),
             payload_locator: self.metadata.payload_locator.clone(),
@@ -125,6 +128,7 @@ impl Tier2DurableItemLayout {
             lease: self.metadata.lease,
             has_causal_parents: self.metadata.has_causal_parents,
             has_causal_children: self.metadata.has_causal_children,
+            compression: &self.metadata.compression,
             confidence_inputs: self.metadata.confidence_inputs.as_ref(),
             confidence_output: self.metadata.confidence_output.as_ref(),
             payload_locator: self.metadata.payload_locator.clone(),
@@ -205,7 +209,7 @@ impl Tier2PayloadLocator {
 }
 
 /// Durable Tier2 metadata row kept hot-path-safe for filtering and recall planning.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct Tier2MetadataRecord {
     pub namespace: NamespaceId,
     pub memory_id: MemoryId,
@@ -216,6 +220,7 @@ pub struct Tier2MetadataRecord {
     pub fingerprint: u64,
     pub normalization_generation: &'static str,
     pub payload_size_bytes: usize,
+    pub affect: Option<AffectSignals>,
     pub landmark: LandmarkMetadata,
     pub visibility: SharingVisibility,
     pub workspace_id: Option<WorkspaceId>,
@@ -225,6 +230,7 @@ pub struct Tier2MetadataRecord {
     pub lease: LeaseMetadata,
     pub has_causal_parents: bool,
     pub has_causal_children: bool,
+    pub compression: CompressionMetadata,
     pub confidence_inputs: Option<ConfidenceInputs>,
     pub confidence_output: Option<ConfidenceOutput>,
     pub payload_locator: Tier2PayloadLocator,
@@ -315,6 +321,7 @@ pub struct Tier2PrefilterView<'a> {
     pub lease: LeaseMetadata,
     pub has_causal_parents: bool,
     pub has_causal_children: bool,
+    pub compression: &'a CompressionMetadata,
     pub confidence_inputs: Option<&'a ConfidenceInputs>,
     pub confidence_output: Option<&'a ConfidenceOutput>,
     pub payload_locator: Tier2PayloadLocator,
@@ -370,6 +377,21 @@ impl Tier2PrefilterView<'_> {
     pub fn landmark_detection_reason(&self) -> Option<&str> {
         self.landmark.detection_reason.as_deref()
     }
+
+    /// Returns the schema memory this row was compressed into, when recorded.
+    pub const fn compressed_into(&self) -> Option<MemoryId> {
+        self.compression.compressed_into
+    }
+
+    /// Returns the logical tick when compression lineage was recorded.
+    pub const fn compression_tick(&self) -> Option<u64> {
+        self.compression.compression_tick
+    }
+
+    /// Returns the source members distilled into this schema row.
+    pub fn compression_source_memory_ids(&self) -> &[MemoryId] {
+        &self.compression.source_memory_ids
+    }
 }
 
 /// Borrowed deterministic metadata key used by Tier2 filter/index maintenance surfaces.
@@ -390,6 +412,7 @@ pub struct Tier2MetadataIndexKey<'a> {
     pub lease: LeaseMetadata,
     pub has_causal_parents: bool,
     pub has_causal_children: bool,
+    pub compression: &'a CompressionMetadata,
     pub confidence_inputs: Option<&'a ConfidenceInputs>,
     pub confidence_output: Option<&'a ConfidenceOutput>,
     pub payload_locator: Tier2PayloadLocator,
@@ -444,5 +467,20 @@ impl Tier2MetadataIndexKey<'_> {
     /// Returns the inspectable detection reason preserved on the metadata-only index key.
     pub fn landmark_detection_reason(&self) -> Option<&str> {
         self.landmark.detection_reason.as_deref()
+    }
+
+    /// Returns the schema memory this row was compressed into, when recorded.
+    pub const fn compressed_into(&self) -> Option<MemoryId> {
+        self.compression.compressed_into
+    }
+
+    /// Returns the logical tick when compression lineage was recorded.
+    pub const fn compression_tick(&self) -> Option<u64> {
+        self.compression.compression_tick
+    }
+
+    /// Returns the source members distilled into this schema row.
+    pub fn compression_source_memory_ids(&self) -> &[MemoryId] {
+        &self.compression.source_memory_ids
     }
 }

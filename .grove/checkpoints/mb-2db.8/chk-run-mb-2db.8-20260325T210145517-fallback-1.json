@@ -1,0 +1,45 @@
+{
+  "id": "chk-run-mb-2db.8-20260325T210145517-fallback-1",
+  "bead_id": "mb-2db.8",
+  "run_id": "run-mb-2db.8-20260325T210145517",
+  "session_id": "ses-run-mb-2db.8-20260325T210145517",
+  "progress": "Synthetic fallback checkpoint after NoProgress",
+  "next_step": "Resume from the transcript tail, avoid repeating completed setup, and continue with the smallest safe remaining step.",
+  "payload": {
+    "claimed_paths": [],
+    "confidence": 0.25,
+    "context": {
+      "failure_class": "NoProgress",
+      "failure_detail": "session ended with Unknown",
+      "stderr_tail": [],
+      "stdout_tail": [
+        "  - added normalization test proving `mood_congruent` survives request normalization",
+        "- `crates/membrain-core/src/engine/ranking.rs`",
+        "  - added `RankingProfile::mood_congruent()`",
+        "  - taught `fuse_scores(...)` to emit stable profile name `\"mood_congruent\"`",
+        "  - added focused test for profile-name stability",
+        "",
+        "Validation:",
+        "- `cargo test -p membrain-daemon normalize_recall_contract_preserves_mood_congruent_opt_in -- --nocapture`",
+        "- `cargo test -p membrain-core mood_congruent_profile_name_is_stable -- --nocapture`",
+        "- `cargo test -p membrain-core mood_history_returns_recorded_affect_trajectory_rows -- --nocapture`",
+        "- `cargo check -p membrain-daemon -p membrain-core`",
+        "",
+        "Key refs:",
+        "- `crates/membrain-daemon/src/daemon.rs:173`",
+        "- `crates/membrain-daemon/src/daemon.rs:3212`",
+        "- `crates/membrain-daemon/src/daemon.rs:3245`",
+        "- `crates/membrain-daemon/src/daemon.rs:4254`",
+        "- `crates/membrain-daemon/src/daemon.rs:4566`",
+        "- `crates/membrain-core/src/engine/ranking.rs:141`",
+        ""
+      ],
+      "synthetic": true
+    },
+    "next_step": "Resume from the transcript tail, avoid repeating completed setup, and continue with the smallest safe remaining step.",
+    "open_questions": [],
+    "progress": "Synthetic fallback checkpoint after NoProgress"
+  },
+  "saved_at": "2026-03-25T21:25:29.900905227Z",
+  "resume_generation": 1
+}

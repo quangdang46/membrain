@@ -1,0 +1,45 @@
+{
+  "id": "chk-run-mb-2db.8-20260325T231832313-fallback-1",
+  "bead_id": "mb-2db.8",
+  "run_id": "run-mb-2db.8-20260325T231832313",
+  "session_id": "ses-run-mb-2db.8-20260325T231832313",
+  "progress": "Synthetic fallback checkpoint after NoProgress",
+  "next_step": "Resume from the transcript tail, avoid repeating completed setup, and continue with the smallest safe remaining step.",
+  "payload": {
+    "claimed_paths": [],
+    "confidence": 0.25,
+    "context": {
+      "failure_class": "NoProgress",
+      "failure_detail": "session ended with Unknown",
+      "stderr_tail": [],
+      "stdout_tail": [
+        "- Added `membrain mood` for current bounded mood snapshot in `crates/membrain-cli/src/main.rs`",
+        "- Added `membrain mood --history` as the history view, reusing the existing trajectory path in `crates/membrain-cli/src/main.rs`",
+        "- Added a focused snapshot regression test in `crates/membrain-cli/tests/cli_end_to_end.rs`",
+        "",
+        "Validated:",
+        "- `cargo test -p membrain-cli cli_mood_json_surfaces_current_snapshot -- --nocapture`",
+        "- `cargo test -p membrain-cli cli_mood_history_json_surfaces_emotional_trajectory_rows -- --nocapture`",
+        "- `cargo check -p membrain-cli --all-targets`",
+        "",
+        "Notes:",
+        "- Existing `mood-history` handling remains intact.",
+        "- I did not broaden scope into core recall centralization or trajectory aggregation; those still look like the main remaining F18 follow-ups.",
+        "",
+        "Key locations:",
+        "- `crates/membrain-cli/src/main.rs:555`",
+        "- `crates/membrain-cli/src/main.rs:784`",
+        "- `crates/membrain-cli/src/main.rs:4812`",
+        "- `crates/membrain-cli/src/main.rs:6684`",
+        "- `crates/membrain-cli/tests/cli_end_to_end.rs:584`",
+        ""
+      ],
+      "synthetic": true
+    },
+    "next_step": "Resume from the transcript tail, avoid repeating completed setup, and continue with the smallest safe remaining step.",
+    "open_questions": [],
+    "progress": "Synthetic fallback checkpoint after NoProgress"
+  },
+  "saved_at": "2026-03-25T23:26:38.507816827Z",
+  "resume_generation": 1
+}

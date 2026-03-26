@@ -1,0 +1,45 @@
+{
+  "id": "chk-run-mb-1ng.11-20260325T160528347-fallback-1",
+  "bead_id": "mb-1ng.11",
+  "run_id": "run-mb-1ng.11-20260325T160528347",
+  "session_id": "ses-run-mb-1ng.11-20260325T160528347",
+  "progress": "Synthetic fallback checkpoint after NoProgress",
+  "next_step": "Resume from the transcript tail, avoid repeating completed setup, and continue with the smallest safe remaining step.",
+  "payload": {
+    "claimed_paths": [],
+    "confidence": 0.25,
+    "context": {
+      "failure_class": "NoProgress",
+      "failure_detail": "session ended with Unknown",
+      "stderr_tail": [],
+      "stdout_tail": [
+        "- Validation is currently blocked by unrelated compile drift outside this bead’s surface.",
+        "",
+        "GROVE_DECISIONS",
+        "",
+        "- Kept this pass bounded to daemon/MCP parity only.",
+        "- Did not expand scope into unrelated `health.rs` compile failures.",
+        "- Preserved the projection-vs-authority contract: daemon outputs still expose working-state as projection and durable memory as authority.",
+        "",
+        "GROVE_WARNINGS",
+        "",
+        "Targeted validation is blocked by unrelated existing compile errors in:",
+        "- `crates/membrain-core/src/health.rs:205`",
+        "- `crates/membrain-core/src/health.rs:241`",
+        "",
+        "Current blocker:",
+        "- missing fields in `AttentionHotspot` initializer",
+        "- missing fields in `AttentionAggregateReport` initializer",
+        "",
+        "I did not take that unrelated lane.",
+        ""
+      ],
+      "synthetic": true
+    },
+    "next_step": "Resume from the transcript tail, avoid repeating completed setup, and continue with the smallest safe remaining step.",
+    "open_questions": [],
+    "progress": "Synthetic fallback checkpoint after NoProgress"
+  },
+  "saved_at": "2026-03-25T16:18:07.872905689Z",
+  "resume_generation": 1
+}

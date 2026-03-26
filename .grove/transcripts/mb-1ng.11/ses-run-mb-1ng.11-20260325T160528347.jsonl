@@ -1,0 +1,54 @@
+{"ts":"2026-03-25T16:05:28.398627564Z","kind":"session_started","session_id":"ses-run-mb-1ng.11-20260325T160528347"}
+{"ts":"2026-03-25T16:18:08.810559520Z","kind":"stdout","line":"GROVE_RESULT"}
+{"ts":"2026-03-25T16:18:08.959505471Z","kind":"stdout","line":""}
+{"ts":"2026-03-25T16:18:08.959590672Z","kind":"stdout","line":"Resumed `mb-1ng.11` from the latest checkpoint and landed the smallest remaining daemon/MCP parity slice for working-state blackboard surfaces."}
+{"ts":"2026-03-25T16:18:08.959739268Z","kind":"stdout","line":""}
+{"ts":"2026-03-25T16:18:08.959745438Z","kind":"stdout","line":"- added daemon JSON-RPC request parsing for:"}
+{"ts":"2026-03-25T16:18:08.959812556Z","kind":"stdout","line":"  - `goal_pin`"}
+{"ts":"2026-03-25T16:18:08.959817662Z","kind":"stdout","line":"  - `goal_dismiss`"}
+{"ts":"2026-03-25T16:18:08.959824682Z","kind":"stdout","line":"  - `goal_snapshot`"}
+{"ts":"2026-03-25T16:18:08.959828830Z","kind":"stdout","line":"- added daemon runtime handlers for those surfaces"}
+{"ts":"2026-03-25T16:18:08.959834361Z","kind":"stdout","line":"- added MCP request envelope/types for those same goal methods"}
+{"ts":"2026-03-25T16:18:08.959841488Z","kind":"stdout","line":"- added daemon runtime parity coverage for pin/dismiss/snapshot projection behavior"}
+{"ts":"2026-03-25T16:18:08.959845211Z","kind":"stdout","line":""}
+{"ts":"2026-03-25T16:18:08.959849253Z","kind":"stdout","line":"GROVE_ARTIFACTS"}
+{"ts":"2026-03-25T16:18:08.959873718Z","kind":"stdout","line":""}
+{"ts":"2026-03-25T16:18:08.959878079Z","kind":"stdout","line":"Updated:"}
+{"ts":"2026-03-25T16:18:08.959882440Z","kind":"stdout","line":"- `crates/membrain-daemon/src/rpc.rs`"}
+{"ts":"2026-03-25T16:18:08.959886269Z","kind":"stdout","line":"- `crates/membrain-daemon/src/daemon.rs`"}
+{"ts":"2026-03-25T16:18:08.959891056Z","kind":"stdout","line":"- `crates/membrain-daemon/src/mcp.rs`"}
+{"ts":"2026-03-25T16:18:08.959897863Z","kind":"stdout","line":"- `crates/membrain-daemon/tests/runtime_doctor_parity.rs`"}
+{"ts":"2026-03-25T16:18:08.959901905Z","kind":"stdout","line":""}
+{"ts":"2026-03-25T16:18:08.959907543Z","kind":"stdout","line":"Key code locations:"}
+{"ts":"2026-03-25T16:18:08.959911691Z","kind":"stdout","line":"- `crates/membrain-daemon/src/rpc.rs`"}
+{"ts":"2026-03-25T16:18:08.959916159Z","kind":"stdout","line":"- `crates/membrain-daemon/src/daemon.rs`"}
+{"ts":"2026-03-25T16:18:08.959919882Z","kind":"stdout","line":"- `crates/membrain-daemon/src/mcp.rs`"}
+{"ts":"2026-03-25T16:18:08.959956047Z","kind":"stdout","line":"- `crates/membrain-daemon/tests/runtime_doctor_parity.rs`"}
+{"ts":"2026-03-25T16:18:08.959962003Z","kind":"stdout","line":""}
+{"ts":"2026-03-25T16:18:08.959967322Z","kind":"stdout","line":"GROVE_LESSONS"}
+{"ts":"2026-03-25T16:18:08.959974555Z","kind":"stdout","line":""}
+{"ts":"2026-03-25T16:18:08.959978171Z","kind":"stdout","line":"- The prior checkpoint already completed core types and CLI parity, so the smallest safe continuation was daemon/MCP parity only."}
+{"ts":"2026-03-25T16:18:08.959985404Z","kind":"stdout","line":"- The clean remaining gap was exactly blackboard pin/dismiss/snapshot; state/pause/resume/abandon were already present."}
+{"ts":"2026-03-25T16:18:08.959994552Z","kind":"stdout","line":"- Validation is currently blocked by unrelated compile drift outside this bead’s surface."}
+{"ts":"2026-03-25T16:18:08.960002955Z","kind":"stdout","line":""}
+{"ts":"2026-03-25T16:18:08.960008167Z","kind":"stdout","line":"GROVE_DECISIONS"}
+{"ts":"2026-03-25T16:18:08.960023165Z","kind":"stdout","line":""}
+{"ts":"2026-03-25T16:18:08.960027526Z","kind":"stdout","line":"- Kept this pass bounded to daemon/MCP parity only."}
+{"ts":"2026-03-25T16:18:08.960033057Z","kind":"stdout","line":"- Did not expand scope into unrelated `health.rs` compile failures."}
+{"ts":"2026-03-25T16:18:08.960037312Z","kind":"stdout","line":"- Preserved the projection-vs-authority contract: daemon outputs still expose working-state as projection and durable memory as authority."}
+{"ts":"2026-03-25T16:18:08.960043694Z","kind":"stdout","line":""}
+{"ts":"2026-03-25T16:18:08.960047630Z","kind":"stdout","line":"GROVE_WARNINGS"}
+{"ts":"2026-03-25T16:18:08.960176974Z","kind":"stdout","line":""}
+{"ts":"2026-03-25T16:18:08.960182717Z","kind":"stdout","line":"Targeted validation is blocked by unrelated existing compile errors in:"}
+{"ts":"2026-03-25T16:18:08.960185483Z","kind":"stdout","line":"- `crates/membrain-core/src/health.rs:205`"}
+{"ts":"2026-03-25T16:18:08.960188249Z","kind":"stdout","line":"- `crates/membrain-core/src/health.rs:241`"}
+{"ts":"2026-03-25T16:18:08.960191971Z","kind":"stdout","line":""}
+{"ts":"2026-03-25T16:18:08.960193673Z","kind":"stdout","line":"Current blocker:"}
+{"ts":"2026-03-25T16:18:08.960197396Z","kind":"stdout","line":"- missing fields in `AttentionHotspot` initializer"}
+{"ts":"2026-03-25T16:18:08.960202076Z","kind":"stdout","line":"- missing fields in `AttentionAggregateReport` initializer"}
+{"ts":"2026-03-25T16:18:08.960205906Z","kind":"stdout","line":""}
+{"ts":"2026-03-25T16:18:08.960208778Z","kind":"stdout","line":"I did not take that unrelated lane."}
+{"ts":"2026-03-25T16:18:08.960211969Z","kind":"stdout","line":""}
+{"ts":"2026-03-25T16:18:08.960215053Z","kind":"stdout","line":"GROVE_EXIT: false"}
+{"ts":"2026-03-25T16:18:08.960215053Z","kind":"protocol","event":{"type":"exit","value":false}}
+{"ts":"2026-03-25T16:18:07.872905689Z","kind":"session_ended","exit_code":0}

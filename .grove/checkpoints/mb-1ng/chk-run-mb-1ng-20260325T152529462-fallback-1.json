@@ -1,0 +1,45 @@
+{
+  "id": "chk-run-mb-1ng-20260325T152529462-fallback-1",
+  "bead_id": "mb-1ng",
+  "run_id": "run-mb-1ng-20260325T152529462",
+  "session_id": "ses-run-mb-1ng-20260325T152529462",
+  "progress": "Synthetic fallback checkpoint after NoProgress",
+  "next_step": "Resume from the transcript tail, avoid repeating completed setup, and continue with the smallest safe remaining step.",
+  "payload": {
+    "claimed_paths": [],
+    "confidence": 0.25,
+    "context": {
+      "failure_class": "NoProgress",
+      "failure_detail": "session ended with Unknown",
+      "stderr_tail": [],
+      "stdout_tail": [
+        "- The cleanest missing product surface is the CLI `goal show|pause|resume|abandon` contract.",
+        "- The daemon/core parity path is real, but currently overlaps with active reservations.",
+        "",
+        "GROVE_DECISIONS",
+        "- I did not edit any files yet because the likely implementation targets are actively reserved by other agents.",
+        "- I narrowed the remaining work to:",
+        "  1. daemon/core working-state parity, or",
+        "  2. missing CLI goal surface",
+        "",
+        "GROVE_WARNINGS",
+        "- Active reservation conflicts currently block safe edits on:",
+        "  - `crates/membrain-daemon/src/daemon.rs`",
+        "  - `crates/membrain-core/src/brain_store.rs`",
+        "  - `crates/membrain-cli/src/main.rs`",
+        "- I already contacted the holders to avoid collision.",
+        "",
+        "",
+        "Next smallest safe step once a reservation clears:",
+        "- implement the documented CLI goal surface in `crates/membrain-cli/src/main.rs`, or",
+        "- wire daemon goal handlers to canonical core working-state methods if those holders release first."
+      ],
+      "synthetic": true
+    },
+    "next_step": "Resume from the transcript tail, avoid repeating completed setup, and continue with the smallest safe remaining step.",
+    "open_questions": [],
+    "progress": "Synthetic fallback checkpoint after NoProgress"
+  },
+  "saved_at": "2026-03-25T15:33:59.724879682Z",
+  "resume_generation": 1
+}

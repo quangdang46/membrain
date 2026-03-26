@@ -7,7 +7,9 @@ use crate::api::{FieldPresence, NamespaceId, PolicyFilterSummary};
 use crate::brain_store::PreparedTier2Layout;
 use crate::engine::contradiction::{ContradictionExplain, ResolutionState};
 use crate::engine::ranking::{RankingExplain, RankingResult, RerankMetadata};
-use crate::engine::recall::{RecallPlan, RecallPlanKind, RecallTraceStage};
+use crate::engine::recall::{
+    AutoRouteDecision, PredictivePrerollDecision, RecallPlan, RecallPlanKind, RecallTraceStage,
+};
 use crate::engine::retrieval_planner::RetrievalPlanTrace;
 use crate::graph::{EntityId, RelationKind};
 use crate::observability::OutcomeClass;
@@ -169,6 +171,8 @@ pub struct RetrievalResult {
     pub score_summary: ScoreSummary,
     /// Full ranking explain payload.
     pub ranking_explain: RankingExplain,
+    /// Whether opt-in mood-congruent ranking participated for this candidate.
+    pub mood_boost_applied: bool,
     /// Contradiction explanations attached to this result.
     pub contradiction_explains: Vec<ContradictionExplain>,
     /// Conflict-state summary required by inspect/explain surfaces.
@@ -620,6 +624,22 @@ impl RetrievalResultSet {
 }
 
 impl RetrievalExplain {
+    fn predictive_fallback_behavior(plan: &RecallPlan) -> &'static str {
+        if plan.trace.predictive_preroll_triggered {
+            if plan.route_summary.routes_to_deeper_tiers {
+                "predictive_prefetch_then_deeper_route"
+            } else {
+                "predictive_prefetch_only"
+            }
+        } else if matches!(plan.kind, RecallPlanKind::Tier2ExactThenTier3Fallback) {
+            "predictive_bypassed_then_tier3_fallback"
+        } else if plan.route_summary.routes_to_deeper_tiers {
+            "predictive_bypassed_then_deeper_route"
+        } else {
+            "predictive_bypassed_without_fallback"
+        }
+    }
+
     /// Builds an explain payload from a recall plan and ranking profile name.
     pub fn from_plan(plan: &RecallPlan, ranking_profile: &'static str) -> Self {
         let tiers_consulted: Vec<String> = plan
@@ -638,7 +658,7 @@ impl RetrievalExplain {
             })
             .collect();
 
-        Self {
+        let mut explain = Self {
             recall_plan: plan.kind,
             route_reason: plan.route_summary.reason.to_string(),
             tiers_consulted,
@@ -651,7 +671,116 @@ impl RetrievalExplain {
             historical_context: None,
             query_by_example: None,
             result_reasons: Vec::new(),
+        };
+        explain.result_reasons.push(ResultReason {
+            memory_id: None,
+            reason_code: if plan.trace.predictive_preroll_triggered {
+                "predictive_preroll_triggered".to_string()
+            } else {
+                "predictive_preroll_bypassed".to_string()
+            },
+            detail: if plan.trace.predictive_preroll_triggered {
+                "predictive pre-recall triggered and remained bounded before retrieval".to_string()
+            } else {
+                format!(
+                    "predictive pre-recall was bypassed because {}",
+                    plan.trace.predictive_preroll_skip_reason
+                )
+            },
+        });
+        explain.result_reasons.push(ResultReason {
+            memory_id: None,
+            reason_code: "predictive_fallback_behavior".to_string(),
+            detail: format!(
+                "predictive routing resolved with fallback behavior {}",
+                Self::predictive_fallback_behavior(plan)
+            ),
+        });
+        explain
+    }
+
+    /// Builds an explain payload from a full auto-routing decision, preserving override and planner facts.
+    pub fn from_auto_route(decision: &AutoRouteDecision) -> Self {
+        let mut explain = Self::from_plan(&decision.plan, decision.explain.ranking_profile);
+        explain.result_reasons.push(ResultReason {
+            memory_id: None,
+            reason_code: "intent_classification".to_string(),
+            detail: format!(
+                "intent={} confidence={:.2} query_path={} request={} plan={}",
+                decision.explain.intent,
+                decision.explain.confidence,
+                decision.explain.query_path,
+                decision.explain.request_summary,
+                decision.explain.selected_plan,
+            ),
+        });
+        explain.result_reasons.push(ResultReason {
+            memory_id: None,
+            reason_code: if decision.explain.override_applied {
+                "route_override_applied".to_string()
+            } else {
+                "route_override_not_applied".to_string()
+            },
+            detail: if let Some(override_mode) = decision.explain.override_mode {
+                format!("manual override selected {}", override_mode)
+            } else {
+                "auto-routing used classified intent without manual override".to_string()
+            },
+        });
+        explain
+    }
+
+    /// Attaches the canonical predictive explain artifact derived from bounded intent routing.
+    pub fn set_predictive_preroll_decision(&mut self, decision: PredictivePrerollDecision) {
+        if let Some(reason) = self
+            .result_reasons
+            .iter_mut()
+            .find(|reason| reason.reason_code == "predictive_preroll_triggered")
+        {
+            let signal = decision
+                .signal
+                .map(|signal| signal.as_str())
+                .unwrap_or("unknown_signal");
+            reason.detail = format!(
+                "predictive pre-recall triggered via {signal} and remained bounded before retrieval"
+            );
+            return;
         }
+
+        if let Some(reason) = self
+            .result_reasons
+            .iter_mut()
+            .find(|reason| reason.reason_code == "predictive_preroll_bypassed")
+        {
+            reason.detail = format!(
+                "predictive pre-recall was bypassed because {}",
+                decision.skip_reason
+            );
+            return;
+        }
+
+        self.result_reasons.push(ResultReason {
+            memory_id: None,
+            reason_code: if decision.should_trigger {
+                "predictive_preroll_triggered".to_string()
+            } else {
+                "predictive_preroll_bypassed".to_string()
+            },
+            detail: if decision.should_trigger {
+                let signal = decision
+                    .signal
+                    .map(|signal| signal.as_str())
+                    .unwrap_or("unknown_signal");
+                format!(
+                    "predictive pre-recall triggered via {signal} and remained bounded before retrieval"
+                )
+            } else {
+                format!(
+                    "predictive pre-recall was bypassed because {}",
+                    decision.skip_reason
+                )
+            },
+        });
     }
 
     /// Attaches canonical historical explain artifacts derived from the planner trace.
@@ -895,6 +1024,7 @@ impl ResultBuilder {
             score: ranking_result.final_score,
             score_summary: ScoreSummary::from_ranking_explain(&ranking_explain),
             ranking_explain,
+            mood_boost_applied: ranking_result.profile_name == "mood_congruent",
             contradiction_explains: ranking_result.contradiction_explains.clone(),
             conflict_markers: ConflictMarkers {
                 conflict_state: ranking_result
@@ -1022,6 +1152,7 @@ impl ResultBuilder {
             score: ranking_result.final_score,
             score_summary: ScoreSummary::from_ranking_explain(&ranking_explain),
             ranking_explain,
+            mood_boost_applied: ranking_result.profile_name == "mood_congruent",
             contradiction_explains: ranking_result.contradiction_explains.clone(),
             conflict_markers: ConflictMarkers {
                 conflict_state: ranking_result
@@ -1371,7 +1502,9 @@ mod tests {
         ContradictionExplain, ContradictionId, ContradictionKind, PreferredAnswerState,
     };
     use crate::engine::ranking::{fuse_scores, RankingInput, RankingProfile};
-    use crate::engine::recall::{RecallEngine, RecallRequest, RecallRuntime};
+    use crate::engine::recall::{
+        AutoRouteRequest, RecallEngine, RecallRequest, RecallRuntime, RouteOverride,
+    };
     use crate::types::{LandmarkSignals, RawEncodeInput, RawIntakeKind};
 
     fn ns(s: &str) -> NamespaceId {
@@ -1493,6 +1626,7 @@ mod tests {
             result_set.evidence_pack[0].result.score >= result_set.evidence_pack[1].result.score
         );
         assert_eq!(result_set.evidence_pack[0].result.memory_id, MemoryId(2));
+        assert!(!result_set.evidence_pack[0].result.mood_boost_applied);
         assert_eq!(
             result_set.evidence_pack[0].result.entry_lane.as_str(),
             "exact"
@@ -2618,6 +2752,35 @@ mod tests {
     }
 
     #[test]
+    fn retrieval_explain_can_preserve_auto_route_decision_and_override_details() {
+        let classification = BrainStore::new(RuntimeConfig::default())
+            .intent_engine()
+            .classify("what happened recently with the release pipeline?");
+        let auto_route = RecallEngine.auto_route(
+            &classification,
+            AutoRouteRequest::new()
+                .with_session(SessionId(88))
+                .with_override(RouteOverride::Tier2Fallback),
+            RuntimeConfig::default(),
+        );
+
+        let explain = RetrievalExplain::from_auto_route(&auto_route);
+
+        assert_eq!(
+            explain.recall_plan,
+            RecallPlanKind::Tier2ExactThenTier3Fallback
+        );
+        assert!(explain
+            .result_reasons
+            .iter()
+            .any(|reason| reason.reason_code == "intent_classification"));
+        assert!(explain.result_reasons.iter().any(|reason| {
+            reason.reason_code == "route_override_applied"
+                && reason.detail.contains("tier2_fallback")
+        }));
+    }
+
+    #[test]
     fn explain_route_produces_stable_route_summary_and_trace_stages() {
         let mut builder = ResultBuilder::new(3, ns("route"));
         let ranked = fuse_scores(
@@ -2809,6 +2972,57 @@ mod tests {
         assert!(!freshness_markers.is_empty());
         assert!(conflict_markers.is_empty());
         assert_eq!(uncertainty_markers.len(), 1);
+    }
+
+    #[test]
+    fn result_builder_marks_mood_boost_when_mood_profile_is_used() {
+        let mut builder = ResultBuilder::new(1, ns("mood_result"));
+        let ranking = fuse_scores(
+            RankingInput {
+                recency: 800,
+                salience: 900,
+                strength: 820,
+                provenance: 700,
+                conflict: 500,
+                confidence: 760,
+            },
+            RankingProfile::mood_congruent(),
+        );
+
+        builder.add(
+            MemoryId(91),
+            ns("mood_result"),
+            SessionId(1),
+            CanonicalMemoryType::Event,
+            "mood-aware result".into(),
+            &ranking,
+            AnsweredFrom::Tier2Indexed,
+        );
+
+        let result_set = builder.build(RetrievalExplain {
+            recall_plan: RecallPlanKind::RecentTier1ThenTier2Exact,
+            route_reason: "mood_congruent".to_string(),
+            tiers_consulted: vec!["tier2_exact".to_string()],
+            trace_stages: vec![RecallTraceStage::Tier2Exact],
+            tier1_answered_directly: false,
+            candidate_budget: 1,
+            time_consumed_ms: Some(1),
+            ranking_profile: "mood_congruent".to_string(),
+            contradictions_found: 0,
+            historical_context: None,
+            query_by_example: None,
+            result_reasons: vec![ResultReason {
+                memory_id: Some(MemoryId(91)),
+                reason_code: "score_kept".to_string(),
+                detail: "opt-in mood congruence kept this candidate".to_string(),
+            }],
+        });
+
+        assert!(result_set.evidence_pack[0].result.mood_boost_applied);
+        assert_eq!(
+            result_set.evidence_pack[0].result.ranking_explain.profile,
+            "mood_congruent"
+        );
     }
 
     #[test]

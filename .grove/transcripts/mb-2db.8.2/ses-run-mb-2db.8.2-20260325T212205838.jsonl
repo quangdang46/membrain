@@ -1,0 +1,68 @@
+{"ts":"2026-03-25T21:22:15.346931251Z","kind":"session_started","session_id":"ses-run-mb-2db.8.2-20260325T212205838"}
+{"ts":"2026-03-25T22:13:49.246510142Z","kind":"stdout","line":"GROVE_RESULT:"}
+{"ts":"2026-03-25T22:13:49.314129751Z","kind":"stdout","line":"Implemented emotional-trajectory recall/dashboard integration by surfacing bounded affect history in canonical health output and wiring health/dashboard drill-downs to `mood_history`."}
+{"ts":"2026-03-25T22:13:49.314149631Z","kind":"stdout","line":""}
+{"ts":"2026-03-25T22:13:49.314152424Z","kind":"stdout","line":"GROVE_ARTIFACTS:"}
+{"ts":"2026-03-25T22:13:49.314152424Z","kind":"protocol","event":{"type":"artifacts","items":[]}}
+{"ts":"2026-03-25T22:13:49.315607480Z","kind":"stdout","line":"- `crates/membrain-core/src/health.rs`"}
+{"ts":"2026-03-25T22:13:49.315607480Z","kind":"protocol","event":{"type":"artifacts","items":["`crates/membrain-core/src/health.rs`"]}}
+{"ts":"2026-03-25T22:13:49.315649387Z","kind":"stdout","line":"  - added `affect_history_rows`, `latest_affect_snapshot`, `latest_affect_tick` to `BrainHealthInputs` and `BrainHealthReport`"}
+{"ts":"2026-03-25T22:13:49.315649387Z","kind":"protocol","event":{"type":"artifacts","items":["added `affect_history_rows`, `latest_affect_snapshot`, `latest_affect_tick` to `BrainHealthInputs` and `BrainHealthReport`"]}}
+{"ts":"2026-03-25T22:13:49.317659128Z","kind":"stdout","line":"  - added `DashboardViewId::AffectTrajectory` with stable snake_case serialization"}
+{"ts":"2026-03-25T22:13:49.317659128Z","kind":"protocol","event":{"type":"artifacts","items":["added `DashboardViewId::AffectTrajectory` with stable snake_case serialization"]}}
+{"ts":"2026-03-25T22:13:49.317683413Z","kind":"stdout","line":"  - added `affect_trajectory` dashboard card and `/mood_history` drill-down path"}
+{"ts":"2026-03-25T22:13:49.317683413Z","kind":"protocol","event":{"type":"artifacts","items":["added `affect_trajectory` dashboard card and `/mood_history` drill-down path"]}}
+{"ts":"2026-03-25T22:13:49.317706408Z","kind":"stdout","line":"  - extended memory subsystem metrics/detail with affect-history counters"}
+{"ts":"2026-03-25T22:13:49.317706408Z","kind":"protocol","event":{"type":"artifacts","items":["extended memory subsystem metrics/detail with affect-history counters"]}}
+{"ts":"2026-03-25T22:13:49.317721667Z","kind":"stdout","line":"- `crates/membrain-daemon/src/daemon.rs`"}
+{"ts":"2026-03-25T22:13:49.317721667Z","kind":"protocol","event":{"type":"artifacts","items":["`crates/membrain-daemon/src/daemon.rs`"]}}
+{"ts":"2026-03-25T22:13:49.317733272Z","kind":"stdout","line":"  - health report now derives affect-history summary from stored `mood_history(...)`"}
+{"ts":"2026-03-25T22:13:49.317733272Z","kind":"protocol","event":{"type":"artifacts","items":["health report now derives affect-history summary from stored `mood_history(...)`"]}}
+{"ts":"2026-03-25T22:13:49.317741976Z","kind":"stdout","line":"- `crates/membrain-core/tests/recall_pipeline_integration.rs`"}
+{"ts":"2026-03-25T22:13:49.317741976Z","kind":"protocol","event":{"type":"artifacts","items":["`crates/membrain-core/tests/recall_pipeline_integration.rs`"]}}
+{"ts":"2026-03-25T22:13:49.317752292Z","kind":"stdout","line":"  - updated health surface test inputs/assertions for affect trajectory summary and drill-down"}
+{"ts":"2026-03-25T22:13:49.317752292Z","kind":"protocol","event":{"type":"artifacts","items":["updated health surface test inputs/assertions for affect trajectory summary and drill-down"]}}
+{"ts":"2026-03-25T22:13:49.317767013Z","kind":"stdout","line":"- `crates/membrain-daemon/tests/runtime_share_unshare_parity.rs`"}
+{"ts":"2026-03-25T22:13:49.317767013Z","kind":"protocol","event":{"type":"artifacts","items":["`crates/membrain-daemon/tests/runtime_share_unshare_parity.rs`"]}}
+{"ts":"2026-03-25T22:13:49.317775180Z","kind":"stdout","line":"  - added parity assertion that daemon `health` exposes the affect trajectory dashboard/drill-down alongside `mood_history`"}
+{"ts":"2026-03-25T22:13:49.317775180Z","kind":"protocol","event":{"type":"artifacts","items":["added parity assertion that daemon `health` exposes the affect trajectory dashboard/drill-down alongside `mood_history`"]}}
+{"ts":"2026-03-25T22:13:49.317899291Z","kind":"stdout","line":"- `docs/CLI.md`"}
+{"ts":"2026-03-25T22:13:49.317899291Z","kind":"protocol","event":{"type":"artifacts","items":["`docs/CLI.md`"]}}
+{"ts":"2026-03-25T22:13:49.317911004Z","kind":"stdout","line":"- `docs/MCP_API.md`"}
+{"ts":"2026-03-25T22:13:49.317911004Z","kind":"protocol","event":{"type":"artifacts","items":["`docs/MCP_API.md`"]}}
+{"ts":"2026-03-25T22:13:49.317915839Z","kind":"stdout","line":"- `docs/OPERATIONS.md`"}
+{"ts":"2026-03-25T22:13:49.317915839Z","kind":"protocol","event":{"type":"artifacts","items":["`docs/OPERATIONS.md`"]}}
+{"ts":"2026-03-25T22:13:49.317922501Z","kind":"stdout","line":""}
+{"ts":"2026-03-25T22:13:49.317925510Z","kind":"stdout","line":"GROVE_LESSONS:"}
+{"ts":"2026-03-25T22:13:49.317925510Z","kind":"protocol","event":{"type":"lessons","items":[]}}
+{"ts":"2026-03-25T22:13:49.317935396Z","kind":"stdout","line":"- The existing recall integration was already present through daemon-side `mood_congruent` use of `mood_history`; the missing user-facing value was canonical health/dashboard surfacing."}
+{"ts":"2026-03-25T22:13:49.317935396Z","kind":"protocol","event":{"type":"lessons","items":["The existing recall integration was already present through daemon-side `mood_congruent` use of `mood_history`; the missing user-facing value was canonical health/dashboard surfacing."]}}
+{"ts":"2026-03-25T22:13:49.317945819Z","kind":"stdout","line":"- `DashboardViewId` needed serde snake_case to match existing machine-readable view expectations in daemon JSON."}
+{"ts":"2026-03-25T22:13:49.317945819Z","kind":"protocol","event":{"type":"lessons","items":["`DashboardViewId` needed serde snake_case to match existing machine-readable view expectations in daemon JSON."]}}
+{"ts":"2026-03-25T22:13:49.317951084Z","kind":"stdout","line":""}
+{"ts":"2026-03-25T22:13:49.317953986Z","kind":"stdout","line":"GROVE_DECISIONS:"}
+{"ts":"2026-03-25T22:13:49.317953986Z","kind":"protocol","event":{"type":"decision","items":[]}}
+{"ts":"2026-03-25T22:13:49.317960970Z","kind":"stdout","line":"- Kept `mood_history` as the detailed read-only history surface rather than inventing a second history API."}
+{"ts":"2026-03-25T22:13:49.317960970Z","kind":"protocol","event":{"type":"decision","items":["Kept `mood_history` as the detailed read-only history surface rather than inventing a second history API."]}}
+{"ts":"2026-03-25T22:13:49.317966988Z","kind":"stdout","line":"- Used the health/dashboard path as the “recall integration” surface by exposing the same bounded affect snapshot that recall-facing mood congruence depends on."}
+{"ts":"2026-03-25T22:13:49.317966988Z","kind":"protocol","event":{"type":"decision","items":["Used the health/dashboard path as the “recall integration” surface by exposing the same bounded affect snapshot that recall-facing mood congruence depends on."]}}
+{"ts":"2026-03-25T22:13:49.317974080Z","kind":"stdout","line":"- Limited the patch to health/report/doc/parity seams instead of refactoring the broader recall engine."}
+{"ts":"2026-03-25T22:13:49.317974080Z","kind":"protocol","event":{"type":"decision","items":["Limited the patch to health/report/doc/parity seams instead of refactoring the broader recall engine."]}}
+{"ts":"2026-03-25T22:13:49.317979238Z","kind":"stdout","line":""}
+{"ts":"2026-03-25T22:13:49.317981709Z","kind":"stdout","line":"GROVE_WARNINGS:"}
+{"ts":"2026-03-25T22:13:49.317981709Z","kind":"protocol","event":{"type":"warning","items":[]}}
+{"ts":"2026-03-25T22:13:49.317985900Z","kind":"stdout","line":"- `latest_affect_tick` currently resolves from stored trajectory row `tick_end`; in daemon health this may still be `null`/`0` depending on how the row is recorded, though the bounded snapshot and row count are surfaced correctly."}
+{"ts":"2026-03-25T22:13:49.317985900Z","kind":"protocol","event":{"type":"warning","items":["`latest_affect_tick` currently resolves from stored trajectory row `tick_end`; in daemon health this may still be `null`/`0` depending on how the row is recorded, though the bounded snapshot and row count are surfaced correctly."]}}
+{"ts":"2026-03-25T22:13:49.318000944Z","kind":"stdout","line":"- File reservations reported `released: 0` at the end even though the work completed; if needed, another agent can re-check MCP reservation state."}
+{"ts":"2026-03-25T22:13:49.318000944Z","kind":"protocol","event":{"type":"warning","items":["File reservations reported `released: 0` at the end even though the work completed; if needed, another agent can re-check MCP reservation state."]}}
+{"ts":"2026-03-25T22:13:49.318016632Z","kind":"stdout","line":""}
+{"ts":"2026-03-25T22:13:49.318018781Z","kind":"stdout","line":"Validation:"}
+{"ts":"2026-03-25T22:13:49.318021468Z","kind":"stdout","line":"- `CARGO_TARGET_DIR=/tmp/membrain-foggybear-core cargo test -p membrain-core health_report_aggregates_subsystems_and_trends -- --nocapture`"}
+{"ts":"2026-03-25T22:13:49.318024369Z","kind":"stdout","line":"- `CARGO_TARGET_DIR=/tmp/membrain-foggybear-core cargo test -p membrain-core health_report_includes_prefetch_family_drop_metrics -- --nocapture`"}
+{"ts":"2026-03-25T22:13:49.318026841Z","kind":"stdout","line":"- `CARGO_TARGET_DIR=/tmp/membrain-foggybear-core cargo test -p membrain-core health_report_surfaces_batch1_metrics_and_status_rollups -- --nocapture`"}
+{"ts":"2026-03-25T22:13:49.318030279Z","kind":"stdout","line":"- `CARGO_TARGET_DIR=/tmp/membrain-foggybear-daemon cargo test -p membrain-daemon runtime_encode_and_mood_history_preserve_emotional_trajectory_contract -- --nocapture`"}
+{"ts":"2026-03-25T22:13:49.318032643Z","kind":"stdout","line":"- `CARGO_TARGET_DIR=/tmp/membrain-foggybear-check cargo check -p membrain-core -p membrain-daemon`"}
+{"ts":"2026-03-25T22:13:49.318035437Z","kind":"stdout","line":""}
+{"ts":"2026-03-25T22:13:49.318038016Z","kind":"stdout","line":"GROVE_EXIT: true"}
+{"ts":"2026-03-25T22:13:49.318038016Z","kind":"protocol","event":{"type":"exit","value":true}}
+{"ts":"2026-03-25T22:13:50.310254447Z","kind":"session_ended","exit_code":0}

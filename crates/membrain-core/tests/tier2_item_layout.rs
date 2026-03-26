@@ -1,4 +1,5 @@
 use membrain_core::api::{AgentId, NamespaceId, WorkspaceId};
+use membrain_core::engine::compression::CompressionPolicy;
 use membrain_core::engine::lease::{
     FreshnessState, LeaseAction, LeaseMetadata, LeasePolicy, LeaseScanItem, LeaseScanner,
 };
@@ -6,9 +7,10 @@ use membrain_core::migrate::DurableSchemaObject;
 use membrain_core::store::tier2::Tier2Store;
 use membrain_core::store::Tier2StoreApi;
 use membrain_core::types::{
-    LandmarkMetadata, MemoryId, NormalizedMemoryEnvelope, RawEncodeInput, RawIntakeKind, SessionId,
-    SharingMetadata,
+    CompressionMetadata, LandmarkMetadata, MemoryId, NormalizedMemoryEnvelope, RawEncodeInput,
+    RawIntakeKind, SessionId, SharingMetadata,
 };
+use membrain_core::{BrainStore, RuntimeConfig};
 
 fn normalized_event(raw_text: &str, compact_text: &str) -> NormalizedMemoryEnvelope {
     normalized_event_with_landmark(raw_text, compact_text, LandmarkMetadata::non_landmark())
@@ -90,11 +92,13 @@ fn normalized_envelope(
         compact_text: compact_text.to_string(),
         normalization_generation: "norm-v1",
         payload_size_bytes: raw_text.len(),
+        affect: None,
         landmark,
         observation_source: observation_source.map(str::to_string),
         observation_chunk_id: observation_chunk_id.map(str::to_string),
         has_causal_parents: false,
         has_causal_children: false,
+        compression: CompressionMetadata::default(),
         sharing: SharingMetadata::default(),
     }
 }
@@ -685,6 +689,114 @@ fn tier2_landmark_prefilter_trace_stays_metadata_first_for_temporal_recall_consu
 }
 
 #[test]
+fn compression_lineage_surfaces_through_public_brain_store_and_tier2_metadata_views() {
+    let mut store = BrainStore::new(RuntimeConfig::default());
+    let namespace = NamespaceId::new("tests/compression-public").unwrap();
+    let applied = store.apply_compression_pass(
+        namespace.clone(),
+        CompressionPolicy {
+            min_episode_count: 3,
+            ..CompressionPolicy::default()
+        },
+        3,
+        false,
+    );
+
+    let artifact = applied.schema_artifact.expect("schema artifact");
+    let schema_layout = store
+        .compression_memory_layout(artifact.schema_memory_id)
+        .expect("schema layout persisted");
+    let schema_prefilter = schema_layout.prefilter_view();
+    let schema_key = schema_layout.metadata_index_key();
+
+    assert_eq!(schema_prefilter.compressed_into(), None);
+    assert_eq!(
+        schema_prefilter.compression_source_memory_ids(),
+        artifact.source_memory_ids.as_slice()
+    );
+    assert_eq!(schema_key.compressed_into(), None);
+    assert_eq!(
+        schema_key.compression_source_memory_ids(),
+        artifact.source_memory_ids.as_slice()
+    );
+    assert_eq!(
+        schema_prefilter.compression_tick(),
+        schema_key.compression_tick()
+    );
+    assert!(schema_prefilter.compression_tick().is_some());
+
+    let source_memory_id = artifact.source_memory_ids[0];
+    let source_layout = store
+        .compression_memory_layout(source_memory_id)
+        .expect("source layout persisted");
+    let source_prefilter = source_layout.prefilter_view();
+    let source_key = source_layout.metadata_index_key();
+
+    assert_eq!(
+        source_prefilter.compressed_into(),
+        Some(artifact.schema_memory_id)
+    );
+    assert_eq!(
+        source_key.compressed_into(),
+        Some(artifact.schema_memory_id)
+    );
+    assert!(source_prefilter.compression_source_memory_ids().is_empty());
+    assert!(source_key.compression_source_memory_ids().is_empty());
+    assert_eq!(
+        source_prefilter.compression_tick(),
+        source_key.compression_tick()
+    );
+    assert!(source_prefilter.compression_tick().is_some());
+}
+
+#[test]
+fn compression_log_entries_filter_by_namespace_and_since_tick() {
+    let mut store = BrainStore::new(RuntimeConfig::default());
+    let alpha = NamespaceId::new("tests/compression-alpha").unwrap();
+    let beta = NamespaceId::new("tests/compression-beta").unwrap();
+
+    let alpha_applied = store.apply_compression_pass(
+        alpha.clone(),
+        CompressionPolicy {
+            min_episode_count: 3,
+            ..CompressionPolicy::default()
+        },
+        3,
+        false,
+    );
+    let beta_applied = store.apply_compression_pass(
+        beta.clone(),
+        CompressionPolicy {
+            min_episode_count: 3,
+            ..CompressionPolicy::default()
+        },
+        3,
+        false,
+    );
+
+    let alpha_entry = alpha_applied
+        .compression_log_entry
+        .expect("alpha compression log entry");
+    let beta_entry = beta_applied
+        .compression_log_entry
+        .expect("beta compression log entry");
+
+    let alpha_entries = store.compression_log_entries(alpha.clone(), None);
+    assert_eq!(alpha_entries, vec![alpha_entry.clone()]);
+
+    let beta_entries = store.compression_log_entries(beta.clone(), None);
+    assert_eq!(beta_entries, vec![beta_entry.clone()]);
+
+    assert!(store
+        .compression_log_entries(alpha, Some(alpha_entry.tick.saturating_add(1)))
+        .is_empty());
+    assert_eq!(
+        store.compression_log_entries(beta, Some(beta_entry.tick)),
+        vec![beta_entry]
+    );
+}
+
+#[test]
 fn tier2_store_schema_objects_match_split_durable_layout_contract() {
     let store = Tier2Store;
 
@@ -701,6 +813,7 @@ fn tier2_store_schema_objects_match_split_durable_layout_contract() {
             DurableSchemaObject::ConflictRecordsTable,
             DurableSchemaObject::DurableMemoryRecords,
             DurableSchemaObject::SnapshotMetadataTable,
+            DurableSchemaObject::CompressionLogTable,
             DurableSchemaObject::LandmarksTable,
         ]
     );

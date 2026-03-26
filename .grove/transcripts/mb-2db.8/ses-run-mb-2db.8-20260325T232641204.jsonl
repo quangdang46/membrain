@@ -1,0 +1,49 @@
+{"ts":"2026-03-25T23:26:42.312071078Z","kind":"session_started","session_id":"ses-run-mb-2db.8-20260325T232641204"}
+{"ts":"2026-03-25T23:42:01.640115367Z","kind":"stdout","line":"Implemented a small remaining F18 explainability slice."}
+{"ts":"2026-03-25T23:42:02.195222004Z","kind":"stdout","line":""}
+{"ts":"2026-03-25T23:42:02.195264737Z","kind":"stdout","line":"What changed"}
+{"ts":"2026-03-25T23:42:02.195277936Z","kind":"stdout","line":"- Added canonical per-result `mood_boost_applied` on `RetrievalResult` in `crates/membrain-core/src/engine/result.rs:151`."}
+{"ts":"2026-03-25T23:42:02.195290702Z","kind":"stdout","line":"- Wired `ResultBuilder` to set it when the opt-in `mood_congruent` ranking profile is actually used in `crates/membrain-core/src/engine/result.rs:979` and `crates/membrain-core/src/engine/result.rs:1106`."}
+{"ts":"2026-03-25T23:42:02.195438268Z","kind":"stdout","line":"- Updated core API fixture structs for the new field in `crates/membrain-core/src/api.rs:2532` and `crates/membrain-core/src/api.rs:2668`."}
+{"ts":"2026-03-25T23:42:02.195550349Z","kind":"stdout","line":"- Added/updated tests in `crates/membrain-core/src/engine/result.rs:1482` and `crates/membrain-core/src/engine/result.rs:2916`."}
+{"ts":"2026-03-25T23:42:02.195567226Z","kind":"stdout","line":"- Tightened the test contract note in `docs/TEST_STRATEGY.md:336`."}
+{"ts":"2026-03-25T23:42:02.195578802Z","kind":"stdout","line":""}
+{"ts":"2026-03-25T23:42:02.195591893Z","kind":"stdout","line":"Validation"}
+{"ts":"2026-03-25T23:42:02.195603685Z","kind":"stdout","line":"- `cargo test -p membrain-core result_builder_marks_mood_boost_when_mood_profile_is_used -- --nocapture`"}
+{"ts":"2026-03-25T23:42:02.195615153Z","kind":"stdout","line":"- `cargo test -p membrain-core result_builder_sorts_by_score_and_truncates -- --nocapture`"}
+{"ts":"2026-03-25T23:42:02.195626404Z","kind":"stdout","line":"- `cargo test -p membrain-core graph_expansion_summary_does_not_treat_non_graph_results_as_seeded -- --nocapture`"}
+{"ts":"2026-03-25T23:42:02.195638521Z","kind":"stdout","line":"- `cargo check -p membrain-core --all-targets`"}
+{"ts":"2026-03-25T23:42:02.195650205Z","kind":"stdout","line":""}
+{"ts":"2026-03-25T23:42:02.195660591Z","kind":"stdout","line":"Coordination"}
+{"ts":"2026-03-25T23:42:02.195671193Z","kind":"stdout","line":"- Registered with MCP Agent Mail as `CrimsonForge`."}
+{"ts":"2026-03-25T23:42:02.195684175Z","kind":"stdout","line":"- Checked inbox, acknowledged mail, and coordinated with other active agents before touching shared surfaces."}
+{"ts":"2026-03-25T23:42:02.195696076Z","kind":"stdout","line":""}
+{"ts":"2026-03-25T23:42:02.195707219Z","kind":"stdout","line":"GROVE_RESULT: success  "}
+{"ts":"2026-03-25T23:42:02.195707219Z","kind":"protocol","event":{"type":"result","summary":"success"}}
+{"ts":"2026-03-25T23:42:02.229020455Z","kind":"stdout","line":"GROVE_ARTIFACTS:"}
+{"ts":"2026-03-25T23:42:02.229020455Z","kind":"protocol","event":{"type":"artifacts","items":[]}}
+{"ts":"2026-03-25T23:42:02.250835877Z","kind":"stdout","line":"- `crates/membrain-core/src/engine/result.rs`"}
+{"ts":"2026-03-25T23:42:02.250835877Z","kind":"protocol","event":{"type":"artifacts","items":["`crates/membrain-core/src/engine/result.rs`"]}}
+{"ts":"2026-03-25T23:42:02.250875041Z","kind":"stdout","line":"- `crates/membrain-core/src/api.rs`"}
+{"ts":"2026-03-25T23:42:02.250875041Z","kind":"protocol","event":{"type":"artifacts","items":["`crates/membrain-core/src/api.rs`"]}}
+{"ts":"2026-03-25T23:42:02.250899382Z","kind":"stdout","line":"- `docs/TEST_STRATEGY.md`"}
+{"ts":"2026-03-25T23:42:02.250899382Z","kind":"protocol","event":{"type":"artifacts","items":["`docs/TEST_STRATEGY.md`"]}}
+{"ts":"2026-03-25T23:42:02.250930324Z","kind":"stdout","line":"GROVE_LESSONS:"}
+{"ts":"2026-03-25T23:42:02.250930324Z","kind":"protocol","event":{"type":"lessons","items":[]}}
+{"ts":"2026-03-25T23:42:02.250955423Z","kind":"stdout","line":"- The smallest safe remaining F18 gap was explainability, not new storage or broad retrieval rewiring."}
+{"ts":"2026-03-25T23:42:02.250955423Z","kind":"protocol","event":{"type":"lessons","items":["The smallest safe remaining F18 gap was explainability, not new storage or broad retrieval rewiring."]}}
+{"ts":"2026-03-25T23:42:02.251021957Z","kind":"stdout","line":"- `mood_congruent` behavior already existed, but its effect was only implicit via ranking profile names."}
+{"ts":"2026-03-25T23:42:02.251021957Z","kind":"protocol","event":{"type":"lessons","items":["`mood_congruent` behavior already existed, but its effect was only implicit via ranking profile names."]}}
+{"ts":"2026-03-25T23:42:02.251039592Z","kind":"stdout","line":"GROVE_DECISIONS:"}
+{"ts":"2026-03-25T23:42:02.251039592Z","kind":"protocol","event":{"type":"decision","items":[]}}
+{"ts":"2026-03-25T23:42:02.251056577Z","kind":"stdout","line":"- Added a machine-readable `mood_boost_applied` flag to keep the emotional hint inspectable and opt-in."}
+{"ts":"2026-03-25T23:42:02.251056577Z","kind":"protocol","event":{"type":"decision","items":["Added a machine-readable `mood_boost_applied` flag to keep the emotional hint inspectable and opt-in."]}}
+{"ts":"2026-03-25T23:42:02.251073887Z","kind":"stdout","line":"- Avoided overlapping daemon/CLI/history files currently held by other agents."}
+{"ts":"2026-03-25T23:42:02.251073887Z","kind":"protocol","event":{"type":"decision","items":["Avoided overlapping daemon/CLI/history files currently held by other agents."]}}
+{"ts":"2026-03-25T23:42:02.251089574Z","kind":"stdout","line":"GROVE_WARNINGS:"}
+{"ts":"2026-03-25T23:42:02.251089574Z","kind":"protocol","event":{"type":"warning","items":[]}}
+{"ts":"2026-03-25T23:42:02.251104720Z","kind":"stdout","line":"- `git diff` for touched files included unrelated concurrent edits in `crates/membrain-core/src/api.rs`; I only adjusted the local fixture literals required by the new field."}
+{"ts":"2026-03-25T23:42:02.251104720Z","kind":"protocol","event":{"type":"warning","items":["`git diff` for touched files included unrelated concurrent edits in `crates/membrain-core/src/api.rs`; I only adjusted the local fixture literals required by the new field."]}}
+{"ts":"2026-03-25T23:42:02.251123220Z","kind":"stdout","line":"GROVE_EXIT: false"}
+{"ts":"2026-03-25T23:42:02.251123220Z","kind":"protocol","event":{"type":"exit","value":false}}
+{"ts":"2026-03-25T23:42:04.966830813Z","kind":"session_ended","exit_code":0}

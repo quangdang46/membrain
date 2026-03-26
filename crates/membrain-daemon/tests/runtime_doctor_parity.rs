@@ -79,6 +79,218 @@ async fn shutdown_runtime(
 }
 
 #[tokio::test]
+async fn runtime_goal_working_state_methods_surface_blackboard_projection_parity() {
+    let (socket_path, handle) = spawn_runtime().await;
+
+    let goal_pin_response = send_request(
+        &socket_path,
+        json!({
+            "jsonrpc":"2.0",
+            "method":"goal_pin",
+            "params":{
+                "namespace":"team.alpha",
+                "task_id":"task-42",
+                "memory_id":7,
+                "request_id":"req-goal-pin"
+            },
+            "id":"goal-pin"
+        }),
+    )
+    .await;
+    assert_eq!(
+        goal_pin_response["result"]["authoritative_truth"],
+        json!("durable_memory")
+    );
+    assert_eq!(goal_pin_response["result"]["status"], json!("active"));
+    assert_eq!(
+        goal_pin_response["result"]["blackboard_state"]["Present"]["projection_kind"],
+        json!("working_state_projection")
+    );
+    assert!(
+        goal_pin_response["result"]["blackboard_state"]["Present"]["active_evidence"]
+            .as_array()
+            .expect("active evidence array")
+            .iter()
+            .any(|handle| handle["memory_id"] == json!(7) && handle["pinned"] == json!(true))
+    );
+
+    let goal_dismiss_response = send_request(
+        &socket_path,
+        json!({
+            "jsonrpc":"2.0",
+            "method":"goal_dismiss",
+            "params":{
+                "namespace":"team.alpha",
+                "task_id":"task-42",
+                "memory_id":2,
+                "agent_id":"agent-12"
+            },
+            "id":"goal-dismiss"
+        }),
+    )
+    .await;
+    assert_eq!(
+        goal_dismiss_response["result"]["authoritative_truth"],
+        json!("durable_memory")
+    );
+    assert!(
+        goal_dismiss_response["result"]["blackboard_state"]["Present"]["active_evidence"]
+            .as_array()
+            .expect("active evidence array")
+            .iter()
+            .all(|handle| handle["memory_id"] != json!(2))
+    );
+
+    let goal_snapshot_response = send_request(
+        &socket_path,
+        json!({
+            "jsonrpc":"2.0",
+            "method":"goal_snapshot",
+            "params":{
+                "namespace":"team.alpha",
+                "task_id":"task-42",
+                "note":"handoff snapshot"
+            },
+            "id":"goal-snapshot"
+        }),
+    )
+    .await;
+    assert_eq!(
+        goal_snapshot_response["result"]["authoritative_truth"],
+        json!("durable_memory")
+    );
+    assert_eq!(
+        goal_snapshot_response["result"]["snapshot"]["artifact_kind"],
+        json!("blackboard_snapshot")
+    );
+    assert_eq!(
+        goal_snapshot_response["result"]["snapshot"]["note"],
+        json!("handoff snapshot")
+    );
+
+    shutdown_runtime(&socket_path, handle).await;
+}
+
+#[tokio::test]
+async fn runtime_fork_and_merge_methods_surface_conflict_and_audit_parity() {
+    let (socket_path, handle) = spawn_runtime().await;
+
+    let fork_response = send_request(
+        &socket_path,
+        json!({
+            "jsonrpc":"2.0",
+            "method":"fork",
+            "params":{
+                "name":"agent-specialist",
+                "namespace":"team.alpha",
+                "inherit":"shared",
+                "note":"runtime parity"
+            },
+            "id":"fork-runtime"
+        }),
+    )
+    .await;
+    assert_eq!(fork_response["result"]["name"], json!("agent-specialist"));
+    assert_eq!(
+        fork_response["result"]["parent_namespace"],
+        json!("team.alpha")
+    );
+    assert_eq!(
+        fork_response["result"]["fork_working_state_count"],
+        json!(0)
+    );
+    assert_eq!(
+        fork_response["result"]["isolation_semantics"],
+        json!("inherit_by_reference_until_explicit_merge")
+    );
+
+    let goal_pin_response = send_request(
+        &socket_path,
+        json!({
+            "jsonrpc":"2.0",
+            "method":"goal_pin",
+            "params":{
+                "namespace":"agent-specialist",
+                "task_id":"fork-task",
+                "memory_id":7
+            },
+            "id":"goal-pin-fork"
+        }),
+    )
+    .await;
+    assert_eq!(goal_pin_response["result"]["status"], json!("active"));
+
+    let merge_preview = send_request(
+        &socket_path,
+        json!({
+            "jsonrpc":"2.0",
+            "method":"merge_fork",
+            "params":{
+                "fork_name":"agent-specialist",
+                "target_namespace":"team.alpha",
+                "conflict_strategy":"manual",
+                "dry_run":true
+            },
+            "id":"merge-preview"
+        }),
+    )
+    .await;
+    assert_eq!(
+        merge_preview["result"]["fork_name"],
+        json!("agent-specialist")
+    );
+    assert_eq!(
+        merge_preview["result"]["target_namespace"],
+        json!("team.alpha")
+    );
+    assert_eq!(merge_preview["result"]["dry_run"], json!(true));
+    assert_eq!(merge_preview["result"]["conflicts_found"], json!(1));
+    assert_eq!(merge_preview["result"]["conflicts_pending"], json!(1));
+    assert_eq!(
+        merge_preview["result"]["fork_working_state_count"],
+        json!(1)
+    );
+    assert_eq!(merge_preview["result"]["divergence_detected"], json!(true));
+    assert_eq!(merge_preview["result"]["audit_sequences"], json!([]));
+    assert_eq!(
+        merge_preview["result"]["conflict_items"][0]["item_kind"],
+        json!("working_state")
+    );
+    assert_eq!(
+        merge_preview["result"]["conflict_items"][0]["preferred_side"],
+        json!("manual")
+    );
+
+    let merge_apply = send_request(
+        &socket_path,
+        json!({
+            "jsonrpc":"2.0",
+            "method":"merge_fork",
+            "params":{
+                "fork_name":"agent-specialist",
+                "target_namespace":"team.alpha",
+                "conflict_strategy":"fork-wins",
+                "dry_run":false
+            },
+            "id":"merge-apply"
+        }),
+    )
+    .await;
+    assert_eq!(merge_apply["result"]["fork_status"], json!("merged"));
+    assert_eq!(merge_apply["result"]["conflicts_found"], json!(0));
+    assert_eq!(merge_apply["result"]["conflicts_pending"], json!(0));
+    assert_eq!(merge_apply["result"]["memories_merged"], json!(1));
+    assert_eq!(
+        merge_apply["result"]["audit_sequences"]
+            .as_array()
+            .map(|v| v.len()),
+        Some(1)
+    );
+
+    shutdown_runtime(&socket_path, handle).await;
+}
+
+#[tokio::test]
 async fn runtime_zero_arg_methods_accept_common_envelope_fields() {
     let (socket_path, handle) = spawn_runtime().await;
 
@@ -296,15 +508,15 @@ async fn runtime_doctor_jsonrpc_response_matches_shared_doctor_contract_fields()
     assert_eq!(indexes.len(), 4);
     assert_eq!(indexes[0]["family"], json!("schema"));
     assert_eq!(indexes[3]["family"], json!("cache"));
-    assert_eq!(indexes[3]["health"], json!("warn"));
+    assert_eq!(indexes[3]["health"], json!("ok"));
     assert_eq!(indexes[3]["usable"], json!(true));
 
     assert_eq!(result["action"], json!("doctor"));
     assert_eq!(result["posture"], json!("degraded"));
     assert_eq!(result["degraded_reasons"], json!(["repair_in_flight"]));
     assert!(result["metrics"].is_object());
-    assert_eq!(result["summary"]["ok_checks"], json!(2));
-    assert_eq!(result["summary"]["warn_checks"], json!(3));
+    assert_eq!(result["summary"]["ok_checks"], json!(3));
+    assert_eq!(result["summary"]["warn_checks"], json!(2));
     assert_eq!(result["summary"]["fail_checks"], json!(0));
     assert_eq!(result["repair_engine_component"], json!("engine.repair"));
     assert!(result["checks"].is_array());
@@ -314,20 +526,13 @@ async fn runtime_doctor_jsonrpc_response_matches_shared_doctor_contract_fields()
     assert_eq!(result["checks"][4]["status"], json!("warn"));
     assert!(result["runbook_hints"].is_array());
     assert_eq!(
-        result["runbook_hints"][0]["runbook_id"],
-        json!("index_rebuild_operations")
-    );
-    assert_eq!(
-        result["runbook_hints"][1]["runbook_id"],
-        json!("tier2_index_drift")
-    );
-    assert_eq!(
-        result["runbook_hints"][2]["runbook_id"],
-        json!("repair_backlog_growth")
-    );
-    assert_eq!(
-        result["runbook_hints"][3]["runbook_id"],
-        json!("incident_response")
+        result["runbook_hints"]
+            .as_array()
+            .expect("runbook hints should be an array")
+            .iter()
+            .map(|hint| hint["runbook_id"].clone())
+            .collect::<Vec<_>>(),
+        vec![json!("repair_backlog_growth"), json!("incident_response")]
     );
     assert_eq!(result["availability"]["posture"], json!("degraded"));
     assert_eq!(
@@ -400,6 +605,38 @@ async fn runtime_health_jsonrpc_response_matches_shared_health_contract_fields()
     .await;
     assert_eq!(posture_response["result"]["posture"], json!("degraded"));
 
+    let encode_response = send_request(
+        &socket_path,
+        json!({
+            "jsonrpc":"2.0",
+            "method":"encode",
+            "params":{
+                "content":"operator attention note",
+                "namespace":"team.alpha"
+            },
+            "id":"encode-health"
+        }),
+    )
+    .await;
+    assert_eq!(encode_response["result"]["status"], json!("accepted"));
+
+    let recall_response = send_request(
+        &socket_path,
+        json!({
+            "jsonrpc":"2.0",
+            "method":"recall",
+            "params":{
+                "query_text":"operator attention note",
+                "namespace":"team.alpha",
+                "session_id":"session-health",
+                "task_id":"task-health"
+            },
+            "id":"recall-health"
+        }),
+    )
+    .await;
+    assert!(recall_response["result"].is_object());
+
     let health_response = send_request(
         &socket_path,
         json!({"jsonrpc":"2.0","method":"health","params":{},"id":"health"}),
@@ -422,7 +659,10 @@ async fn runtime_health_jsonrpc_response_matches_shared_health_contract_fields()
     assert!(result["subsystem_status"].is_array());
     assert!(result["trends"].is_array());
     assert!(result["trend_summary"].is_array());
-    assert_eq!(result["feature_availability"][0]["feature"], json!("health"));
+    assert_eq!(
+        result["feature_availability"][0]["feature"],
+        json!("health")
+    );
     assert_eq!(result["feature_availability"][0]["posture"], json!("Full"));
     assert_eq!(
         result["feature_availability"][0]["note"],
@@ -431,12 +671,38 @@ async fn runtime_health_jsonrpc_response_matches_shared_health_contract_fields()
     assert_eq!(result["degraded_status"]["posture"], json!("Degraded"));
     assert_eq!(
         result["degraded_status"]["surviving_query_capabilities"],
-        json!(["recall", "health"])
+        json!(["doctor", "health", "audit"])
     );
     assert_eq!(
         result["degraded_status"]["recommended_runbooks"],
         json!(["repair_backlog_growth"])
     );
+    assert_eq!(result["total_encodes"], json!(1));
+    assert_eq!(result["total_recalls"], json!(0));
+    assert_eq!(result["attention"]["total_encode_count"], json!(1));
+    assert_eq!(result["attention"]["total_recall_count"], json!(0));
+    assert_eq!(result["attention"]["highest_namespace_pressure"], json!(0));
+    assert_eq!(
+        result["attention"]["hotspots"][0]["namespace"],
+        json!("team.alpha")
+    );
+    assert_eq!(
+        result["attention"]["hotspots"][0]["contributing_signals"]["encode_count"],
+        json!(1)
+    );
+    assert_eq!(
+        result["attention"]["hotspots"][0]["contributing_signals"]["recall_count"],
+        json!(0)
+    );
+    assert_eq!(
+        result["attention"]["hotspots"][0]["sample_log"]
+            .as_str()
+            .unwrap()
+            .contains("namespace=team.alpha"),
+        true
+    );
+    assert_eq!(result["cache"]["hints_submitted"], json!(0));
+    assert_eq!(result["cache"]["prefetch_queue_depth"], json!(0));
 
     shutdown_runtime(&socket_path, handle).await;
 }

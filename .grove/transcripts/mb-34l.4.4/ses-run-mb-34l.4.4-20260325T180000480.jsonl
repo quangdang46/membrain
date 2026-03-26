@@ -1,0 +1,27 @@
+{"ts":"2026-03-25T18:00:00.563728018Z","kind":"session_started","session_id":"ses-run-mb-34l.4.4-20260325T180000480"}
+{"ts":"2026-03-25T18:30:36.848354829Z","kind":"stdout","line":"I read the failed CLI recall probe output."}
+{"ts":"2026-03-25T18:30:37.601892008Z","kind":"stdout","line":""}
+{"ts":"2026-03-25T18:30:37.601904811Z","kind":"stdout","line":"Result:"}
+{"ts":"2026-03-25T18:30:37.601907906Z","kind":"stdout","line":"- This probe also did not reach the CLI output."}
+{"ts":"2026-03-25T18:30:37.601910253Z","kind":"stdout","line":"- It failed during workspace compilation because `membrain-daemon` is in a broken intermediate state."}
+{"ts":"2026-03-25T18:30:37.601913241Z","kind":"stdout","line":""}
+{"ts":"2026-03-25T18:30:37.601915481Z","kind":"stdout","line":"Errors in this run:"}
+{"ts":"2026-03-25T18:30:37.601917829Z","kind":"stdout","line":"- `crates/membrain-daemon/src/daemon.rs:3252` missing `RuntimeState::ensure_goal_working_state`"}
+{"ts":"2026-03-25T18:30:37.601920390Z","kind":"stdout","line":"- `crates/membrain-daemon/src/daemon.rs:3310` missing `RuntimeState::task_key`"}
+{"ts":"2026-03-25T18:30:37.601923697Z","kind":"stdout","line":"- `crates/membrain-daemon/src/daemon.rs:3312` missing field `goal_checkpoints`"}
+{"ts":"2026-03-25T18:30:37.601926685Z","kind":"stdout","line":"- `crates/membrain-daemon/src/daemon.rs:3455` missing `RuntimeState::task_key`"}
+{"ts":"2026-03-25T18:30:37.601928925Z","kind":"stdout","line":"- `crates/membrain-daemon/src/daemon.rs:3457` missing field `goal_checkpoints`"}
+{"ts":"2026-03-25T18:30:37.601931486Z","kind":"stdout","line":"- `crates/membrain-daemon/src/daemon.rs:3500` type inference error in `.map(|task| ...)`"}
+{"ts":"2026-03-25T18:30:37.601934047Z","kind":"stdout","line":"- `crates/membrain-daemon/src/daemon.rs:3538` missing `RuntimeState::task_key`"}
+{"ts":"2026-03-25T18:30:37.601937141Z","kind":"stdout","line":"- `crates/membrain-daemon/src/daemon.rs:3540` missing field `goal_checkpoints`"}
+{"ts":"2026-03-25T18:30:37.601939915Z","kind":"stdout","line":""}
+{"ts":"2026-03-25T18:30:37.601942370Z","kind":"stdout","line":"So the current state is:"}
+{"ts":"2026-03-25T18:30:37.601945464Z","kind":"stdout","line":""}
+{"ts":"2026-03-25T18:30:37.601948345Z","kind":"stdout","line":"- `crates/membrain-daemon/tests/e2e_mcp.sh` passes end-to-end in isolated-target validation"}
+{"ts":"2026-03-25T18:30:37.601950905Z","kind":"stdout","line":"- ad hoc `cargo run -p membrain-cli ...` probes can fail because the shared workspace currently recompiles broken `membrain-daemon` code"}
+{"ts":"2026-03-25T18:30:37.602434786Z","kind":"stdout","line":"- these failed background probes do not give trustworthy evidence about current CLI JSON drift by themselves"}
+{"ts":"2026-03-25T18:30:37.602441935Z","kind":"stdout","line":""}
+{"ts":"2026-03-25T18:30:37.602444176Z","kind":"stdout","line":"The most reliable conclusion remains:"}
+{"ts":"2026-03-25T18:30:37.602446737Z","kind":"stdout","line":"- daemon proof layer is green"}
+{"ts":"2026-03-25T18:30:37.602448977Z","kind":"stdout","line":"- CLI side still needs validation once the shared compile drift settles or via a fully isolated route under the current script owner’s reservation"}
+{"ts":"2026-03-25T18:30:42.372990944Z","kind":"session_ended","exit_code":0}

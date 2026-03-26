@@ -1,0 +1,45 @@
+{
+  "id": "chk-run-mb-2db.3-20260325T171507476-fallback-1",
+  "bead_id": "mb-2db.3",
+  "run_id": "run-mb-2db.3-20260325T171507476",
+  "session_id": "ses-run-mb-2db.3-20260325T171507476",
+  "progress": "Synthetic fallback checkpoint after NoProgress",
+  "next_step": "Resume from the transcript tail, avoid repeating completed setup, and continue with the smallest safe remaining step.",
+  "payload": {
+    "claimed_paths": [],
+    "confidence": 0.25,
+    "context": {
+      "failure_class": "NoProgress",
+      "failure_detail": "session ended with Unknown",
+      "stderr_tail": [],
+      "stdout_tail": [
+        "",
+        "- Added daemon JSON-RPC parsing + runtime dispatch for `hot_paths` / `dead_zones`.",
+        "- Added daemon handlers that call the existing core aggregation in `BrainStore`.",
+        "- Added CLI commands:",
+        "  - `membrain hot-paths --top <N> [--json]`",
+        "  - `membrain dead-zones --min-age <TICKS> [--json]`",
+        "- Added human-readable CLI printers for both outputs.",
+        "- Confirmed targeted compile passes:",
+        "  - `cargo check -p membrain-cli -p membrain-daemon -p membrain-core`",
+        "",
+        "Key files:",
+        "- `crates/membrain-daemon/src/rpc.rs`",
+        "- `crates/membrain-daemon/src/daemon.rs`",
+        "- `crates/membrain-cli/src/main.rs`",
+        "",
+        "",
+        "",
+        "",
+        "",
+        ""
+      ],
+      "synthetic": true
+    },
+    "next_step": "Resume from the transcript tail, avoid repeating completed setup, and continue with the smallest safe remaining step.",
+    "open_questions": [],
+    "progress": "Synthetic fallback checkpoint after NoProgress"
+  },
+  "saved_at": "2026-03-25T17:35:41.571004098Z",
+  "resume_generation": 1
+}

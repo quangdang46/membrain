@@ -1,0 +1,35 @@
+{"ts":"2026-03-25T15:29:35.451576783Z","kind":"session_started","session_id":"ses-run-mb-1ng.11-20260325T152935405"}
+{"ts":"2026-03-25T16:05:25.651365038Z","kind":"stdout","line":"Done."}
+{"ts":"2026-03-25T16:05:25.734472195Z","kind":"stdout","line":""}
+{"ts":"2026-03-25T16:05:25.734484331Z","kind":"stdout","line":"Implemented the remaining bounded `mb-1ng.11` CLI/docs parity slice:"}
+{"ts":"2026-03-25T16:05:25.734487631Z","kind":"stdout","line":""}
+{"ts":"2026-03-25T16:05:25.734490186Z","kind":"stdout","line":"- `crates/membrain-cli/src/main.rs`"}
+{"ts":"2026-03-25T16:05:25.734493380Z","kind":"stdout","line":"  - added `goal` subcommands for:"}
+{"ts":"2026-03-25T16:05:25.734496042Z","kind":"stdout","line":"    - `show`"}
+{"ts":"2026-03-25T16:05:25.734498597Z","kind":"stdout","line":"    - `pin`"}
+{"ts":"2026-03-25T16:05:25.734501258Z","kind":"stdout","line":"    - `dismiss`"}
+{"ts":"2026-03-25T16:05:25.734503919Z","kind":"stdout","line":"    - `snapshot`"}
+{"ts":"2026-03-25T16:05:25.734515204Z","kind":"stdout","line":"    - `pause`"}
+{"ts":"2026-03-25T16:05:25.734517972Z","kind":"stdout","line":"    - `resume`"}
+{"ts":"2026-03-25T16:05:25.734520420Z","kind":"stdout","line":"    - `abandon`"}
+{"ts":"2026-03-25T16:05:25.734522869Z","kind":"stdout","line":"- `crates/membrain-cli/tests/cli_end_to_end.rs`"}
+{"ts":"2026-03-25T16:05:25.734525424Z","kind":"stdout","line":"  - added focused JSON parity tests for goal/working-state flows"}
+{"ts":"2026-03-25T16:05:25.734527979Z","kind":"stdout","line":"- `crates/membrain-cli/tests/e2e_cli.sh`"}
+{"ts":"2026-03-25T16:05:25.734530321Z","kind":"stdout","line":"  - added logging-heavy goal flow coverage"}
+{"ts":"2026-03-25T16:05:25.734532982Z","kind":"stdout","line":"- `docs/CLI.md`"}
+{"ts":"2026-03-25T16:05:25.734535537Z","kind":"stdout","line":"  - updated `membrain goal` contract"}
+{"ts":"2026-03-25T16:05:25.734538092Z","kind":"stdout","line":"- `docs/MCP_API.md`"}
+{"ts":"2026-03-25T16:05:25.734540647Z","kind":"stdout","line":"  - clarified projection-vs-authority semantics for goal-state surfaces"}
+{"ts":"2026-03-25T16:05:25.734543202Z","kind":"stdout","line":""}
+{"ts":"2026-03-25T16:05:25.734545651Z","kind":"stdout","line":"Validation passed:"}
+{"ts":"2026-03-25T16:05:25.734548206Z","kind":"stdout","line":""}
+{"ts":"2026-03-25T16:05:25.734550548Z","kind":"stdout","line":"- `cargo check -p membrain-cli`"}
+{"ts":"2026-03-25T16:05:25.734552996Z","kind":"stdout","line":"- `cargo test -p membrain-cli goal_commands_parse_canonical_fields -- --nocapture`"}
+{"ts":"2026-03-25T16:05:25.734555658Z","kind":"stdout","line":"- `cargo test -p membrain-cli --test cli_end_to_end -- --nocapture`"}
+{"ts":"2026-03-25T16:05:25.734558106Z","kind":"stdout","line":"- `bash crates/membrain-cli/tests/e2e_cli.sh`"}
+{"ts":"2026-03-25T16:05:25.734560874Z","kind":"stdout","line":""}
+{"ts":"2026-03-25T16:05:25.734563216Z","kind":"stdout","line":"Key outcome:"}
+{"ts":"2026-03-25T16:05:25.734565878Z","kind":"stdout","line":"- working-state CLI now exposes explicit blackboard/checkpoint lifecycle surfaces while keeping `authoritative_truth = \"durable_memory\"` and `projection_kind = \"working_state_projection\"` visible in JSON."}
+{"ts":"2026-03-25T16:05:25.734568859Z","kind":"stdout","line":""}
+{"ts":"2026-03-25T16:05:25.734571307Z","kind":"stdout","line":"I also coordinated via MCP Agent Mail, acknowledged pending messages, and released my file reservations."}
+{"ts":"2026-03-25T16:05:26.762236381Z","kind":"session_ended","exit_code":0}

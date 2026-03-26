@@ -623,7 +623,13 @@ impl RuntimeMethodRequest {
                 Ok(RuntimeRequest::Health)
             }
             "encode" => {
-                let mut allowed = vec!["content", "namespace", "memory_type", "visibility"];
+                let mut allowed = vec![
+                    "content",
+                    "namespace",
+                    "memory_type",
+                    "visibility",
+                    "emotional_annotations",
+                ];
                 allowed.extend_from_slice(COMMON_ENVELOPE_FIELDS);
                 reject_unknown_fields(&self.params, &allowed)?;
                 let common = parse_common_fields(&self.params)?;
@@ -635,11 +641,13 @@ impl RuntimeMethodRequest {
                     .and_then(Value::as_str)
                     .map(ToOwned::to_owned);
                 let visibility = parse_optional_string(&self.params, "visibility")?;
+                let emotional_annotations = self.params.get("emotional_annotations").cloned();
                 Ok(RuntimeRequest::Encode {
                     content,
                     namespace,
                     memory_type,
                     visibility,
+                    emotional_annotations,
                     common,
                 })
             }
@@ -839,6 +847,7 @@ impl RuntimeMethodRequest {
                     "current_context",
                     "working_memory_ids",
                     "format",
+                    "mood_congruent",
                 ];
                 let mut allowed_fields = allowed.to_vec();
                 allowed_fields.extend_from_slice(COMMON_ENVELOPE_FIELDS);
@@ -848,6 +857,7 @@ impl RuntimeMethodRequest {
                 let namespace = parse_required_string(&self.params, "namespace")?;
                 let current_context = parse_optional_string(&self.params, "current_context")?;
                 let format = parse_optional_string(&self.params, "format")?;
+                let mood_congruent = parse_optional_bool(&self.params, "mood_congruent")?;
                 let working_memory_ids = match self.params.get("working_memory_ids") {
                     None | Some(Value::Null) => None,
                     Some(Value::Array(values)) => Some(
@@ -879,6 +889,108 @@ impl RuntimeMethodRequest {
                     current_context,
                     working_memory_ids,
                     format,
+                    mood_congruent,
+                    common,
+                })
+            }
+            "goal_state" => {
+                let mut allowed = vec!["namespace", "task_id"];
+                allowed.extend_from_slice(COMMON_ENVELOPE_FIELDS);
+                reject_unknown_fields(&self.params, &allowed)?;
+                let common = parse_common_fields(&self.params)?;
+                let namespace = parse_required_string(&self.params, "namespace")?;
+                let task_id = parse_optional_string(&self.params, "task_id")?;
+                Ok(RuntimeRequest::GoalState {
+                    namespace,
+                    task_id,
+                    common,
+                })
+            }
+            "goal_pause" => {
+                let mut allowed = vec!["namespace", "task_id", "note"];
+                allowed.extend_from_slice(COMMON_ENVELOPE_FIELDS);
+                reject_unknown_fields(&self.params, &allowed)?;
+                let common = parse_common_fields(&self.params)?;
+                let namespace = parse_required_string(&self.params, "namespace")?;
+                let task_id = parse_optional_string(&self.params, "task_id")?;
+                let note = parse_optional_string(&self.params, "note")?;
+                Ok(RuntimeRequest::GoalPause {
+                    namespace,
+                    task_id,
+                    note,
+                    common,
+                })
+            }
+            "goal_pin" => {
+                let mut allowed = vec!["namespace", "task_id", "memory_id"];
+                allowed.extend_from_slice(COMMON_ENVELOPE_FIELDS);
+                reject_unknown_fields(&self.params, &allowed)?;
+                let common = parse_common_fields(&self.params)?;
+                let namespace = parse_required_string(&self.params, "namespace")?;
+                let task_id = parse_optional_string(&self.params, "task_id")?;
+                let memory_id = parse_required_u64(&self.params, "memory_id")?;
+                Ok(RuntimeRequest::GoalPin {
+                    namespace,
+                    task_id,
+                    memory_id,
+                    common,
+                })
+            }
+            "goal_dismiss" => {
+                let mut allowed = vec!["namespace", "task_id", "memory_id"];
+                allowed.extend_from_slice(COMMON_ENVELOPE_FIELDS);
+                reject_unknown_fields(&self.params, &allowed)?;
+                let common = parse_common_fields(&self.params)?;
+                let namespace = parse_required_string(&self.params, "namespace")?;
+                let task_id = parse_optional_string(&self.params, "task_id")?;
+                let memory_id = parse_required_u64(&self.params, "memory_id")?;
+                Ok(RuntimeRequest::GoalDismiss {
+                    namespace,
+                    task_id,
+                    memory_id,
+                    common,
+                })
+            }
+            "goal_snapshot" => {
+                let mut allowed = vec!["namespace", "task_id", "note"];
+                allowed.extend_from_slice(COMMON_ENVELOPE_FIELDS);
+                reject_unknown_fields(&self.params, &allowed)?;
+                let common = parse_common_fields(&self.params)?;
+                let namespace = parse_required_string(&self.params, "namespace")?;
+                let task_id = parse_optional_string(&self.params, "task_id")?;
+                let note = parse_optional_string(&self.params, "note")?;
+                Ok(RuntimeRequest::GoalSnapshot {
+                    namespace,
+                    task_id,
+                    note,
+                    common,
+                })
+            }
+            "goal_resume" => {
+                let mut allowed = vec!["namespace", "task_id"];
+                allowed.extend_from_slice(COMMON_ENVELOPE_FIELDS);
+                reject_unknown_fields(&self.params, &allowed)?;
+                let common = parse_common_fields(&self.params)?;
+                let namespace = parse_required_string(&self.params, "namespace")?;
+                let task_id = parse_optional_string(&self.params, "task_id")?;
+                Ok(RuntimeRequest::GoalResume {
+                    namespace,
+                    task_id,
+                    common,
+                })
+            }
+            "goal_abandon" => {
+                let mut allowed = vec!["namespace", "task_id", "reason"];
+                allowed.extend_from_slice(COMMON_ENVELOPE_FIELDS);
+                reject_unknown_fields(&self.params, &allowed)?;
+                let common = parse_common_fields(&self.params)?;
+                let namespace = parse_required_string(&self.params, "namespace")?;
+                let task_id = parse_optional_string(&self.params, "task_id")?;
+                let reason = parse_optional_string(&self.params, "reason")?;
+                Ok(RuntimeRequest::GoalAbandon {
+                    namespace,
+                    task_id,
+                    reason,
                     common,
                 })
             }
@@ -992,6 +1104,71 @@ impl RuntimeMethodRequest {
                     since_tick,
                     op,
                     limit,
+                    common,
+                })
+            }
+            "mood_history" => {
+                let mut allowed = vec!["namespace", "since_tick"];
+                allowed.extend_from_slice(COMMON_ENVELOPE_FIELDS);
+                reject_unknown_fields(&self.params, &allowed)?;
+                let common = parse_common_fields(&self.params)?;
+                let namespace = parse_required_string(&self.params, "namespace")?;
+                let since_tick = parse_optional_u64(&self.params, "since_tick")?;
+                Ok(RuntimeRequest::MoodHistory {
+                    namespace,
+                    since_tick,
+                    common,
+                })
+            }
+            "hot_paths" => {
+                let mut allowed = vec!["namespace", "top_n"];
+                allowed.extend_from_slice(COMMON_ENVELOPE_FIELDS);
+                reject_unknown_fields(&self.params, &allowed)?;
+                let common = parse_common_fields(&self.params)?;
+                let namespace = parse_required_string(&self.params, "namespace")?;
+                let top_n = parse_optional_positive_usize(&self.params, "top_n")?;
+                Ok(RuntimeRequest::HotPaths {
+                    namespace,
+                    top_n,
+                    common,
+                })
+            }
+            "dead_zones" => {
+                let mut allowed = vec!["namespace", "min_age_ticks"];
+                allowed.extend_from_slice(COMMON_ENVELOPE_FIELDS);
+                reject_unknown_fields(&self.params, &allowed)?;
+                let common = parse_common_fields(&self.params)?;
+                let namespace = parse_required_string(&self.params, "namespace")?;
+                let min_age_ticks = parse_optional_u64(&self.params, "min_age_ticks")?;
+                Ok(RuntimeRequest::DeadZones {
+                    namespace,
+                    min_age_ticks,
+                    common,
+                })
+            }
+            "compress" => {
+                let mut allowed = vec!["namespace", "dry_run"];
+                allowed.extend_from_slice(COMMON_ENVELOPE_FIELDS);
+                reject_unknown_fields(&self.params, &allowed)?;
+                let common = parse_common_fields(&self.params)?;
+                let namespace = parse_required_string(&self.params, "namespace")?;
+                let dry_run = parse_optional_bool(&self.params, "dry_run")?.unwrap_or(false);
+                Ok(RuntimeRequest::Compress {
+                    namespace,
+                    dry_run,
+                    common,
+                })
+            }
+            "schemas" => {
+                let mut allowed = vec!["namespace", "top_n"];
+                allowed.extend_from_slice(COMMON_ENVELOPE_FIELDS);
+                reject_unknown_fields(&self.params, &allowed)?;
+                let common = parse_common_fields(&self.params)?;
+                let namespace = parse_required_string(&self.params, "namespace")?;
+                let top_n = parse_optional_positive_usize(&self.params, "top_n")?;
+                Ok(RuntimeRequest::Schemas {
+                    namespace,
+                    top_n,
                     common,
                 })
             }
@@ -1210,6 +1387,47 @@ impl RuntimeMethodRequest {
                     common: _common,
                 })
             }
+            "fork" => {
+                let mut allowed = vec!["name", "namespace", "parent_namespace", "inherit", "note"];
+                allowed.extend_from_slice(COMMON_ENVELOPE_FIELDS);
+                reject_unknown_fields(&self.params, &allowed)?;
+                let common = parse_common_fields(&self.params)?;
+                let name = parse_required_string(&self.params, "name")?;
+                let namespace = parse_required_string(&self.params, "namespace")?;
+                let parent_namespace = parse_optional_string(&self.params, "parent_namespace")?;
+                let inherit = parse_optional_string(&self.params, "inherit")?;
+                let note = parse_optional_string(&self.params, "note")?;
+                Ok(RuntimeRequest::Fork {
+                    name,
+                    namespace,
+                    parent_namespace,
+                    inherit,
+                    note,
+                    common,
+                })
+            }
+            "merge_fork" => {
+                let mut allowed = vec![
+                    "fork_name",
+                    "target_namespace",
+                    "conflict_strategy",
+                    "dry_run",
+                ];
+                allowed.extend_from_slice(COMMON_ENVELOPE_FIELDS);
+                reject_unknown_fields(&self.params, &allowed)?;
+                let common = parse_common_fields(&self.params)?;
+                let fork_name = parse_required_string(&self.params, "fork_name")?;
+                let target_namespace = parse_required_string(&self.params, "target_namespace")?;
+                let conflict_strategy = parse_optional_string(&self.params, "conflict_strategy")?;
+                let dry_run = parse_optional_bool(&self.params, "dry_run")?.unwrap_or(false);
+                Ok(RuntimeRequest::MergeFork {
+                    fork_name,
+                    target_namespace,
+                    conflict_strategy,
+                    dry_run,
+                    common,
+                })
+            }
             "link" => {
                 let mut allowed = vec!["source_id", "target_id", "namespace", "link_type"];
                 allowed.extend_from_slice(COMMON_ENVELOPE_FIELDS);
@@ -1252,6 +1470,7 @@ pub enum RuntimeRequest {
         namespace: String,
         memory_type: Option<String>,
         visibility: Option<String>,
+        emotional_annotations: Option<serde_json::Value>,
         common: RuntimeCommonFields,
     },
     Observe {
@@ -1313,6 +1532,47 @@ pub enum RuntimeRequest {
         current_context: Option<String>,
         working_memory_ids: Option<Vec<u64>>,
         format: Option<String>,
+        mood_congruent: Option<bool>,
+        common: RuntimeCommonFields,
+    },
+    GoalState {
+        namespace: String,
+        task_id: Option<String>,
+        common: RuntimeCommonFields,
+    },
+    GoalPause {
+        namespace: String,
+        task_id: Option<String>,
+        note: Option<String>,
+        common: RuntimeCommonFields,
+    },
+    GoalPin {
+        namespace: String,
+        task_id: Option<String>,
+        memory_id: u64,
+        common: RuntimeCommonFields,
+    },
+    GoalDismiss {
+        namespace: String,
+        task_id: Option<String>,
+        memory_id: u64,
+        common: RuntimeCommonFields,
+    },
+    GoalSnapshot {
+        namespace: String,
+        task_id: Option<String>,
+        note: Option<String>,
+        common: RuntimeCommonFields,
+    },
+    GoalResume {
+        namespace: String,
+        task_id: Option<String>,
+        common: RuntimeCommonFields,
+    },
+    GoalAbandon {
+        namespace: String,
+        task_id: Option<String>,
+        reason: Option<String>,
         common: RuntimeCommonFields,
     },
     Inspect {
@@ -1333,6 +1593,31 @@ pub enum RuntimeRequest {
         since_tick: Option<u64>,
         op: Option<String>,
         limit: Option<usize>,
+        common: RuntimeCommonFields,
+    },
+    MoodHistory {
+        namespace: String,
+        since_tick: Option<u64>,
+        common: RuntimeCommonFields,
+    },
+    HotPaths {
+        namespace: String,
+        top_n: Option<usize>,
+        common: RuntimeCommonFields,
+    },
+    DeadZones {
+        namespace: String,
+        min_age_ticks: Option<u64>,
+        common: RuntimeCommonFields,
+    },
+    Compress {
+        namespace: String,
+        dry_run: bool,
+        common: RuntimeCommonFields,
+    },
+    Schemas {
+        namespace: String,
+        top_n: Option<usize>,
         common: RuntimeCommonFields,
     },
     Invalidate {
@@ -1364,6 +1649,21 @@ pub enum RuntimeRequest {
     Unshare {
         id: u64,
         namespace: String,
+        common: RuntimeCommonFields,
+    },
+    Fork {
+        name: String,
+        namespace: String,
+        parent_namespace: Option<String>,
+        inherit: Option<String>,
+        note: Option<String>,
+        common: RuntimeCommonFields,
+    },
+    MergeFork {
+        fork_name: String,
+        target_namespace: String,
+        conflict_strategy: Option<String>,
+        dry_run: bool,
         common: RuntimeCommonFields,
     },
     Link {
@@ -1598,6 +1898,63 @@ mod tests {
     }
 
     #[test]
+    fn parse_method_accepts_mood_history_params() {
+        let request = RuntimeMethodRequest {
+            jsonrpc: "2.0".to_string(),
+            method: "mood_history".to_string(),
+            params: json!({ "namespace": "team.alpha", "since_tick": 12 }),
+            id: Some(json!(17)),
+        };
+
+        assert_eq!(
+            request.parse_method().unwrap(),
+            RuntimeRequest::MoodHistory {
+                namespace: "team.alpha".to_string(),
+                since_tick: Some(12),
+                common: RuntimeCommonFields::default(),
+            }
+        );
+    }
+
+    #[test]
+    fn parse_method_accepts_compress_params() {
+        let request = RuntimeMethodRequest {
+            jsonrpc: "2.0".to_string(),
+            method: "compress".to_string(),
+            params: json!({ "namespace": "team.alpha", "dry_run": true }),
+            id: Some(json!(18)),
+        };
+
+        assert_eq!(
+            request.parse_method().unwrap(),
+            RuntimeRequest::Compress {
+                namespace: "team.alpha".to_string(),
+                dry_run: true,
+                common: RuntimeCommonFields::default(),
+            }
+        );
+    }
+
+    #[test]
+    fn parse_method_accepts_schemas_params() {
+        let request = RuntimeMethodRequest {
+            jsonrpc: "2.0".to_string(),
+            method: "schemas".to_string(),
+            params: json!({ "namespace": "team.alpha", "top_n": 5 }),
+            id: Some(json!(19)),
+        };
+
+        assert_eq!(
+            request.parse_method().unwrap(),
+            RuntimeRequest::Schemas {
+                namespace: "team.alpha".to_string(),
+                top_n: Some(5),
+                common: RuntimeCommonFields::default(),
+            }
+        );
+    }
+
+    #[test]
     fn parse_method_accepts_named_recall_params() {
         let request = RuntimeMethodRequest {
             jsonrpc: "2.0".to_string(),
@@ -1672,7 +2029,8 @@ mod tests {
                 "namespace": "team.alpha",
                 "current_context": "debugging session",
                 "working_memory_ids": [7, 8],
-                "format": "markdown"
+                "format": "markdown",
+                "mood_congruent": true
             }),
             id: Some(json!(9)),
         };
@@ -1685,6 +2043,7 @@ mod tests {
                 current_context: Some("debugging session".to_string()),
                 working_memory_ids: Some(vec![7, 8]),
                 format: Some("markdown".to_string()),
+                mood_congruent: Some(true),
                 common: RuntimeCommonFields::default(),
             }
         );
@@ -2399,6 +2758,20 @@ mod tests {
         let error = explain.parse_method().unwrap_err();
         assert_eq!(error.code, -32602);
         assert_eq!(error.message, "unknown field unexpected");
+
+        let goal_state = RuntimeMethodRequest {
+            jsonrpc: "2.0".to_string(),
+            method: "goal_state".to_string(),
+            params: json!({
+                "namespace": "team.alpha",
+                "task_id": "task-42",
+                "unexpected": true
+            }),
+            id: Some(json!(21)),
+        };
+        let error = goal_state.parse_method().unwrap_err();
+        assert_eq!(error.code, -32602);
+        assert_eq!(error.message, "unknown field unexpected");
     }
 
     #[test]
@@ -2459,6 +2832,83 @@ mod tests {
         match explain.parse_method().unwrap() {
             RuntimeRequest::Explain { common, .. } => {
                 assert_eq!(common.agent_id.as_deref(), Some("agent-7"));
+            }
+            _ => std::process::abort(),
+        }
+
+        let goal_state = RuntimeMethodRequest {
+            jsonrpc: "2.0".to_string(),
+            method: "goal_state".to_string(),
+            params: json!({
+                "namespace": "team.alpha",
+                "task_id": "task-99",
+                "request_id": "req-goal",
+                "agent_id": "agent-11"
+            }),
+            id: Some(json!(184)),
+        };
+        match goal_state.parse_method().unwrap() {
+            RuntimeRequest::GoalState {
+                namespace,
+                task_id,
+                common,
+            } => {
+                assert_eq!(namespace, "team.alpha");
+                assert_eq!(task_id.as_deref(), Some("task-99"));
+                assert_eq!(common.request_id.as_deref(), Some("req-goal"));
+                assert_eq!(common.agent_id.as_deref(), Some("agent-11"));
+            }
+            _ => std::process::abort(),
+        }
+
+        let goal_pin = RuntimeMethodRequest {
+            jsonrpc: "2.0".to_string(),
+            method: "goal_pin".to_string(),
+            params: json!({
+                "namespace": "team.alpha",
+                "task_id": "task-99",
+                "memory_id": 7,
+                "request_id": "req-goal-pin"
+            }),
+            id: Some(json!(185)),
+        };
+        match goal_pin.parse_method().unwrap() {
+            RuntimeRequest::GoalPin {
+                namespace,
+                task_id,
+                memory_id,
+                common,
+            } => {
+                assert_eq!(namespace, "team.alpha");
+                assert_eq!(task_id.as_deref(), Some("task-99"));
+                assert_eq!(memory_id, 7);
+                assert_eq!(common.request_id.as_deref(), Some("req-goal-pin"));
+            }
+            _ => std::process::abort(),
+        }
+
+        let goal_snapshot = RuntimeMethodRequest {
+            jsonrpc: "2.0".to_string(),
+            method: "goal_snapshot".to_string(),
+            params: json!({
+                "namespace": "team.alpha",
+                "task_id": "task-99",
+                "note": "handoff",
+                "agent_id": "agent-12"
+            }),
+            id: Some(json!(186)),
+        };
+        match goal_snapshot.parse_method().unwrap() {
+            RuntimeRequest::GoalSnapshot {
+                namespace,
+                task_id,
+                note,
+                common,
+            } => {
+                assert_eq!(namespace, "team.alpha");
+                assert_eq!(task_id.as_deref(), Some("task-99"));
+                assert_eq!(note.as_deref(), Some("handoff"));
+                assert_eq!(common.agent_id.as_deref(), Some("agent-12"));
             }
             _ => std::process::abort(),
         }
@@ -2597,6 +3047,7 @@ mod tests {
                 namespace,
                 memory_type,
                 visibility,
+                emotional_annotations: _,
                 common,
             } => {
                 assert_eq!(content, "user prefers dark mode");
@@ -2778,6 +3229,67 @@ mod tests {
             } => {
                 assert_eq!(id, 42);
                 assert_eq!(namespace, "team.alpha");
+                assert_eq!(common, RuntimeCommonFields::default());
+            }
+            _ => std::process::abort(),
+        }
+    }
+
+    #[test]
+    fn parse_method_fork_and_merge_fork_accept_canonical_fields() {
+        let fork = RuntimeMethodRequest {
+            jsonrpc: "2.0".to_string(),
+            method: "fork".to_string(),
+            params: json!({
+                "name": "agent-specialist",
+                "namespace": "team.alpha",
+                "inherit": "shared",
+                "note": "testing"
+            }),
+            id: Some(json!(39)),
+        };
+        match fork.parse_method().unwrap() {
+            RuntimeRequest::Fork {
+                name,
+                namespace,
+                parent_namespace,
+                inherit,
+                note,
+                common,
+            } => {
+                assert_eq!(name, "agent-specialist");
+                assert_eq!(namespace, "team.alpha");
+                assert_eq!(parent_namespace, None);
+                assert_eq!(inherit.as_deref(), Some("shared"));
+                assert_eq!(note.as_deref(), Some("testing"));
+                assert_eq!(common, RuntimeCommonFields::default());
+            }
+            _ => std::process::abort(),
+        }
+
+        let merge = RuntimeMethodRequest {
+            jsonrpc: "2.0".to_string(),
+            method: "merge_fork".to_string(),
+            params: json!({
+                "fork_name": "agent-specialist",
+                "target_namespace": "team.alpha",
+                "conflict_strategy": "recency-wins",
+                "dry_run": true
+            }),
+            id: Some(json!(40)),
+        };
+        match merge.parse_method().unwrap() {
+            RuntimeRequest::MergeFork {
+                fork_name,
+                target_namespace,
+                conflict_strategy,
+                dry_run,
+                common,
+            } => {
+                assert_eq!(fork_name, "agent-specialist");
+                assert_eq!(target_namespace, "team.alpha");
+                assert_eq!(conflict_strategy.as_deref(), Some("recency-wins"));
+                assert!(dry_run);
                 assert_eq!(common, RuntimeCommonFields::default());
             }
             _ => std::process::abort(),

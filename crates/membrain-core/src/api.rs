@@ -6,7 +6,10 @@ use crate::policy::{
     PolicyGateway, PolicySummary, SafeguardOutcome as PolicySafeguardOutcome, SharingAccessOutcome,
     SharingAccessRequest, SharingVisibility,
 };
-use crate::types::{MemoryId, SessionId};
+use crate::types::{
+    AffectSignals, AffectTrajectoryHistory, BlackboardSnapshotArtifact, BlackboardState,
+    GoalCheckpoint, GoalLifecycleStatus, GoalStackFrame, MemoryId, SessionId,
+};
 
 /// Stable namespace identifier carried by every core request and response envelope.
 #[derive(Debug, Clone, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
@@ -89,7 +92,7 @@ impl AgentId {
 }
 
 /// Stable task or governing work-item identifier preserved in request envelopes.
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
 pub struct TaskId(String);
 
 impl TaskId {
@@ -542,6 +545,180 @@ impl ResponseWarning {
     }
 }
 
+/// Explicit summary for one visible goal/working-state surface.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+pub struct GoalStateOutput {
+    pub task_id: FieldPresence<String>,
+    pub status: GoalLifecycleStatus,
+    pub goal_stack: Vec<GoalStackFrame>,
+    pub latest_checkpoint: FieldPresence<GoalCheckpoint>,
+    pub blackboard_state: FieldPresence<BlackboardState>,
+    pub namespace: String,
+    pub authoritative_truth: &'static str,
+}
+
+/// Shared response for explicit pause semantics on the goal stack.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+pub struct GoalPauseOutput {
+    pub task_id: FieldPresence<String>,
+    pub status: GoalLifecycleStatus,
+    pub checkpoint: GoalCheckpoint,
+    pub paused_at_tick: u64,
+    pub note: FieldPresence<String>,
+    pub namespace: String,
+    pub authoritative_truth: &'static str,
+}
+
+/// Shared response for explicit resume semantics on the goal stack.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+pub struct GoalResumeOutput {
+    pub task_id: FieldPresence<String>,
+    pub status: GoalLifecycleStatus,
+    pub checkpoint: GoalCheckpoint,
+    pub resumed_at_tick: u64,
+    pub restored_evidence_handles: Vec<u64>,
+    pub restored_dependencies: Vec<String>,
+    pub warnings: Vec<ResponseWarning>,
+    pub namespace: String,
+    pub authoritative_truth: &'static str,
+}
+
+/// Shared response for explicit abandon semantics on the goal stack.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+pub struct GoalAbandonOutput {
+    pub task_id: FieldPresence<String>,
+    pub status: GoalLifecycleStatus,
+    pub checkpoint: FieldPresence<GoalCheckpoint>,
+    pub abandoned_at_tick: u64,
+    pub reason: FieldPresence<String>,
+    pub namespace: String,
+    pub authoritative_truth: &'static str,
+}
+
+/// Shared response for blackboard snapshot creation.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+pub struct BlackboardSnapshotOutput {
+    pub snapshot: BlackboardSnapshotArtifact,
+    pub namespace: String,
+    pub authoritative_truth: &'static str,
+}
+
+/// Governs which parent visibility scopes a fork inherits by reference.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub enum ForkInheritance {
+    PublicOnly,
+    SharedToo,
+    All,
+}
+
+impl ForkInheritance {
+    /// Returns the stable machine-readable inheritance label.
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::PublicOnly => "public",
+            Self::SharedToo => "shared",
+            Self::All => "all",
+        }
+    }
+}
+
+/// Stable lifecycle state for one governed fork namespace.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub enum ForkStatus {
+    Active,
+    Merged,
+    Abandoned,
+}
+
+impl ForkStatus {
+    /// Returns the stable machine-readable fork status label.
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Active => "active",
+            Self::Merged => "merged",
+            Self::Abandoned => "abandoned",
+        }
+    }
+}
+
+/// Stable merge-conflict strategy accepted by CLI, daemon, and MCP surfaces.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub enum MergeConflictStrategy {
+    ForkWins,
+    ParentWins,
+    RecencyWins,
+    Manual,
+}
+
+impl MergeConflictStrategy {
+    /// Returns the stable machine-readable conflict-strategy label.
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::ForkWins => "fork-wins",
+            Self::ParentWins => "parent-wins",
+            Self::RecencyWins => "recency-wins",
+            Self::Manual => "manual",
+        }
+    }
+}
+
+/// Shared response for governed namespace fork capture.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+pub struct ForkInfoOutput {
+    pub name: String,
+    pub namespace: String,
+    pub parent_namespace: String,
+    pub inherit_visibility: &'static str,
+    pub status: &'static str,
+    pub forked_at_tick: u64,
+    pub inherited_count: usize,
+    pub fork_local_procedure_count: usize,
+    pub fork_working_state_count: usize,
+    pub diverged: bool,
+    pub divergence_basis: &'static str,
+    pub isolation_semantics: &'static str,
+    pub note: FieldPresence<String>,
+    pub authoritative_truth: &'static str,
+}
+
+/// Shared inspectable summary of one merge conflict encountered during governed fork reconciliation.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+pub struct MergeConflictOutput {
+    pub item_kind: &'static str,
+    pub item_handle: String,
+    pub target_handle: Option<String>,
+    pub fork_memory_id: Option<u64>,
+    pub target_memory_id: Option<u64>,
+    pub conflict_kind: &'static str,
+    pub resolution_state: &'static str,
+    pub preferred_side: &'static str,
+    pub detail: String,
+}
+
+/// Shared response for governed fork-merge execution or preview.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+pub struct MergeReportOutput {
+    pub fork_name: String,
+    pub target_namespace: String,
+    pub dry_run: bool,
+    pub conflict_strategy: &'static str,
+    pub memories_merged: usize,
+    pub merged_items: Vec<String>,
+    pub conflicts_found: usize,
+    pub conflicts_auto_resolved: usize,
+    pub conflicts_pending: usize,
+    pub conflict_items: Vec<MergeConflictOutput>,
+    pub engrams_merged: usize,
+    pub fork_status: &'static str,
+    pub fork_local_procedure_count: usize,
+    pub fork_working_state_count: usize,
+    pub audit_sequences: Vec<u64>,
+    pub divergence_detected: bool,
+    pub divergence_basis: &'static str,
+    pub isolation_semantics: &'static str,
+    pub authoritative_truth: &'static str,
+}
+
 /// Storage facts for one derived skill artifact.
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
 pub struct SkillArtifactStorageView {
@@ -703,6 +880,124 @@ pub struct ProceduralStoreOutput {
     pub procedures: Vec<ProceduralEntrySummary>,
 }
 
+/// One ranked hot-path entry derived from bounded retrieval activity.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+pub struct HotPathEntry {
+    pub namespace: String,
+    pub memory_id: u64,
+    pub attention_score: u64,
+    pub recall_count: u64,
+    pub session_recall_count: u64,
+    pub working_set_pins: usize,
+    pub dominant_signal: &'static str,
+    pub heat_bucket: &'static str,
+    pub prewarm_trigger: &'static str,
+    pub prewarm_action: &'static str,
+    pub prewarm_target_family: &'static str,
+    pub sample_log: String,
+}
+
+/// One ranked dead-zone entry derived from bounded stale retrieval activity.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+pub struct DeadZoneEntry {
+    pub namespace: String,
+    pub memory_id: u64,
+    pub last_recall_tick: Option<u64>,
+    pub ticks_since_last_recall: Option<u64>,
+    pub recall_count: u64,
+    pub stale_reason: &'static str,
+    pub candidate_rewarm_family: &'static str,
+    pub sample_log: String,
+}
+
+/// Shared hot-path output preserved across operator surfaces.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+pub struct HotPathsOutput {
+    pub namespace: String,
+    pub top_n: usize,
+    pub total_candidates: usize,
+    pub entries: Vec<HotPathEntry>,
+    pub authoritative_truth: &'static str,
+}
+
+/// Shared current mood snapshot preserved across operator surfaces.
+#[derive(Debug, Clone, PartialEq, serde::Serialize)]
+pub struct MoodSnapshotOutput {
+    pub namespace: String,
+    pub current_mood: Option<AffectSignals>,
+    pub latest_tick: Option<u64>,
+    pub history_rows: usize,
+    pub authoritative_truth: &'static str,
+}
+
+/// Shared affect-trajectory history preserved across operator surfaces.
+#[derive(Debug, Clone, PartialEq, serde::Serialize)]
+pub struct MoodHistoryOutput {
+    pub namespace: String,
+    pub since_tick: Option<u64>,
+    pub total_rows: usize,
+    pub rows: Vec<AffectTrajectoryRowOutput>,
+    pub authoritative_truth: &'static str,
+}
+
+/// One affect-trajectory row preserved across operator surfaces.
+#[derive(Debug, Clone, PartialEq, serde::Serialize)]
+pub struct AffectTrajectoryRowOutput {
+    pub namespace: String,
+    pub era_id: Option<String>,
+    pub memory_id: u64,
+    pub tick_start: u64,
+    pub tick_end: Option<u64>,
+    pub avg_valence: f32,
+    pub avg_arousal: f32,
+    pub memory_count: u64,
+    pub authoritative_truth: &'static str,
+}
+
+impl MoodHistoryOutput {
+    /// Builds the shared output surface from canonical affect-trajectory history.
+    pub fn from_history(history: AffectTrajectoryHistory) -> Self {
+        Self {
+            namespace: history.namespace.as_str().to_string(),
+            since_tick: history.since_tick,
+            total_rows: history.total_rows,
+            rows: history
+                .rows
+                .into_iter()
+                .map(AffectTrajectoryRowOutput::from_row)
+                .collect(),
+            authoritative_truth: history.authoritative_truth,
+        }
+    }
+}
+
+impl AffectTrajectoryRowOutput {
+    /// Builds the shared row output from one canonical affect-trajectory row.
+    pub fn from_row(row: crate::types::AffectTrajectoryRow) -> Self {
+        Self {
+            namespace: row.namespace.as_str().to_string(),
+            era_id: row.era_id,
+            memory_id: row.memory_id.0,
+            tick_start: row.tick_start,
+            tick_end: row.tick_end,
+            avg_valence: row.avg_valence,
+            avg_arousal: row.avg_arousal,
+            memory_count: row.memory_count,
+            authoritative_truth: row.authoritative_truth,
+        }
+    }
+}
+
+/// Shared dead-zone output preserved across operator surfaces.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+pub struct DeadZonesOutput {
+    pub namespace: String,
+    pub min_age_ticks: u64,
+    pub total_candidates: usize,
+    pub entries: Vec<DeadZoneEntry>,
+    pub authoritative_truth: &'static str,
+}
+
 /// Machine-readable top-level route summary preserved across interfaces.
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
 pub struct RouteSummary {
@@ -715,6 +1010,10 @@ pub struct RouteSummary {
     pub pre_route_candidate_count: Option<usize>,
     pub post_route_candidate_count: Option<usize>,
     pub fallback_reason: Option<&'static str>,
+    pub predictive_triggered: bool,
+    pub predictive_signal: FieldPresence<&'static str>,
+    pub predictive_skip_reason: Option<&'static str>,
+    pub predictive_fallback_behavior: Option<&'static str>,
 }
 
 /// Bounded score component preserved for explain and inspect surfaces.
@@ -730,6 +1029,7 @@ pub struct TraceScoreComponent {
 pub enum TraceStage {
     Tier1ExactHandle,
     Tier1RecentWindow,
+    PredictivePreroll,
     Tier2Exact,
     GraphExpansion,
     Tier3Fallback,
@@ -743,6 +1043,7 @@ impl TraceStage {
         match self {
             Self::Tier1ExactHandle => "tier1_exact_handle",
             Self::Tier1RecentWindow => "tier1_recent_window",
+            Self::PredictivePreroll => "predictive_preroll",
             Self::Tier2Exact => "tier2_exact",
             Self::GraphExpansion => "graph_expansion",
             Self::Tier3Fallback => "tier3_fallback",
@@ -1010,6 +1311,58 @@ impl RouteSummary {
                     _ => None,
                 });
 
+        let predictive_trigger_reason = result_set
+            .explain
+            .result_reasons
+            .iter()
+            .find(|reason| reason.reason_code == "predictive_preroll_triggered");
+        let predictive_bypass_reason = result_set
+            .explain
+            .result_reasons
+            .iter()
+            .find(|reason| reason.reason_code == "predictive_preroll_bypassed");
+        let predictive_fallback_reason = result_set
+            .explain
+            .result_reasons
+            .iter()
+            .find(|reason| reason.reason_code == "predictive_fallback_behavior");
+        let predictive_signal = predictive_trigger_reason.and_then(|reason| {
+            [
+                "session_recency",
+                "high_value_recent",
+                "temporal_anchor",
+                "procedural_sequence",
+            ]
+            .into_iter()
+            .find(|signal| reason.detail.contains(signal))
+        });
+        let predictive_skip_reason = predictive_bypass_reason.and_then(|reason| {
+            [
+                "predictive_preroll_enabled",
+                "request_not_opted_in",
+                "exact_id_direct_lookup",
+                "graph_expansion_not_predictive",
+                "tier1_budget_disabled",
+                "prefetch_budget_disabled",
+                "intent_not_predictive_candidate",
+                "low_confidence_fallback",
+                "predictive_not_evaluated",
+            ]
+            .into_iter()
+            .find(|skip_reason| reason.detail.contains(skip_reason))
+        });
+        let predictive_fallback_behavior = predictive_fallback_reason.and_then(|reason| {
+            [
+                "predictive_prefetch_then_deeper_route",
+                "predictive_prefetch_only",
+                "predictive_bypassed_then_tier3_fallback",
+                "predictive_bypassed_then_deeper_route",
+                "predictive_bypassed_without_fallback",
+            ]
+            .into_iter()
+            .find(|behavior| reason.detail.contains(behavior))
+        });
+
         Self {
             route_family,
             route_reason,
@@ -1033,6 +1386,12 @@ impl RouteSummary {
             pre_route_candidate_count: Some(result_set.total_candidates),
             post_route_candidate_count: Some(result_set.evidence_pack.len()),
             fallback_reason,
+            predictive_triggered: predictive_trigger_reason.is_some(),
+            predictive_signal: predictive_signal
+                .map(FieldPresence::Present)
+                .unwrap_or(FieldPresence::Absent),
+            predictive_skip_reason,
+            predictive_fallback_behavior,
         }
     }
 }
@@ -1064,6 +1423,12 @@ impl ResultReason {
             "confidence_display_rule" => "confidence_display_rule",
             "strength_threshold_applied" => "strength_threshold_applied",
             "below_min_strength" => "below_min_strength",
+            "predictive_preroll_triggered" => "predictive_preroll_triggered",
+            "predictive_preroll_bypassed" => "predictive_preroll_bypassed",
+            "predictive_fallback_behavior" => "predictive_fallback_behavior",
+            "intent_classification" => "intent_classification",
+            "route_override_applied" => "route_override_applied",
+            "route_override_not_applied" => "route_override_not_applied",
             _ => "custom_reason_code",
         };
         let reason_family = match reason_code {
@@ -1088,6 +1453,12 @@ impl ResultReason {
             | "confidence_display_rule"
             | "strength_threshold_applied"
             | "below_min_strength" => "threshold",
+            "predictive_preroll_triggered"
+            | "predictive_preroll_bypassed"
+            | "predictive_fallback_behavior" => "predictive",
+            "intent_classification" | "route_override_applied" | "route_override_not_applied" => {
+                "routing"
+            }
             _ => "custom",
         };
         let route_stage = match reason_code {
@@ -1106,6 +1477,12 @@ impl ResultReason {
             | "contradiction_selected"
             | "contradiction_visible"
             | "contradiction_retained_under_legal_hold" => TraceStage::Tier2Exact,
+            "predictive_preroll_triggered"
+            | "predictive_preroll_bypassed"
+            | "predictive_fallback_behavior" => TraceStage::PredictivePreroll,
+            "intent_classification" | "route_override_applied" | "route_override_not_applied" => {
+                TraceStage::Packaging
+            }
             "graph_cutoff_max_depth" | "graph_cutoff_budget" | "graph_cutoff_policy_namespace" => {
                 TraceStage::GraphExpansion
             }
@@ -1635,11 +2012,12 @@ mod tests {
     use super::{
         AgentId, ApiModule, AvailabilityPosture, AvailabilityReason, AvailabilitySummary,
         CacheMetricsSummary, ConflictMarker, ContextValidationError, ErrorKind, ExplainTraceSchema,
-        FieldPresence, FreshnessMarker, GraphExpansionSummary, NamespaceId,
-        PassiveObservationInspectSummary, PolicyContext, PolicyFilterSummary, RemediationHint,
-        RemediationStep, RequestContext, RequestId, ResponseContext, ResponseWarning, ResultReason,
-        RouteSummary, TraceOmissionSummary, TracePolicySummary, TraceProvenanceSummary,
-        TraceScoreComponent, TraceStage, UncertaintyMarker, WorkspaceId,
+        FieldPresence, FreshnessMarker, GraphExpansionSummary, MoodHistoryOutput,
+        MoodSnapshotOutput, NamespaceId, PassiveObservationInspectSummary, PolicyContext,
+        PolicyFilterSummary, RemediationHint, RemediationStep, RequestContext, RequestId,
+        ResponseContext, ResponseWarning, ResultReason, RouteSummary, TraceOmissionSummary,
+        TracePolicySummary, TraceProvenanceSummary, TraceScoreComponent, TraceStage,
+        UncertaintyMarker, WorkspaceId,
     };
     use crate::engine::ranking::{RankingExplain, RerankMetadata};
     use crate::engine::recall::{RecallPlanKind, RecallTraceStage};
@@ -1660,8 +2038,9 @@ mod tests {
         SafeguardOutcome as PolicySafeguardOutcome, SafeguardReasonCode, SafeguardRequest,
         SharingAccessDecision, SharingVisibility,
     };
-    use crate::types::CanonicalMemoryType;
-    use crate::types::SessionId;
+    use crate::types::{
+        AffectSignals, AffectTrajectoryHistory, AffectTrajectoryRow, CanonicalMemoryType, SessionId,
+    };
     use serde_json::Value;
 
     #[test]
@@ -2145,6 +2524,62 @@ mod tests {
     }
 
     #[test]
+    fn mood_snapshot_output_preserves_current_affect_surface() {
+        let output = MoodSnapshotOutput {
+            namespace: "team.alpha".to_string(),
+            current_mood: Some(AffectSignals::new(0.4, 0.9)),
+            latest_tick: Some(12),
+            history_rows: 3,
+            authoritative_truth: "emotional_timeline",
+        };
+
+        assert_eq!(output.namespace, "team.alpha");
+        assert_eq!(output.current_mood, Some(AffectSignals::new(0.4, 0.9)));
+        assert_eq!(output.latest_tick, Some(12));
+        assert_eq!(output.history_rows, 3);
+        assert_eq!(output.authoritative_truth, "emotional_timeline");
+    }
+
+    #[test]
+    fn mood_history_output_converts_affect_trajectory_history_to_shared_surface() {
+        let namespace = NamespaceId::new("team.alpha").unwrap();
+        let history = AffectTrajectoryHistory {
+            namespace: namespace.clone(),
+            since_tick: Some(7),
+            total_rows: 1,
+            rows: vec![AffectTrajectoryRow {
+                namespace,
+                era_id: Some("era-1".to_string()),
+                memory_id: crate::types::MemoryId(42),
+                tick_start: 9,
+                tick_end: Some(11),
+                avg_valence: 0.3,
+                avg_arousal: 0.8,
+                memory_count: 2,
+                authoritative_truth: "emotional_timeline",
+            }],
+            authoritative_truth: "emotional_timeline",
+        };
+
+        let output = MoodHistoryOutput::from_history(history);
+
+        assert_eq!(output.namespace, "team.alpha");
+        assert_eq!(output.since_tick, Some(7));
+        assert_eq!(output.total_rows, 1);
+        assert_eq!(output.authoritative_truth, "emotional_timeline");
+        assert_eq!(output.rows.len(), 1);
+        assert_eq!(output.rows[0].namespace, "team.alpha");
+        assert_eq!(output.rows[0].era_id.as_deref(), Some("era-1"));
+        assert_eq!(output.rows[0].memory_id, 42);
+        assert_eq!(output.rows[0].tick_start, 9);
+        assert_eq!(output.rows[0].tick_end, Some(11));
+        assert_eq!(output.rows[0].avg_valence, 0.3);
+        assert_eq!(output.rows[0].avg_arousal, 0.8);
+        assert_eq!(output.rows[0].memory_count, 2);
+        assert_eq!(output.rows[0].authoritative_truth, "emotional_timeline");
+    }
+
+    #[test]
     fn route_summary_from_result_set_preserves_temporal_recall_and_candidate_counts() {
         let result_set = RetrievalResultSet {
             outcome_class: OutcomeClass::Accepted,
@@ -2253,6 +2688,7 @@ mod tests {
                         has_conflict: false,
                         contradiction_details: Vec::new(),
                     },
+                    mood_boost_applied: false,
                     contradiction_explains: Vec::new(),
                     conflict_markers: ConflictMarkers {
                         conflict_state: crate::engine::contradiction::ResolutionState::None,
@@ -2389,6 +2825,7 @@ mod tests {
                         has_conflict: false,
                         contradiction_details: Vec::new(),
                     },
+                    mood_boost_applied: false,
                     contradiction_explains: Vec::new(),
                     conflict_markers: ConflictMarkers {
                         conflict_state: crate::engine::contradiction::ResolutionState::None,
@@ -2613,6 +3050,55 @@ mod tests {
     }
 
     #[test]
+    fn result_reason_from_auto_route_reasons_preserves_routing_family_and_codes() {
+        let classification = crate::engine::result::ResultReason {
+            memory_id: None,
+            reason_code: "intent_classification".to_string(),
+            detail: "intent=recent_activity confidence=0.91 query_path=recent_context request=small_session_lookup plan=recent_tier1_then_tier2_exact".to_string(),
+        };
+        let override_applied = crate::engine::result::ResultReason {
+            memory_id: None,
+            reason_code: "route_override_applied".to_string(),
+            detail: "manual override selected tier2_fallback".to_string(),
+        };
+        let override_not_applied = crate::engine::result::ResultReason {
+            memory_id: None,
+            reason_code: "route_override_not_applied".to_string(),
+            detail: "auto-routing used classified intent without manual override".to_string(),
+        };
+
+        let mapped_classification = ResultReason::from_result_reason(&classification);
+        let mapped_override_applied = ResultReason::from_result_reason(&override_applied);
+        let mapped_override_not_applied = ResultReason::from_result_reason(&override_not_applied);
+
+        assert_eq!(mapped_classification.reason_code, "intent_classification");
+        assert_eq!(mapped_classification.reason_family, "routing");
+        assert_eq!(mapped_classification.route_stage, TraceStage::Packaging);
+        assert!(!mapped_classification.policy_filter_applied);
+
+        assert_eq!(
+            mapped_override_applied.reason_code,
+            "route_override_applied"
+        );
+        assert_eq!(mapped_override_applied.reason_family, "routing");
+        assert_eq!(mapped_override_applied.route_stage, TraceStage::Packaging);
+        assert!(mapped_override_applied.detail.contains("tier2_fallback"));
+
+        assert_eq!(
+            mapped_override_not_applied.reason_code,
+            "route_override_not_applied"
+        );
+        assert_eq!(mapped_override_not_applied.reason_family, "routing");
+        assert_eq!(
+            mapped_override_not_applied.route_stage,
+            TraceStage::Packaging
+        );
+        assert!(mapped_override_not_applied
+            .detail
+            .contains("without manual override"));
+    }
+
+    #[test]
     fn trace_schema_fields_attach_with_stable_machine_names() {
         let response = ResponseContext::success(
             NamespaceId::new("team.gamma").unwrap(),
@@ -2630,6 +3116,10 @@ mod tests {
                 pre_route_candidate_count: Some(3),
                 post_route_candidate_count: Some(1),
                 fallback_reason: Some("tier1_recent_insufficient"),
+                predictive_triggered: false,
+                predictive_signal: FieldPresence::Absent,
+                predictive_skip_reason: Some("request_not_opted_in"),
+                predictive_fallback_behavior: Some("predictive_bypassed_then_deeper_route"),
             },
             vec![
                 TraceStage::PolicyGate,
@@ -3015,6 +3505,10 @@ mod tests {
                 pre_route_candidate_count: Some(8),
                 post_route_candidate_count: Some(1),
                 fallback_reason: Some("cache_probe_continued"),
+                predictive_triggered: false,
+                predictive_signal: FieldPresence::Absent,
+                predictive_skip_reason: Some("request_not_opted_in"),
+                predictive_fallback_behavior: Some("predictive_bypassed_then_deeper_route"),
             },
             vec![
                 TraceStage::Tier1RecentWindow,
@@ -3196,6 +3690,10 @@ mod tests {
                 pre_route_candidate_count: Some(3),
                 post_route_candidate_count: Some(1),
                 fallback_reason: Some("tier1_recent_insufficient"),
+                predictive_triggered: false,
+                predictive_signal: FieldPresence::Absent,
+                predictive_skip_reason: Some("request_not_opted_in"),
+                predictive_fallback_behavior: Some("predictive_bypassed_then_deeper_route"),
             },
             vec![TraceStage::PolicyGate, TraceStage::Tier2Exact],
             vec![ResultReason {

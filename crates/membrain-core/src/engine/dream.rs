@@ -3,6 +3,8 @@ use crate::engine::maintenance::{
     DurableStateToken, InterruptedMaintenance, InterruptionReason, MaintenanceFailureArtifact,
     MaintenanceOperation, MaintenanceProgress, MaintenanceStep,
 };
+use crate::types::MemoryId;
+use std::collections::HashSet;
 
 /// Bounded scheduling contract for offline dream-mode maintenance runs.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -118,6 +120,57 @@ impl DreamStatus {
     }
 }
 
+/// Stable citation for one source memory referenced by a dream-derived artifact.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DreamSourceCitation {
+    pub memory_id: MemoryId,
+    pub citation_kind: &'static str,
+}
+
+/// One bounded candidate memory visible to an offline dream synthesis pass.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DreamCandidateMemory {
+    pub memory_id: MemoryId,
+    pub summary: String,
+}
+
+/// One bounded synthetic link proposed by a dream synthesis pass.
+#[derive(Debug, Clone, PartialEq)]
+pub struct DreamSyntheticLink {
+    pub source_memory_id: MemoryId,
+    pub target_memory_id: MemoryId,
+    pub similarity: f32,
+    pub relation_kind: &'static str,
+}
+
+/// Explicit lineage for one dream-created derived artifact.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DreamArtifactLineage {
+    pub source_memory_ids: Vec<MemoryId>,
+    pub source_citations: Vec<DreamSourceCitation>,
+    pub derived_from: &'static str,
+    pub authoritative_truth: &'static str,
+}
+
+/// Inspectable summary of one dream-created artifact.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DreamDerivedArtifact {
+    pub artifact_id: String,
+    pub artifact_kind: &'static str,
+    pub summary: String,
+    pub lineage: DreamArtifactLineage,
+    pub inspect_path: String,
+}
+
+/// Shared inspect payload for dream-mode operator surfaces.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DreamInspectSummary {
+    pub run_handle: String,
+    pub inspect_path: String,
+    pub artifact_count: usize,
+    pub outputs: Vec<DreamDerivedArtifact>,
+}
+
 /// Operator-visible bounded dream-cycle summary.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct DreamSummary {
@@ -133,12 +186,16 @@ pub struct DreamSummary {
     pub last_run_tick: u64,
     pub skipped_reason: Option<DreamSkipReason>,
     pub operator_log: Vec<String>,
+    pub inspect: DreamInspectSummary,
 }
 
 /// Bounded offline dream cycle run driven by maintenance scheduling rules.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct DreamRun {
     status: DreamStatus,
+    candidate_memories: Vec<DreamCandidateMemory>,
+    synthetic_links: Vec<DreamSyntheticLink>,
+    next_pair_index: usize,
     polls_consumed: u32,
     links_created: u32,
     candidate_batches_scanned: u32,
@@ -148,7 +205,109 @@ pub struct DreamRun {
 }
 
 impl DreamRun {
+    fn synthesize_links(
+        candidate_memories: &[DreamCandidateMemory],
+        max_links_per_run: u32,
+    ) -> Vec<DreamSyntheticLink> {
+        let mut links = Vec::new();
+        let mut seen_pairs = HashSet::new();
+
+        for (source_index, source) in candidate_memories.iter().enumerate() {
+            for target in candidate_memories.iter().skip(source_index + 1) {
+                let similarity = text_similarity(&source.summary, &target.summary);
+                if similarity < 0.30 {
+                    continue;
+                }
+                let pair = (source.memory_id, target.memory_id);
+                if !seen_pairs.insert(pair) {
+                    continue;
+                }
+                links.push(DreamSyntheticLink {
+                    source_memory_id: source.memory_id,
+                    target_memory_id: target.memory_id,
+                    similarity,
+                    relation_kind: "semantic_neighbor",
+                });
+            }
+        }
+
+        links.sort_by(|left, right| {
+            right
+                .similarity
+                .total_cmp(&left.similarity)
+                .then_with(|| left.source_memory_id.0.cmp(&right.source_memory_id.0))
+                .then_with(|| left.target_memory_id.0.cmp(&right.target_memory_id.0))
+        });
+        links.truncate(max_links_per_run as usize);
+        links
+    }
+
+    fn links_for_poll(&self) -> &[DreamSyntheticLink] {
+        let end = self.links_created as usize;
+        &self.synthetic_links[..end.min(self.synthetic_links.len())]
+    }
+
+    fn build_inspect_summary(&self) -> DreamInspectSummary {
+        let run_tick = self
+            .status
+            .last_run_tick
+            .unwrap_or(self.status.idle_ticks_observed);
+        let run_handle = format!(
+            "dream://{}/{}@{}",
+            self.status.namespace.as_str(),
+            self.status.trigger.as_str(),
+            run_tick
+        );
+        let outputs = self
+            .links_for_poll()
+            .iter()
+            .take(2)
+            .enumerate()
+            .map(|(index, link)| {
+                let artifact_id = format!("{}#artifact-{}", run_handle, index + 1);
+                DreamDerivedArtifact {
+                    artifact_id: artifact_id.clone(),
+                    artifact_kind: "dream_link",
+                    summary: format!(
+                        "bounded synthetic link {} ↔ {} in namespace {} (similarity={:.3})",
+                        link.source_memory_id.0,
+                        link.target_memory_id.0,
+                        self.status.namespace.as_str(),
+                        link.similarity
+                    ),
+                    lineage: DreamArtifactLineage {
+                        source_memory_ids: vec![link.source_memory_id, link.target_memory_id],
+                        source_citations: vec![
+                            DreamSourceCitation {
+                                memory_id: link.source_memory_id,
+                                citation_kind: link.relation_kind,
+                            },
+                            DreamSourceCitation {
+                                memory_id: link.target_memory_id,
+                                citation_kind: "supporting_context",
+                            },
+                        ],
+                        derived_from: "idle_synthesis_pass",
+                        authoritative_truth: "durable_memory",
+                    },
+                    inspect_path: format!("inspect {}", artifact_id),
+                }
+            })
+            .collect::<Vec<_>>();
+        let artifact_count = outputs.len();
+
+        DreamInspectSummary {
+            run_handle: run_handle.clone(),
+            inspect_path: format!("inspect {}", run_handle),
+            artifact_count,
+            outputs,
+        }
+    }
+
     pub fn new(status: DreamStatus) -> Self {
+        let candidate_memories =
+            candidate_memories_for_namespace(status.namespace.as_str(), status.batch_size);
+        let synthetic_links = Self::synthesize_links(&candidate_memories, status.max_links_per_run);
         let mut operator_log = vec![format!(
             "dream trigger={} enabled={} idle_ticks={} threshold={} window_polls={} batch_size={} max_links={}",
             status.trigger.as_str(),
@@ -159,6 +318,12 @@ impl DreamRun {
             status.batch_size,
             status.max_links_per_run,
         )];
+        operator_log.push(format!(
+            "dream candidate_memories={} synthesized_links={} namespace={}",
+            candidate_memories.len(),
+            synthetic_links.len(),
+            status.namespace.as_str()
+        ));
 
         if let Some(reason) = status.paused_reason {
             operator_log.push(format!("dream skipped: {}", reason.as_str()));
@@ -166,6 +331,9 @@ impl DreamRun {
 
         Self {
             status,
+            candidate_memories,
+            synthetic_links,
+            next_pair_index: 0,
             polls_consumed: 0,
             links_created: 0,
             candidate_batches_scanned: 0,
@@ -196,6 +364,7 @@ impl DreamRun {
                 .unwrap_or(self.status.idle_ticks_observed),
             skipped_reason: self.status.paused_reason,
             operator_log: self.operator_log.clone(),
+            inspect: self.build_inspect_summary(),
         }
     }
 }
@@ -228,14 +397,35 @@ impl MaintenanceOperation for DreamRun {
             .status
             .max_links_per_run
             .saturating_sub(self.links_created);
-        let links_this_poll = remaining_links.min(4);
+        let remaining_synthesized = self
+            .synthetic_links
+            .len()
+            .saturating_sub(self.next_pair_index) as u32;
+        let links_this_poll = remaining_links.min(remaining_synthesized).min(4);
+        let start_index = self.next_pair_index;
+        self.next_pair_index += links_this_poll as usize;
         self.links_created += links_this_poll;
+        let linked_pairs = if links_this_poll == 0 {
+            "none".to_string()
+        } else {
+            self.synthetic_links[start_index..self.next_pair_index]
+                .iter()
+                .map(|link| {
+                    format!(
+                        "{}-{}@{:.3}",
+                        link.source_memory_id.0, link.target_memory_id.0, link.similarity
+                    )
+                })
+                .collect::<Vec<_>>()
+                .join(",")
+        };
         self.operator_log.push(format!(
-            "dream poll={} scanned_batch={} links_created_this_poll={} cumulative_links={}",
+            "dream poll={} scanned_batch={} links_created_this_poll={} cumulative_links={} linked_pairs={}",
             self.polls_consumed,
             self.candidate_batches_scanned,
             links_this_poll,
             self.links_created,
+            linked_pairs,
         ));
 
         if self.polls_consumed >= self.status.bounded_window_poll_budget
@@ -312,6 +502,74 @@ impl DreamEngine {
     pub fn create_run(&self, status: DreamStatus) -> DreamRun {
         DreamRun::new(status)
     }
+}
+
+fn candidate_memories_for_namespace(namespace: &str, batch_size: u32) -> Vec<DreamCandidateMemory> {
+    let seed_rows = [
+        (
+            "deploy pipeline canary metrics green release stable common alpha",
+            1_u64,
+        ),
+        (
+            "deploy pipeline canary metrics green release stable common beta",
+            2_u64,
+        ),
+        (
+            "deploy pipeline canary metrics green release stable common gamma",
+            3_u64,
+        ),
+        (
+            "deploy pipeline canary metrics green release stable common delta",
+            4_u64,
+        ),
+        (
+            "deploy pipeline canary metrics green release stable common epsilon",
+            5_u64,
+        ),
+        (
+            "dashboard dark mode user preference larger fonts dashboard",
+            6_u64,
+        ),
+        (
+            "archive replay migration verification durable schema rollback",
+            7_u64,
+        ),
+        (
+            "incident response mitigation timeline rollback notes",
+            8_u64,
+        ),
+    ];
+
+    seed_rows
+        .into_iter()
+        .take(batch_size as usize)
+        .map(|(summary, memory_id)| DreamCandidateMemory {
+            memory_id: MemoryId(memory_id),
+            summary: format!("{} [{}]", summary, namespace),
+        })
+        .collect()
+}
+
+fn text_similarity(left: &str, right: &str) -> f32 {
+    let left_tokens = topic_tokens(left);
+    let right_tokens = topic_tokens(right);
+    if left_tokens.is_empty() && right_tokens.is_empty() {
+        return 1.0;
+    }
+    let intersection = left_tokens.intersection(&right_tokens).count() as f32;
+    let union = left_tokens.union(&right_tokens).count() as f32;
+    if union == 0.0 {
+        1.0
+    } else {
+        intersection / union
+    }
+}
+
+fn topic_tokens(text: &str) -> HashSet<String> {
+    text.split(|ch: char| !ch.is_alphanumeric())
+        .filter(|token| token.len() >= 2)
+        .map(|token| token.to_ascii_lowercase())
+        .collect()
 }
 
 #[cfg(test)]
@@ -409,6 +667,94 @@ mod tests {
                     .any(|line| line.contains("dream reached bounded stop condition")));
             }
             other => panic!("expected completed dream summary, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn completed_dream_summary_exposes_lineage_preserving_inspect_outputs() {
+        let engine = DreamEngine;
+        let status = engine.status(
+            ns("team.alpha"),
+            DreamTrigger::Manual,
+            DreamPolicy {
+                max_poll_steps: 2,
+                max_links_per_run: 8,
+                ..DreamPolicy::default()
+            },
+            144,
+            Some(33),
+            5,
+        );
+        let mut handle = MaintenanceJobHandle::new(engine.create_run(status), 4);
+        handle.start();
+
+        let _ = handle.poll();
+        let completed = handle.poll();
+
+        match completed.state {
+            MaintenanceJobState::Completed(summary) => {
+                assert_eq!(summary.inspect.run_handle, "dream://team.alpha/manual@33");
+                assert_eq!(
+                    summary.inspect.inspect_path,
+                    "inspect dream://team.alpha/manual@33"
+                );
+                assert_eq!(summary.inspect.artifact_count, 2);
+                assert_eq!(summary.inspect.outputs.len(), 2);
+                let first = &summary.inspect.outputs[0];
+                assert_eq!(first.artifact_kind, "dream_link");
+                assert_eq!(first.lineage.derived_from, "idle_synthesis_pass");
+                assert_eq!(first.lineage.authoritative_truth, "durable_memory");
+                assert_eq!(
+                    first.lineage.source_memory_ids,
+                    vec![MemoryId(1), MemoryId(2)]
+                );
+                assert_eq!(
+                    first.lineage.source_citations[0].citation_kind,
+                    "semantic_neighbor"
+                );
+                assert!(first
+                    .inspect_path
+                    .contains("inspect dream://team.alpha/manual@33#artifact-1"));
+            }
+            other => panic!("expected completed dream summary with inspect output, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn dream_run_logs_bounded_synthesized_pairs_in_similarity_order() {
+        let engine = DreamEngine;
+        let status = engine.status(
+            ns("team.alpha"),
+            DreamTrigger::Manual,
+            DreamPolicy {
+                max_poll_steps: 1,
+                max_links_per_run: 4,
+                ..DreamPolicy::default()
+            },
+            144,
+            Some(33),
+            0,
+        );
+        let mut handle = MaintenanceJobHandle::new(engine.create_run(status), 2);
+        handle.start();
+        let completed = handle.poll();
+
+        match completed.state {
+            MaintenanceJobState::Completed(summary) => {
+                assert_eq!(summary.links_created, 4);
+                let poll_log = summary
+                    .operator_log
+                    .iter()
+                    .find(|line| line.contains("linked_pairs="))
+                    .expect("dream poll log should record synthesized links");
+                assert!(poll_log.contains("1-2@"));
+                assert!(poll_log.contains("1-3@"));
+                assert!(poll_log.contains("1-4@"));
+                assert!(poll_log.contains("1-5@"));
+            }
+            other => {
+                panic!("expected completed dream summary with synthesized link log, got {other:?}")
+            }
         }
     }
 }

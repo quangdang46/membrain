@@ -1,0 +1,38 @@
+{
+  "id": "chk-run-mb-2db.3-20260325T202533693-fallback-1",
+  "bead_id": "mb-2db.3",
+  "run_id": "run-mb-2db.3-20260325T202533693",
+  "session_id": "ses-run-mb-2db.3-20260325T202533693",
+  "progress": "Synthetic fallback checkpoint after NoProgress",
+  "next_step": "Resume from the transcript tail, avoid repeating completed setup, and continue with the smallest safe remaining step.",
+  "payload": {
+    "claimed_paths": [],
+    "confidence": 0.25,
+    "context": {
+      "failure_class": "NoProgress",
+      "failure_detail": "session ended with Unknown",
+      "stderr_tail": [],
+      "stdout_tail": [
+        "",
+        "",
+        "",
+        "",
+        "",
+        "",
+        "I’ve also:",
+        "- registered as `BlueHarbor`",
+        "- acknowledged pending Agent Mail messages",
+        "- replied with my exact file/scope slice to avoid communication purgatory and reduce overlap",
+        "",
+        "Current next safe step:",
+        "- once `GrayCliff` clears or narrows the daemon reservation, wire `RuntimeState::doctor_report()` to use the live `RuntimeAuditState.store.attention_namespaces()` output in place of the hard-coded placeholder vector, then update the runtime doctor parity assertion to prove health exposes the real attention hotspot."
+      ],
+      "synthetic": true
+    },
+    "next_step": "Resume from the transcript tail, avoid repeating completed setup, and continue with the smallest safe remaining step.",
+    "open_questions": [],
+    "progress": "Synthetic fallback checkpoint after NoProgress"
+  },
+  "saved_at": "2026-03-25T20:39:09.950608266Z",
+  "resume_generation": 1
+}

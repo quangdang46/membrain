@@ -1,0 +1,47 @@
+{"ts":"2026-03-25T17:48:16.862534199Z","kind":"session_started","session_id":"ses-run-mb-2db.5.1-20260325T174816828"}
+{"ts":"2026-03-25T17:57:03.198275264Z","kind":"stdout","line":"Done."}
+{"ts":"2026-03-25T17:57:03.375913351Z","kind":"stdout","line":""}
+{"ts":"2026-03-25T17:57:03.375927011Z","kind":"stdout","line":"- Read `AGENTS.md` and `README.md` fully."}
+{"ts":"2026-03-25T17:57:03.375929999Z","kind":"stdout","line":"- Registered in MCP Agent Mail as `VioletGate`, checked inbox, announced scope, and released reservations afterward."}
+{"ts":"2026-03-25T17:57:03.375984318Z","kind":"stdout","line":"- Resumed from the latest checkpoint without redoing completed work."}
+{"ts":"2026-03-25T17:57:03.375988694Z","kind":"stdout","line":"- Verified `mb-2db.5.1` was already correctly landed and passing."}
+{"ts":"2026-03-25T17:57:03.375991042Z","kind":"stdout","line":""}
+{"ts":"2026-03-25T17:57:03.375993603Z","kind":"stdout","line":"Validated:"}
+{"ts":"2026-03-25T17:57:03.375996057Z","kind":"stdout","line":"- `cargo test -p membrain-core fork_metadata_reports_isolation_and_divergence_from_fork_local_state -- --nocapture`"}
+{"ts":"2026-03-25T17:57:03.375998725Z","kind":"stdout","line":"- `cargo test -p membrain-cli fork_and_merge_outputs_preserve_governed_branch_metadata -- --nocapture`"}
+{"ts":"2026-03-25T17:57:03.376001287Z","kind":"stdout","line":"- `cargo check -p membrain-core -p membrain-cli`"}
+{"ts":"2026-03-25T17:57:03.376003634Z","kind":"stdout","line":""}
+{"ts":"2026-03-25T17:57:03.376005875Z","kind":"stdout","line":"Bead status:"}
+{"ts":"2026-03-25T17:57:03.376008223Z","kind":"stdout","line":"- `mb-2db.5.1` is now closed in `.beads/issues.jsonl:185`"}
+{"ts":"2026-03-25T17:57:03.376010464Z","kind":"stdout","line":""}
+{"ts":"2026-03-25T17:57:03.376012599Z","kind":"stdout","line":"Key landed surfaces:"}
+{"ts":"2026-03-25T17:57:03.376015053Z","kind":"stdout","line":"- `crates/membrain-core/src/brain_store.rs:1737`"}
+{"ts":"2026-03-25T17:57:03.376017508Z","kind":"stdout","line":"- `crates/membrain-core/src/engine/fork.rs:1`"}
+{"ts":"2026-03-25T17:57:03.376019856Z","kind":"stdout","line":"- `crates/membrain-core/tests/working_memory_admission.rs:355`"}
+{"ts":"2026-03-25T17:57:03.376022097Z","kind":"stdout","line":"- `crates/membrain-cli/src/main.rs:7963`"}
+{"ts":"2026-03-25T17:57:03.376024444Z","kind":"stdout","line":""}
+{"ts":"2026-03-25T17:57:03.376026579Z","kind":"stdout","line":"Current branching follow-on:"}
+{"ts":"2026-03-25T17:57:03.376029033Z","kind":"stdout","line":"- `mb-2db.5.2` remains open at `.beads/issues.jsonl:186`"}
+{"ts":"2026-03-25T17:57:03.376031274Z","kind":"stdout","line":""}
+{"ts":"2026-03-25T17:57:03.376033516Z","kind":"stdout","line":"GROVE_RESULT"}
+{"ts":"2026-03-25T17:57:03.378528697Z","kind":"stdout","line":"- Verified fork capture, branch metadata, and isolation semantics are landed and the bead is complete."}
+{"ts":"2026-03-25T17:57:03.378648435Z","kind":"stdout","line":""}
+{"ts":"2026-03-25T17:57:03.378651636Z","kind":"stdout","line":"GROVE_ARTIFACTS"}
+{"ts":"2026-03-25T17:57:03.378658466Z","kind":"stdout","line":"- `crates/membrain-core/src/brain_store.rs`"}
+{"ts":"2026-03-25T17:57:03.378661347Z","kind":"stdout","line":"- `crates/membrain-core/src/engine/fork.rs`"}
+{"ts":"2026-03-25T17:57:03.378667430Z","kind":"stdout","line":"- `crates/membrain-core/tests/working_memory_admission.rs`"}
+{"ts":"2026-03-25T17:57:03.378670739Z","kind":"stdout","line":"- `crates/membrain-cli/src/main.rs`"}
+{"ts":"2026-03-25T17:57:03.378673086Z","kind":"stdout","line":""}
+{"ts":"2026-03-25T17:57:03.378688987Z","kind":"stdout","line":"GROVE_LESSONS"}
+{"ts":"2026-03-25T17:57:03.378693576Z","kind":"stdout","line":"- The first safe fork layer was already completed; the remaining branching work has moved to merge-resolution follow-on scope."}
+{"ts":"2026-03-25T17:57:03.378697312Z","kind":"stdout","line":""}
+{"ts":"2026-03-25T17:57:03.378699553Z","kind":"stdout","line":"GROVE_DECISIONS"}
+{"ts":"2026-03-25T17:57:03.378702221Z","kind":"stdout","line":"- Closed `mb-2db.5.1`."}
+{"ts":"2026-03-25T17:57:03.378705102Z","kind":"stdout","line":"- Left daemon-side unrelated compile drift untouched."}
+{"ts":"2026-03-25T17:57:03.379339222Z","kind":"stdout","line":""}
+{"ts":"2026-03-25T17:57:03.379346372Z","kind":"stdout","line":"GROVE_WARNINGS"}
+{"ts":"2026-03-25T17:57:03.379350748Z","kind":"stdout","line":"- Daemon-wide follow-up remains blocked by unrelated compile drift outside this bead."}
+{"ts":"2026-03-25T17:57:03.379352455Z","kind":"stdout","line":""}
+{"ts":"2026-03-25T17:57:03.379353949Z","kind":"stdout","line":"GROVE_EXIT: false"}
+{"ts":"2026-03-25T17:57:03.379353949Z","kind":"protocol","event":{"type":"exit","value":false}}
+{"ts":"2026-03-25T17:57:04.783519672Z","kind":"session_ended","exit_code":0}

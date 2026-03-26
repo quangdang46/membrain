@@ -1,0 +1,56 @@
+{"ts":"2026-03-25T15:59:53.425147020Z","kind":"session_started","session_id":"ses-run-mb-1ng-20260325T155953349"}
+{"ts":"2026-03-25T16:09:22.985388534Z","kind":"stdout","line":"Read `AGENTS.md`, `README.md`, and `docs/README.md`, reviewed the mb-1ng.11 transcript tail, explored the current working-state architecture, registered in Agent Mail as `CoralCove`, introduced myself, checked inbox, and coordinated with active agents."}
+{"ts":"2026-03-25T16:09:23.047976426Z","kind":"stdout","line":""}
+{"ts":"2026-03-25T16:09:23.047986855Z","kind":"stdout","line":"Key status:"}
+{"ts":"2026-03-25T16:09:23.047989728Z","kind":"stdout","line":"- `mb-1ng.11` core/daemon scaffolding had already landed."}
+{"ts":"2026-03-25T16:09:23.047993239Z","kind":"stdout","line":"- `BlueWaterfall` confirmed the CLI/docs parity slice is already done."}
+{"ts":"2026-03-25T16:09:23.047997709Z","kind":"stdout","line":"- The remaining runtime gap is still in `crates/membrain-daemon/src/daemon.rs:3074` onward: goal handlers synthesize blackboard/checkpoints instead of using shared `BrainStore::{goal_state,goal_pause,goal_resume,goal_abandon}`."}
+{"ts":"2026-03-25T16:09:23.048001859Z","kind":"stdout","line":"- Those exact daemon/core files are currently reserved by other agents, so I did not collide with them."}
+{"ts":"2026-03-25T16:09:23.048006009Z","kind":"stdout","line":""}
+{"ts":"2026-03-25T16:09:23.048008456Z","kind":"stdout","line":"What I completed:"}
+{"ts":"2026-03-25T16:09:23.048011117Z","kind":"stdout","line":"- Added a non-overlapping public facade integration test in `crates/membrain-core/tests/working_memory_admission.rs` proving `BrainStore` working-state lifecycle behavior:"}
+{"ts":"2026-03-25T16:09:23.048033676Z","kind":"stdout","line":"  - projection vs authoritative truth"}
+{"ts":"2026-03-25T16:09:23.048036975Z","kind":"stdout","line":"  - pin"}
+{"ts":"2026-03-25T16:09:23.048039422Z","kind":"stdout","line":"  - pause"}
+{"ts":"2026-03-25T16:09:23.048041763Z","kind":"stdout","line":"  - resume"}
+{"ts":"2026-03-25T16:09:23.048043998Z","kind":"stdout","line":"  - abandon"}
+{"ts":"2026-03-25T16:09:23.048046552Z","kind":"stdout","line":"  - audit trail assertions"}
+{"ts":"2026-03-25T16:09:23.048048786Z","kind":"stdout","line":""}
+{"ts":"2026-03-25T16:09:23.048051340Z","kind":"stdout","line":"Validation:"}
+{"ts":"2026-03-25T16:09:23.048053575Z","kind":"stdout","line":"- `rustfmt --edition 2024 --check crates/membrain-core/tests/working_memory_admission.rs` passed."}
+{"ts":"2026-03-25T16:09:23.048055809Z","kind":"stdout","line":"- Targeted test run is blocked by unrelated existing compile errors in `crates/membrain-core/src/engine/dream.rs:217`, `crates/membrain-core/src/engine/dream.rs:197`, and `crates/membrain-core/src/engine/dream.rs:307`."}
+{"ts":"2026-03-25T16:09:23.048058150Z","kind":"stdout","line":""}
+{"ts":"2026-03-25T16:09:23.048060279Z","kind":"stdout","line":"GROVE_RESULT: success"}
+{"ts":"2026-03-25T16:09:23.048060279Z","kind":"protocol","event":{"type":"result","summary":"success"}}
+{"ts":"2026-03-25T16:09:23.052708975Z","kind":"stdout","line":""}
+{"ts":"2026-03-25T16:09:23.052722064Z","kind":"stdout","line":"GROVE_ARTIFACTS:"}
+{"ts":"2026-03-25T16:09:23.052722064Z","kind":"protocol","event":{"type":"artifacts","items":[]}}
+{"ts":"2026-03-25T16:09:23.052778994Z","kind":"stdout","line":"- `crates/membrain-core/tests/working_memory_admission.rs`"}
+{"ts":"2026-03-25T16:09:23.052778994Z","kind":"protocol","event":{"type":"artifacts","items":["`crates/membrain-core/tests/working_memory_admission.rs`"]}}
+{"ts":"2026-03-25T16:09:23.052804746Z","kind":"stdout","line":"  - added public `BrainStore` lifecycle integration coverage for `mb-1ng.11`"}
+{"ts":"2026-03-25T16:09:23.052804746Z","kind":"protocol","event":{"type":"artifacts","items":["added public `BrainStore` lifecycle integration coverage for `mb-1ng.11`"]}}
+{"ts":"2026-03-25T16:09:23.052810811Z","kind":"stdout","line":""}
+{"ts":"2026-03-25T16:09:23.052813152Z","kind":"stdout","line":"GROVE_LESSONS:"}
+{"ts":"2026-03-25T16:09:23.052813152Z","kind":"protocol","event":{"type":"lessons","items":[]}}
+{"ts":"2026-03-25T16:09:23.053303497Z","kind":"stdout","line":"- The live remaining `mb-1ng.11` gap is runtime integration, not CLI/docs parity."}
+{"ts":"2026-03-25T16:09:23.053303497Z","kind":"protocol","event":{"type":"lessons","items":["The live remaining `mb-1ng.11` gap is runtime integration, not CLI/docs parity."]}}
+{"ts":"2026-03-25T16:09:23.053314564Z","kind":"stdout","line":"- Existing core facade APIs already expose the right lifecycle semantics; a public integration test was the safest non-conflicting slice."}
+{"ts":"2026-03-25T16:09:23.053314564Z","kind":"protocol","event":{"type":"lessons","items":["Existing core facade APIs already expose the right lifecycle semantics; a public integration test was the safest non-conflicting slice."]}}
+{"ts":"2026-03-25T16:09:23.053376602Z","kind":"stdout","line":""}
+{"ts":"2026-03-25T16:09:23.053380007Z","kind":"stdout","line":"GROVE_DECISIONS:"}
+{"ts":"2026-03-25T16:09:23.053380007Z","kind":"protocol","event":{"type":"decision","items":[]}}
+{"ts":"2026-03-25T16:09:23.053386392Z","kind":"stdout","line":"- Avoided reserved CLI/docs and daemon/core files."}
+{"ts":"2026-03-25T16:09:23.053386392Z","kind":"protocol","event":{"type":"decision","items":["Avoided reserved CLI/docs and daemon/core files."]}}
+{"ts":"2026-03-25T16:09:23.053394585Z","kind":"stdout","line":"- Took a safe follow-on slice that strengthens acceptance evidence without duplicating another agent’s work."}
+{"ts":"2026-03-25T16:09:23.053394585Z","kind":"protocol","event":{"type":"decision","items":["Took a safe follow-on slice that strengthens acceptance evidence without duplicating another agent’s work."]}}
+{"ts":"2026-03-25T16:09:23.053400012Z","kind":"stdout","line":""}
+{"ts":"2026-03-25T16:09:23.053402566Z","kind":"stdout","line":"GROVE_WARNINGS:"}
+{"ts":"2026-03-25T16:09:23.053402566Z","kind":"protocol","event":{"type":"warning","items":[]}}
+{"ts":"2026-03-25T16:09:23.053407036Z","kind":"stdout","line":"- `cargo test -p membrain-core --test working_memory_admission public_brain_store_goal_lifecycle_preserves_projection_and_audit -- --nocapture` is blocked by unrelated pre-existing `dream.rs` compile failures."}
+{"ts":"2026-03-25T16:09:23.053407036Z","kind":"protocol","event":{"type":"warning","items":["`cargo test -p membrain-core --test working_memory_admission public_brain_store_goal_lifecycle_preserves_projection_and_audit -- --nocapture` is blocked by unrelated pre-existing `dream.rs` compile failures."]}}
+{"ts":"2026-03-25T16:09:23.053412250Z","kind":"stdout","line":"- Remaining daemon/runtime integration work is mapped but not edited because reserved holders have not cleared overlap yet."}
+{"ts":"2026-03-25T16:09:23.053412250Z","kind":"protocol","event":{"type":"warning","items":["Remaining daemon/runtime integration work is mapped but not edited because reserved holders have not cleared overlap yet."]}}
+{"ts":"2026-03-25T16:09:23.053417996Z","kind":"stdout","line":""}
+{"ts":"2026-03-25T16:09:23.053419698Z","kind":"stdout","line":"GROVE_EXIT: false"}
+{"ts":"2026-03-25T16:09:23.053419698Z","kind":"protocol","event":{"type":"exit","value":false}}
+{"ts":"2026-03-25T16:09:23.769574812Z","kind":"session_ended","exit_code":0}

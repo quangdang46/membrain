@@ -1,0 +1,45 @@
+{
+  "id": "chk-run-mb-2db.7.1-20260325T185634833-fallback-1",
+  "bead_id": "mb-2db.7.1",
+  "run_id": "run-mb-2db.7.1-20260325T185634833",
+  "session_id": "ses-run-mb-2db.7.1-20260325T185634833",
+  "progress": "Synthetic fallback checkpoint after NoProgress",
+  "next_step": "Resume from the transcript tail, avoid repeating completed setup, and continue with the smallest safe remaining step.",
+  "payload": {
+    "claimed_paths": [],
+    "confidence": 0.25,
+    "context": {
+      "failure_class": "NoProgress",
+      "failure_detail": "session ended with Unknown",
+      "stderr_tail": [],
+      "stdout_tail": [
+        "    \"Registered on MCP Agent Mail as LilacBeaver\",",
+        "    \"Reserved non-conflicting target files and detected overlap on consolidation.rs\",",
+        "    \"Replied to WhiteBeaver in-thread and stood down from conflicting edits\",",
+        "    \"Mapped exact code/test precedents for compression safety\"",
+        "  ],",
+        "  \"implementation_notes\": {",
+        "    \"primary_edit_point\": \"crates/membrain-core/src/engine/consolidation.rs\",",
+        "    \"primary_test_point\": \"crates/membrain-core/tests/maintenance_control.rs\",",
+        "    \"compression_contract_anchor\": \"CompactionUnitSelection\",",
+        "    \"existing_safety_precedents\": [",
+        "      \"authoritative_evidence_retained\",",
+        "      \"durable_truth_source = durable_memory_rows\",",
+        "      \"projection not authoritative truth\",",
+        "      \"cannot archive last authoritative evidence without legal hold\"",
+        "    ]",
+        "  },",
+        "  \"next_safe_step\": \"Wait for WhiteBeaver reply; if they own consolidation.rs, pivot to non-overlapping review/validation or the next unblocked bead.\"",
+        "}",
+        "```",
+        ""
+      ],
+      "synthetic": true
+    },
+    "next_step": "Resume from the transcript tail, avoid repeating completed setup, and continue with the smallest safe remaining step.",
+    "open_questions": [],
+    "progress": "Synthetic fallback checkpoint after NoProgress"
+  },
+  "saved_at": "2026-03-25T19:04:53.559544424Z",
+  "resume_generation": 1
+}

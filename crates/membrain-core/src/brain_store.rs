@@ -1,5 +1,7 @@
 use crate::api::{
-    ApiModule, FieldPresence, NamespaceId, ProceduralEntryAuditView, ProceduralEntryRecallView,
+    ApiModule, DeadZoneEntry, DeadZonesOutput, FieldPresence, ForkInfoOutput, ForkInheritance,
+    ForkStatus, HotPathEntry, HotPathsOutput, MergeConflictOutput, MergeConflictStrategy,
+    MergeReportOutput, NamespaceId, ProceduralEntryAuditView, ProceduralEntryRecallView,
     ProceduralEntryReviewView, ProceduralEntryStorageView, ProceduralEntrySummary,
     ProceduralStoreOutput, ReflectionArtifactView, SkillArtifactRecallView,
     SkillArtifactReviewView, SkillArtifactStorageView, SkillArtifactSummary, SkillArtifactsOutput,
@@ -7,6 +9,10 @@ use crate::api::{
 use crate::config::RuntimeConfig;
 use crate::embed::EmbedModule;
 use crate::engine::belief_history::BeliefHistoryEngine;
+use crate::engine::compression::{
+    CompressionApplyResult, CompressionEngine, CompressionLogEntry, CompressionPolicy,
+    CompressionSummary, CompressionTrigger,
+};
 use crate::engine::confidence::ConfidenceEngine;
 use crate::engine::consolidation::{
     ConsolidationEngine, ConsolidationPolicy, ConsolidationSummary, DerivedArtifact,
@@ -29,7 +35,9 @@ use crate::engine::ranking::RankingEngine;
 use crate::engine::recall::RecallEngine;
 use crate::engine::reconsolidation::{LabileMemory, ReconsolidationPolicy, ReconsolidationRun};
 use crate::engine::repair::RepairEngine;
+use crate::engine::working_state::{GoalWorkingState, WorkingStateEngine};
 use crate::graph::{CausalInvalidationReport, CausalLink, CausalTrace, GraphModule};
+use crate::health::AttentionNamespaceInputs;
 use crate::index::IndexModule;
 use crate::migrate::{DurableSchemaObject, MigrationModule};
 use crate::observability::{
@@ -49,17 +57,32 @@ use crate::store::tier2::{Tier2DurableItemLayout, Tier2Store};
 use crate::store::tier_router::{TierRouter, TierRoutingInput, TierRoutingTrace};
 use crate::store::{AuditLogStoreApi, HotStoreApi, ProceduralStoreApi, Tier2StoreApi};
 use crate::types::{
-    CoreApiVersion, MemoryId, RawEncodeInput, SemanticDiff, SemanticDiffCategory,
-    SemanticDiffEntry, SessionId, SnapshotAnchor, SnapshotId, SnapshotMetadata,
-    SnapshotRetentionClass,
+    AffectSignals, AffectTrajectoryHistory, AffectTrajectoryRow, CompressionMetadata,
+    CoreApiVersion, MemoryId, NormalizedMemoryEnvelope, RawEncodeInput, RawIntakeKind,
+    SemanticDiff, SemanticDiffCategory, SemanticDiffEntry, SessionId, SharingMetadata,
+    SnapshotAnchor, SnapshotId, SnapshotMetadata, SnapshotRetentionClass,
 };
-use std::collections::HashMap;
+use std::collections::{BTreeSet, HashMap, HashSet};
 
 const PROCEDURAL_PROMOTION_ACTOR: &str = "procedural_store_promotion";
 const PROCEDURAL_ROLLBACK_ACTOR: &str = "procedural_store_rollback";
+const FORK_MERGE_ACTOR: &str = "fork_merge";
+
+#[derive(Debug, Clone)]
+struct PlannedMergeConflict {
+    output: MergeConflictOutput,
+    auto_resolved: bool,
+    preferred_side: &'static str,
+}
+
+#[derive(Debug, Clone)]
+struct PlannedForkMerge {
+    merged_items: Vec<String>,
+    conflict_items: Vec<PlannedMergeConflict>,
+}
 
 /// Inspectable result returned when the core facade prepares a Tier2 layout from encode output.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct PreparedTier2Layout {
     pub layout: Tier2DurableItemLayout,
     pub prefilter_trace: Tier2PrefilterTrace,
@@ -105,8 +128,144 @@ pub enum SnapshotDeleteErrorReason {
     LastRestorableAnchor,
 }
 
+/// Captured governed fork metadata stored by the core facade.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct BrainForkRecord {
+    name: String,
+    namespace: NamespaceId,
+    parent_namespace: NamespaceId,
+    forked_at_tick: u64,
+    inherit_visibility: ForkInheritance,
+    status: ForkStatus,
+    merged_at_tick: Option<u64>,
+    inherited_count_at_fork: usize,
+    note: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+struct StoredAffectTrajectoryRow {
+    namespace: NamespaceId,
+    era_id: Option<String>,
+    memory_id: MemoryId,
+    tick_start: u64,
+    tick_end: Option<u64>,
+    avg_valence: f32,
+    avg_arousal: f32,
+    memory_count: u64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct StoredCompressionLogRow {
+    schema_memory_id: MemoryId,
+    source_memory_count: usize,
+    tick: u64,
+    namespace: NamespaceId,
+    keyword_summary: Option<String>,
+}
+
+/// Stable configuration for creating one governed namespace fork.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ForkConfig {
+    pub name: String,
+    pub parent_namespace: NamespaceId,
+    pub inherit_visibility: ForkInheritance,
+    pub note: Option<String>,
+}
+
+/// Stable configuration for merging one governed namespace fork.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct MergeConfig {
+    pub fork_name: String,
+    pub target_namespace: NamespaceId,
+    pub conflict_strategy: MergeConflictStrategy,
+    pub dry_run: bool,
+}
+
 fn semantic_diff_caution() -> &'static str {
     "semantic diff summarizes bounded historical evidence and does not prove consensus or truth"
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+struct RetrievalAttentionSignals {
+    recall_count: u64,
+    session_recall_count: u64,
+    last_recall_tick: Option<u64>,
+    deny_count: u64,
+    working_set_pins: usize,
+    task_pressure: usize,
+}
+
+fn retrieval_attention_score(signals: &RetrievalAttentionSignals) -> u64 {
+    signals.recall_count * 5
+        + signals.session_recall_count * 11
+        + signals.deny_count * 3
+        + (signals.working_set_pins as u64 * 17)
+        + (signals.task_pressure as u64 * 13)
+}
+
+fn retrieval_dominant_signal(signals: &RetrievalAttentionSignals) -> &'static str {
+    let candidates = [
+        ("working_set_pins", signals.working_set_pins as u64 * 17),
+        ("task_pressure", signals.task_pressure as u64 * 13),
+        ("session_recall_count", signals.session_recall_count * 11),
+        ("recall_count", signals.recall_count * 5),
+        ("deny_count", signals.deny_count * 3),
+    ];
+    candidates
+        .into_iter()
+        .max_by_key(|(_, weight)| *weight)
+        .map(|(signal, _)| signal)
+        .unwrap_or("recall_count")
+}
+
+fn retrieval_heat_bucket(score: u64, signals: &RetrievalAttentionSignals) -> &'static str {
+    if score >= 160 || signals.working_set_pins >= 2 || signals.task_pressure >= 3 {
+        "hot"
+    } else if score >= 60 || signals.session_recall_count >= 2 {
+        "warming"
+    } else if score > 0 {
+        "warm"
+    } else {
+        "idle"
+    }
+}
+
+fn retrieval_prewarm_guidance(
+    bucket: &'static str,
+    dominant_signal: &'static str,
+    signals: &RetrievalAttentionSignals,
+) -> (&'static str, &'static str, &'static str) {
+    match (bucket, dominant_signal) {
+        ("hot", "working_set_pins") | ("hot", "task_pressure") => {
+            ("task_intent", "bounded_goal_rewarm", "goal_conditioned")
+        }
+        ("hot", "session_recall_count") | ("warming", "session_recall_count") => (
+            "session_recency",
+            "bounded_session_rewarm",
+            "session_warmup",
+        ),
+        ("warm", "recall_count") | ("warming", "recall_count") if signals.recall_count >= 4 => {
+            ("session_recency", "queue_prefetch_hint", "prefetch_hints")
+        }
+        _ => ("none", "observe_only", "none"),
+    }
+}
+
+fn dead_zone_reason(
+    current_tick: u64,
+    min_age_ticks: u64,
+    signals: &RetrievalAttentionSignals,
+) -> (&'static str, &'static str) {
+    match signals.last_recall_tick {
+        None => ("never_recalled", "cold_start_mitigation"),
+        Some(last_tick)
+            if current_tick.saturating_sub(last_tick) >= min_age_ticks.saturating_mul(4) =>
+        {
+            ("long_idle", "cold_start_mitigation")
+        }
+        Some(_) if signals.recall_count <= 1 => ("single_touch_stale", "prefetch_hints"),
+        Some(_) => ("cooling_after_activity", "session_warmup"),
+    }
 }
 
 fn semantic_diff_category_order(category: SemanticDiffCategory) -> u8 {
@@ -182,6 +341,7 @@ pub struct BrainStore {
     belief_history: BeliefHistoryEngine,
     confidence: ConfidenceEngine,
     consolidation: ConsolidationEngine,
+    compression: CompressionEngine,
     forgetting: ForgettingEngine,
     repair: RepairEngine,
     hot_store: HotStore,
@@ -196,8 +356,13 @@ pub struct BrainStore {
     migrate: MigrationModule,
     audit_log: AppendOnlyAuditLog,
     procedural_entries: HashMap<String, ProceduralMemoryRecord>,
+    working_state: WorkingStateEngine,
     snapshots: HashMap<SnapshotId, SnapshotMetadata>,
     snapshot_name_index: HashMap<(NamespaceId, String), SnapshotId>,
+    forks: HashMap<String, BrainForkRecord>,
+    affect_trajectory: Vec<StoredAffectTrajectoryRow>,
+    compression_log: Vec<StoredCompressionLogRow>,
+    compression_memories: HashMap<MemoryId, Tier2DurableItemLayout>,
     next_snapshot_id: u64,
 }
 
@@ -217,6 +382,7 @@ impl BrainStore {
             belief_history: BeliefHistoryEngine::new(),
             confidence: ConfidenceEngine,
             consolidation: ConsolidationEngine,
+            compression: CompressionEngine,
             forgetting: ForgettingEngine,
             repair: RepairEngine,
             hot_store: HotStore,
@@ -231,8 +397,13 @@ impl BrainStore {
             migrate: MigrationModule,
             audit_log: AuditLogStore.new_default_log(),
             procedural_entries: HashMap::new(),
+            working_state: WorkingStateEngine::default(),
             snapshots: HashMap::new(),
             snapshot_name_index: HashMap::new(),
+            forks: HashMap::new(),
+            affect_trajectory: Vec::new(),
+            compression_log: Vec::new(),
+            compression_memories: HashMap::new(),
             next_snapshot_id: 1,
         }
     }
@@ -570,6 +741,62 @@ impl BrainStore {
     /// Returns the shared consolidation surface owned by the core crate.
     pub fn consolidation_engine(&self) -> &ConsolidationEngine {
         &self.consolidation
+    }
+
+    /// Returns the shared compression surface owned by the core crate.
+    pub fn compression_engine(&self) -> &CompressionEngine {
+        &self.compression
+    }
+
+    /// Returns an inspectable summary of one bounded compression pass.
+    pub fn summarize_compression_pass(
+        &self,
+        namespace: NamespaceId,
+        policy: CompressionPolicy,
+        estimated_candidates: u32,
+    ) -> CompressionSummary {
+        use crate::engine::maintenance::{MaintenanceJobHandle, MaintenanceJobState};
+
+        let last_run_tick = self.current_tick().checked_sub(1);
+        let status =
+            self.compression
+                .status(namespace, CompressionTrigger::Manual, policy, last_run_tick);
+        let run = self.compression.create_run(status);
+        let mut handle = MaintenanceJobHandle::new(run, estimated_candidates.max(1) + 1);
+
+        loop {
+            let snapshot = handle.poll();
+            match snapshot.state {
+                MaintenanceJobState::Completed(summary) => return summary,
+                MaintenanceJobState::Running { .. } => continue,
+                other => panic!("unexpected compression state: {other:?}"),
+            }
+        }
+    }
+
+    /// Applies the first eligible bounded compression candidate for the namespace.
+    pub fn apply_compression_pass(
+        &mut self,
+        namespace: NamespaceId,
+        policy: CompressionPolicy,
+        estimated_candidates: u32,
+        dry_run: bool,
+    ) -> CompressionApplyResult {
+        let _ = estimated_candidates;
+        let last_run_tick = self.current_tick().checked_sub(1);
+        let status =
+            self.compression
+                .status(namespace, CompressionTrigger::Manual, policy, last_run_tick);
+        let applied = self.compression.apply_first_candidate(&status, dry_run);
+        if !dry_run {
+            if let Some(artifact) = applied.schema_artifact.clone() {
+                self.persist_compression_artifact(&status.namespace, &artifact);
+            }
+            if let Some(entry) = applied.compression_log_entry.clone() {
+                self.record_compression_log_entry(entry);
+            }
+        }
+        applied
     }
 
     /// Returns a bounded operator-facing skills surface backed by derived skill artifacts.
@@ -1584,6 +1811,560 @@ impl BrainStore {
         SnapshotId(self.next_snapshot_id)
     }
 
+    fn inherited_count_for_visibility(&self, inherit_visibility: ForkInheritance) -> usize {
+        match inherit_visibility {
+            ForkInheritance::PublicOnly => 0,
+            ForkInheritance::SharedToo => self
+                .procedural_entries
+                .values()
+                .filter(|record| record.visibility == SharingVisibility::Shared)
+                .count(),
+            ForkInheritance::All => self.procedural_entries.len(),
+        }
+    }
+
+    fn fork_local_procedure_count(&self, fork_namespace: &NamespaceId) -> usize {
+        self.procedural_entries
+            .values()
+            .filter(|record| &record.namespace == fork_namespace)
+            .count()
+    }
+
+    fn fork_working_state_count(&self, fork_namespace: &NamespaceId) -> usize {
+        self.working_state
+            .states()
+            .filter(|state| &state.namespace == fork_namespace)
+            .count()
+    }
+
+    fn fork_diverged(&self, fork_namespace: &NamespaceId) -> bool {
+        self.fork_local_procedure_count(fork_namespace) > 0
+            || self.fork_working_state_count(fork_namespace) > 0
+    }
+
+    fn plan_fork_merge(&self, fork: &BrainForkRecord, config: &MergeConfig) -> PlannedForkMerge {
+        let mut merged_items = Vec::new();
+        let mut conflict_items = Vec::new();
+
+        let mut fork_procedures = self
+            .procedural_entries
+            .values()
+            .filter(|record| record.namespace == fork.namespace)
+            .cloned()
+            .collect::<Vec<_>>();
+        fork_procedures.sort_by(|left, right| left.pattern_handle.cmp(&right.pattern_handle));
+
+        for fork_record in fork_procedures {
+            let parent_handle =
+                ProceduralStore::pattern_handle(&config.target_namespace, &fork_record.pattern);
+            let target_record = self.procedural_entries.get(&parent_handle);
+            let item_label = format!("procedural:{}", fork_record.pattern_handle);
+            match target_record {
+                None => merged_items.push(item_label),
+                Some(target_record)
+                    if target_record.action == fork_record.action
+                        && target_record.confidence == fork_record.confidence
+                        && target_record.state == fork_record.state =>
+                {
+                    merged_items.push(item_label);
+                }
+                Some(target_record) => {
+                    let (resolution_state, preferred_side) = match config.conflict_strategy {
+                        MergeConflictStrategy::Manual => ("unresolved", "manual"),
+                        MergeConflictStrategy::ForkWins => ("auto_resolved", "fork"),
+                        MergeConflictStrategy::ParentWins => ("auto_resolved", "parent"),
+                        MergeConflictStrategy::RecencyWins => {
+                            if fork_record.version >= target_record.version {
+                                ("auto_resolved", "fork")
+                            } else {
+                                ("auto_resolved", "parent")
+                            }
+                        }
+                    };
+                    let detail = format!(
+                        "procedural divergence pattern={} fork_action={} target_action={} fork_version={} target_version={}",
+                        fork_record.pattern,
+                        fork_record.action,
+                        target_record.action,
+                        fork_record.version,
+                        target_record.version
+                    );
+                    conflict_items.push(PlannedMergeConflict {
+                        auto_resolved: resolution_state == "auto_resolved",
+                        preferred_side,
+                        output: MergeConflictOutput {
+                            item_kind: "procedural_entry",
+                            item_handle: fork_record.pattern_handle.clone(),
+                            target_handle: Some(target_record.pattern_handle.clone()),
+                            fork_memory_id: fork_record
+                                .lineage_ancestors
+                                .last()
+                                .map(|memory| memory.0),
+                            target_memory_id: target_record
+                                .lineage_ancestors
+                                .last()
+                                .map(|memory| memory.0),
+                            conflict_kind: "contradiction_revision",
+                            resolution_state,
+                            preferred_side,
+                            detail,
+                        },
+                    });
+                }
+            }
+        }
+
+        let mut working_states = self
+            .working_state
+            .states()
+            .filter(|state| state.namespace == fork.namespace)
+            .cloned()
+            .collect::<Vec<_>>();
+        working_states.sort_by(|left, right| left.task_id.as_str().cmp(right.task_id.as_str()));
+        for state in working_states {
+            let item_handle = state.task_id.as_str().to_string();
+            let detail = format!(
+                "working-state divergence task_id={} status={} active_evidence={} pending_dependencies={}",
+                state.task_id.as_str(),
+                state.status.as_str(),
+                state.blackboard.active_evidence.len(),
+                state.pending_dependencies.len()
+            );
+            match config.conflict_strategy {
+                MergeConflictStrategy::Manual => conflict_items.push(PlannedMergeConflict {
+                    auto_resolved: false,
+                    preferred_side: "manual",
+                    output: MergeConflictOutput {
+                        item_kind: "working_state",
+                        item_handle,
+                        target_handle: None,
+                        fork_memory_id: None,
+                        target_memory_id: None,
+                        conflict_kind: "working_state_pending",
+                        resolution_state: "unresolved",
+                        preferred_side: "manual",
+                        detail,
+                    },
+                }),
+                _ => merged_items.push(format!("working_state:{}", state.task_id.as_str())),
+            }
+        }
+
+        PlannedForkMerge {
+            merged_items,
+            conflict_items,
+        }
+    }
+
+    fn fork_info_output(&self, record: &BrainForkRecord) -> ForkInfoOutput {
+        let fork_local_procedure_count = self.fork_local_procedure_count(&record.namespace);
+        let fork_working_state_count = self.fork_working_state_count(&record.namespace);
+        let diverged = self.fork_diverged(&record.namespace);
+        ForkInfoOutput {
+            name: record.name.clone(),
+            namespace: record.namespace.as_str().to_string(),
+            parent_namespace: record.parent_namespace.as_str().to_string(),
+            inherit_visibility: record.inherit_visibility.as_str(),
+            status: record.status.as_str(),
+            forked_at_tick: record.forked_at_tick,
+            inherited_count: record.inherited_count_at_fork,
+            fork_local_procedure_count,
+            fork_working_state_count,
+            diverged,
+            divergence_basis: "fork_namespace_local_state",
+            isolation_semantics: "inherit_by_reference_until_explicit_merge",
+            note: record
+                .note
+                .clone()
+                .map(FieldPresence::Present)
+                .unwrap_or(FieldPresence::Absent),
+            authoritative_truth: "fork_metadata",
+        }
+    }
+
+    /// Captures or reuses one governed namespace fork with inheritance-by-reference metadata.
+    pub fn fork(&mut self, config: ForkConfig) -> ForkInfoOutput {
+        if let Some(existing) = self.forks.get(&config.name) {
+            return self.fork_info_output(existing);
+        }
+
+        let forked_at_tick = self.current_tick().saturating_add(1);
+        let namespace = NamespaceId::new(config.name.clone())
+            .expect("fork config name should already be a valid namespace");
+        let inherited_count = self.inherited_count_for_visibility(config.inherit_visibility);
+        let record = BrainForkRecord {
+            name: config.name.clone(),
+            namespace: namespace.clone(),
+            parent_namespace: config.parent_namespace.clone(),
+            forked_at_tick,
+            inherit_visibility: config.inherit_visibility,
+            status: ForkStatus::Active,
+            merged_at_tick: None,
+            inherited_count_at_fork: inherited_count,
+            note: config.note.clone(),
+        };
+        self.forks.insert(record.name.clone(), record.clone());
+        self.append_audit_entry(
+            AuditLogEntry::new(
+                AuditEventCategory::Policy,
+                AuditEventKind::ApprovedSharing,
+                namespace.clone(),
+                "fork_capture",
+                format!(
+                    "forked namespace={} parent_namespace={} inherit_visibility={} inherited_count={} isolation_semantics=inherit_by_reference_until_explicit_merge divergence_basis=fork_namespace_local_state status={}",
+                    namespace.as_str(),
+                    record.parent_namespace.as_str(),
+                    record.inherit_visibility.as_str(),
+                    inherited_count,
+                    record.status.as_str()
+                ),
+            )
+            .with_tick(forked_at_tick),
+        );
+        self.fork_info_output(&record)
+    }
+
+    /// Returns all known governed namespace forks in stable fork order.
+    pub fn list_forks(&self) -> Vec<ForkInfoOutput> {
+        let mut forks = self
+            .forks
+            .values()
+            .map(|record| self.fork_info_output(record))
+            .collect::<Vec<_>>();
+        forks.sort_by(|left, right| {
+            left.forked_at_tick
+                .cmp(&right.forked_at_tick)
+                .then_with(|| left.name.cmp(&right.name))
+        });
+        forks
+    }
+
+    /// Returns one governed fork merge report and records merge lifecycle state on non-dry runs.
+    pub fn merge_fork(&mut self, config: MergeConfig) -> Option<MergeReportOutput> {
+        let fork = self.forks.get(&config.fork_name)?.clone();
+        let fork_local_procedure_count = self.fork_local_procedure_count(&fork.namespace);
+        let fork_working_state_count = self.fork_working_state_count(&fork.namespace);
+        let divergence_detected = self.fork_diverged(&fork.namespace);
+        let planned = self.plan_fork_merge(&fork, &config);
+        let conflicts_found = planned.conflict_items.len();
+        let conflicts_auto_resolved = planned
+            .conflict_items
+            .iter()
+            .filter(|conflict| conflict.auto_resolved)
+            .count();
+        let conflicts_pending = conflicts_found.saturating_sub(conflicts_auto_resolved);
+        let merged_count = planned.merged_items.len() + conflicts_auto_resolved;
+        let tick = self.current_tick().saturating_add(1);
+        let mut audit_sequences = Vec::new();
+
+        if !config.dry_run {
+            for conflict in &planned.conflict_items {
+                let audit = self.append_audit_entry(
+                    AuditLogEntry::new(
+                        AuditEventCategory::Maintenance,
+                        if conflict.auto_resolved {
+                            AuditEventKind::MaintenanceReconsolidationApplied
+                        } else {
+                            AuditEventKind::MaintenanceReconsolidationDeferred
+                        },
+                        config.target_namespace.clone(),
+                        FORK_MERGE_ACTOR,
+                        format!(
+                            "fork_merge_conflict fork={} item_kind={} item_handle={} target_handle={} preferred_side={} resolution_state={} detail={}",
+                            config.fork_name,
+                            conflict.output.item_kind,
+                            conflict.output.item_handle,
+                            conflict.output.target_handle.as_deref().unwrap_or("none"),
+                            conflict.preferred_side,
+                            conflict.output.resolution_state,
+                            conflict.output.detail
+                        ),
+                    )
+                    .with_tick(tick)
+                    .with_related_run(format!("merge-run-{}", config.fork_name)),
+                );
+                audit_sequences.push(audit.sequence);
+            }
+            let summary_audit = self.append_audit_entry(
+                AuditLogEntry::new(
+                    AuditEventCategory::Maintenance,
+                    AuditEventKind::MaintenanceReconsolidationApplied,
+                    config.target_namespace.clone(),
+                    FORK_MERGE_ACTOR,
+                    format!(
+                        "merged fork={} target_namespace={} merged_items={} conflicts_found={} conflicts_auto_resolved={} conflicts_pending={} strategy={} divergence_detected={} isolation_semantics=inherit_by_reference_until_explicit_merge",
+                        config.fork_name,
+                        config.target_namespace.as_str(),
+                        planned.merged_items.join(","),
+                        conflicts_found,
+                        conflicts_auto_resolved,
+                        conflicts_pending,
+                        config.conflict_strategy.as_str(),
+                        divergence_detected
+                    ),
+                )
+                .with_tick(tick)
+                .with_related_run(format!("merge-run-{}", config.fork_name)),
+            );
+            audit_sequences.push(summary_audit.sequence);
+            if let Some(record) = self.forks.get_mut(&config.fork_name) {
+                record.status = ForkStatus::Merged;
+                record.merged_at_tick = Some(tick);
+            }
+        }
+
+        let fork_status = if config.dry_run {
+            fork.status.as_str()
+        } else {
+            ForkStatus::Merged.as_str()
+        };
+        Some(MergeReportOutput {
+            fork_name: config.fork_name,
+            target_namespace: config.target_namespace.as_str().to_string(),
+            dry_run: config.dry_run,
+            conflict_strategy: config.conflict_strategy.as_str(),
+            memories_merged: merged_count,
+            merged_items: planned.merged_items,
+            conflicts_found,
+            conflicts_auto_resolved,
+            conflicts_pending,
+            conflict_items: planned
+                .conflict_items
+                .into_iter()
+                .map(|conflict| conflict.output)
+                .collect(),
+            engrams_merged: merged_count,
+            fork_status,
+            fork_local_procedure_count,
+            fork_working_state_count,
+            audit_sequences,
+            divergence_detected,
+            divergence_basis: "fork_namespace_local_state",
+            isolation_semantics: "inherit_by_reference_until_explicit_merge",
+            authoritative_truth: "fork_metadata",
+        })
+    }
+
+    fn affect_trajectory_row_from_signals(
+        &self,
+        namespace: NamespaceId,
+        memory_id: MemoryId,
+        era_id: Option<String>,
+        tick_start: u64,
+        affect: AffectSignals,
+    ) -> StoredAffectTrajectoryRow {
+        let affect = affect.clamped();
+        StoredAffectTrajectoryRow {
+            namespace,
+            era_id,
+            memory_id,
+            tick_start,
+            tick_end: None,
+            avg_valence: affect.valence,
+            avg_arousal: affect.arousal,
+            memory_count: 1,
+        }
+    }
+
+    /// Appends one durable affect-trajectory row captured from encode-time signals.
+    pub fn record_affect_trajectory(
+        &mut self,
+        namespace: NamespaceId,
+        memory_id: MemoryId,
+        era_id: Option<String>,
+        tick_start: u64,
+        affect: AffectSignals,
+    ) -> AffectTrajectoryRow {
+        let row = self
+            .affect_trajectory_row_from_signals(namespace, memory_id, era_id, tick_start, affect);
+        self.affect_trajectory.push(row.clone());
+        AffectTrajectoryRow {
+            namespace: row.namespace,
+            era_id: row.era_id,
+            memory_id: row.memory_id,
+            tick_start: row.tick_start,
+            tick_end: row.tick_end,
+            avg_valence: row.avg_valence,
+            avg_arousal: row.avg_arousal,
+            memory_count: row.memory_count,
+            authoritative_truth: "emotional_timeline",
+        }
+    }
+
+    fn stored_compression_log_row(entry: CompressionLogEntry) -> StoredCompressionLogRow {
+        StoredCompressionLogRow {
+            schema_memory_id: entry.schema_memory_id,
+            source_memory_count: entry.source_memory_count,
+            tick: entry.tick,
+            namespace: entry.namespace,
+            keyword_summary: entry.keyword_summary,
+        }
+    }
+
+    fn persist_compression_artifact(
+        &mut self,
+        namespace: &NamespaceId,
+        artifact: &crate::engine::compression::CompressionSchemaArtifact,
+    ) {
+        let schema_tick = self.current_tick().saturating_add(1);
+        let schema_envelope = NormalizedMemoryEnvelope {
+            memory_type: crate::types::CanonicalMemoryType::Observation,
+            source_kind: RawIntakeKind::Observation,
+            raw_text: artifact.compact_text.clone(),
+            compact_text: artifact.compact_text.clone(),
+            normalization_generation: "compression-schema-v1",
+            payload_size_bytes: artifact.compact_text.len(),
+            affect: None,
+            landmark: crate::types::LandmarkMetadata::non_landmark(),
+            observation_source: Some("compression".to_string()),
+            observation_chunk_id: Some(artifact.cluster_id.clone()),
+            has_causal_parents: true,
+            has_causal_children: false,
+            compression: CompressionMetadata {
+                compressed_into: None,
+                compression_tick: Some(schema_tick),
+                source_memory_ids: artifact.source_memory_ids.clone(),
+            },
+            sharing: SharingMetadata::default(),
+        };
+        let schema_layout = self.tier2_store.layout_item(
+            namespace.clone(),
+            artifact.schema_memory_id,
+            SessionId(0),
+            artifact.schema_memory_id.0,
+            &schema_envelope,
+            None,
+            None,
+        );
+        self.compression_memories
+            .insert(artifact.schema_memory_id, schema_layout);
+
+        for source_memory_id in &artifact.source_memory_ids {
+            let source_text = format!(
+                "compressed source memory {} for schema {}",
+                source_memory_id.0, artifact.schema_memory_id.0
+            );
+            let source_envelope = NormalizedMemoryEnvelope {
+                memory_type: crate::types::CanonicalMemoryType::Observation,
+                source_kind: RawIntakeKind::Observation,
+                raw_text: source_text.clone(),
+                compact_text: source_text,
+                normalization_generation: "compression-source-v1",
+                payload_size_bytes: artifact.compact_text.len(),
+                affect: None,
+                landmark: crate::types::LandmarkMetadata::non_landmark(),
+                observation_source: Some("compression".to_string()),
+                observation_chunk_id: Some(artifact.cluster_id.clone()),
+                has_causal_parents: false,
+                has_causal_children: true,
+                compression: CompressionMetadata {
+                    compressed_into: Some(artifact.schema_memory_id),
+                    compression_tick: Some(schema_tick),
+                    source_memory_ids: Vec::new(),
+                },
+                sharing: SharingMetadata::default(),
+            };
+            let source_layout = self.tier2_store.layout_item(
+                namespace.clone(),
+                *source_memory_id,
+                SessionId(0),
+                source_memory_id.0,
+                &source_envelope,
+                None,
+                None,
+            );
+            self.compression_memories
+                .insert(*source_memory_id, source_layout);
+        }
+    }
+
+    pub fn compression_memory_layout(
+        &self,
+        memory_id: MemoryId,
+    ) -> Option<&Tier2DurableItemLayout> {
+        self.compression_memories.get(&memory_id)
+    }
+
+    /// Appends one durable compression-log row captured from an accepted compression apply.
+    pub fn record_compression_log_entry(
+        &mut self,
+        entry: CompressionLogEntry,
+    ) -> CompressionLogEntry {
+        let row = Self::stored_compression_log_row(entry.clone());
+        self.compression_log.push(row);
+        entry
+    }
+
+    /// Returns the bounded compression-log history for one namespace and optional tick floor.
+    pub fn compression_log_entries(
+        &self,
+        namespace: NamespaceId,
+        since_tick: Option<u64>,
+    ) -> Vec<CompressionLogEntry> {
+        let mut rows = self
+            .compression_log
+            .iter()
+            .filter(|row| row.namespace == namespace)
+            .filter(|row| since_tick.is_none_or(|min_tick| row.tick >= min_tick))
+            .cloned()
+            .collect::<Vec<_>>();
+        rows.sort_by(|left, right| {
+            left.tick
+                .cmp(&right.tick)
+                .then_with(|| left.schema_memory_id.0.cmp(&right.schema_memory_id.0))
+        });
+        rows.into_iter()
+            .map(|row| CompressionLogEntry {
+                schema_memory_id: row.schema_memory_id,
+                source_memory_count: row.source_memory_count,
+                tick: row.tick,
+                namespace: row.namespace,
+                keyword_summary: row.keyword_summary,
+            })
+            .collect()
+    }
+
+    /// Returns the bounded affect-trajectory history for one namespace and optional tick floor.
+    pub fn mood_history(
+        &self,
+        namespace: NamespaceId,
+        since_tick: Option<u64>,
+    ) -> AffectTrajectoryHistory {
+        let mut rows = self
+            .affect_trajectory
+            .iter()
+            .filter(|row| row.namespace == namespace)
+            .filter(|row| since_tick.is_none_or(|min_tick| row.tick_start >= min_tick))
+            .cloned()
+            .collect::<Vec<_>>();
+        rows.sort_by(|left, right| {
+            left.tick_start
+                .cmp(&right.tick_start)
+                .then_with(|| left.memory_id.0.cmp(&right.memory_id.0))
+        });
+        let rows = rows
+            .into_iter()
+            .map(|row| AffectTrajectoryRow {
+                namespace: row.namespace,
+                era_id: row.era_id,
+                memory_id: row.memory_id,
+                tick_start: row.tick_start,
+                tick_end: row.tick_end,
+                avg_valence: row.avg_valence,
+                avg_arousal: row.avg_arousal,
+                memory_count: row.memory_count,
+                authoritative_truth: "emotional_timeline",
+            })
+            .collect::<Vec<_>>();
+        AffectTrajectoryHistory {
+            namespace,
+            since_tick,
+            total_rows: rows.len(),
+            rows,
+            authoritative_truth: "emotional_timeline",
+        }
+    }
+
     /// Returns the current logical tick inferred from retained snapshot and audit metadata.
     pub fn current_tick(&self) -> u64 {
         self.snapshots
@@ -1592,6 +2373,432 @@ impl BrainStore {
             .chain(self.audit_log.max_tick())
             .max()
             .unwrap_or(0)
+    }
+
+    fn retrieval_attention_signals(
+        &self,
+        namespace: &NamespaceId,
+    ) -> HashMap<MemoryId, RetrievalAttentionSignals> {
+        let mut signals = HashMap::<MemoryId, RetrievalAttentionSignals>::new();
+
+        for entry in self.audit_log.entries_for_namespace(namespace) {
+            let Some(memory_id) = entry.memory_id else {
+                continue;
+            };
+            let signal = signals.entry(memory_id).or_default();
+            match entry.kind {
+                AuditEventKind::RecallServed => {
+                    signal.recall_count = signal.recall_count.saturating_add(1);
+                    if entry.session_id.is_some() {
+                        signal.session_recall_count = signal.session_recall_count.saturating_add(1);
+                    }
+                    signal.last_recall_tick = match (signal.last_recall_tick, entry.tick) {
+                        (Some(existing), Some(candidate)) => Some(existing.max(candidate)),
+                        (None, Some(candidate)) => Some(candidate),
+                        (existing, None) => existing,
+                    };
+                }
+                AuditEventKind::RecallDenied => {
+                    signal.deny_count = signal.deny_count.saturating_add(1);
+                    signal.last_recall_tick = match (signal.last_recall_tick, entry.tick) {
+                        (Some(existing), Some(candidate)) => Some(existing.max(candidate)),
+                        (None, Some(candidate)) => Some(candidate),
+                        (existing, None) => existing,
+                    };
+                }
+                _ => {}
+            }
+        }
+
+        let mut pinned_by_memory = HashSet::new();
+        for state in self.working_state.states() {
+            if &state.namespace != namespace {
+                continue;
+            }
+            let task_pressure = state.blackboard.active_evidence.len();
+            for handle in &state.blackboard.active_evidence {
+                let signal = signals.entry(handle.memory_id).or_default();
+                signal.task_pressure = signal.task_pressure.max(task_pressure);
+                if handle.pinned && pinned_by_memory.insert(handle.memory_id) {
+                    signal.working_set_pins = signal.working_set_pins.saturating_add(1);
+                }
+            }
+            for memory_id in &state.selected_evidence_handles {
+                let signal = signals.entry(*memory_id).or_default();
+                signal.task_pressure = signal.task_pressure.max(task_pressure);
+                if pinned_by_memory.insert(*memory_id) {
+                    signal.working_set_pins = signal.working_set_pins.saturating_add(1);
+                }
+            }
+        }
+
+        signals
+    }
+
+    fn hot_path_entry_for_signals(
+        &self,
+        namespace: &NamespaceId,
+        memory_id: MemoryId,
+        signals: RetrievalAttentionSignals,
+    ) -> Option<HotPathEntry> {
+        let attention_score = retrieval_attention_score(&signals);
+        if attention_score == 0 {
+            return None;
+        }
+        let dominant_signal = retrieval_dominant_signal(&signals);
+        let heat_bucket = retrieval_heat_bucket(attention_score, &signals);
+        let (prewarm_trigger, prewarm_action, prewarm_target_family) =
+            retrieval_prewarm_guidance(heat_bucket, dominant_signal, &signals);
+        Some(HotPathEntry {
+            namespace: namespace.as_str().to_string(),
+            memory_id: memory_id.0,
+            attention_score,
+            recall_count: signals.recall_count,
+            session_recall_count: signals.session_recall_count,
+            working_set_pins: signals.working_set_pins,
+            dominant_signal,
+            heat_bucket,
+            prewarm_trigger,
+            prewarm_action,
+            prewarm_target_family,
+            sample_log: format!(
+                "memory_id={} attention_score={} recalls={} session_recalls={} pins={} task_pressure={} denies={}",
+                memory_id.0,
+                attention_score,
+                signals.recall_count,
+                signals.session_recall_count,
+                signals.working_set_pins,
+                signals.task_pressure,
+                signals.deny_count
+            ),
+        })
+    }
+
+    /// Returns one bounded hot-path report derived from retrieval events and working-state pressure.
+    pub fn hot_paths(&self, namespace: NamespaceId, top_n: usize) -> HotPathsOutput {
+        let mut entries = self
+            .retrieval_attention_signals(&namespace)
+            .into_iter()
+            .filter_map(|(memory_id, signals)| {
+                self.hot_path_entry_for_signals(&namespace, memory_id, signals)
+            })
+            .collect::<Vec<_>>();
+
+        entries.sort_by(|left, right| {
+            right
+                .attention_score
+                .cmp(&left.attention_score)
+                .then_with(|| right.recall_count.cmp(&left.recall_count))
+                .then_with(|| left.memory_id.cmp(&right.memory_id))
+        });
+        let total_candidates = entries.len();
+        entries.truncate(top_n.max(1));
+
+        HotPathsOutput {
+            namespace: namespace.as_str().to_string(),
+            top_n: top_n.max(1),
+            total_candidates,
+            entries,
+            authoritative_truth: "durable_memory",
+        }
+    }
+
+    /// Predicts the next recall-derived hot-path advisory for one memory without mutating durable state.
+    pub fn predict_recall_hot_path(
+        &self,
+        namespace: &NamespaceId,
+        memory_id: MemoryId,
+        session_id: Option<SessionId>,
+    ) -> Option<HotPathEntry> {
+        let mut signals = self
+            .retrieval_attention_signals(namespace)
+            .remove(&memory_id)
+            .unwrap_or_default();
+        signals.recall_count = signals.recall_count.saturating_add(1);
+        if session_id.is_some() {
+            signals.session_recall_count = signals.session_recall_count.saturating_add(1);
+        }
+        signals.last_recall_tick = Some(self.current_tick().saturating_add(1));
+        self.hot_path_entry_for_signals(namespace, memory_id, signals)
+    }
+
+    /// Returns one bounded dead-zone report for stale or never-reused retrieval candidates.
+    pub fn dead_zones(&self, namespace: NamespaceId, min_age_ticks: u64) -> DeadZonesOutput {
+        let current_tick = self.current_tick();
+        let threshold = min_age_ticks.max(1);
+        let mut entries = self
+            .retrieval_attention_signals(&namespace)
+            .into_iter()
+            .filter_map(|(memory_id, signals)| {
+                let ticks_since_last_recall = signals
+                    .last_recall_tick
+                    .map(|tick| current_tick.saturating_sub(tick));
+                let stale_enough = match ticks_since_last_recall {
+                    Some(age) => age >= threshold,
+                    None => true,
+                };
+                if !stale_enough || signals.working_set_pins > 0 {
+                    return None;
+                }
+                let (stale_reason, candidate_rewarm_family) =
+                    dead_zone_reason(current_tick, threshold, &signals);
+                Some(DeadZoneEntry {
+                    namespace: namespace.as_str().to_string(),
+                    memory_id: memory_id.0,
+                    last_recall_tick: signals.last_recall_tick,
+                    ticks_since_last_recall,
+                    recall_count: signals.recall_count,
+                    stale_reason,
+                    candidate_rewarm_family,
+                    sample_log: format!(
+                        "memory_id={} recalls={} last_recall_tick={} ticks_since_last_recall={} denies={}",
+                        memory_id.0,
+                        signals.recall_count,
+                        signals
+                            .last_recall_tick
+                            .map(|tick| tick.to_string())
+                            .unwrap_or_else(|| "never".to_string()),
+                        ticks_since_last_recall
+                            .map(|age| age.to_string())
+                            .unwrap_or_else(|| "none".to_string()),
+                        signals.deny_count
+                    ),
+                })
+            })
+            .collect::<Vec<_>>();
+
+        entries.sort_by(|left, right| {
+            right
+                .ticks_since_last_recall
+                .unwrap_or(u64::MAX)
+                .cmp(&left.ticks_since_last_recall.unwrap_or(u64::MAX))
+                .then_with(|| left.recall_count.cmp(&right.recall_count))
+                .then_with(|| left.memory_id.cmp(&right.memory_id))
+        });
+        let total_candidates = entries.len();
+
+        DeadZonesOutput {
+            namespace: namespace.as_str().to_string(),
+            min_age_ticks: threshold,
+            total_candidates,
+            entries,
+            authoritative_truth: "durable_memory",
+        }
+    }
+
+    /// Returns canonical namespace-scoped attention inputs derived from live audit and working-state signals.
+    pub fn attention_namespaces(&self) -> Vec<AttentionNamespaceInputs> {
+        let mut namespaces = BTreeSet::new();
+        for entry in self.audit_log.entries() {
+            namespaces.insert(entry.namespace.as_str().to_string());
+        }
+        for state in self.working_state.states() {
+            namespaces.insert(state.namespace.as_str().to_string());
+        }
+
+        namespaces
+            .into_iter()
+            .filter_map(|raw_namespace| {
+                let namespace = NamespaceId::new(raw_namespace.clone()).ok()?;
+                let mut recall_count = 0_u64;
+                let mut encode_count = 0_u64;
+                let mut promotion_count = 0_u64;
+                let mut overflow_count = 0_u64;
+
+                for entry in self.audit_log.entries_for_namespace(&namespace) {
+                    match entry.kind {
+                        AuditEventKind::RecallServed => {
+                            recall_count = recall_count.saturating_add(1);
+                        }
+                        AuditEventKind::EncodeAccepted => {
+                            encode_count = encode_count.saturating_add(1);
+                        }
+                        AuditEventKind::MaintenanceConsolidationCompleted
+                        | AuditEventKind::MaintenanceConsolidationPartial => {
+                            promotion_count = promotion_count.saturating_add(1);
+                            if entry.detail.contains("overflow") {
+                                overflow_count = overflow_count.saturating_add(1);
+                            }
+                        }
+                        _ => {}
+                    }
+                }
+
+                let working_memory_pressure = self
+                    .working_state
+                    .states()
+                    .filter(|state| state.namespace == namespace)
+                    .map(|state| state.blackboard.active_evidence.len())
+                    .max()
+                    .unwrap_or(0);
+
+                if recall_count == 0
+                    && encode_count == 0
+                    && promotion_count == 0
+                    && overflow_count == 0
+                    && working_memory_pressure == 0
+                {
+                    return None;
+                }
+
+                Some(AttentionNamespaceInputs {
+                    namespace: raw_namespace,
+                    recall_count,
+                    encode_count,
+                    working_memory_pressure,
+                    promotion_count,
+                    overflow_count,
+                })
+            })
+            .collect()
+    }
+
+    /// Registers or replaces one task-scoped working-state record.
+    pub fn upsert_goal_working_state(&mut self, state: GoalWorkingState) {
+        self.working_state.upsert(state);
+    }
+
+    /// Returns the current blackboard and checkpoint view for one task.
+    pub fn goal_state(&self, task_id: &crate::api::TaskId) -> Option<crate::api::GoalStateOutput> {
+        self.working_state.goal_state(task_id)
+    }
+
+    /// Pins one evidence handle into the task blackboard.
+    pub fn blackboard_pin(
+        &mut self,
+        task_id: &crate::api::TaskId,
+        memory_id: MemoryId,
+    ) -> Option<crate::api::GoalStateOutput> {
+        self.working_state.pin_evidence(task_id, memory_id)
+    }
+
+    /// Dismisses one evidence handle from the task blackboard.
+    pub fn blackboard_dismiss(
+        &mut self,
+        task_id: &crate::api::TaskId,
+        memory_id: MemoryId,
+    ) -> Option<crate::api::GoalStateOutput> {
+        self.working_state.dismiss_evidence(task_id, memory_id)
+    }
+
+    /// Persists the latest resumability checkpoint and marks the task dormant.
+    pub fn goal_pause(
+        &mut self,
+        task_id: &crate::api::TaskId,
+        note: Option<String>,
+    ) -> Option<crate::api::GoalPauseOutput> {
+        let paused = self.working_state.pause_goal(
+            task_id,
+            note.clone(),
+            self.current_tick().saturating_add(1),
+        )?;
+        let task_label = match &paused.task_id {
+            crate::api::FieldPresence::Present(task_id) => task_id.as_str(),
+            crate::api::FieldPresence::Absent => "absent",
+            crate::api::FieldPresence::Redacted => "redacted",
+        };
+        let note_label = match &paused.note {
+            crate::api::FieldPresence::Present(note) => note.as_str(),
+            crate::api::FieldPresence::Absent => "none",
+            crate::api::FieldPresence::Redacted => "redacted",
+        };
+        self.append_audit_entry(
+            AuditLogEntry::new(
+                AuditEventCategory::Maintenance,
+                AuditEventKind::IncidentRecorded,
+                crate::api::NamespaceId::new(paused.namespace.clone())
+                    .expect("goal_pause namespace should remain valid"),
+                "goal_pause",
+                format!(
+                    "paused task={} checkpoint={} status={} note={}",
+                    task_label,
+                    paused.checkpoint.checkpoint_id,
+                    paused.status.as_str(),
+                    note_label
+                ),
+            )
+            .with_tick(paused.paused_at_tick),
+        );
+        Some(paused)
+    }
+
+    /// Rehydrates one dormant goal stack from its newest valid checkpoint.
+    pub fn goal_resume(
+        &mut self,
+        task_id: &crate::api::TaskId,
+    ) -> Result<crate::api::GoalResumeOutput, crate::engine::working_state::ResumeWarning> {
+        let resumed = self
+            .working_state
+            .resume_goal(task_id, self.current_tick().saturating_add(1))?;
+        let task_label = match &resumed.task_id {
+            crate::api::FieldPresence::Present(task_id) => task_id.as_str(),
+            crate::api::FieldPresence::Absent => "absent",
+            crate::api::FieldPresence::Redacted => "redacted",
+        };
+        self.append_audit_entry(
+            AuditLogEntry::new(
+                AuditEventCategory::Maintenance,
+                AuditEventKind::IncidentRecorded,
+                crate::api::NamespaceId::new(resumed.namespace.clone())
+                    .expect("goal_resume namespace should remain valid"),
+                "goal_resume",
+                format!(
+                    "resumed task={} checkpoint={} status={} warnings={}",
+                    task_label,
+                    resumed.checkpoint.checkpoint_id,
+                    resumed.status.as_str(),
+                    resumed.warnings.len()
+                ),
+            )
+            .with_tick(resumed.resumed_at_tick),
+        );
+        Ok(resumed)
+    }
+
+    /// Intentionally abandons one active or dormant goal while preserving checkpoint metadata.
+    pub fn goal_abandon(
+        &mut self,
+        task_id: &crate::api::TaskId,
+        reason: Option<String>,
+    ) -> Option<crate::api::GoalAbandonOutput> {
+        let abandoned = self.working_state.abandon_goal(
+            task_id,
+            reason.clone(),
+            self.current_tick().saturating_add(1),
+        )?;
+        let task_label = match &abandoned.task_id {
+            crate::api::FieldPresence::Present(task_id) => task_id.as_str(),
+            crate::api::FieldPresence::Absent => "absent",
+            crate::api::FieldPresence::Redacted => "redacted",
+        };
+        let checkpoint_label = match &abandoned.checkpoint {
+            crate::api::FieldPresence::Present(checkpoint) => checkpoint.checkpoint_id.as_str(),
+            crate::api::FieldPresence::Absent => "none",
+            crate::api::FieldPresence::Redacted => "redacted",
+        };
+        let reason_label = match &abandoned.reason {
+            crate::api::FieldPresence::Present(reason) => reason.as_str(),
+            crate::api::FieldPresence::Absent => "none",
+            crate::api::FieldPresence::Redacted => "redacted",
+        };
+        self.append_audit_entry(
+            AuditLogEntry::new(
+                AuditEventCategory::Maintenance,
+                AuditEventKind::IncidentRecorded,
+                crate::api::NamespaceId::new(abandoned.namespace.clone())
+                    .expect("goal_abandon namespace should remain valid"),
+                "goal_abandon",
+                format!(
+                    "abandoned task={} checkpoint={} status={} reason={}",
+                    task_label,
+                    checkpoint_label,
+                    abandoned.status.as_str(),
+                    reason_label
+                ),
+            )
+            .with_tick(abandoned.abandoned_at_tick),
+        );
+        Some(abandoned)
     }
 
     /// Returns the number of active snapshots in the effective namespace.
@@ -2032,26 +3239,30 @@ impl Default for BrainStore {
 #[cfg(test)]
 mod tests {
     use super::{
-        semantic_diff_caution, BrainStore, PreparedTier2Layout, SnapshotDeleteErrorReason,
+        semantic_diff_caution, BrainStore, ForkConfig, MergeConfig, PreparedTier2Layout,
+        SnapshotDeleteErrorReason, FORK_MERGE_ACTOR,
     };
-    use crate::api::NamespaceId;
+    use crate::api::{ForkInheritance, MergeConflictStrategy, NamespaceId, TaskId};
+    use crate::engine::compression::CompressionPolicy;
     use crate::engine::consolidation::{ConsolidationPolicy, DerivedArtifactKind};
     use crate::engine::contradiction::{ContradictionKind, ContradictionStore};
     use crate::engine::forgetting::ForgettingPolicy;
-    use crate::engine::maintenance::MaintenanceJobState;
     use crate::engine::reconsolidation::{
         LabileMemory, LabileState, PendingUpdate, PreReopenState, ReconsolidationPolicy,
         RefreshReadiness, ReopenStableState, UpdateSource,
     };
+    use crate::engine::working_state::GoalWorkingState;
     use crate::migrate::DurableSchemaObject;
     use crate::observability::{AuditEventCategory, AuditEventKind, Tier1LookupOutcome};
+    use crate::policy::SharingVisibility;
     use crate::store::audit::AuditLogEntry;
     use crate::store::{
-        HotStoreApi, LifecycleState, ProceduralEntryState, TierOwnership, TierRoutingInput,
-        TierRoutingReason,
+        HotStoreApi, LifecycleState, ProceduralEntryState, ProceduralMemoryRecord, ProceduralStore,
+        TierOwnership, TierRoutingInput, TierRoutingReason,
     };
     use crate::types::{
-        CanonicalMemoryType, FastPathRouteFamily, MemoryId, RawEncodeInput, RawIntakeKind,
+        AffectSignals, BlackboardEvidenceHandle, BlackboardState, CanonicalMemoryType,
+        FastPathRouteFamily, GoalStackFrame, MemoryId, RawEncodeInput, RawIntakeKind,
         SemanticDiffCategory, SessionId, SnapshotId, SnapshotRetentionClass, Tier1HotRecord,
     };
 
@@ -2063,6 +3274,7 @@ mod tests {
             MemoryId(77),
             SessionId(4),
             RawEncodeInput::new(RawIntakeKind::Event, "project launch deadline was moved")
+                .with_affect_signals(AffectSignals::new(0.45, 0.91))
                 .with_landmark_signals(crate::types::LandmarkSignals::new(0.91, 0.83, 0.31, 88)),
         );
         let landmark_record = layout.landmark_record();
@@ -2117,6 +3329,36 @@ mod tests {
             Some(&expected_confidence)
         );
         assert_eq!(layout.prefilter_trace().payload_fetch_count, 0);
+        assert_eq!(layout.metadata.affect, Some(AffectSignals::new(0.45, 0.91)));
+    }
+
+    #[test]
+    fn mood_history_returns_recorded_affect_trajectory_rows() {
+        let mut store = BrainStore::default();
+        let namespace = NamespaceId::new("tests.affect").unwrap();
+        let row = store.record_affect_trajectory(
+            namespace.clone(),
+            MemoryId(41),
+            Some("era-affect-0001".to_string()),
+            12,
+            AffectSignals::new(0.35, 0.82),
+        );
+
+        assert_eq!(row.namespace, namespace);
+        assert_eq!(row.memory_id, MemoryId(41));
+        assert_eq!(row.era_id.as_deref(), Some("era-affect-0001"));
+        assert_eq!(row.avg_valence, 0.35);
+        assert_eq!(row.avg_arousal, 0.82);
+        assert_eq!(row.authoritative_truth, "emotional_timeline");
+
+        let history = store.mood_history(namespace.clone(), Some(12));
+        assert_eq!(history.namespace, namespace);
+        assert_eq!(history.since_tick, Some(12));
+        assert_eq!(history.total_rows, 1);
+        assert_eq!(history.rows.len(), 1);
+        assert_eq!(history.rows[0].memory_id, MemoryId(41));
+        assert_eq!(history.rows[0].authoritative_truth, "emotional_timeline");
+        assert_eq!(history.authoritative_truth, "emotional_timeline");
     }
 
     #[test]
@@ -2519,6 +3761,133 @@ mod tests {
     }
 
     #[test]
+    fn summarize_compression_pass_exposes_candidate_lineage_and_counts() {
+        let store = BrainStore::default();
+        let summary = store.summarize_compression_pass(
+            NamespaceId::new("tests/compression").unwrap(),
+            CompressionPolicy {
+                min_episode_count: 3,
+                batch_size: 2,
+                ..Default::default()
+            },
+            3,
+        );
+
+        assert_eq!(summary.clusters_evaluated, 3);
+        assert_eq!(summary.eligible_clusters, 1);
+        assert_eq!(summary.review_clusters, 1);
+        assert_eq!(summary.blocked_clusters, 1);
+        assert_eq!(summary.inspect.candidate_count, 3);
+        assert_eq!(
+            summary.inspect.run_handle,
+            "compression://tests/compression/manual@0"
+        );
+        assert!(summary
+            .inspect
+            .inspect_path
+            .contains("compression://tests/compression/manual@0"));
+        assert!(summary
+            .inspect
+            .outputs
+            .iter()
+            .any(|decision| decision.authoritative_truth == "durable_memory"));
+    }
+
+    #[test]
+    fn apply_compression_pass_returns_schema_artifact_for_first_eligible_cluster() {
+        let mut store = BrainStore::default();
+        let namespace = NamespaceId::new("tests/compression").unwrap();
+        let applied = store.apply_compression_pass(
+            namespace.clone(),
+            CompressionPolicy {
+                min_episode_count: 3,
+                ..Default::default()
+            },
+            3,
+            false,
+        );
+
+        assert_eq!(applied.decision.disposition.as_str(), "eligible");
+        assert_eq!(applied.schemas_created, 1);
+        assert!(applied.episodes_compressed > 0);
+        assert!(applied.storage_reduction_pct > 0);
+        assert!(applied.blocked_reasons.is_empty());
+        assert!(applied.schema_artifact.is_some());
+        assert!(applied
+            .verification
+            .as_ref()
+            .is_some_and(|report| report.verified));
+        let artifact = applied.schema_artifact.as_ref().expect("schema artifact");
+        let schema_layout = store
+            .compression_memory_layout(artifact.schema_memory_id)
+            .expect("schema layout persisted");
+        assert_eq!(
+            schema_layout.metadata.compression.source_memory_ids,
+            artifact.source_memory_ids
+        );
+        assert!(schema_layout.metadata.compression.compressed_into.is_none());
+        for source_memory_id in &artifact.source_memory_ids {
+            let source_layout = store
+                .compression_memory_layout(*source_memory_id)
+                .expect("source layout persisted");
+            assert_eq!(
+                source_layout.metadata.compression.compressed_into,
+                Some(artifact.schema_memory_id)
+            );
+            assert!(source_layout
+                .metadata
+                .compression
+                .source_memory_ids
+                .is_empty());
+        }
+        assert_eq!(store.compression_log_entries(namespace, None).len(), 1);
+    }
+
+    #[test]
+    fn apply_compression_pass_persists_compression_log_entry_for_namespace() {
+        let mut store = BrainStore::default();
+        let namespace = NamespaceId::new("tests/compression-log").unwrap();
+        let applied = store.apply_compression_pass(
+            namespace.clone(),
+            CompressionPolicy {
+                min_episode_count: 3,
+                ..Default::default()
+            },
+            3,
+            false,
+        );
+
+        let entries = store.compression_log_entries(namespace.clone(), None);
+        assert_eq!(entries.len(), 1);
+        let entry = &entries[0];
+        let applied_entry = applied
+            .compression_log_entry
+            .as_ref()
+            .expect("compression log entry");
+        assert_eq!(entry, applied_entry);
+        assert_eq!(entry.namespace, namespace);
+        assert!(entry.keyword_summary.as_deref().is_some());
+    }
+
+    #[test]
+    fn dry_run_compression_pass_does_not_persist_compression_log_entry() {
+        let mut store = BrainStore::default();
+        let namespace = NamespaceId::new("tests/compression-log-dry-run").unwrap();
+        let applied = store.apply_compression_pass(
+            namespace.clone(),
+            CompressionPolicy {
+                min_episode_count: 3,
+                ..Default::default()
+            },
+            3,
+            true,
+        );
+
+        assert!(applied.compression_log_entry.is_some());
+        assert!(store.compression_log_entries(namespace, None).is_empty());
+    }
+
+    #[test]
     fn summarize_forgetting_pass_exposes_archive_not_delete_semantics() {
         let store = BrainStore::default();
         let summary = store.summarize_forgetting_pass(
@@ -2726,7 +4095,7 @@ mod tests {
         );
         assert_eq!(
             rows[1].kind,
-            crate::observability::AuditEventKind::MaintenanceReconsolidationDiscarded
+            crate::observability::AuditEventKind::MaintenanceReconsolidationApplied
         );
         assert_eq!(
             rows[2].kind,
@@ -2787,6 +4156,271 @@ mod tests {
         );
         assert_eq!(range.total_matches, 1);
         assert_eq!(range.rows, vec![row.clone()]);
+    }
+
+    #[test]
+    fn brain_store_hot_paths_and_dead_zones_follow_bounded_attention_signals() {
+        let namespace = NamespaceId::new("tests/f13-hot-paths").unwrap();
+        let mut store = BrainStore::default();
+
+        store.append_audit_entry(
+            AuditLogEntry::new(
+                crate::observability::AuditEventCategory::Recall,
+                crate::observability::AuditEventKind::RecallServed,
+                namespace.clone(),
+                "recall_engine",
+                "served exact hot path",
+            )
+            .with_memory_id(MemoryId(11))
+            .with_session_id(SessionId(7))
+            .with_request_id("req-recall-11a")
+            .with_tick(10),
+        );
+        store.append_audit_entry(
+            AuditLogEntry::new(
+                crate::observability::AuditEventCategory::Recall,
+                crate::observability::AuditEventKind::RecallServed,
+                namespace.clone(),
+                "recall_engine",
+                "served exact hot path again",
+            )
+            .with_memory_id(MemoryId(11))
+            .with_session_id(SessionId(7))
+            .with_request_id("req-recall-11b")
+            .with_tick(14),
+        );
+        store.append_audit_entry(
+            AuditLogEntry::new(
+                crate::observability::AuditEventCategory::Recall,
+                crate::observability::AuditEventKind::RecallDenied,
+                namespace.clone(),
+                "recall_engine",
+                "policy denied deeper recall",
+            )
+            .with_memory_id(MemoryId(22))
+            .with_request_id("req-recall-22")
+            .with_tick(8),
+        );
+        store.append_audit_entry(
+            AuditLogEntry::new(
+                crate::observability::AuditEventCategory::Recall,
+                crate::observability::AuditEventKind::RecallServed,
+                namespace.clone(),
+                "recall_engine",
+                "old cold recall",
+            )
+            .with_memory_id(MemoryId(33))
+            .with_request_id("req-recall-33")
+            .with_tick(2),
+        );
+
+        let mut blackboard = BlackboardState::new(
+            namespace.clone(),
+            Some(TaskId::new("heat-task")),
+            Some(SessionId(7)),
+            "investigate hot path",
+        );
+        blackboard.active_evidence =
+            vec![BlackboardEvidenceHandle::new(MemoryId(11), "primary").pinned()];
+        let mut state = GoalWorkingState::new(
+            TaskId::new("heat-task"),
+            namespace.clone(),
+            Some(SessionId(7)),
+            vec![GoalStackFrame::new("investigate hot path")],
+            blackboard,
+        );
+        state.selected_evidence_handles = vec![MemoryId(11)];
+        store.upsert_goal_working_state(state);
+
+        let hot_paths = store.hot_paths(namespace.clone(), 3);
+        assert_eq!(hot_paths.namespace, namespace.as_str());
+        assert_eq!(hot_paths.authoritative_truth, "durable_memory");
+        assert_eq!(hot_paths.total_candidates, 3);
+        assert_eq!(hot_paths.entries[0].memory_id, 11);
+        assert_eq!(hot_paths.entries[0].heat_bucket, "warming");
+        assert_eq!(
+            hot_paths.entries[0].prewarm_action,
+            "bounded_session_rewarm"
+        );
+        assert_eq!(hot_paths.entries[0].prewarm_target_family, "session_warmup");
+        assert!(hot_paths.entries[0].attention_score > hot_paths.entries[1].attention_score);
+
+        let dead_zones = store.dead_zones(namespace.clone(), 5);
+        assert_eq!(dead_zones.namespace, namespace.as_str());
+        assert_eq!(dead_zones.authoritative_truth, "durable_memory");
+        assert!(dead_zones.entries.iter().any(|entry| entry.memory_id == 33));
+        let cold = dead_zones
+            .entries
+            .iter()
+            .find(|entry| entry.memory_id == 33)
+            .expect("cold memory should appear in dead zones");
+        assert_eq!(cold.stale_reason, "single_touch_stale");
+        assert_eq!(cold.candidate_rewarm_family, "prefetch_hints");
+        assert_eq!(cold.ticks_since_last_recall, Some(12));
+        assert!(!dead_zones.entries.iter().any(|entry| entry.memory_id == 11));
+    }
+
+    #[test]
+    fn attention_namespaces_derive_heatmap_inputs_from_live_store_state() {
+        let namespace = NamespaceId::new("tests/f13-heatmap").unwrap();
+        let mut store = BrainStore::default();
+
+        store.append_audit_entry(
+            AuditLogEntry::new(
+                crate::observability::AuditEventCategory::Encode,
+                crate::observability::AuditEventKind::EncodeAccepted,
+                namespace.clone(),
+                "encode_engine",
+                "encoded working-set candidate",
+            )
+            .with_memory_id(MemoryId(51))
+            .with_tick(3),
+        );
+        store.append_audit_entry(
+            AuditLogEntry::new(
+                crate::observability::AuditEventCategory::Recall,
+                crate::observability::AuditEventKind::RecallServed,
+                namespace.clone(),
+                "recall_engine",
+                "served attention candidate",
+            )
+            .with_memory_id(MemoryId(51))
+            .with_session_id(SessionId(9))
+            .with_tick(5),
+        );
+        store.append_audit_entry(
+            AuditLogEntry::new(
+                crate::observability::AuditEventCategory::Maintenance,
+                crate::observability::AuditEventKind::MaintenanceConsolidationPartial,
+                namespace.clone(),
+                "maintenance_engine",
+                "overflow promotion retained bounded prewarm signal",
+            )
+            .with_tick(8),
+        );
+
+        let mut blackboard = BlackboardState::new(
+            namespace.clone(),
+            Some(TaskId::new("heatmap-task")),
+            Some(SessionId(9)),
+            "surface heatmap attention",
+        );
+        blackboard.active_evidence = vec![
+            BlackboardEvidenceHandle::new(MemoryId(51), "primary").pinned(),
+            BlackboardEvidenceHandle::new(MemoryId(52), "supporting"),
+        ];
+        let state = GoalWorkingState::new(
+            TaskId::new("heatmap-task"),
+            namespace.clone(),
+            Some(SessionId(9)),
+            vec![GoalStackFrame::new("surface heatmap attention")],
+            blackboard,
+        );
+        store.upsert_goal_working_state(state);
+
+        let attention = store.attention_namespaces();
+        assert_eq!(attention.len(), 1);
+        assert_eq!(attention[0].namespace, namespace.as_str());
+        assert_eq!(attention[0].recall_count, 1);
+        assert_eq!(attention[0].encode_count, 1);
+        assert_eq!(attention[0].promotion_count, 1);
+        assert_eq!(attention[0].overflow_count, 1);
+        assert_eq!(attention[0].working_memory_pressure, 2);
+    }
+
+    #[test]
+    fn predict_recall_hot_path_reuses_canonical_attention_policy() {
+        let namespace = NamespaceId::new("tests/predict-hot-path").unwrap();
+        let mut store = BrainStore::default();
+        let predicted = store
+            .predict_recall_hot_path(&namespace, MemoryId(41), None)
+            .expect("predicted hot path should exist after recall");
+        assert_eq!(predicted.memory_id, 41);
+        assert_eq!(predicted.attention_score, 5);
+        assert_eq!(predicted.heat_bucket, "warm");
+        assert_eq!(predicted.prewarm_action, "observe_only");
+        assert_eq!(predicted.prewarm_target_family, "none");
+
+        let mut blackboard = BlackboardState::new(
+            namespace.clone(),
+            Some(TaskId::new("predict-hot-task")),
+            Some(SessionId(7)),
+            "investigate predicted hot path",
+        );
+        blackboard.active_evidence =
+            vec![BlackboardEvidenceHandle::new(MemoryId(41), "primary").pinned()];
+        let mut state = GoalWorkingState::new(
+            TaskId::new("predict-hot-task"),
+            namespace.clone(),
+            Some(SessionId(7)),
+            vec![GoalStackFrame::new("investigate predicted hot path")],
+            blackboard,
+        );
+        state.selected_evidence_handles = vec![MemoryId(41)];
+        store.upsert_goal_working_state(state);
+
+        let predicted = store
+            .predict_recall_hot_path(&namespace, MemoryId(41), Some(SessionId(7)))
+            .expect("predicted hot path should exist with working-state pressure");
+        assert_eq!(predicted.heat_bucket, "warm");
+        assert_eq!(predicted.prewarm_action, "observe_only");
+        assert_eq!(predicted.prewarm_target_family, "none");
+        assert_eq!(predicted.dominant_signal, "working_set_pins");
+        assert!(predicted.attention_score > 5);
+    }
+
+    #[test]
+    fn predict_recall_hot_path_only_queues_prefetch_for_repeated_warming_recalls() {
+        let namespace = NamespaceId::new("tests/predict-hot-prefetch-threshold").unwrap();
+        let mut store = BrainStore::default();
+
+        for tick in 1..=3 {
+            store.append_audit_entry(
+                AuditLogEntry::new(
+                    crate::observability::AuditEventCategory::Recall,
+                    crate::observability::AuditEventKind::RecallServed,
+                    namespace.clone(),
+                    "recall_engine",
+                    "warming recall",
+                )
+                .with_memory_id(MemoryId(77))
+                .with_request_id(format!("req-recall-77-{tick}"))
+                .with_tick(tick),
+            );
+        }
+
+        let predicted = store
+            .predict_recall_hot_path(&namespace, MemoryId(77), None)
+            .expect("predicted hot path should exist after repeated recall");
+        assert_eq!(predicted.heat_bucket, "warm");
+        assert_eq!(predicted.dominant_signal, "recall_count");
+        assert_eq!(predicted.prewarm_action, "queue_prefetch_hint");
+        assert_eq!(predicted.prewarm_trigger, "session_recency");
+        assert_eq!(predicted.prewarm_target_family, "prefetch_hints");
+
+        let mut store = BrainStore::default();
+        for tick in 1..=2 {
+            store.append_audit_entry(
+                AuditLogEntry::new(
+                    crate::observability::AuditEventCategory::Recall,
+                    crate::observability::AuditEventKind::RecallServed,
+                    namespace.clone(),
+                    "recall_engine",
+                    "insufficient warming recall",
+                )
+                .with_memory_id(MemoryId(78))
+                .with_request_id(format!("req-recall-78-{tick}"))
+                .with_tick(tick),
+            );
+        }
+
+        let predicted = store
+            .predict_recall_hot_path(&namespace, MemoryId(78), None)
+            .expect("predicted hot path should exist for low repeated recall");
+        assert_eq!(predicted.heat_bucket, "warm");
+        assert_eq!(predicted.dominant_signal, "recall_count");
+        assert_eq!(predicted.prewarm_action, "observe_only");
+        assert_eq!(predicted.prewarm_target_family, "none");
     }
 
     #[test]
@@ -3185,6 +4819,7 @@ mod tests {
                 DurableSchemaObject::ConflictRecordsTable,
                 DurableSchemaObject::DurableMemoryRecords,
                 DurableSchemaObject::SnapshotMetadataTable,
+                DurableSchemaObject::CompressionLogTable,
                 DurableSchemaObject::LandmarksTable,
             ]
         );
@@ -3451,15 +5086,30 @@ mod tests {
 
         assert_eq!(diff.before_anchor, baseline.anchor());
         assert_eq!(diff.after_anchor, after.anchor());
-        assert_eq!(diff.entries.len(), 1);
-        assert_eq!(diff.entries[0].category, SemanticDiffCategory::Archived);
-        assert_eq!(diff.entries[0].before_anchor, baseline.anchor());
-        assert_eq!(diff.entries[0].after_anchor, after.anchor());
-        assert_eq!(
-            diff.entries[0].audit_kind,
-            Some(AuditEventKind::ArchiveRecorded)
-        );
-        assert!(!diff.entries[0].unresolved);
+        assert_eq!(diff.entries.len(), 2);
+        assert!(diff
+            .entries
+            .iter()
+            .all(|entry| entry.before_anchor == baseline.anchor()));
+        assert!(diff
+            .entries
+            .iter()
+            .all(|entry| entry.after_anchor == after.anchor()));
+        assert!(diff
+            .entries
+            .iter()
+            .all(|entry| entry.audit_kind == Some(AuditEventKind::ArchiveRecorded)));
+        assert!(diff
+            .entries
+            .iter()
+            .any(|entry| entry.category == SemanticDiffCategory::Archived
+                && entry.summary.contains("deleted snapshot=old-checkpoint")));
+        assert!(diff
+            .entries
+            .iter()
+            .any(|entry| entry.category == SemanticDiffCategory::DerivedState
+                && entry.summary.contains("captured snapshot=baseline")));
+        assert!(diff.entries.iter().all(|entry| !entry.unresolved));
     }
 
     #[test]
@@ -3606,6 +5256,219 @@ mod tests {
         let by_query = store.belief_history_for_query("prod-b").unwrap();
         assert_eq!(by_query.chain_id, chain.chain_id);
         assert!(store.open_belief_conflicts().is_empty());
+    }
+
+    #[test]
+    fn goal_working_state_flows_through_brain_store_facade() {
+        let mut store = BrainStore::default();
+        let namespace = NamespaceId::new("tests.goal.facade").unwrap();
+        let task_id = TaskId::new("deploy-incident");
+        let mut blackboard = BlackboardState::new(
+            namespace.clone(),
+            Some(task_id.clone()),
+            None,
+            "restore service",
+        );
+        blackboard.subgoals = vec!["check alarms".to_string()];
+        blackboard.active_evidence = vec![BlackboardEvidenceHandle::new(MemoryId(41), "primary")];
+        blackboard.active_beliefs = vec!["service can recover".to_string()];
+        blackboard.unknowns = vec!["impact window".to_string()];
+        blackboard.next_action = Some("page on-call".to_string());
+        blackboard.blocked_reason = Some("waiting on approval".to_string());
+
+        let mut state = GoalWorkingState::new(
+            task_id.clone(),
+            namespace.clone(),
+            None,
+            vec![GoalStackFrame::new("restore service")],
+            blackboard,
+        );
+        state.selected_evidence_handles = vec![MemoryId(41)];
+        state.pending_dependencies = vec!["approval-ticket".to_string()];
+        store.upsert_goal_working_state(state);
+
+        let pinned = store
+            .blackboard_pin(&task_id, MemoryId(43))
+            .expect("pin result");
+        let crate::api::FieldPresence::Present(blackboard) = pinned.blackboard_state else {
+            panic!("expected blackboard state");
+        };
+        assert_eq!(blackboard.active_evidence.len(), 2);
+        assert!(blackboard
+            .active_evidence
+            .iter()
+            .any(|handle| handle.memory_id == MemoryId(43) && handle.pinned));
+
+        let paused = store
+            .goal_pause(&task_id, Some("waiting for approval".to_string()))
+            .expect("pause result");
+        assert_eq!(paused.status.as_str(), "dormant");
+
+        let resumed = store.goal_resume(&task_id).expect("resume result");
+        assert_eq!(resumed.status.as_str(), "active");
+        assert!(resumed.restored_evidence_handles.contains(&41));
+
+        let abandoned = store
+            .goal_abandon(&task_id, Some("rollback superseded".to_string()))
+            .expect("abandon result");
+        assert_eq!(abandoned.status.as_str(), "abandoned");
+
+        let entries = store.audit_entries();
+        assert!(entries.iter().any(|entry| {
+            entry.kind == AuditEventKind::IncidentRecorded
+                && entry.detail.contains("paused task=deploy-incident")
+        }));
+        assert!(entries.iter().any(|entry| {
+            entry.kind == AuditEventKind::IncidentRecorded
+                && entry.detail.contains("resumed task=deploy-incident")
+        }));
+        assert!(entries.iter().any(|entry| {
+            entry.kind == AuditEventKind::IncidentRecorded
+                && entry.detail.contains("abandoned task=deploy-incident")
+        }));
+    }
+
+    #[test]
+    fn merge_fork_reports_explicit_conflicts_and_audit_sequences() {
+        let mut store = BrainStore::default();
+        let target_namespace = NamespaceId::new("team.alpha").unwrap();
+        let fork_namespace = NamespaceId::new("agent-specialist").unwrap();
+
+        store.fork(ForkConfig {
+            name: "agent-specialist".to_string(),
+            parent_namespace: target_namespace.clone(),
+            inherit_visibility: ForkInheritance::SharedToo,
+            note: Some("testing merge".to_string()),
+        });
+
+        let parent_pattern = "deploy after incident".to_string();
+        let parent_handle = ProceduralStore::pattern_handle(&target_namespace, &parent_pattern);
+        let parent_hash = ProceduralStore::pattern_hash(&target_namespace, &parent_pattern);
+        store.procedural_entries.insert(
+            parent_handle.clone(),
+            ProceduralMemoryRecord {
+                namespace: target_namespace.clone(),
+                pattern_handle: parent_handle,
+                pattern_hash: parent_hash,
+                pattern: parent_pattern.clone(),
+                action: "page primary on-call".to_string(),
+                confidence: 700,
+                source_fixture_name: "fixture-parent".to_string(),
+                source_engram_id: Some(1),
+                lineage_ancestors: vec![MemoryId(41)],
+                supporting_memory_count: 1,
+                source_citation_count: 1,
+                query_cues: vec!["deploy".to_string()],
+                accepted_by: "tester".to_string(),
+                acceptance_note: "parent".to_string(),
+                visibility: SharingVisibility::Shared,
+                state: ProceduralEntryState::Active,
+                version: 1,
+                promotion_audit_sequence: 1,
+                last_transition_sequence: 1,
+                last_transition_kind: "approved_sharing",
+                rollback_note: None,
+            },
+        );
+        let fork_handle = ProceduralStore::pattern_handle(&fork_namespace, &parent_pattern);
+        let fork_hash = ProceduralStore::pattern_hash(&fork_namespace, &parent_pattern);
+        store.procedural_entries.insert(
+            fork_handle.clone(),
+            ProceduralMemoryRecord {
+                namespace: fork_namespace.clone(),
+                pattern_handle: fork_handle,
+                pattern_hash: fork_hash,
+                pattern: parent_pattern,
+                action: "rollback immediately".to_string(),
+                confidence: 900,
+                source_fixture_name: "fixture-fork".to_string(),
+                source_engram_id: Some(2),
+                lineage_ancestors: vec![MemoryId(99)],
+                supporting_memory_count: 1,
+                source_citation_count: 1,
+                query_cues: vec!["deploy".to_string()],
+                accepted_by: "tester".to_string(),
+                acceptance_note: "fork".to_string(),
+                visibility: SharingVisibility::Shared,
+                state: ProceduralEntryState::Active,
+                version: 2,
+                promotion_audit_sequence: 2,
+                last_transition_sequence: 2,
+                last_transition_kind: "approved_sharing",
+                rollback_note: None,
+            },
+        );
+
+        let mut blackboard = BlackboardState::new(
+            fork_namespace.clone(),
+            Some(TaskId::new("fork-task")),
+            Some(SessionId(9)),
+            "compare branch outputs",
+        );
+        blackboard.active_evidence = vec![BlackboardEvidenceHandle::new(MemoryId(99), "selected")];
+        let state = GoalWorkingState::new(
+            TaskId::new("fork-task"),
+            fork_namespace,
+            Some(SessionId(9)),
+            vec![GoalStackFrame::new("compare branch outputs")],
+            blackboard,
+        );
+        store.upsert_goal_working_state(state);
+
+        let preview = store
+            .merge_fork(MergeConfig {
+                fork_name: "agent-specialist".to_string(),
+                target_namespace: target_namespace.clone(),
+                conflict_strategy: MergeConflictStrategy::Manual,
+                dry_run: true,
+            })
+            .expect("merge preview should exist");
+        assert_eq!(preview.conflicts_found, 2);
+        assert_eq!(preview.conflicts_auto_resolved, 0);
+        assert_eq!(preview.conflicts_pending, 2);
+        assert!(preview.merged_items.is_empty());
+        assert!(preview.audit_sequences.is_empty());
+        assert_eq!(preview.conflict_items.len(), 2);
+        assert!(preview
+            .conflict_items
+            .iter()
+            .any(|item| item.item_kind == "procedural_entry"
+                && item.resolution_state == "unresolved"));
+        assert!(preview
+            .conflict_items
+            .iter()
+            .any(|item| item.item_kind == "working_state" && item.preferred_side == "manual"));
+
+        let applied = store
+            .merge_fork(MergeConfig {
+                fork_name: "agent-specialist".to_string(),
+                target_namespace,
+                conflict_strategy: MergeConflictStrategy::ForkWins,
+                dry_run: false,
+            })
+            .expect("merge apply should exist");
+        assert_eq!(applied.conflicts_found, 1);
+        assert_eq!(applied.conflicts_auto_resolved, 1);
+        assert_eq!(applied.conflicts_pending, 0);
+        assert_eq!(applied.memories_merged, 2);
+        assert_eq!(applied.engrams_merged, 2);
+        assert_eq!(applied.audit_sequences.len(), 2);
+        assert_eq!(applied.fork_status, "merged");
+        assert!(applied
+            .conflict_items
+            .iter()
+            .all(|item| item.resolution_state == "auto_resolved"
+                || item.item_kind == "working_state"));
+        let audit_entries = store.audit_entries();
+        assert!(audit_entries.iter().any(|entry| {
+            entry.actor_source == FORK_MERGE_ACTOR
+                && entry.detail.contains("fork_merge_conflict")
+                && entry.related_run.as_deref() == Some("merge-run-agent-specialist")
+        }));
+        assert!(audit_entries.iter().any(|entry| {
+            entry.actor_source == FORK_MERGE_ACTOR
+                && entry.detail.contains("merged fork=agent-specialist")
+        }));
     }
 
     #[test]

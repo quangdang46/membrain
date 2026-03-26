@@ -1,0 +1,66 @@
+{"ts":"2026-03-25T21:32:59.272199383Z","kind":"session_started","session_id":"ses-run-mb-2db.6-20260325T213258519"}
+{"ts":"2026-03-25T22:03:15.006185209Z","kind":"stdout","line":"GROVE_RESULT: success"}
+{"ts":"2026-03-25T22:03:15.006185209Z","kind":"protocol","event":{"type":"result","summary":"success"}}
+{"ts":"2026-03-25T22:03:15.115547395Z","kind":"stdout","line":""}
+{"ts":"2026-03-25T22:03:15.115559784Z","kind":"stdout","line":"GROVE_ARTIFACTS:"}
+{"ts":"2026-03-25T22:03:15.115559784Z","kind":"protocol","event":{"type":"artifacts","items":[]}}
+{"ts":"2026-03-25T22:03:15.115567540Z","kind":"stdout","line":"- `crates/membrain-core/src/engine/predictive.rs`"}
+{"ts":"2026-03-25T22:03:15.115567540Z","kind":"protocol","event":{"type":"artifacts","items":["`crates/membrain-core/src/engine/predictive.rs`"]}}
+{"ts":"2026-03-25T22:03:15.115811854Z","kind":"stdout","line":"- `crates/membrain-core/src/engine/mod.rs`"}
+{"ts":"2026-03-25T22:03:15.115811854Z","kind":"protocol","event":{"type":"artifacts","items":["`crates/membrain-core/src/engine/mod.rs`"]}}
+{"ts":"2026-03-25T22:03:15.115818964Z","kind":"stdout","line":"- `crates/membrain-core/src/lib.rs`"}
+{"ts":"2026-03-25T22:03:15.115818964Z","kind":"protocol","event":{"type":"artifacts","items":["`crates/membrain-core/src/lib.rs`"]}}
+{"ts":"2026-03-25T22:03:15.115825104Z","kind":"stdout","line":""}
+{"ts":"2026-03-25T22:03:15.115827474Z","kind":"stdout","line":"GROVE_DECISIONS:"}
+{"ts":"2026-03-25T22:03:15.115827474Z","kind":"protocol","event":{"type":"decision","items":[]}}
+{"ts":"2026-03-25T22:03:15.115832214Z","kind":"stdout","line":"- Implemented F16 as a new low-collision core engine module instead of editing contested predictive trigger files."}
+{"ts":"2026-03-25T22:03:15.115832214Z","kind":"protocol","event":{"type":"decision","items":["Implemented F16 as a new low-collision core engine module instead of editing contested predictive trigger files."]}}
+{"ts":"2026-03-25T22:03:15.116121233Z","kind":"stdout","line":"- Kept predictive pre-recall as an accelerator layered on existing audit/prefetch infrastructure, not a correctness path."}
+{"ts":"2026-03-25T22:03:15.116121233Z","kind":"protocol","event":{"type":"decision","items":["Kept predictive pre-recall as an accelerator layered on existing audit/prefetch infrastructure, not a correctness path."]}}
+{"ts":"2026-03-25T22:03:15.116129313Z","kind":"stdout","line":"- Used bounded audit-derived transition learning plus bounded speculative prewarm into the existing prefetch queue."}
+{"ts":"2026-03-25T22:03:15.116129313Z","kind":"protocol","event":{"type":"decision","items":["Used bounded audit-derived transition learning plus bounded speculative prewarm into the existing prefetch queue."]}}
+{"ts":"2026-03-25T22:03:15.116134807Z","kind":"stdout","line":"- Avoided `brain_store.rs`, planner, health, CLI, MCP, and docs because active agents already held overlapping scope there."}
+{"ts":"2026-03-25T22:03:15.116134807Z","kind":"protocol","event":{"type":"decision","items":["Avoided `brain_store.rs`, planner, health, CLI, MCP, and docs because active agents already held overlapping scope there."]}}
+{"ts":"2026-03-25T22:03:15.116200410Z","kind":"stdout","line":""}
+{"ts":"2026-03-25T22:03:15.116204072Z","kind":"stdout","line":"GROVE_LESSONS:"}
+{"ts":"2026-03-25T22:03:15.116204072Z","kind":"protocol","event":{"type":"lessons","items":[]}}
+{"ts":"2026-03-25T22:03:15.116209351Z","kind":"stdout","line":"- The repo already had partial predictive scaffolding in `engine/recall.rs`; the missing piece was a reusable learned-sequence engine."}
+{"ts":"2026-03-25T22:03:15.116209351Z","kind":"protocol","event":{"type":"lessons","items":["The repo already had partial predictive scaffolding in `engine/recall.rs`; the missing piece was a reusable learned-sequence engine."]}}
+{"ts":"2026-03-25T22:03:15.116214629Z","kind":"stdout","line":"- Existing `AppendOnlyAuditLog` + `CacheManager.prefetch` were enough to add F16 behavior without inventing a new cache family or transport surface."}
+{"ts":"2026-03-25T22:03:15.116214629Z","kind":"protocol","event":{"type":"lessons","items":["Existing `AppendOnlyAuditLog` + `CacheManager.prefetch` were enough to add F16 behavior without inventing a new cache family or transport surface."]}}
+{"ts":"2026-03-25T22:03:15.116230572Z","kind":"stdout","line":"- `brain_store.rs` currently centralizes some trigger semantics, so cross-agent coordination mattered to avoid collisions."}
+{"ts":"2026-03-25T22:03:15.116230572Z","kind":"protocol","event":{"type":"lessons","items":["`brain_store.rs` currently centralizes some trigger semantics, so cross-agent coordination mattered to avoid collisions."]}}
+{"ts":"2026-03-25T22:03:15.116234127Z","kind":"stdout","line":""}
+{"ts":"2026-03-25T22:03:15.116235419Z","kind":"stdout","line":"GROVE_WARNINGS:"}
+{"ts":"2026-03-25T22:03:15.116235419Z","kind":"protocol","event":{"type":"warning","items":[]}}
+{"ts":"2026-03-25T22:03:15.116238328Z","kind":"stdout","line":"- This lands the reusable predictive engine and tests, but not full wrapper/health/doc parity."}
+{"ts":"2026-03-25T22:03:15.116238328Z","kind":"protocol","event":{"type":"warning","items":["This lands the reusable predictive engine and tests, but not full wrapper/health/doc parity."]}}
+{"ts":"2026-03-25T22:03:15.116241452Z","kind":"stdout","line":"- Another agent (`TopazElk`) is actively handling the trigger-mapping layer in `brain_store.rs`; final end-to-end F16 behavior depends on that integration layer."}
+{"ts":"2026-03-25T22:03:15.116241452Z","kind":"protocol","event":{"type":"warning","items":["Another agent (`TopazElk`) is actively handling the trigger-mapping layer in `brain_store.rs`; final end-to-end F16 behavior depends on that integration layer."]}}
+{"ts":"2026-03-25T22:03:15.116245438Z","kind":"stdout","line":"- I intentionally did not touch contested files to avoid stomping concurrent work."}
+{"ts":"2026-03-25T22:03:15.116245438Z","kind":"protocol","event":{"type":"warning","items":["I intentionally did not touch contested files to avoid stomping concurrent work."]}}
+{"ts":"2026-03-25T22:03:15.116248238Z","kind":"stdout","line":""}
+{"ts":"2026-03-25T22:03:15.116249854Z","kind":"stdout","line":"What I added:"}
+{"ts":"2026-03-25T22:03:15.116251255Z","kind":"stdout","line":"- `PredictiveRecallConfig` with hard bounds for support, confidence, queue fill ratio, branching, and prefetch count."}
+{"ts":"2026-03-25T22:03:15.116252763Z","kind":"stdout","line":"- `PredictiveRecallEngine::from_audit(...)` to learn recall-to-recall transitions from bounded audit history."}
+{"ts":"2026-03-25T22:03:15.116254055Z","kind":"stdout","line":"- `predict_next(...)` for session-local predictions with namespace fallback."}
+{"ts":"2026-03-25T22:03:15.116255671Z","kind":"stdout","line":"- `speculative_prewarm(...)` to queue bounded speculative prefetch only when:"}
+{"ts":"2026-03-25T22:03:15.116256964Z","kind":"stdout","line":"  - there is enough transition support,"}
+{"ts":"2026-03-25T22:03:15.116258364Z","kind":"stdout","line":"  - confidence clears threshold,"}
+{"ts":"2026-03-25T22:03:15.116259872Z","kind":"stdout","line":"  - prefetch is enabled,"}
+{"ts":"2026-03-25T22:03:15.116261273Z","kind":"stdout","line":"  - queue pressure is still below the configured cap."}
+{"ts":"2026-03-25T22:03:15.116262565Z","kind":"stdout","line":"- Explicit observe-only reasons like:"}
+{"ts":"2026-03-25T22:03:15.116263858Z","kind":"stdout","line":"  - `no_transition_history`"}
+{"ts":"2026-03-25T22:03:15.116265259Z","kind":"stdout","line":"  - `insufficient_transition_support`"}
+{"ts":"2026-03-25T22:03:15.116266982Z","kind":"stdout","line":"  - `confidence_below_threshold`"}
+{"ts":"2026-03-25T22:03:15.116268490Z","kind":"stdout","line":"  - `prefetch_disabled`"}
+{"ts":"2026-03-25T22:03:15.116269783Z","kind":"stdout","line":"  - `predictive_budget_constrained`"}
+{"ts":"2026-03-25T22:03:15.116271076Z","kind":"stdout","line":"  - `prefetch_submit_rejected`"}
+{"ts":"2026-03-25T22:03:15.116272476Z","kind":"stdout","line":""}
+{"ts":"2026-03-25T22:03:15.116273769Z","kind":"stdout","line":"Validation:"}
+{"ts":"2026-03-25T22:03:15.116275169Z","kind":"stdout","line":"- `cargo test -p membrain-core predictive -- --nocapture` ✅"}
+{"ts":"2026-03-25T22:03:15.116279693Z","kind":"stdout","line":"- `cargo check -p membrain-core` ✅"}
+{"ts":"2026-03-25T22:03:15.116281201Z","kind":"stdout","line":""}
+{"ts":"2026-03-25T22:03:15.116282494Z","kind":"stdout","line":"GROVE_EXIT: true"}
+{"ts":"2026-03-25T22:03:15.116282494Z","kind":"protocol","event":{"type":"exit","value":true}}
+{"ts":"2026-03-25T22:03:16.327863776Z","kind":"session_ended","exit_code":0}

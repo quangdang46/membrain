@@ -824,7 +824,7 @@ fn consolidation_runs_emit_lineage_preserving_artifacts_through_maintenance_hand
     assert_eq!(summary.batch_plan.unit_selection.selected_units, 3);
     assert_eq!(
         summary.batch_plan.unit_selection.selection_rule,
-        "episode_source_sets_with_lineage_and_durable_citations"
+        "episode_source_sets_with_lineage_and_durable_citations_and_schema_compression"
     );
     assert_eq!(
         summary.batch_plan.unit_selection.durable_truth_source,
@@ -832,7 +832,7 @@ fn consolidation_runs_emit_lineage_preserving_artifacts_through_maintenance_hand
     );
     assert_eq!(
         summary.batch_plan.unit_selection.derived_outputs,
-        vec!["summary", "fact", "gist", "relation", "skill"]
+        vec!["summary", "fact", "gist", "relation", "skill", "schema"]
     );
     assert!(
         summary

@@ -1,0 +1,61 @@
+{"ts":"2026-03-25T22:07:55.610362239Z","kind":"session_started","session_id":"ses-run-mb-2db.6.1-20260325T220755538"}
+{"ts":"2026-03-25T22:21:07.299101055Z","kind":"stdout","line":"GROVE_RESULT: success"}
+{"ts":"2026-03-25T22:21:07.299101055Z","kind":"protocol","event":{"type":"result","summary":"success"}}
+{"ts":"2026-03-25T22:21:07.354960124Z","kind":"stdout","line":""}
+{"ts":"2026-03-25T22:21:07.354979067Z","kind":"stdout","line":"GROVE_ARTIFACTS:"}
+{"ts":"2026-03-25T22:21:07.354979067Z","kind":"protocol","event":{"type":"artifacts","items":[]}}
+{"ts":"2026-03-25T22:21:07.354987842Z","kind":"stdout","line":"- `crates/membrain-core/src/engine/recall.rs`"}
+{"ts":"2026-03-25T22:21:07.354987842Z","kind":"protocol","event":{"type":"artifacts","items":["`crates/membrain-core/src/engine/recall.rs`"]}}
+{"ts":"2026-03-25T22:21:07.355015132Z","kind":"stdout","line":""}
+{"ts":"2026-03-25T22:21:07.355018343Z","kind":"stdout","line":"GROVE_LESSONS:"}
+{"ts":"2026-03-25T22:21:07.355018343Z","kind":"protocol","event":{"type":"lessons","items":[]}}
+{"ts":"2026-03-25T22:21:07.355023694Z","kind":"stdout","line":"- The predictive engine in `crates/membrain-core/src/engine/predictive.rs` already had bounded support/confidence/queue controls; the missing part for this bead was making the trigger layer in `crates/membrain-core/src/engine/recall.rs` explicit and inspectable."}
+{"ts":"2026-03-25T22:21:07.355023694Z","kind":"protocol","event":{"type":"lessons","items":["The predictive engine in `crates/membrain-core/src/engine/predictive.rs` already had bounded support/confidence/queue controls; the missing part for this bead was making the trigger layer in `crates/membrain-core/src/engine/recall.rs` explicit and inspectable."]}}
+{"ts":"2026-03-25T22:21:07.355052482Z","kind":"stdout","line":"- The harness does not expose MCP Agent Mail tools even though the local `mcp-agent-mail` wrapper points to them, so I could not perform real registration from this session."}
+{"ts":"2026-03-25T22:21:07.355052482Z","kind":"protocol","event":{"type":"lessons","items":["The harness does not expose MCP Agent Mail tools even though the local `mcp-agent-mail` wrapper points to them, so I could not perform real registration from this session."]}}
+{"ts":"2026-03-25T22:21:07.355062863Z","kind":"stdout","line":""}
+{"ts":"2026-03-25T22:21:07.355067036Z","kind":"stdout","line":"GROVE_DECISIONS:"}
+{"ts":"2026-03-25T22:21:07.355067036Z","kind":"protocol","event":{"type":"decision","items":[]}}
+{"ts":"2026-03-25T22:21:07.355073136Z","kind":"stdout","line":"- Kept the change scoped to `crates/membrain-core/src/engine/recall.rs` to avoid contested integration surfaces."}
+{"ts":"2026-03-25T22:21:07.355073136Z","kind":"protocol","event":{"type":"decision","items":["Kept the change scoped to `crates/membrain-core/src/engine/recall.rs` to avoid contested integration surfaces."]}}
+{"ts":"2026-03-25T22:21:07.355078487Z","kind":"stdout","line":"- Defined stable bounded trigger signals for predictive preroll:"}
+{"ts":"2026-03-25T22:21:07.355078487Z","kind":"protocol","event":{"type":"decision","items":["Defined stable bounded trigger signals for predictive preroll:"]}}
+{"ts":"2026-03-25T22:21:07.355106740Z","kind":"stdout","line":"  - `session_recency`"}
+{"ts":"2026-03-25T22:21:07.355106740Z","kind":"protocol","event":{"type":"decision","items":["`session_recency`"]}}
+{"ts":"2026-03-25T22:21:07.355112412Z","kind":"stdout","line":"  - `high_value_recent`"}
+{"ts":"2026-03-25T22:21:07.355112412Z","kind":"protocol","event":{"type":"decision","items":["`high_value_recent`"]}}
+{"ts":"2026-03-25T22:21:07.355117228Z","kind":"stdout","line":"  - `temporal_anchor`"}
+{"ts":"2026-03-25T22:21:07.355117228Z","kind":"protocol","event":{"type":"decision","items":["`temporal_anchor`"]}}
+{"ts":"2026-03-25T22:21:07.355122258Z","kind":"stdout","line":"  - `procedural_sequence`"}
+{"ts":"2026-03-25T22:21:07.355122258Z","kind":"protocol","event":{"type":"decision","items":["`procedural_sequence`"]}}
+{"ts":"2026-03-25T22:21:07.355126646Z","kind":"stdout","line":"- Added one more hard bound at the trigger layer: predictive preroll is skipped when `prefetch_queue_capacity == 0`, yielding `prefetch_budget_disabled`."}
+{"ts":"2026-03-25T22:21:07.355126646Z","kind":"protocol","event":{"type":"decision","items":["Added one more hard bound at the trigger layer: predictive preroll is skipped when `prefetch_queue_capacity == 0`, yielding `prefetch_budget_disabled`."]}}
+{"ts":"2026-03-25T22:21:07.355164852Z","kind":"stdout","line":"- Closed bead `mb-2db.6.1` and synced beads export."}
+{"ts":"2026-03-25T22:21:07.355164852Z","kind":"protocol","event":{"type":"decision","items":["Closed bead `mb-2db.6.1` and synced beads export."]}}
+{"ts":"2026-03-25T22:21:07.355170310Z","kind":"stdout","line":""}
+{"ts":"2026-03-25T22:21:07.355172129Z","kind":"stdout","line":"GROVE_WARNINGS:"}
+{"ts":"2026-03-25T22:21:07.355172129Z","kind":"protocol","event":{"type":"warning","items":[]}}
+{"ts":"2026-03-25T22:21:07.355175447Z","kind":"stdout","line":"- I could not actually register with MCP Agent Mail because those MCP tools are not exposed in this harness, despite repo instructions referencing them."}
+{"ts":"2026-03-25T22:21:07.355175447Z","kind":"protocol","event":{"type":"warning","items":["I could not actually register with MCP Agent Mail because those MCP tools are not exposed in this harness, despite repo instructions referencing them."]}}
+{"ts":"2026-03-25T22:21:07.355554723Z","kind":"stdout","line":""}
+{"ts":"2026-03-25T22:21:07.355559217Z","kind":"stdout","line":"What changed:"}
+{"ts":"2026-03-25T22:21:07.355561893Z","kind":"stdout","line":"- `crates/membrain-core/src/engine/recall.rs`"}
+{"ts":"2026-03-25T22:21:07.355564461Z","kind":"stdout","line":"  - Added `PredictivePrerollSignal`."}
+{"ts":"2026-03-25T22:21:07.355566816Z","kind":"stdout","line":"  - Extended `PredictivePrerollDecision` to carry `signal: Option<PredictivePrerollSignal>`."}
+{"ts":"2026-03-25T22:21:07.355569919Z","kind":"stdout","line":"  - Mapped predictive intents to bounded trigger signals in `RecallEngine::predictive_preroll_decision(...)`."}
+{"ts":"2026-03-25T22:21:07.355572595Z","kind":"stdout","line":"  - Added the `prefetch_budget_disabled` guard."}
+{"ts":"2026-03-25T22:21:07.355574735Z","kind":"stdout","line":"  - Added focused tests for signal mapping and prefetch-budget gating."}
+{"ts":"2026-03-25T22:21:07.355576340Z","kind":"stdout","line":""}
+{"ts":"2026-03-25T22:21:07.355578053Z","kind":"stdout","line":"Validation:"}
+{"ts":"2026-03-25T22:21:07.355579444Z","kind":"stdout","line":"- `cargo test -p membrain-core predictive -- --nocapture` ✅"}
+{"ts":"2026-03-25T22:21:07.355580835Z","kind":"stdout","line":"- `cargo test -p membrain-core recall -- --nocapture` ✅"}
+{"ts":"2026-03-25T22:21:07.355582333Z","kind":"stdout","line":"- `cargo check -p membrain-core` ✅"}
+{"ts":"2026-03-25T22:21:07.355583832Z","kind":"stdout","line":""}
+{"ts":"2026-03-25T22:21:07.355585223Z","kind":"stdout","line":"Notable locations:"}
+{"ts":"2026-03-25T22:21:07.355586721Z","kind":"stdout","line":"- `crates/membrain-core/src/engine/recall.rs:140`"}
+{"ts":"2026-03-25T22:21:07.355588113Z","kind":"stdout","line":"- `crates/membrain-core/src/engine/recall.rs:192`"}
+{"ts":"2026-03-25T22:21:07.355589397Z","kind":"stdout","line":"- `crates/membrain-core/src/engine/recall.rs:685`"}
+{"ts":"2026-03-25T22:21:07.355590788Z","kind":"stdout","line":""}
+{"ts":"2026-03-25T22:21:07.355592179Z","kind":"stdout","line":"GROVE_EXIT: true"}
+{"ts":"2026-03-25T22:21:07.355592179Z","kind":"protocol","event":{"type":"exit","value":true}}
+{"ts":"2026-03-25T22:21:07.960815712Z","kind":"session_ended","exit_code":0}

@@ -1,23 +1,35 @@
 use clap::{ArgAction, Parser, Subcommand};
 use membrain_core::api::{
-    AvailabilityReason, AvailabilitySummary, CacheMetricsSummary, ConflictMarker, FieldPresence,
-    FreshnessMarker, NamespaceId, PassiveObservationInspectSummary, PolicyContext, RemediationStep,
-    RequestId, ResponseContext, ResponseWarning, TraceOmissionSummary, TracePolicySummary,
-    TraceProvenanceSummary, TraceScoreComponent, TraceStage, UncertaintyMarker,
+    AvailabilityReason, AvailabilitySummary, BlackboardSnapshotOutput, CacheMetricsSummary,
+    ConflictMarker, DeadZonesOutput, FieldPresence, ForkInfoOutput, ForkInheritance,
+    FreshnessMarker, GoalAbandonOutput, GoalPauseOutput, GoalResumeOutput, GoalStateOutput,
+    HotPathsOutput, MergeConflictStrategy, MergeReportOutput, NamespaceId,
+    PassiveObservationInspectSummary, PolicyContext, RemediationStep, RequestId, ResponseContext,
+    ResponseWarning, TaskId, TraceOmissionSummary, TracePolicySummary, TraceProvenanceSummary,
+    TraceScoreComponent, TraceStage, UncertaintyMarker,
 };
+use membrain_core::brain_store::{ForkConfig, MergeConfig};
 use membrain_core::embed::EmbeddingPurpose;
+use membrain_core::engine::compression::{
+    CompressionApplyResult, CompressionPolicy, CompressionSchemaArtifact, CompressionSkipReason,
+    CompressionTrigger,
+};
 use membrain_core::engine::confidence::{ConfidenceInputs, ConfidencePolicy};
 use membrain_core::engine::context_budget::{
     ContextBudgetRequest, ContextBudgetResponse, InjectionFormat,
 };
-use membrain_core::engine::dream::{DreamEngine, DreamPolicy, DreamSkipReason, DreamTrigger};
+use membrain_core::engine::dream::{
+    DreamArtifactLineage, DreamDerivedArtifact, DreamEngine, DreamInspectSummary, DreamPolicy,
+    DreamSkipReason, DreamSourceCitation, DreamTrigger,
+};
 use membrain_core::engine::lease::{LeaseMetadata, LeasePolicy, LeaseScanItem, LeaseScanner};
 use membrain_core::engine::maintenance::{
     MaintenanceController, MaintenanceJobHandle, MaintenanceJobState,
 };
 use membrain_core::engine::observe::{ObserveConfig, ObserveEngine};
 use membrain_core::engine::ranking::{
-    fuse_scores, ConfidenceDisplayConfig, ConfidenceExplain, RankingInput, RankingProfile,
+    adjusted_ranking_input_for_affect, fuse_scores, ranking_profile_for_recall,
+    ranking_profile_name_for_recall, ConfidenceDisplayConfig, ConfidenceExplain, RankingInput,
 };
 use membrain_core::engine::recall::RecallRuntime;
 use membrain_core::engine::repair::{IndexRepairEntrypoint, RepairTarget};
@@ -41,9 +53,11 @@ use membrain_core::store::audit::{
 use membrain_core::store::cache::CacheManager;
 use membrain_core::store::hot::Tier1HotMetadataStore;
 use membrain_core::types::{
-    CanonicalMemoryType, MemoryId, RawEncodeInput, RawIntakeKind, SessionId, Tier1HotRecord,
+    AffectSignals, AffectTrajectoryHistory, BlackboardState, CanonicalMemoryType, GoalCheckpoint,
+    GoalLifecycleStatus, GoalStackFrame, MemoryId, RawEncodeInput, RawIntakeKind, SessionId,
+    Tier1HotRecord,
 };
-use membrain_core::{BrainStore, RuntimeConfig};
+use membrain_core::{BrainStore, GoalWorkingState, RuntimeConfig, WorkingStateEngine};
 use membrain_daemon::daemon::{DaemonRuntime, DaemonRuntimeConfig};
 use membrain_daemon::preflight::{
     evaluate_preflight as evaluate_shared_preflight,
@@ -67,6 +81,9 @@ static SESSION_ID: AtomicU64 = AtomicU64::new(1);
 /// Global preflight correlation ID for CLI-local session.
 static NEXT_PREFLIGHT_ID: AtomicU64 = AtomicU64::new(1);
 
+/// Global logical tick for CLI-local working-state surfaces.
+static NEXT_GOAL_TICK: AtomicU64 = AtomicU64::new(1);
+
 /// Local record kept for CLI-session recall and inspect.
 #[derive(Debug, Clone)]
 struct LocalMemoryRecord {
@@ -77,6 +94,7 @@ struct LocalMemoryRecord {
     route_family: membrain_core::types::FastPathRouteFamily,
     compact_text: String,
     provisional_salience: u16,
+    affect: Option<AffectSignals>,
     fingerprint: u64,
     payload_size_bytes: usize,
     is_landmark: bool,
@@ -171,6 +189,81 @@ enum PreflightCommands {
 }
 
 #[derive(Subcommand, Debug)]
+enum GoalCommands {
+    /// Show the current goal-stack and working-state projection.
+    Show {
+        /// Optional task identifier for the active goal.
+        #[arg(long)]
+        task: Option<String>,
+        #[command(flatten)]
+        output: SharedOutputFlags,
+    },
+    /// Pin one evidence handle in the blackboard projection.
+    Pin {
+        /// Task identifier for the active goal.
+        #[arg(long)]
+        task: String,
+        /// Durable memory id to pin.
+        #[arg(long = "memory-id")]
+        memory_id: u64,
+        #[command(flatten)]
+        output: SharedOutputFlags,
+    },
+    /// Dismiss one evidence handle from the blackboard projection.
+    Dismiss {
+        /// Task identifier for the active goal.
+        #[arg(long)]
+        task: String,
+        /// Durable memory id to dismiss.
+        #[arg(long = "memory-id")]
+        memory_id: u64,
+        #[command(flatten)]
+        output: SharedOutputFlags,
+    },
+    /// Emit a named blackboard snapshot artifact.
+    Snapshot {
+        /// Task identifier for the active goal.
+        #[arg(long)]
+        task: String,
+        /// Optional operator note for the snapshot.
+        #[arg(long)]
+        note: Option<String>,
+        #[command(flatten)]
+        output: SharedOutputFlags,
+    },
+    /// Persist a resumability checkpoint and mark the goal dormant.
+    Pause {
+        /// Optional task identifier for the active goal.
+        #[arg(long)]
+        task: Option<String>,
+        /// Optional operator note for the pause event.
+        #[arg(long)]
+        note: Option<String>,
+        #[command(flatten)]
+        output: SharedOutputFlags,
+    },
+    /// Resume a dormant goal from the newest valid checkpoint.
+    Resume {
+        /// Optional task identifier for the dormant goal.
+        #[arg(long)]
+        task: Option<String>,
+        #[command(flatten)]
+        output: SharedOutputFlags,
+    },
+    /// Intentionally abandon the active goal.
+    Abandon {
+        /// Optional task identifier for the active goal.
+        #[arg(long)]
+        task: Option<String>,
+        /// Optional operator reason for abandonment.
+        #[arg(long)]
+        reason: Option<String>,
+        #[command(flatten)]
+        output: SharedOutputFlags,
+    },
+}
+
+#[derive(Subcommand, Debug)]
 enum Commands {
     /// Encode (store) a new memory
     #[command(name = "remember", visible_alias = "encode")]
@@ -232,6 +325,9 @@ enum Commands {
         /// Widen only to policy-approved shared/public surfaces.
         #[arg(long, default_value_t = false)]
         include_public: bool,
+        /// Opt into mood-congruent ranking using the latest recorded affect snapshot.
+        #[arg(long = "mood-congruent", default_value_t = false)]
+        mood_congruent: bool,
         /// Force graph_mode=off.
         #[arg(long, default_value_t = false)]
         no_engram: bool,
@@ -281,6 +377,9 @@ enum Commands {
         /// Namespace to explain over
         #[arg(long, short = 'n', default_value = "default")]
         namespace: String,
+        /// Opt into mood-congruent ranking using the latest recorded affect snapshot.
+        #[arg(long = "mood-congruent", default_value_t = false)]
+        mood_congruent: bool,
         #[command(flatten)]
         output: SharedOutputFlags,
     },
@@ -303,6 +402,61 @@ enum Commands {
         /// Number of iterations
         #[arg(long, default_value_t = 100)]
         iters: usize,
+        #[command(flatten)]
+        output: SharedOutputFlags,
+    },
+    /// Run a bounded schema-compression pass or preview.
+    Compress {
+        /// Namespace whose compression surface should be inspected.
+        #[arg(long, short = 'n', default_value = "default")]
+        namespace: String,
+        /// Show the bounded compression summary instead of applying the first eligible candidate.
+        #[arg(long, default_value_t = false)]
+        status: bool,
+        /// Preview the first eligible candidate without mutating counts.
+        #[arg(long, default_value_t = false)]
+        dry_run: bool,
+        /// Disable compression for this surfaced policy view.
+        #[arg(long, default_value_t = false)]
+        disable: bool,
+        /// Last known compression tick carried into the surfaced scheduler state.
+        #[arg(long = "last-run-tick")]
+        last_run_tick: Option<u64>,
+        /// Minimum episodic source memories required before a cluster may compress.
+        #[arg(long = "min-episode-count", default_value_t = 20)]
+        min_episode_count: usize,
+        /// Minimum centroid coherence required for direct eligibility.
+        #[arg(long = "coherence-min", default_value_t = 0.55)]
+        coherence_min: f32,
+        /// Coherence margin below the threshold that triggers review instead of rejection.
+        #[arg(long = "review-margin", default_value_t = 0.05)]
+        review_margin: f32,
+        /// Maximum clusters the bounded run may evaluate per poll.
+        #[arg(long = "batch-size", default_value_t = 8)]
+        batch_size: usize,
+        #[command(flatten)]
+        output: SharedOutputFlags,
+    },
+    /// List bounded schema artifacts implied by the current compression surface.
+    Schemas {
+        /// Namespace whose schema artifacts should be listed.
+        #[arg(long, short = 'n', default_value = "default")]
+        namespace: String,
+        /// Maximum schema artifacts to return.
+        #[arg(long = "top", default_value_t = 3)]
+        top: usize,
+        /// Minimum episodic source memories required before a cluster may compress.
+        #[arg(long = "min-episode-count", default_value_t = 20)]
+        min_episode_count: usize,
+        /// Minimum centroid coherence required for direct eligibility.
+        #[arg(long = "coherence-min", default_value_t = 0.55)]
+        coherence_min: f32,
+        /// Coherence margin below the threshold that triggers review instead of rejection.
+        #[arg(long = "review-margin", default_value_t = 0.05)]
+        review_margin: f32,
+        /// Maximum clusters the bounded run may evaluate.
+        #[arg(long = "batch-size", default_value_t = 8)]
+        batch_size: usize,
         #[command(flatten)]
         output: SharedOutputFlags,
     },
@@ -349,6 +503,11 @@ enum Commands {
         #[command(subcommand)]
         command: PreflightCommands,
     },
+    /// Manage bounded cognitive blackboard and goal checkpoints.
+    Goal {
+        #[command(subcommand)]
+        command: GoalCommands,
+    },
     /// Query and export bounded audit history slices
     Audit {
         /// Namespace to inspect
@@ -369,6 +528,53 @@ enum Commands {
         /// Optional tail count after filtering
         #[arg(long)]
         recent: Option<usize>,
+        #[command(flatten)]
+        output: SharedOutputFlags,
+    },
+    /// Show ranked hot paths derived from bounded retrieval attention signals.
+    HotPaths {
+        /// Namespace to inspect.
+        #[arg(long, short = 'n', default_value = "default")]
+        namespace: String,
+        /// Maximum number of ranked entries to return.
+        #[arg(long = "top", default_value_t = 10)]
+        top_n: usize,
+        #[command(flatten)]
+        output: SharedOutputFlags,
+    },
+    /// Show stale dead zones derived from bounded retrieval attention signals.
+    DeadZones {
+        /// Namespace to inspect.
+        #[arg(long, short = 'n', default_value = "default")]
+        namespace: String,
+        /// Minimum stale age in logical ticks.
+        #[arg(long = "min-age", default_value_t = 1)]
+        min_age_ticks: u64,
+        #[command(flatten)]
+        output: SharedOutputFlags,
+    },
+    /// Show the current bounded mood snapshot or the bounded emotional trajectory history.
+    Mood {
+        /// Namespace to inspect.
+        #[arg(long, short = 'n', default_value = "default")]
+        namespace: String,
+        /// Show the read-only emotional trajectory timeline instead of only the current snapshot.
+        #[arg(long, default_value_t = false)]
+        history: bool,
+        /// Optional inclusive lower tick bound for history output.
+        #[arg(long = "since")]
+        since_tick: Option<u64>,
+        #[command(flatten)]
+        output: SharedOutputFlags,
+    },
+    /// Show the bounded emotional trajectory history for one namespace.
+    MoodHistory {
+        /// Namespace to inspect.
+        #[arg(long, short = 'n', default_value = "default")]
+        namespace: String,
+        /// Optional inclusive lower tick bound.
+        #[arg(long = "since")]
+        since_tick: Option<u64>,
         #[command(flatten)]
         output: SharedOutputFlags,
     },
@@ -394,6 +600,42 @@ enum Commands {
         #[command(flatten)]
         output: SharedOutputFlags,
     },
+    /// Create a governed fork namespace that inherits approved parent visibility by reference.
+    Fork {
+        /// New fork namespace name.
+        #[arg(long)]
+        name: String,
+        /// Active namespace initiating the fork.
+        #[arg(long, short = 'n', default_value = "default")]
+        namespace: String,
+        /// Optional authoritative parent namespace when different from --namespace.
+        #[arg(long)]
+        parent_namespace: Option<String>,
+        /// Inheritance scope: public, shared, or all.
+        #[arg(long, default_value = "public")]
+        inherit: String,
+        /// Optional operator note for the fork metadata.
+        #[arg(long)]
+        note: Option<String>,
+        #[command(flatten)]
+        output: SharedOutputFlags,
+    },
+    /// Merge a governed fork back into the target namespace.
+    Merge {
+        /// Fork namespace name to merge.
+        fork_name: String,
+        /// Target authoritative namespace.
+        #[arg(long = "into")]
+        target_namespace: String,
+        /// Conflict handling strategy: manual, fork-wins, parent-wins, recency-wins.
+        #[arg(long, default_value = "manual")]
+        conflict: String,
+        /// Preview the merge without changing fork state.
+        #[arg(long, default_value_t = false)]
+        dry_run: bool,
+        #[command(flatten)]
+        output: SharedOutputFlags,
+    },
     /// Pack a ready-to-inject context window from bounded recall results
     Budget {
         /// Hard token budget for the packed output
@@ -416,6 +658,9 @@ enum Commands {
         /// Widen only to policy-approved shared/public surfaces.
         #[arg(long, default_value_t = false)]
         include_public: bool,
+        /// Opt into mood-congruent ranking using the latest recorded affect snapshot.
+        #[arg(long = "mood-congruent", default_value_t = false)]
+        mood_congruent: bool,
         #[command(flatten)]
         output: SharedOutputFlags,
     },
@@ -552,6 +797,15 @@ struct InspectOutput {
 }
 
 #[derive(Debug, Clone, Serialize)]
+struct MoodSnapshotOutput {
+    namespace: String,
+    current_mood: Option<AffectSignals>,
+    latest_tick: Option<u64>,
+    history_rows: usize,
+    authoritative_truth: &'static str,
+}
+
+#[derive(Debug, Clone, Serialize)]
 struct ObservePreviewFragment {
     index: usize,
     write_decision: &'static str,
@@ -660,6 +914,87 @@ struct BenchmarkOutput {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+struct DreamSourceCitationOutput {
+    memory_id: u64,
+    citation_kind: &'static str,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+struct DreamArtifactLineageOutput {
+    source_memory_ids: Vec<u64>,
+    source_citations: Vec<DreamSourceCitationOutput>,
+    derived_from: &'static str,
+    authoritative_truth: &'static str,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+struct DreamDerivedArtifactOutput {
+    artifact_id: String,
+    artifact_kind: &'static str,
+    summary: String,
+    lineage: DreamArtifactLineageOutput,
+    inspect_path: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+struct DreamInspectSummaryOutput {
+    run_handle: String,
+    inspect_path: String,
+    artifact_count: usize,
+    outputs: Vec<DreamDerivedArtifactOutput>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+struct CompressionInspectOutput {
+    run_handle: String,
+    inspect_path: String,
+    candidate_count: usize,
+    outputs: Vec<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+struct SchemaArtifactOutput {
+    id: u64,
+    content: String,
+    source_count: usize,
+    confidence: u16,
+    keywords: Vec<String>,
+    compressed_member_ids: Vec<u64>,
+    inspect_path: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+struct SchemasOutput {
+    outcome: &'static str,
+    namespace: String,
+    top: usize,
+    schemas: Vec<SchemaArtifactOutput>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+struct CompressionOutput {
+    outcome: &'static str,
+    namespace: String,
+    enabled: bool,
+    trigger: &'static str,
+    execution_window: &'static str,
+    dry_run: bool,
+    candidate_clusters: usize,
+    eligible_clusters: u32,
+    review_clusters: u32,
+    blocked_clusters: u32,
+    schemas_created: u32,
+    episodes_compressed: u32,
+    storage_reduction_pct: u8,
+    last_run_tick: Option<u64>,
+    paused_reason: Option<&'static str>,
+    blocked_reasons: Vec<&'static str>,
+    related_run: Option<String>,
+    inspect: Option<CompressionInspectOutput>,
+    operator_log: Vec<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 struct DreamOutput {
     outcome: &'static str,
     namespace: String,
@@ -677,6 +1012,7 @@ struct DreamOutput {
     candidate_batches_scanned: u32,
     last_run_tick: Option<u64>,
     paused_reason: Option<&'static str>,
+    inspect: Option<DreamInspectSummaryOutput>,
     operator_log: Vec<String>,
 }
 
@@ -735,6 +1071,33 @@ struct ShareOutput {
     policy_filters_applied: Vec<membrain_core::api::PolicyFilterSummary>,
     audit: ShareAuditView,
     audit_rows: Vec<AuditRow>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+struct ForkAuditView {
+    event_kind: &'static str,
+    actor_source: &'static str,
+    request_id: String,
+    effective_namespace: String,
+    source_namespace: Option<String>,
+    target_namespace: Option<String>,
+    status: &'static str,
+    related_run: Option<String>,
+    redacted: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+struct ForkOutput {
+    outcome: &'static str,
+    fork: ForkInfoOutput,
+    audit: ForkAuditView,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+struct MergeOutput {
+    outcome: &'static str,
+    report: MergeReportOutput,
+    audit: ForkAuditView,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize)]
@@ -857,6 +1220,15 @@ struct DoctorReport {
     health: BrainHealthReport,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+struct GoalLogEvent {
+    action: &'static str,
+    task_id: Option<String>,
+    namespace: String,
+    status: &'static str,
+    detail: String,
+}
+
 impl From<AuditLogEntry> for AuditRow {
     fn from(entry: AuditLogEntry) -> Self {
         Self {
@@ -899,8 +1271,160 @@ fn intent_confidence_label(low_confidence_fallback: bool) -> &'static str {
     }
 }
 
+fn compression_skip_reason_label(reason: Option<CompressionSkipReason>) -> Option<&'static str> {
+    reason.map(CompressionSkipReason::as_str)
+}
+
 fn dream_skip_reason_label(reason: Option<DreamSkipReason>) -> Option<&'static str> {
     reason.map(DreamSkipReason::as_str)
+}
+
+fn compression_output_from_apply(
+    namespace: &str,
+    dry_run: bool,
+    last_run_tick: Option<u64>,
+    applied: CompressionApplyResult,
+) -> CompressionOutput {
+    CompressionOutput {
+        outcome: if applied.blocked_reasons.is_empty() {
+            "accepted"
+        } else {
+            "blocked"
+        },
+        namespace: namespace.to_string(),
+        enabled: true,
+        trigger: CompressionTrigger::Manual.as_str(),
+        execution_window: "manual_bounded_run",
+        dry_run,
+        candidate_clusters: 1,
+        eligible_clusters: u32::from(applied.decision.disposition.as_str() == "eligible"),
+        review_clusters: u32::from(applied.decision.disposition.as_str() == "review"),
+        blocked_clusters: u32::from(applied.decision.disposition.as_str() == "ineligible"),
+        schemas_created: applied.schemas_created,
+        episodes_compressed: applied.episodes_compressed,
+        storage_reduction_pct: applied.storage_reduction_pct,
+        last_run_tick,
+        paused_reason: None,
+        blocked_reasons: applied.blocked_reasons,
+        related_run: Some(applied.related_run.clone()),
+        inspect: Some(CompressionInspectOutput {
+            run_handle: applied.related_run,
+            inspect_path: applied.decision.inspect_path.clone(),
+            candidate_count: 1,
+            outputs: vec![format!(
+                "{}:{}:{}",
+                applied.decision.cluster_id,
+                applied.decision.disposition.as_str(),
+                applied.decision.reason_code
+            )],
+        }),
+        operator_log: applied.operator_log,
+    }
+}
+
+fn schema_artifact_output(artifact: CompressionSchemaArtifact) -> SchemaArtifactOutput {
+    SchemaArtifactOutput {
+        id: artifact.schema_memory_id.0,
+        content: artifact.compact_text,
+        source_count: artifact.source_memory_ids.len(),
+        confidence: artifact.confidence_millis,
+        keywords: artifact.dominant_keywords,
+        compressed_member_ids: artifact
+            .compressed_member_ids
+            .into_iter()
+            .map(|id| id.0)
+            .collect(),
+        inspect_path: artifact.inspect_path,
+    }
+}
+
+fn schemas_output(
+    store: &BrainStore,
+    namespace: &NamespaceId,
+    top: usize,
+    policy: CompressionPolicy,
+) -> SchemasOutput {
+    let top = top.max(1);
+    let status = store.compression_engine().status(
+        namespace.clone(),
+        CompressionTrigger::Manual,
+        policy,
+        None,
+    );
+    let schemas = store
+        .compression_engine()
+        .candidate_clusters(&status)
+        .into_iter()
+        .filter_map(|cluster| {
+            let decision = store
+                .compression_engine()
+                .evaluate_candidate(&status, &cluster);
+            if decision.disposition.as_str() == "eligible" {
+                store
+                    .compression_engine()
+                    .apply_candidate(&status, &cluster, true)
+                    .schema_artifact
+                    .map(schema_artifact_output)
+            } else {
+                None
+            }
+        })
+        .take(top)
+        .collect();
+
+    SchemasOutput {
+        outcome: "accepted",
+        namespace: namespace.as_str().to_string(),
+        top,
+        schemas,
+    }
+}
+
+fn dream_source_citation_output(citation: DreamSourceCitation) -> DreamSourceCitationOutput {
+    DreamSourceCitationOutput {
+        memory_id: citation.memory_id.0,
+        citation_kind: citation.citation_kind,
+    }
+}
+
+fn dream_artifact_lineage_output(lineage: DreamArtifactLineage) -> DreamArtifactLineageOutput {
+    DreamArtifactLineageOutput {
+        source_memory_ids: lineage
+            .source_memory_ids
+            .into_iter()
+            .map(|id| id.0)
+            .collect(),
+        source_citations: lineage
+            .source_citations
+            .into_iter()
+            .map(dream_source_citation_output)
+            .collect(),
+        derived_from: lineage.derived_from,
+        authoritative_truth: lineage.authoritative_truth,
+    }
+}
+
+fn dream_derived_artifact_output(artifact: DreamDerivedArtifact) -> DreamDerivedArtifactOutput {
+    DreamDerivedArtifactOutput {
+        artifact_id: artifact.artifact_id,
+        artifact_kind: artifact.artifact_kind,
+        summary: artifact.summary,
+        lineage: dream_artifact_lineage_output(artifact.lineage),
+        inspect_path: artifact.inspect_path,
+    }
+}
+
+fn dream_inspect_summary_output(inspect: DreamInspectSummary) -> DreamInspectSummaryOutput {
+    DreamInspectSummaryOutput {
+        run_handle: inspect.run_handle,
+        inspect_path: inspect.inspect_path,
+        artifact_count: inspect.artifact_count,
+        outputs: inspect
+            .outputs
+            .into_iter()
+            .map(dream_derived_artifact_output)
+            .collect(),
+    }
 }
 
 fn describe_retrieval_validation_error(error: RetrievalRequestValidationError) -> &'static str {
@@ -927,6 +1451,7 @@ struct RecallCommandConfig {
     explain: String,
     namespace: NamespaceId,
     include_public: bool,
+    mood_congruent: bool,
     like: Option<MemoryId>,
     unlike: Option<MemoryId>,
     graph_expansion: bool,
@@ -949,6 +1474,7 @@ fn validate_recall_command(
     like: Option<u64>,
     unlike: Option<u64>,
     include_public: bool,
+    mood_congruent: bool,
     no_engram: bool,
     as_of: Option<u64>,
     at: Option<&str>,
@@ -1058,6 +1584,7 @@ fn validate_recall_command(
         explain,
         namespace,
         include_public,
+        mood_congruent,
         like: like.map(MemoryId),
         unlike: unlike.map(MemoryId),
         graph_expansion: !no_engram,
@@ -1698,8 +2225,8 @@ fn query_by_example_memory_ids(
 fn build_retrieval_result_set(
     local_records: &[LocalMemoryRecord],
     config: &RecallCommandConfig,
-    ranking_profile: RankingProfile,
-    route_family: &'static str,
+    current_mood: Option<AffectSignals>,
+    _route_family: &'static str,
     route_reason: String,
     matched_ids: Vec<MemoryId>,
     causal_seed: Option<MemoryId>,
@@ -1761,7 +2288,7 @@ fn build_retrieval_result_set(
             let confidence_inputs = build_confidence_inputs(record);
             let confidence_output = membrain_core::engine::confidence::ConfidenceEngine
                 .compute(&confidence_inputs, &confidence_policy);
-            let ranking = fuse_scores(
+            let ranking_input = adjusted_ranking_input_for_affect(
                 RankingInput {
                     recency: 900,
                     salience: record.provisional_salience,
@@ -1770,7 +2297,13 @@ fn build_retrieval_result_set(
                     conflict: 500,
                     confidence: confidence_output.confidence,
                 },
-                ranking_profile,
+                config.mood_congruent,
+                current_mood,
+                record.affect,
+            );
+            let ranking = fuse_scores(
+                ranking_input,
+                ranking_profile_for_recall(config.mood_congruent, current_mood, record.affect),
             );
             builder.add_with_confidence(
                 record.memory_id,
@@ -1820,7 +2353,17 @@ fn build_retrieval_result_set(
             || config.graph_expansion),
         candidate_budget: bounded_top,
         time_consumed_ms: None,
-        ranking_profile: route_family.to_string(),
+        ranking_profile: ranking_profile_name_for_recall(
+            config.mood_congruent,
+            current_mood,
+            selected_ids.iter().find_map(|memory_id| {
+                local_records
+                    .iter()
+                    .find(|r| r.namespace == config.namespace && r.memory_id == *memory_id)
+                    .and_then(|record| record.affect)
+            }),
+        )
+        .to_string(),
         contradictions_found: 0,
         historical_context: None,
         query_by_example: None,
@@ -2109,7 +2652,7 @@ fn build_retrieval_result_set(
 
 #[allow(clippy::too_many_arguments)]
 fn encode_memory(
-    store: &BrainStore,
+    store: &mut BrainStore,
     hot: &mut Tier1HotMetadataStore,
     local_records: &mut Vec<LocalMemoryRecord>,
     content: &str,
@@ -2117,8 +2660,8 @@ fn encode_memory(
     kind: &str,
     _context: Option<&str>,
     _attention: f32,
-    _valence: f32,
-    _arousal: f32,
+    valence: f32,
+    arousal: f32,
     source: &str,
 ) -> ResponseContext<EncodeOutput> {
     let intake_kind = parse_memory_kind(kind);
@@ -2128,7 +2671,8 @@ fn encode_memory(
         .find(|record| record.namespace == *namespace)
         .and_then(|record| record.era_id.clone())
         .map(|era_id| RawEncodeInput::new(intake_kind, content).with_active_era_id(era_id))
-        .unwrap_or_else(|| RawEncodeInput::new(intake_kind, content));
+        .unwrap_or_else(|| RawEncodeInput::new(intake_kind, content))
+        .with_affect_signals(AffectSignals::new(valence, arousal).clamped());
     let prepared = store.encode_engine().prepare_fast_path(input);
 
     let memory_id = MemoryId(NEXT_MEMORY_ID.fetch_add(1, Ordering::SeqCst));
@@ -2142,6 +2686,7 @@ fn encode_memory(
         route_family: prepared.classification.route_family,
         compact_text: prepared.normalized.compact_text.clone(),
         provisional_salience: prepared.provisional_salience,
+        affect: prepared.normalized.affect,
         fingerprint: prepared.fingerprint,
         payload_size_bytes: prepared.normalized.payload_size_bytes,
         is_landmark: prepared.normalized.landmark.is_landmark,
@@ -2154,6 +2699,15 @@ fn encode_memory(
 
     hot.seed(local.as_hot_record());
     local_records.push(local);
+    if let Some(affect) = prepared.normalized.affect {
+        let _ = store.record_affect_trajectory(
+            namespace.clone(),
+            memory_id,
+            prepared.normalized.landmark.era_id.clone(),
+            store.current_tick(),
+            affect,
+        );
+    }
 
     ResponseContext::success(
         namespace.clone(),
@@ -2188,6 +2742,7 @@ fn budget_memories(
     token_budget: usize,
     format: InjectionFormat,
     include_public: bool,
+    mood_congruent: bool,
 ) -> ResponseContext<ContextBudgetResponse> {
     let config = RecallCommandConfig {
         query: query.map(str::to_owned),
@@ -2198,6 +2753,7 @@ fn budget_memories(
         explain: "summary".to_string(),
         namespace: namespace.clone(),
         include_public,
+        mood_congruent,
         like: None,
         unlike: None,
         graph_expansion: false,
@@ -2235,10 +2791,11 @@ fn budget_memories(
         .map(|record| record.memory_id)
         .collect::<Vec<_>>();
 
+    let current_mood = current_cli_mood_snapshot(store, &config.namespace);
     let result_set = build_retrieval_result_set(
         local_records,
         &config,
-        RankingProfile::balanced(),
+        current_mood,
         intent_result.route_inputs.ranking_profile.as_str(),
         recall_plan.route_summary.reason.to_string(),
         matched_ids,
@@ -2273,6 +2830,11 @@ fn budget_memories(
         ));
     }
     response
+}
+
+fn current_cli_mood_snapshot(store: &BrainStore, namespace: &NamespaceId) -> Option<AffectSignals> {
+    let latest = store.mood_history(namespace.clone(), None).rows.pop()?;
+    Some(AffectSignals::new(latest.avg_valence, latest.avg_arousal).clamped())
 }
 
 fn recall_memories(
@@ -2323,10 +2885,11 @@ fn recall_memories(
     } else {
         recall_plan.route_summary.reason.to_string()
     };
+    let current_mood = current_cli_mood_snapshot(store, &config.namespace);
     let result_set = build_retrieval_result_set(
         local_records,
         config,
-        RankingProfile::balanced(),
+        current_mood,
         intent_result.route_inputs.ranking_profile.as_str(),
         route_reason,
         matched_ids,
@@ -2458,6 +3021,7 @@ fn observe_memories(
                 route_family: prepared.classification.route_family,
                 compact_text: prepared.normalized.compact_text.clone(),
                 provisional_salience: prepared.provisional_salience,
+                affect: prepared.normalized.affect,
                 fingerprint: prepared.fingerprint,
                 payload_size_bytes: prepared.normalized.payload_size_bytes,
                 is_landmark: prepared.normalized.landmark.is_landmark,
@@ -2705,6 +3269,7 @@ fn explain_query(
     query: &str,
     depth: Option<usize>,
     namespace: &NamespaceId,
+    mood_congruent: bool,
 ) -> ResponseContext<RetrievalResultSet> {
     let intent_result = store.intent_engine().classify(query);
     let config = RecallCommandConfig {
@@ -2716,6 +3281,7 @@ fn explain_query(
         explain: "full".to_string(),
         namespace: namespace.clone(),
         include_public: false,
+        mood_congruent,
         like: None,
         unlike: None,
         graph_expansion: false,
@@ -2767,10 +3333,11 @@ fn explain_query(
             .collect::<Vec<_>>()
     };
 
+    let current_mood = current_cli_mood_snapshot(store, namespace);
     let mut result_set = build_retrieval_result_set(
         local_records,
         &config,
-        RankingProfile::balanced(),
+        current_mood,
         intent_result.route_inputs.ranking_profile.as_str(),
         recall_plan.route_summary.reason.to_string(),
         matched_ids,
@@ -3117,6 +3684,92 @@ fn unshare_output(memory_id: u64, namespace: &NamespaceId) -> ShareOutput {
     }
 }
 
+fn fork_output(
+    store: &mut BrainStore,
+    name: String,
+    namespace: NamespaceId,
+    parent_namespace: Option<String>,
+    inherit: &str,
+    note: Option<String>,
+) -> anyhow::Result<ForkOutput> {
+    let inherit_visibility = match inherit {
+        "public" => ForkInheritance::PublicOnly,
+        "shared" => ForkInheritance::SharedToo,
+        "all" => ForkInheritance::All,
+        other => anyhow::bail!("invalid inherit `{other}`; expected public, shared, or all"),
+    };
+    let parent_namespace = match parent_namespace {
+        Some(parent) => NamespaceId::new(parent)?,
+        None => namespace,
+    };
+    let fork = store.fork(ForkConfig {
+        name,
+        parent_namespace,
+        inherit_visibility,
+        note,
+    });
+    let request_id = format!("req-fork-{}", fork.name);
+    let related_run = Some(format!("fork-run-{}", fork.name));
+    Ok(ForkOutput {
+        outcome: "accepted",
+        audit: ForkAuditView {
+            event_kind: AuditEventKind::ApprovedSharing.as_str(),
+            actor_source: "cli_fork",
+            request_id,
+            effective_namespace: fork.namespace.clone(),
+            source_namespace: Some(fork.parent_namespace.clone()),
+            target_namespace: Some(fork.namespace.clone()),
+            status: fork.status,
+            related_run,
+            redacted: false,
+        },
+        fork,
+    })
+}
+
+fn merge_output(
+    store: &mut BrainStore,
+    fork_name: String,
+    target_namespace: NamespaceId,
+    conflict: &str,
+    dry_run: bool,
+) -> anyhow::Result<MergeOutput> {
+    let conflict_strategy = match conflict {
+        "manual" => MergeConflictStrategy::Manual,
+        "fork-wins" => MergeConflictStrategy::ForkWins,
+        "parent-wins" => MergeConflictStrategy::ParentWins,
+        "recency-wins" => MergeConflictStrategy::RecencyWins,
+        other => anyhow::bail!(
+            "invalid conflict `{other}`; expected manual, fork-wins, parent-wins, or recency-wins"
+        ),
+    };
+    let report = store
+        .merge_fork(MergeConfig {
+            fork_name: fork_name.clone(),
+            target_namespace,
+            conflict_strategy,
+            dry_run,
+        })
+        .ok_or_else(|| anyhow::anyhow!("unknown fork `{fork_name}`"))?;
+    let request_id = format!("req-merge-{fork_name}");
+    let related_run = Some(format!("merge-run-{fork_name}"));
+    Ok(MergeOutput {
+        outcome: "accepted",
+        audit: ForkAuditView {
+            event_kind: AuditEventKind::MaintenanceReconsolidationApplied.as_str(),
+            actor_source: "cli_merge",
+            request_id,
+            effective_namespace: report.target_namespace.clone(),
+            source_namespace: Some(report.fork_name.clone()),
+            target_namespace: Some(report.target_namespace.clone()),
+            status: report.fork_status,
+            related_run,
+            redacted: false,
+        },
+        report,
+    })
+}
+
 fn filter_audit_rows(
     log: &AppendOnlyAuditLog,
     namespace: &NamespaceId,
@@ -3343,6 +3996,27 @@ fn doctor_report() -> DoctorReport {
             uncertain_count: 3,
             dream_links_total: 9,
             last_dream_tick: Some(42),
+            affect_history_rows: 2,
+            latest_affect_snapshot: Some((0.2, 0.7)),
+            latest_affect_tick: Some(198),
+            attention_namespaces: vec![
+                membrain_core::health::AttentionNamespaceInputs {
+                    namespace: "team.alpha".to_string(),
+                    recall_count: 21,
+                    encode_count: 4,
+                    working_memory_pressure: 6,
+                    promotion_count: 2,
+                    overflow_count: 1,
+                },
+                membrain_core::health::AttentionNamespaceInputs {
+                    namespace: "team.beta".to_string(),
+                    recall_count: 8,
+                    encode_count: 3,
+                    working_memory_pressure: 2,
+                    promotion_count: 0,
+                    overflow_count: 0,
+                },
+            ],
             total_recalls: 55,
             total_encodes: 12,
             current_tick: 200,
@@ -3577,6 +4251,25 @@ fn print_doctor_report(report: &DoctorReport) -> anyhow::Result<()> {
     Ok(())
 }
 
+fn render_health_bar(current: usize, capacity: usize, width: usize) -> String {
+    if capacity == 0 || width == 0 {
+        return "-".repeat(width.max(1));
+    }
+    let filled = ((current.min(capacity) * width) + (capacity / 2)) / capacity;
+    let empty = width.saturating_sub(filled);
+    format!("{}{}", "#".repeat(filled), "-".repeat(empty))
+}
+
+fn render_score_bar(score: f32, width: usize) -> String {
+    if width == 0 {
+        return String::new();
+    }
+    let clamped = score.clamp(0.0, 1.0);
+    let filled = (clamped * width as f32).round() as usize;
+    let empty = width.saturating_sub(filled.min(width));
+    format!("{}{}", "#".repeat(filled.min(width)), "-".repeat(empty))
+}
+
 fn print_health_report(report: &BrainHealthReport, brief: bool) -> anyhow::Result<()> {
     if brief {
         let posture = report
@@ -3605,72 +4298,251 @@ fn print_health_report(report: &BrainHealthReport, brief: bool) -> anyhow::Resul
         return Ok(());
     }
 
+    let posture = report
+        .availability_posture
+        .map(|value| value.as_str())
+        .unwrap_or("full");
+    let repair_queue = report
+        .repair_queue_depth
+        .map(|depth| depth.to_string())
+        .unwrap_or_else(|| "n/a".to_string());
+    let dream_tick = report
+        .last_dream_tick
+        .map(|tick| tick.to_string())
+        .unwrap_or_else(|| "n/a".to_string());
+    let top_engrams = if report.top_engrams.is_empty() {
+        "none".to_string()
+    } else {
+        report
+            .top_engrams
+            .iter()
+            .map(|(label, count)| format!("{label}:{count}"))
+            .collect::<Vec<_>>()
+            .join(", ")
+    };
+    let features = if report.feature_availability.is_empty() {
+        "none".to_string()
+    } else {
+        report
+            .feature_availability
+            .iter()
+            .map(|feature| match feature.note.as_deref() {
+                Some(note) => format!(
+                    "{}:{} ({})",
+                    feature.feature,
+                    feature.posture.as_str(),
+                    note
+                ),
+                None => format!("{}:{}", feature.feature, feature.posture.as_str()),
+            })
+            .collect::<Vec<_>>()
+            .join(", ")
+    };
+
+    println!("membrain — Brain Health");
+    println!("========================");
+    println!("TIER UTILIZATION");
     println!(
-        "Brain health: hot={}/{} ({:.1}%) cold={} confidence={:.2} strength={:.2}",
+        "  Hot   [{}] {}/{} ({:.1}%)",
+        render_health_bar(report.hot_memories, report.hot_capacity, 20),
         report.hot_memories,
         report.hot_capacity,
         report.hot_utilization_pct,
-        report.cold_memories,
-        report.avg_confidence,
-        report.avg_strength,
     );
     println!(
-        "  quality: low_confidence={} conflicts={} uncertain={} decay_rate={:.3}",
+        "  Cold  {} memories  archive={}",
+        report.cold_memories, report.archive_count
+    );
+    println!();
+    println!("QUALITY");
+    println!(
+        "  Strength    {:.2} [{}]",
+        report.avg_strength,
+        render_score_bar(report.avg_strength, 10)
+    );
+    println!(
+        "  Confidence  {:.2} [{}]",
+        report.avg_confidence,
+        render_score_bar(report.avg_confidence, 10)
+    );
+    println!(
+        "  Low conf    {}  conflicts={}  uncertain={}  decay_rate={:.3}",
         report.low_confidence_count,
         report.unresolved_conflicts,
         report.uncertain_count,
         report.decay_rate,
     );
+    println!();
+    println!("ENGRAMS & SIGNALS");
     println!(
-        "  activity: recalls={} encodes={} tick={} uptime_ticks={}",
-        report.total_recalls,
-        report.total_encodes,
-        report.current_tick,
-        report.daemon_uptime_ticks,
+        "  Engrams     total={} avg_cluster_size={:.2} top=[{}]",
+        report.total_engrams, report.avg_cluster_size, top_engrams,
     );
     println!(
-        "  posture: availability={} backpressure={} repair_queue={}",
-        report
-            .availability_posture
-            .map(|posture| posture.as_str())
-            .unwrap_or("full"),
+        "  Landmarks   {}  dream_links={}  last_dream_tick={}",
+        report.landmark_count, report.dream_links_total, dream_tick,
+    );
+    println!();
+    println!("OPERATIONS");
+    println!(
+        "  Availability  {}  backpressure={}  repair_queue={}",
+        posture,
         report.backpressure_state.unwrap_or("normal"),
-        report
-            .repair_queue_depth
-            .map(|depth| depth.to_string())
-            .unwrap_or_else(|| "n/a".to_string()),
+        repair_queue,
     );
+    println!(
+        "  Cache={}  Index={}  Repair={}",
+        report.cache.state.as_str(),
+        report.indexes.state.as_str(),
+        report
+            .repair
+            .as_ref()
+            .map(|repair| repair.state.as_str())
+            .unwrap_or("unavailable"),
+    );
+    println!(
+        "  Prewarm       {}  queue={}/{}",
+        report.cache.adaptive_prewarm_state,
+        report.cache.prefetch_queue_depth,
+        report.cache.prefetch_capacity,
+    );
+    println!("  Features      {}", features);
     if let Some(notes) = &report.availability_notes {
-        println!("  notes: {notes}");
+        println!("  Notes         {notes}");
     }
-    println!("  subsystems:");
+    if let Some(degraded) = &report.degraded_status {
+        println!("  Degraded      {}", degraded.summary);
+        if !degraded.recommended_runbooks.is_empty() {
+            println!(
+                "  Runbooks      {}",
+                degraded.recommended_runbooks.join(", ")
+            );
+        }
+    }
+    if !report.dashboard_views.is_empty() {
+        println!("  Views");
+        for view in &report.dashboard_views {
+            println!(
+                "    - {} [{} alerts] {}",
+                view.view.as_str(),
+                view.alert_count,
+                view.summary
+            );
+            if !view.drill_down_targets.is_empty() {
+                println!("      drill-down: {}", view.drill_down_targets.join(", "));
+            }
+        }
+    }
+    if !report.alerts.is_empty() {
+        println!("  Alerts");
+        for alert in &report.alerts {
+            println!(
+                "    - {} [{}] {}",
+                alert.subsystem,
+                alert.severity.as_str(),
+                alert.summary
+            );
+            println!("      drill-down: {}", alert.drill_down_path);
+            if let Some(runbook) = alert.recommended_runbook {
+                println!("      runbook: {runbook}");
+            }
+            if !alert.reason_codes.is_empty() {
+                println!("      reasons: {}", alert.reason_codes.join(", "));
+            }
+        }
+    }
+    if !report.drill_down_paths.is_empty() {
+        println!("  Drill-down paths");
+        for path in &report.drill_down_paths {
+            println!(
+                "    - {} -> {} ({})",
+                path.path, path.target_surface, path.summary
+            );
+        }
+    }
+    if !report.attention.hotspots.is_empty() {
+        println!("  Attention heatmap");
+        for hotspot in &report.attention.hotspots {
+            println!(
+                "    - #{} {} [{}|band={}] score={} dominant={} prewarm={} via {} -> {}",
+                hotspot.rank,
+                hotspot.namespace,
+                hotspot.heat_bucket,
+                hotspot.heat_band,
+                hotspot.attention_score,
+                hotspot.dominant_signal,
+                hotspot.prewarm_action,
+                hotspot.prewarm_trigger,
+                hotspot.prewarm_target_family,
+            );
+            println!(
+                "      signals: recalls={} encodes={} pressure={} promotions={} overflows={}",
+                hotspot.contributing_signals.recall_count,
+                hotspot.contributing_signals.encode_count,
+                hotspot.contributing_signals.working_memory_pressure,
+                hotspot.contributing_signals.promotion_count,
+                hotspot.contributing_signals.overflow_count,
+            );
+        }
+        println!("      summary: {}", report.cache.adaptive_prewarm_summary);
+    }
+    println!();
+    println!("SUBSYSTEM STATUS");
     for subsystem in &report.subsystem_status {
+        let metrics = if subsystem.metrics.is_empty() {
+            "none".to_string()
+        } else {
+            subsystem
+                .metrics
+                .iter()
+                .map(|metric| format!("{}={}", metric.metric, metric.value))
+                .collect::<Vec<_>>()
+                .join(", ")
+        };
         println!(
-            "    - {} [{}] {}",
+            "  - {} [{}] {}",
             subsystem.subsystem,
             subsystem.state.as_str(),
             subsystem.detail
         );
-    }
-    if !report.feature_availability.is_empty() {
-        println!("  features:");
-        for feature in &report.feature_availability {
-            println!(
-                "    - {} [{}]{}",
-                feature.feature,
-                feature.posture.as_str(),
-                feature
-                    .note
-                    .as_ref()
-                    .map(|note| format!(" {note}"))
-                    .unwrap_or_default()
-            );
+        println!("      metrics: {metrics}");
+        if !subsystem.reasons.is_empty() {
+            println!("      reasons: {}", subsystem.reasons.join(", "));
         }
     }
-    if let Some(degraded) = &report.degraded_status {
-        println!("  degraded summary: {}", degraded.summary);
-        if !degraded.recommended_runbooks.is_empty() {
-            println!("  runbooks: {}", degraded.recommended_runbooks.join(", "));
+    println!();
+    println!("ACTIVITY");
+    println!(
+        "  Tick={}  uptime_ticks={}  encodes={}  recalls={}",
+        report.current_tick, report.daemon_uptime_ticks, report.total_encodes, report.total_recalls,
+    );
+    if !report.trend_summary.is_empty() {
+        println!("  Trend summary:");
+        for summary in &report.trend_summary {
+            let metrics = if summary.trends.is_empty() {
+                "no trend data".to_string()
+            } else {
+                summary
+                    .trends
+                    .iter()
+                    .map(|trend| {
+                        format!(
+                            "{}:{}->{} ({})",
+                            trend.metric,
+                            trend.previous,
+                            trend.current,
+                            trend.direction.as_str()
+                        )
+                    })
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            };
+            println!(
+                "    - {} [{}] {}",
+                summary.subsystem,
+                summary.state.as_str(),
+                metrics
+            );
         }
     }
     Ok(())
@@ -3678,6 +4550,321 @@ fn print_health_report(report: &BrainHealthReport, brief: bool) -> anyhow::Resul
 
 fn next_preflight_correlation_id() -> u64 {
     NEXT_PREFLIGHT_ID.fetch_add(1, Ordering::SeqCst)
+}
+
+fn next_goal_tick() -> u64 {
+    NEXT_GOAL_TICK.fetch_add(1, Ordering::SeqCst)
+}
+
+fn build_goal_working_state(namespace: &NamespaceId, task_id: Option<&str>) -> GoalWorkingState {
+    let task_id = TaskId::new(task_id.unwrap_or("active-goal"));
+    let mut blackboard = BlackboardState::new(
+        namespace.clone(),
+        Some(task_id.clone()),
+        Some(SessionId(SESSION_ID.load(Ordering::SeqCst))),
+        format!("advance {}", namespace.as_str()),
+    );
+    blackboard.subgoals = vec![
+        "stabilize current context".to_string(),
+        "verify policy-safe next step".to_string(),
+    ];
+    blackboard.active_beliefs = vec!["blackboard is a projection, not authority".to_string()];
+    blackboard.unknowns = vec!["downstream operator acknowledgement".to_string()];
+    blackboard.next_action = Some("inspect latest checkpoint before mutating state".to_string());
+    blackboard.blocked_reason = Some("awaiting explicit operator action".to_string());
+
+    let mut state = GoalWorkingState::new(
+        task_id.clone(),
+        namespace.clone(),
+        Some(SessionId(SESSION_ID.load(Ordering::SeqCst))),
+        vec![
+            GoalStackFrame::new(blackboard.current_goal.clone()),
+            GoalStackFrame {
+                goal: "preserve resumability metadata".to_string(),
+                parent_goal: Some(blackboard.current_goal.clone()),
+                priority: Some(1),
+                blocked_reason: blackboard.blocked_reason.clone(),
+            },
+        ],
+        blackboard,
+    );
+    state.selected_evidence_handles = vec![MemoryId(1), MemoryId(2)];
+    state.pending_dependencies = vec!["policy-review".to_string(), "operator-ack".to_string()];
+    state
+}
+
+fn goal_engine_with_seed(namespace: &NamespaceId, task_id: Option<&str>) -> WorkingStateEngine {
+    let mut engine = WorkingStateEngine::default();
+    engine.upsert(build_goal_working_state(namespace, task_id));
+    engine
+}
+
+fn goal_log_event(
+    action: &'static str,
+    task_id: Option<&str>,
+    namespace: &NamespaceId,
+    status: &'static str,
+    detail: impl Into<String>,
+) -> GoalLogEvent {
+    GoalLogEvent {
+        action,
+        task_id: task_id.map(ToOwned::to_owned),
+        namespace: namespace.as_str().to_string(),
+        status,
+        detail: detail.into(),
+    }
+}
+
+fn print_goal_state_human(output: &GoalStateOutput) {
+    let task_label = match &output.task_id {
+        FieldPresence::Present(task_id) => task_id.as_str(),
+        FieldPresence::Absent => "(active-goal)",
+        FieldPresence::Redacted => "(redacted)",
+    };
+    println!(
+        "Goal state task={} status={}",
+        task_label,
+        output.status.as_str()
+    );
+    println!("  namespace: {}", output.namespace);
+    println!("  authoritative_truth: {}", output.authoritative_truth);
+    println!("  goal_stack_depth: {}", output.goal_stack.len());
+    for (index, frame) in output.goal_stack.iter().enumerate() {
+        println!("  frame[{}]: {}", index + 1, frame.goal);
+        if let Some(parent_goal) = frame.parent_goal.as_deref() {
+            println!("    parent_goal: {parent_goal}");
+        }
+        if let Some(priority) = frame.priority {
+            println!("    priority: {priority}");
+        }
+        if let Some(blocked_reason) = frame.blocked_reason.as_deref() {
+            println!("    blocked_reason: {blocked_reason}");
+        }
+    }
+    if let FieldPresence::Present(checkpoint) = &output.latest_checkpoint {
+        println!(
+            "  checkpoint: {} tick={} stale={}",
+            checkpoint.checkpoint_id, checkpoint.created_tick, checkpoint.stale
+        );
+        if let Some(summary) = checkpoint.blackboard_summary.as_deref() {
+            println!("    summary: {summary}");
+        }
+    }
+    if let FieldPresence::Present(blackboard) = &output.blackboard_state {
+        println!("  projection_kind: {}", blackboard.projection_kind);
+        println!("  current_goal: {}", blackboard.current_goal);
+        if !blackboard.subgoals.is_empty() {
+            println!("  subgoals: {}", blackboard.subgoals.join(" | "));
+        }
+        if !blackboard.active_evidence.is_empty() {
+            let handles = blackboard
+                .active_evidence
+                .iter()
+                .map(|handle| {
+                    format!(
+                        "{}:{}:pinned={}",
+                        handle.memory_id.0, handle.role, handle.pinned
+                    )
+                })
+                .collect::<Vec<_>>();
+            println!("  active_evidence: {}", handles.join(", "));
+        }
+        if let Some(next_action) = blackboard.next_action.as_deref() {
+            println!("  next_action: {next_action}");
+        }
+        if let Some(blocked_reason) = blackboard.blocked_reason.as_deref() {
+            println!("  blocked_reason: {blocked_reason}");
+        }
+    }
+}
+
+fn print_goal_pause_human(output: &GoalPauseOutput) {
+    let task_label = match &output.task_id {
+        FieldPresence::Present(task_id) => task_id.as_str(),
+        FieldPresence::Absent => "(active-goal)",
+        FieldPresence::Redacted => "(redacted)",
+    };
+    println!(
+        "Goal pause task={} status={}",
+        task_label,
+        output.status.as_str()
+    );
+    println!("  namespace: {}", output.namespace);
+    println!("  checkpoint: {}", output.checkpoint.checkpoint_id);
+    println!("  paused_at_tick: {}", output.paused_at_tick);
+    println!("  authoritative_truth: {}", output.authoritative_truth);
+    if let FieldPresence::Present(note) = &output.note {
+        println!("  note: {note}");
+    }
+}
+
+fn print_goal_resume_human(output: &GoalResumeOutput) {
+    let task_label = match &output.task_id {
+        FieldPresence::Present(task_id) => task_id.as_str(),
+        FieldPresence::Absent => "(active-goal)",
+        FieldPresence::Redacted => "(redacted)",
+    };
+    println!(
+        "Goal resume task={} status={}",
+        task_label,
+        output.status.as_str()
+    );
+    println!("  namespace: {}", output.namespace);
+    println!("  checkpoint: {}", output.checkpoint.checkpoint_id);
+    println!("  resumed_at_tick: {}", output.resumed_at_tick);
+    println!(
+        "  restored_evidence_handles: {:?}",
+        output.restored_evidence_handles
+    );
+    println!(
+        "  restored_dependencies: {:?}",
+        output.restored_dependencies
+    );
+    println!("  authoritative_truth: {}", output.authoritative_truth);
+    for warning in &output.warnings {
+        println!("  warning: {} [{}]", warning.detail, warning.code);
+    }
+}
+
+fn print_goal_abandon_human(output: &GoalAbandonOutput) {
+    let task_label = match &output.task_id {
+        FieldPresence::Present(task_id) => task_id.as_str(),
+        FieldPresence::Absent => "(active-goal)",
+        FieldPresence::Redacted => "(redacted)",
+    };
+    println!(
+        "Goal abandon task={} status={}",
+        task_label,
+        output.status.as_str()
+    );
+    println!("  namespace: {}", output.namespace);
+    println!("  abandoned_at_tick: {}", output.abandoned_at_tick);
+    println!("  authoritative_truth: {}", output.authoritative_truth);
+    if let FieldPresence::Present(checkpoint) = &output.checkpoint {
+        println!("  checkpoint: {}", checkpoint.checkpoint_id);
+    }
+    if let FieldPresence::Present(reason) = &output.reason {
+        println!("  reason: {reason}");
+    }
+}
+
+fn print_hot_paths_human(output: &HotPathsOutput) {
+    println!(
+        "Hot paths namespace={} entries={}/{}",
+        output.namespace,
+        output.entries.len(),
+        output.total_candidates
+    );
+    println!("  top_n: {}", output.top_n);
+    println!("  authoritative_truth: {}", output.authoritative_truth);
+    for entry in &output.entries {
+        println!(
+            "  memory={} score={} bucket={} recalls={} session_recalls={} pins={}",
+            entry.memory_id,
+            entry.attention_score,
+            entry.heat_bucket,
+            entry.recall_count,
+            entry.session_recall_count,
+            entry.working_set_pins
+        );
+        println!(
+            "    dominant_signal={} prewarm={} trigger={} target={}",
+            entry.dominant_signal,
+            entry.prewarm_action,
+            entry.prewarm_trigger,
+            entry.prewarm_target_family
+        );
+        println!("    sample_log: {}", entry.sample_log);
+    }
+}
+
+fn print_dead_zones_human(output: &DeadZonesOutput) {
+    println!(
+        "Dead zones namespace={} entries={}/{}",
+        output.namespace,
+        output.entries.len(),
+        output.total_candidates
+    );
+    println!("  min_age_ticks: {}", output.min_age_ticks);
+    println!("  authoritative_truth: {}", output.authoritative_truth);
+    for entry in &output.entries {
+        println!(
+            "  memory={} recalls={} last_recall_tick={:?} age={:?}",
+            entry.memory_id,
+            entry.recall_count,
+            entry.last_recall_tick,
+            entry.ticks_since_last_recall
+        );
+        println!(
+            "    stale_reason={} candidate_rewarm_family={}",
+            entry.stale_reason, entry.candidate_rewarm_family
+        );
+        println!("    sample_log: {}", entry.sample_log);
+    }
+}
+
+fn print_mood_snapshot_human(output: &MoodSnapshotOutput) {
+    println!("Mood namespace={}", output.namespace);
+    println!("  history_rows: {}", output.history_rows);
+    println!("  authoritative_truth: {}", output.authoritative_truth);
+    match output.current_mood {
+        Some(current) => {
+            println!(
+                "  current_mood: valence={:.3} arousal={:.3} latest_tick={:?}",
+                current.valence, current.arousal, output.latest_tick
+            );
+        }
+        None => {
+            println!(
+                "  current_mood: unavailable latest_tick={:?}",
+                output.latest_tick
+            );
+        }
+    }
+}
+
+fn print_mood_history_human(output: &AffectTrajectoryHistory) {
+    println!(
+        "Mood history namespace={} rows={}",
+        output.namespace.as_str(),
+        output.rows.len()
+    );
+    println!("  since_tick: {:?}", output.since_tick);
+    println!("  authoritative_truth: {}", output.authoritative_truth);
+    for row in &output.rows {
+        println!(
+            "  memory={} tick={}..{:?} valence={:.3} arousal={:.3} count={}",
+            row.memory_id.0,
+            row.tick_start,
+            row.tick_end,
+            row.avg_valence,
+            row.avg_arousal,
+            row.memory_count
+        );
+        if let Some(era_id) = row.era_id.as_deref() {
+            println!("    era: {era_id}");
+        }
+    }
+}
+
+fn print_goal_snapshot_human(output: &BlackboardSnapshotOutput) {
+    println!("Goal snapshot {}", output.snapshot.snapshot_id);
+    println!("  namespace: {}", output.namespace);
+    println!("  created_tick: {}", output.snapshot.created_tick);
+    println!(
+        "  evidence_handles: {:?}",
+        output
+            .snapshot
+            .evidence_handles
+            .iter()
+            .map(|id| id.0)
+            .collect::<Vec<_>>()
+    );
+    if let Some(note) = output.snapshot.note.as_deref() {
+        println!("  note: {note}");
+    }
+    println!("  artifact_kind: {}", output.snapshot.artifact_kind);
+    println!("  authoritative_truth: {}", output.authoritative_truth);
 }
 
 fn evaluate_cli_preflight(
@@ -3849,7 +5036,7 @@ async fn main() -> anyhow::Result<()> {
         } => {
             let ns = NamespaceId::new(namespace)?;
             let response = encode_memory(
-                &store,
+                &mut store,
                 &mut hot,
                 &mut local_records,
                 content,
@@ -3898,6 +5085,7 @@ async fn main() -> anyhow::Result<()> {
             like,
             unlike,
             include_public,
+            mood_congruent,
             no_engram,
             as_of,
             at,
@@ -3918,6 +5106,7 @@ async fn main() -> anyhow::Result<()> {
                 *like,
                 *unlike,
                 *include_public,
+                *mood_congruent,
                 *no_engram,
                 *as_of,
                 at.as_deref(),
@@ -4082,6 +5271,7 @@ async fn main() -> anyhow::Result<()> {
             format,
             top,
             include_public,
+            mood_congruent,
             output,
         } => {
             let namespace = namespace
@@ -4102,6 +5292,7 @@ async fn main() -> anyhow::Result<()> {
                 *token_budget,
                 format,
                 *include_public,
+                *mood_congruent,
             );
             if output.json {
                 println!("{}", serde_json::to_string_pretty(&response)?);
@@ -4215,10 +5406,12 @@ async fn main() -> anyhow::Result<()> {
             query,
             depth,
             namespace,
+            mood_congruent,
             output,
         } => {
             let ns = NamespaceId::new(namespace)?;
-            let response = explain_query(&store, &local_records, query, *depth, &ns);
+            let response =
+                explain_query(&store, &local_records, query, *depth, &ns, *mood_congruent);
             if output.json {
                 println!("{}", serde_json::to_string_pretty(&response)?);
             } else {
@@ -4494,6 +5687,159 @@ async fn main() -> anyhow::Result<()> {
                 );
             }
         }
+        Commands::Compress {
+            namespace,
+            status,
+            dry_run,
+            disable,
+            last_run_tick,
+            min_episode_count,
+            coherence_min,
+            review_margin,
+            batch_size,
+            output,
+        } => {
+            let namespace = NamespaceId::new(namespace)?;
+            let policy = CompressionPolicy {
+                enabled: !disable,
+                min_episode_count: *min_episode_count,
+                centroid_coherence_min: *coherence_min,
+                review_margin: *review_margin,
+                batch_size: *batch_size,
+            };
+            let mut store = BrainStore::new(RuntimeConfig::default());
+            let status_view = store.compression_engine().status(
+                namespace.clone(),
+                CompressionTrigger::Manual,
+                policy,
+                *last_run_tick,
+            );
+
+            let compression_output = if *status || status_view.should_skip() {
+                let summary = store.summarize_compression_pass(namespace.clone(), policy, 3);
+                CompressionOutput {
+                    outcome: if status_view.should_skip() {
+                        "blocked"
+                    } else {
+                        "accepted"
+                    },
+                    namespace: namespace.as_str().to_string(),
+                    enabled: status_view.enabled,
+                    trigger: status_view.trigger.as_str(),
+                    execution_window: "manual_bounded_run",
+                    dry_run: *dry_run,
+                    candidate_clusters: summary.inspect.candidate_count,
+                    eligible_clusters: summary.eligible_clusters,
+                    review_clusters: summary.review_clusters,
+                    blocked_clusters: summary.blocked_clusters,
+                    schemas_created: 0,
+                    episodes_compressed: 0,
+                    storage_reduction_pct: 0,
+                    last_run_tick: status_view.last_run_tick,
+                    paused_reason: compression_skip_reason_label(status_view.paused_reason),
+                    blocked_reasons: Vec::new(),
+                    related_run: Some(summary.inspect.run_handle.clone()),
+                    inspect: Some(CompressionInspectOutput {
+                        run_handle: summary.inspect.run_handle,
+                        inspect_path: summary.inspect.inspect_path,
+                        candidate_count: summary.inspect.candidate_count,
+                        outputs: summary
+                            .inspect
+                            .outputs
+                            .into_iter()
+                            .map(|decision| {
+                                format!(
+                                    "{}:{}:{}",
+                                    decision.cluster_id,
+                                    decision.disposition.as_str(),
+                                    decision.reason_code
+                                )
+                            })
+                            .collect(),
+                    }),
+                    operator_log: summary.operator_log,
+                }
+            } else {
+                let applied = store.apply_compression_pass(namespace.clone(), policy, 3, *dry_run);
+                compression_output_from_apply(namespace.as_str(), *dry_run, *last_run_tick, applied)
+            };
+
+            if output.json {
+                println!("{}", serde_json::to_string_pretty(&compression_output)?);
+            } else {
+                println!(
+                    "Compression '{}' in '{}' → enabled={}, dry_run={}, eligible={}, review={}, blocked={}, schemas={}, episodes={}, reduction={}%, paused={}",
+                    compression_output.outcome,
+                    compression_output.namespace,
+                    compression_output.enabled,
+                    compression_output.dry_run,
+                    compression_output.eligible_clusters,
+                    compression_output.review_clusters,
+                    compression_output.blocked_clusters,
+                    compression_output.schemas_created,
+                    compression_output.episodes_compressed,
+                    compression_output.storage_reduction_pct,
+                    compression_output.paused_reason.unwrap_or("none"),
+                );
+                if let Some(inspect) = &compression_output.inspect {
+                    println!(
+                        "  inspect={} run_handle={} candidates={}",
+                        inspect.inspect_path, inspect.run_handle, inspect.candidate_count
+                    );
+                    if output.verbose > 0 {
+                        for entry in &inspect.outputs {
+                            println!("  candidate {entry}");
+                        }
+                    }
+                }
+                if output.verbose > 0 || compression_output.outcome != "accepted" {
+                    for line in &compression_output.operator_log {
+                        println!("  {line}");
+                    }
+                }
+            }
+        }
+        Commands::Schemas {
+            namespace,
+            top,
+            min_episode_count,
+            coherence_min,
+            review_margin,
+            batch_size,
+            output,
+        } => {
+            let ns = NamespaceId::new(namespace)?;
+            let policy = CompressionPolicy {
+                min_episode_count: *min_episode_count,
+                centroid_coherence_min: *coherence_min,
+                review_margin: *review_margin,
+                batch_size: *batch_size,
+                ..Default::default()
+            };
+            let output_result = schemas_output(&store, &ns, *top, policy);
+            if output.json {
+                let response = ResponseContext::success(
+                    ns,
+                    RequestId::new(format!("schemas-{}", top))?,
+                    output_result,
+                );
+                println!("{}", serde_json::to_string_pretty(&response)?);
+            } else if !output.quiet {
+                println!(
+                    "Schemas in '{}' → {} artifact(s)",
+                    output_result.namespace,
+                    output_result.schemas.len()
+                );
+                for schema in &output_result.schemas {
+                    println!(
+                        "  schema={} sources={} confidence={} keywords={:?}",
+                        schema.id, schema.source_count, schema.confidence, schema.keywords
+                    );
+                    println!("    inspect_path: {}", schema.inspect_path);
+                    println!("    content: {}", schema.content);
+                }
+            }
+        }
         Commands::Dream {
             namespace,
             status,
@@ -4549,6 +5895,7 @@ async fn main() -> anyhow::Result<()> {
                     candidate_batches_scanned: 0,
                     last_run_tick: dream_status.last_run_tick,
                     paused_reason: dream_skip_reason_label(dream_status.paused_reason),
+                    inspect: None,
                     operator_log: vec![format!(
                         "dream status trigger={} enabled={} idle_ticks={} threshold={}",
                         dream_status.trigger.as_str(),
@@ -4584,6 +5931,7 @@ async fn main() -> anyhow::Result<()> {
                                 candidate_batches_scanned: summary.candidate_batches_scanned,
                                 last_run_tick: Some(summary.last_run_tick),
                                 paused_reason: dream_skip_reason_label(summary.skipped_reason),
+                                inspect: Some(dream_inspect_summary_output(summary.inspect)),
                                 operator_log: summary.operator_log,
                             });
                             break;
@@ -4617,6 +5965,27 @@ async fn main() -> anyhow::Result<()> {
                     dream_output.links_created_total,
                     dream_output.paused_reason.unwrap_or("none"),
                 );
+                if let Some(inspect) = &dream_output.inspect {
+                    println!(
+                        "  inspect={} run_handle={} artifacts={}",
+                        inspect.inspect_path, inspect.run_handle, inspect.artifact_count
+                    );
+                    if output.verbose > 0 {
+                        for artifact in &inspect.outputs {
+                            println!(
+                                "  artifact {} [{}] → {}",
+                                artifact.artifact_id, artifact.artifact_kind, artifact.inspect_path
+                            );
+                            println!("    {}", artifact.summary);
+                            println!(
+                                "    lineage derived_from={} authoritative_truth={} sources={:?}",
+                                artifact.lineage.derived_from,
+                                artifact.lineage.authoritative_truth,
+                                artifact.lineage.source_memory_ids
+                            );
+                        }
+                    }
+                }
                 if output.verbose > 0 || dream_output.outcome != "accepted" {
                     for line in &dream_output.operator_log {
                         println!("  {line}");
@@ -4664,6 +6033,291 @@ async fn main() -> anyhow::Result<()> {
                 }
             }
         }
+        Commands::Goal { command } => match command {
+            GoalCommands::Show { task, output } => {
+                let namespace = NamespaceId::new("default")?;
+                let engine = goal_engine_with_seed(&namespace, task.as_deref());
+                let state = engine
+                    .goal_state(&TaskId::new(task.as_deref().unwrap_or("active-goal")))
+                    .expect("seeded goal state should exist");
+                let log = vec![goal_log_event(
+                    "goal_get",
+                    task.as_deref(),
+                    &namespace,
+                    state.status.as_str(),
+                    "fetched bounded blackboard projection without mutating durable truth",
+                )];
+                if output.json {
+                    let mut response = ResponseContext::success(
+                        namespace.clone(),
+                        RequestId::new(format!(
+                            "goal-show-{}",
+                            task.as_deref().unwrap_or("active-goal")
+                        ))?,
+                        state.clone(),
+                    );
+                    response.warnings = log
+                        .iter()
+                        .map(|entry| ResponseWarning::new(entry.action, entry.detail.clone()))
+                        .collect();
+                    println!("{}", serde_json::to_string_pretty(&response)?);
+                } else if !output.quiet {
+                    print_goal_state_human(&state);
+                    if output.verbose > 0 {
+                        println!("  log: {}", log[0].detail);
+                    }
+                }
+            }
+            GoalCommands::Pin {
+                task,
+                memory_id,
+                output,
+            } => {
+                let namespace = NamespaceId::new("default")?;
+                let task_id = TaskId::new(task);
+                let mut engine = goal_engine_with_seed(&namespace, Some(task.as_str()));
+                let state = engine
+                    .pin_evidence(&task_id, MemoryId(*memory_id))
+                    .expect("seeded goal state should exist");
+                let log = vec![goal_log_event(
+                    "goal_pin",
+                    Some(task.as_str()),
+                    &namespace,
+                    state.status.as_str(),
+                    format!("pinned memory #{memory_id} into blackboard projection"),
+                )];
+                if output.json {
+                    let mut response = ResponseContext::success(
+                        namespace.clone(),
+                        RequestId::new(format!("goal-pin-{task}-{memory_id}"))?,
+                        state.clone(),
+                    );
+                    response.warnings = log
+                        .iter()
+                        .map(|entry| ResponseWarning::new(entry.action, entry.detail.clone()))
+                        .collect();
+                    println!("{}", serde_json::to_string_pretty(&response)?);
+                } else if !output.quiet {
+                    print_goal_state_human(&state);
+                    println!("  log: {}", log[0].detail);
+                }
+            }
+            GoalCommands::Dismiss {
+                task,
+                memory_id,
+                output,
+            } => {
+                let namespace = NamespaceId::new("default")?;
+                let task_id = TaskId::new(task);
+                let mut engine = goal_engine_with_seed(&namespace, Some(task.as_str()));
+                let state = engine
+                    .dismiss_evidence(&task_id, MemoryId(*memory_id))
+                    .expect("seeded goal state should exist");
+                let log = vec![goal_log_event(
+                    "goal_dismiss",
+                    Some(task.as_str()),
+                    &namespace,
+                    state.status.as_str(),
+                    format!("dismissed memory #{memory_id} from blackboard projection"),
+                )];
+                if output.json {
+                    let mut response = ResponseContext::success(
+                        namespace.clone(),
+                        RequestId::new(format!("goal-dismiss-{task}-{memory_id}"))?,
+                        state.clone(),
+                    );
+                    response.warnings = log
+                        .iter()
+                        .map(|entry| ResponseWarning::new(entry.action, entry.detail.clone()))
+                        .collect();
+                    println!("{}", serde_json::to_string_pretty(&response)?);
+                } else if !output.quiet {
+                    print_goal_state_human(&state);
+                    println!("  log: {}", log[0].detail);
+                }
+            }
+            GoalCommands::Snapshot { task, note, output } => {
+                let namespace = NamespaceId::new("default")?;
+                let task_id = TaskId::new(task);
+                let mut engine = goal_engine_with_seed(&namespace, Some(task.as_str()));
+                let snapshot = engine
+                    .snapshot_blackboard(&task_id, note.clone(), next_goal_tick())
+                    .expect("seeded goal state should exist");
+                let output_result = BlackboardSnapshotOutput {
+                    snapshot,
+                    namespace: namespace.as_str().to_string(),
+                    authoritative_truth: "durable_memory",
+                };
+                let log = vec![goal_log_event(
+                    "goal_snapshot",
+                    Some(task.as_str()),
+                    &namespace,
+                    "snapshot",
+                    "emitted derived blackboard snapshot artifact for handoff/inspect",
+                )];
+                if output.json {
+                    let mut response = ResponseContext::success(
+                        namespace.clone(),
+                        RequestId::new(format!("goal-snapshot-{task}"))?,
+                        output_result.clone(),
+                    );
+                    response.warnings = log
+                        .iter()
+                        .map(|entry| ResponseWarning::new(entry.action, entry.detail.clone()))
+                        .collect();
+                    println!("{}", serde_json::to_string_pretty(&response)?);
+                } else if !output.quiet {
+                    print_goal_snapshot_human(&output_result);
+                    println!("  log: {}", log[0].detail);
+                }
+            }
+            GoalCommands::Pause { task, note, output } => {
+                let namespace = NamespaceId::new("default")?;
+                let task_ref = task.as_deref();
+                let mut engine = goal_engine_with_seed(&namespace, task_ref);
+                let output_result = engine
+                    .pause_goal(
+                        &TaskId::new(task_ref.unwrap_or("active-goal")),
+                        note.clone(),
+                        next_goal_tick(),
+                    )
+                    .expect("seeded goal state should exist");
+                let log = vec![goal_log_event(
+                    "goal_pause",
+                    task_ref,
+                    &namespace,
+                    output_result.status.as_str(),
+                    "persisted resumability checkpoint and marked goal dormant",
+                )];
+                if output.json {
+                    let mut response = ResponseContext::success(
+                        namespace.clone(),
+                        RequestId::new(format!(
+                            "goal-pause-{}",
+                            task_ref.unwrap_or("active-goal")
+                        ))?,
+                        output_result.clone(),
+                    );
+                    response.warnings = log
+                        .iter()
+                        .map(|entry| ResponseWarning::new(entry.action, entry.detail.clone()))
+                        .collect();
+                    println!("{}", serde_json::to_string_pretty(&response)?);
+                } else if !output.quiet {
+                    print_goal_pause_human(&output_result);
+                    println!("  log: {}", log[0].detail);
+                }
+            }
+            GoalCommands::Resume { task, output } => {
+                let namespace = NamespaceId::new("default")?;
+                let task_ref = task.as_deref();
+                let mut engine = goal_engine_with_seed(&namespace, task_ref);
+                if task_ref.is_some() {
+                    let task_id = TaskId::new(task_ref.unwrap_or("active-goal"));
+                    let _ = engine.pause_goal(
+                        &task_id,
+                        Some("checkpoint before resume".to_string()),
+                        1,
+                    );
+                }
+                let output_result = engine
+                    .resume_goal(
+                        &TaskId::new(task_ref.unwrap_or("active-goal")),
+                        next_goal_tick().saturating_add(10),
+                    )
+                    .unwrap_or_else(|warning| GoalResumeOutput {
+                        task_id: FieldPresence::Present(task_ref.unwrap_or("active-goal").to_string()),
+                        status: GoalLifecycleStatus::Stale,
+                        checkpoint: GoalCheckpoint {
+                            checkpoint_id: format!("goal-checkpoint-{}", task_ref.unwrap_or("active-goal")),
+                            created_tick: next_goal_tick(),
+                            status: GoalLifecycleStatus::Stale,
+                            evidence_handles: vec![],
+                            pending_dependencies: vec![],
+                            blocked_reason: Some(warning.as_str().to_string()),
+                            blackboard_summary: Some(
+                                "resume degraded explicitly because no valid persisted checkpoint was available"
+                                    .to_string(),
+                            ),
+                            stale: true,
+                            namespace: namespace.clone(),
+                            task_id: Some(TaskId::new(task_ref.unwrap_or("active-goal"))),
+                            authoritative_truth: "durable_memory",
+                        },
+                        resumed_at_tick: next_goal_tick(),
+                        restored_evidence_handles: vec![],
+                        restored_dependencies: vec![],
+                        warnings: vec![ResponseWarning::new(warning.as_str(), "resume degraded explicitly")],
+                        namespace: namespace.as_str().to_string(),
+                        authoritative_truth: "durable_memory",
+                    });
+                let log = vec![goal_log_event(
+                    "goal_resume",
+                    task_ref,
+                    &namespace,
+                    output_result.status.as_str(),
+                    "resumed from checkpoint or surfaced stale degradation explicitly",
+                )];
+                if output.json {
+                    let mut response = ResponseContext::success(
+                        namespace.clone(),
+                        RequestId::new(format!(
+                            "goal-resume-{}",
+                            task_ref.unwrap_or("active-goal")
+                        ))?,
+                        output_result.clone(),
+                    );
+                    response.warnings = log
+                        .iter()
+                        .map(|entry| ResponseWarning::new(entry.action, entry.detail.clone()))
+                        .collect();
+                    println!("{}", serde_json::to_string_pretty(&response)?);
+                } else if !output.quiet {
+                    print_goal_resume_human(&output_result);
+                    println!("  log: {}", log[0].detail);
+                }
+            }
+            GoalCommands::Abandon {
+                task,
+                reason,
+                output,
+            } => {
+                let namespace = NamespaceId::new("default")?;
+                let task_ref = task.as_deref();
+                let mut engine = goal_engine_with_seed(&namespace, task_ref);
+                let task_id = TaskId::new(task_ref.unwrap_or("active-goal"));
+                let _ =
+                    engine.pause_goal(&task_id, Some("checkpoint before abandon".to_string()), 1);
+                let output_result = engine
+                    .abandon_goal(&task_id, reason.clone(), next_goal_tick())
+                    .expect("seeded goal state should exist");
+                let log = vec![goal_log_event(
+                    "goal_abandon",
+                    task_ref,
+                    &namespace,
+                    output_result.status.as_str(),
+                    "abandoned active goal while preserving checkpoint metadata for inspection",
+                )];
+                if output.json {
+                    let mut response = ResponseContext::success(
+                        namespace.clone(),
+                        RequestId::new(format!(
+                            "goal-abandon-{}",
+                            task_ref.unwrap_or("active-goal")
+                        ))?,
+                        output_result.clone(),
+                    );
+                    response.warnings = log
+                        .iter()
+                        .map(|entry| ResponseWarning::new(entry.action, entry.detail.clone()))
+                        .collect();
+                    println!("{}", serde_json::to_string_pretty(&response)?);
+                } else if !output.quiet {
+                    print_goal_abandon_human(&output_result);
+                    println!("  log: {}", log[0].detail);
+                }
+            }
+        },
         Commands::Observe {
             content,
             namespace,
@@ -5017,6 +6671,105 @@ async fn main() -> anyhow::Result<()> {
                 filter_audit_rows(&log, &ns, *id, *session, *since, op.as_deref(), *recent)?;
             print_audit_rows(&export, output.json)?;
         }
+        Commands::HotPaths {
+            namespace,
+            top_n,
+            output,
+        } => {
+            let ns = NamespaceId::new(namespace)?;
+            let output_result = store.hot_paths(ns.clone(), *top_n);
+            if output.json {
+                let response = ResponseContext::success(
+                    ns,
+                    RequestId::new(format!("hot-paths-{}", top_n))?,
+                    output_result,
+                );
+                println!("{}", serde_json::to_string_pretty(&response)?);
+            } else if !output.quiet {
+                print_hot_paths_human(&output_result);
+            }
+        }
+        Commands::DeadZones {
+            namespace,
+            min_age_ticks,
+            output,
+        } => {
+            let ns = NamespaceId::new(namespace)?;
+            let output_result = store.dead_zones(ns.clone(), *min_age_ticks);
+            if output.json {
+                let response = ResponseContext::success(
+                    ns,
+                    RequestId::new(format!("dead-zones-{}", min_age_ticks))?,
+                    output_result,
+                );
+                println!("{}", serde_json::to_string_pretty(&response)?);
+            } else if !output.quiet {
+                print_dead_zones_human(&output_result);
+            }
+        }
+        Commands::Mood {
+            namespace,
+            history,
+            since_tick,
+            output,
+        } => {
+            let ns = NamespaceId::new(namespace)?;
+            if *history {
+                let output_result = store.mood_history(ns.clone(), *since_tick);
+                if output.json {
+                    let response = ResponseContext::success(
+                        ns,
+                        RequestId::new(format!("mood-history-{}", since_tick.unwrap_or(0)))?,
+                        output_result,
+                    );
+                    println!("{}", serde_json::to_string_pretty(&response)?);
+                } else if !output.quiet {
+                    print_mood_history_human(&output_result);
+                }
+            } else {
+                let history_output = store.mood_history(ns.clone(), None);
+                let latest_tick = history_output.rows.last().map(|row| row.tick_start);
+                let current_mood = history_output
+                    .rows
+                    .last()
+                    .map(|row| AffectSignals::new(row.avg_valence, row.avg_arousal).clamped());
+                let output_result = MoodSnapshotOutput {
+                    namespace: ns.as_str().to_string(),
+                    current_mood,
+                    latest_tick,
+                    history_rows: history_output.rows.len(),
+                    authoritative_truth: "emotional_timeline",
+                };
+                if output.json {
+                    let response = ResponseContext::success(
+                        ns,
+                        RequestId::new("mood-current".to_string())?,
+                        output_result,
+                    );
+                    println!("{}", serde_json::to_string_pretty(&response)?);
+                } else if !output.quiet {
+                    print_mood_snapshot_human(&output_result);
+                }
+            }
+        }
+        Commands::MoodHistory {
+            namespace,
+            since_tick,
+            output,
+        } => {
+            let ns = NamespaceId::new(namespace)?;
+            let output_result = store.mood_history(ns.clone(), *since_tick);
+            if output.json {
+                let response = ResponseContext::success(
+                    ns,
+                    RequestId::new(format!("mood-history-{}", since_tick.unwrap_or(0)))?,
+                    output_result,
+                );
+                println!("{}", serde_json::to_string_pretty(&response)?);
+            } else if !output.quiet {
+                print_mood_history_human(&output_result);
+            }
+        }
         Commands::Share {
             id,
             namespace_id,
@@ -5080,6 +6833,81 @@ async fn main() -> anyhow::Result<()> {
                 println!("Unshared memory #{} in '{}' [private]", id, ns.as_str());
             }
         }
+        Commands::Fork {
+            name,
+            namespace,
+            parent_namespace,
+            inherit,
+            note,
+            output,
+        } => {
+            let ns = NamespaceId::new(namespace)?;
+            let mut store = BrainStore::default();
+            let output_result = fork_output(
+                &mut store,
+                name.clone(),
+                ns.clone(),
+                parent_namespace.clone(),
+                inherit,
+                note.clone(),
+            )?;
+            if output.json {
+                let response = ResponseContext::success(
+                    NamespaceId::new(output_result.fork.namespace.clone())?,
+                    RequestId::new(format!("fork-{name}"))?,
+                    output_result,
+                );
+                println!("{}", serde_json::to_string_pretty(&response)?);
+            } else {
+                println!(
+                    "Forked '{}' from '{}' [{} inheritance, {}]",
+                    name,
+                    output_result.fork.parent_namespace,
+                    output_result.fork.inherit_visibility,
+                    output_result.fork.status
+                );
+            }
+        }
+        Commands::Merge {
+            fork_name,
+            target_namespace,
+            conflict,
+            dry_run,
+            output,
+        } => {
+            let target = NamespaceId::new(target_namespace)?;
+            let mut store = BrainStore::default();
+            let _ = store.fork(ForkConfig {
+                name: fork_name.clone(),
+                parent_namespace: target.clone(),
+                inherit_visibility: ForkInheritance::PublicOnly,
+                note: None,
+            });
+            let output_result = merge_output(
+                &mut store,
+                fork_name.clone(),
+                target.clone(),
+                conflict,
+                *dry_run,
+            )?;
+            if output.json {
+                let response = ResponseContext::success(
+                    target,
+                    RequestId::new(format!("merge-{fork_name}"))?,
+                    output_result,
+                );
+                println!("{}", serde_json::to_string_pretty(&response)?);
+            } else {
+                println!(
+                    "Merged '{}' into '{}' [{} merged, {} pending, dry_run={}]",
+                    fork_name,
+                    output_result.report.target_namespace,
+                    output_result.report.memories_merged,
+                    output_result.report.conflicts_pending,
+                    output_result.report.dry_run
+                );
+            }
+        }
         Commands::Daemon {
             socket_path,
             request_concurrency,
@@ -5101,12 +6929,12 @@ async fn main() -> anyhow::Result<()> {
 mod tests {
     use super::{
         build_retrieval_result_set, cli_preflight_allow, cli_preflight_explain,
-        confidence_explain_for_result, dream_skip_reason_label, explain_query,
-        filter_audit_rows, inspect_memory, observe_memories, parse_audit_category,
+        confidence_explain_for_result, dream_skip_reason_label, explain_query, filter_audit_rows,
+        fork_output, inspect_memory, merge_output, observe_memories, parse_audit_category,
         parse_audit_kind, print_audit_rows, procedures_output, query_by_example_memory_ids,
         response_trace_for_result_set, sample_audit_log, share_output, skills_output,
-        unshare_output, Cli, Commands, DreamOutput, LocalMemoryRecord, PreflightCommands,
-        RecallCommandConfig,
+        unshare_output, Cli, Commands, DreamOutput, GoalCommands, LocalMemoryRecord,
+        PreflightCommands, RecallCommandConfig,
     };
     use clap::Parser;
     use membrain_core::api::{FieldPresence, NamespaceId, TraceStage};
@@ -5334,6 +7162,55 @@ mod tests {
     }
 
     #[test]
+    fn compress_command_preserves_scheduler_controls() {
+        let cli = Cli::parse_from([
+            "membrain",
+            "compress",
+            "--namespace",
+            "team.alpha",
+            "--status",
+            "--dry-run",
+            "--disable",
+            "--last-run-tick",
+            "9",
+            "--min-episode-count",
+            "7",
+            "--coherence-min",
+            "0.61",
+            "--review-margin",
+            "0.08",
+            "--batch-size",
+            "3",
+        ]);
+
+        match cli.command {
+            Commands::Compress {
+                namespace,
+                status,
+                dry_run,
+                disable,
+                last_run_tick,
+                min_episode_count,
+                coherence_min,
+                review_margin,
+                batch_size,
+                ..
+            } => {
+                assert_eq!(namespace, "team.alpha");
+                assert!(status);
+                assert!(dry_run);
+                assert!(disable);
+                assert_eq!(last_run_tick, Some(9));
+                assert_eq!(min_episode_count, 7);
+                assert!((coherence_min - 0.61).abs() < f32::EPSILON);
+                assert!((review_margin - 0.08).abs() < f32::EPSILON);
+                assert_eq!(batch_size, 3);
+            }
+            other => panic!("expected compress command, got {other:?}"),
+        }
+    }
+
+    #[test]
     fn dream_command_preserves_scheduler_controls() {
         let cli = Cli::parse_from([
             "membrain",
@@ -5368,6 +7245,46 @@ mod tests {
                 assert_eq!(links_created_total, 12);
             }
             other => panic!("expected dream command, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn schemas_command_preserves_listing_controls() {
+        let cli = Cli::parse_from([
+            "membrain",
+            "schemas",
+            "--namespace",
+            "team.alpha",
+            "--top",
+            "5",
+            "--min-episode-count",
+            "7",
+            "--coherence-min",
+            "0.61",
+            "--review-margin",
+            "0.08",
+            "--batch-size",
+            "3",
+        ]);
+
+        match cli.command {
+            Commands::Schemas {
+                namespace,
+                top,
+                min_episode_count,
+                coherence_min,
+                review_margin,
+                batch_size,
+                ..
+            } => {
+                assert_eq!(namespace, "team.alpha");
+                assert_eq!(top, 5);
+                assert_eq!(min_episode_count, 7);
+                assert!((coherence_min - 0.61).abs() < f32::EPSILON);
+                assert!((review_margin - 0.08).abs() < f32::EPSILON);
+                assert_eq!(batch_size, 3);
+            }
+            other => panic!("expected schemas command, got {other:?}"),
         }
     }
 
@@ -5733,6 +7650,7 @@ mod tests {
             explain: "summary".to_string(),
             namespace: namespace.clone(),
             include_public: false,
+            mood_congruent: false,
             like: None,
             unlike: None,
             graph_expansion: false,
@@ -5747,7 +7665,7 @@ mod tests {
         let result_set = build_retrieval_result_set(
             &[],
             &config,
-            RankingProfile::balanced(),
+            None,
             "balanced",
             "small lookup for active session can stay on hot recent window before durable fallback"
                 .to_string(),
@@ -5785,6 +7703,7 @@ mod tests {
             landmark_label: None,
             era_id: None,
             passive_observation: None,
+            affect: None,
             causal_parents: Vec::new(),
             causal_link_type: None,
         }];
@@ -5797,6 +7716,7 @@ mod tests {
             explain: "full".to_string(),
             namespace: namespace.clone(),
             include_public: false,
+            mood_congruent: false,
             like: None,
             unlike: None,
             graph_expansion: false,
@@ -5812,7 +7732,7 @@ mod tests {
         let result_set = build_retrieval_result_set(
             &local_records,
             &config,
-            RankingProfile::balanced(),
+            None,
             "balanced",
             "small lookup for active session can stay on hot recent window before durable fallback"
                 .to_string(),
@@ -5855,6 +7775,7 @@ mod tests {
                 landmark_label: None,
                 era_id: None,
                 passive_observation: None,
+                affect: None,
                 causal_parents: Vec::new(),
                 causal_link_type: None,
             },
@@ -5872,6 +7793,7 @@ mod tests {
                 landmark_label: None,
                 era_id: None,
                 passive_observation: None,
+                affect: None,
                 causal_parents: Vec::new(),
                 causal_link_type: None,
             },
@@ -5889,6 +7811,7 @@ mod tests {
                 landmark_label: None,
                 era_id: None,
                 passive_observation: None,
+                affect: None,
                 causal_parents: Vec::new(),
                 causal_link_type: None,
             },
@@ -5902,6 +7825,7 @@ mod tests {
             explain: "full".to_string(),
             namespace: namespace.clone(),
             include_public: false,
+            mood_congruent: false,
             like: Some(MemoryId(7)),
             unlike: None,
             graph_expansion: false,
@@ -5922,7 +7846,7 @@ mod tests {
         let result_set = build_retrieval_result_set(
             &local_records,
             &config,
-            RankingProfile::balanced(),
+            None,
             "balanced",
             "query-by-example seed similarity expanded a bounded hot-window shortlist".to_string(),
             matched_ids,
@@ -5968,6 +7892,7 @@ mod tests {
                 landmark_label: None,
                 era_id: None,
                 passive_observation: None,
+                affect: None,
                 causal_parents: Vec::new(),
                 causal_link_type: None,
             },
@@ -5985,6 +7910,7 @@ mod tests {
                 landmark_label: None,
                 era_id: None,
                 passive_observation: None,
+                affect: None,
                 causal_parents: Vec::new(),
                 causal_link_type: None,
             },
@@ -6002,6 +7928,7 @@ mod tests {
                 landmark_label: None,
                 era_id: None,
                 passive_observation: None,
+                affect: None,
                 causal_parents: Vec::new(),
                 causal_link_type: None,
             },
@@ -6015,6 +7942,7 @@ mod tests {
             explain: "full".to_string(),
             namespace: namespace.clone(),
             include_public: false,
+            mood_congruent: false,
             like: None,
             unlike: Some(MemoryId(11)),
             graph_expansion: false,
@@ -6035,7 +7963,7 @@ mod tests {
         let result_set = build_retrieval_result_set(
             &local_records,
             &config,
-            RankingProfile::balanced(),
+            None,
             "balanced",
             "query-by-example seed similarity expanded a bounded hot-window shortlist".to_string(),
             matched_ids,
@@ -6079,6 +8007,7 @@ mod tests {
                 landmark_label: Some("launch day pivot".to_string()),
                 era_id: Some("era-launch-0042".to_string()),
                 passive_observation: None,
+                affect: None,
                 causal_parents: Vec::new(),
                 causal_link_type: None,
             },
@@ -6096,6 +8025,7 @@ mod tests {
                 landmark_label: None,
                 era_id: Some("era-launch-0042".to_string()),
                 passive_observation: None,
+                affect: None,
                 causal_parents: Vec::new(),
                 causal_link_type: None,
             },
@@ -6113,6 +8043,7 @@ mod tests {
                 landmark_label: Some("older unrelated era".to_string()),
                 era_id: Some("era-older-0001".to_string()),
                 passive_observation: None,
+                affect: None,
                 causal_parents: Vec::new(),
                 causal_link_type: None,
             },
@@ -6126,6 +8057,7 @@ mod tests {
             explain: "full".to_string(),
             namespace: namespace.clone(),
             include_public: false,
+            mood_congruent: false,
             like: None,
             unlike: None,
             graph_expansion: false,
@@ -6141,7 +8073,7 @@ mod tests {
         let result_set = build_retrieval_result_set(
             &local_records,
             &config,
-            RankingProfile::balanced(),
+            None,
             "balanced",
             "temporal recall stayed inside one landmark-defined era".to_string(),
             vec![MemoryId(7), MemoryId(8), MemoryId(9)],
@@ -6187,6 +8119,7 @@ mod tests {
                 landmark_label: None,
                 era_id: None,
                 passive_observation: None,
+                affect: None,
                 causal_parents: Vec::new(),
                 causal_link_type: None,
             },
@@ -6204,6 +8137,7 @@ mod tests {
                 landmark_label: None,
                 era_id: None,
                 passive_observation: None,
+                affect: None,
                 causal_parents: vec![MemoryId(10)],
                 causal_link_type: Some(CausalLinkType::Reconsolidated),
             },
@@ -6221,12 +8155,13 @@ mod tests {
                 landmark_label: None,
                 era_id: None,
                 passive_observation: None,
+                affect: None,
                 causal_parents: vec![MemoryId(20)],
                 causal_link_type: Some(CausalLinkType::Extracted),
             },
         ];
 
-        let response = explain_query(&store, &local_records, "30", Some(2), &namespace);
+        let response = explain_query(&store, &local_records, "30", Some(2), &namespace, false);
         let result = response.result.expect("causal explain result");
 
         assert_eq!(
@@ -6302,6 +8237,7 @@ mod tests {
                 landmark_label: None,
                 era_id: None,
                 passive_observation: None,
+                affect: None,
                 causal_parents: Vec::new(),
                 causal_link_type: None,
             },
@@ -6319,6 +8255,7 @@ mod tests {
                 landmark_label: None,
                 era_id: None,
                 passive_observation: None,
+                affect: None,
                 causal_parents: Vec::new(),
                 causal_link_type: None,
             },
@@ -6332,6 +8269,7 @@ mod tests {
             explain: "full".to_string(),
             namespace: namespace.clone(),
             include_public: false,
+            mood_congruent: false,
             like: None,
             unlike: None,
             graph_expansion: false,
@@ -6347,7 +8285,7 @@ mod tests {
         let result_set = build_retrieval_result_set(
             &local_records,
             &config,
-            RankingProfile::balanced(),
+            None,
             "balanced",
             "confidence-aware ordering".to_string(),
             vec![MemoryId(1), MemoryId(60)],
@@ -6478,6 +8416,7 @@ mod tests {
             candidate_batches_scanned: 0,
             last_run_tick: status.last_run_tick,
             paused_reason: dream_skip_reason_label(status.paused_reason),
+            inspect: None,
             operator_log: vec![
                 "dream status trigger=idle_window enabled=false idle_ticks=12 threshold=100"
                     .to_string(),
@@ -6544,6 +8483,128 @@ mod tests {
                 assert!(!output.json);
             }
             other => panic!("expected unshare command, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn fork_and_merge_commands_parse_canonical_fields() {
+        let fork = Cli::parse_from([
+            "membrain",
+            "fork",
+            "--name",
+            "agent-specialist",
+            "--namespace",
+            "team.alpha",
+            "--inherit",
+            "shared",
+            "--note",
+            "testing",
+        ]);
+        let merge = Cli::parse_from([
+            "membrain",
+            "merge",
+            "agent-specialist",
+            "--into",
+            "team.alpha",
+            "--conflict",
+            "recency-wins",
+            "--dry-run",
+        ]);
+
+        match fork.command {
+            Commands::Fork {
+                name,
+                namespace,
+                parent_namespace,
+                inherit,
+                note,
+                output,
+            } => {
+                assert_eq!(name, "agent-specialist");
+                assert_eq!(namespace, "team.alpha");
+                assert_eq!(parent_namespace, None);
+                assert_eq!(inherit, "shared");
+                assert_eq!(note.as_deref(), Some("testing"));
+                assert!(!output.json);
+            }
+            other => panic!("expected fork command, got {other:?}"),
+        }
+
+        match merge.command {
+            Commands::Merge {
+                fork_name,
+                target_namespace,
+                conflict,
+                dry_run,
+                output,
+            } => {
+                assert_eq!(fork_name, "agent-specialist");
+                assert_eq!(target_namespace, "team.alpha");
+                assert_eq!(conflict, "recency-wins");
+                assert!(dry_run);
+                assert!(!output.json);
+            }
+            other => panic!("expected merge command, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn goal_commands_parse_canonical_fields() {
+        let show = Cli::parse_from(["membrain", "goal", "show", "--task", "deploy-incident"]);
+        let pin = Cli::parse_from([
+            "membrain",
+            "goal",
+            "pin",
+            "--task",
+            "deploy-incident",
+            "--memory-id",
+            "7",
+        ]);
+        let snapshot = Cli::parse_from([
+            "membrain",
+            "goal",
+            "snapshot",
+            "--task",
+            "deploy-incident",
+            "--note",
+            "handoff",
+        ]);
+
+        match show.command {
+            Commands::Goal {
+                command: GoalCommands::Show { task, output },
+            } => {
+                assert_eq!(task.as_deref(), Some("deploy-incident"));
+                assert!(!output.json);
+            }
+            other => panic!("expected goal show command, got {other:?}"),
+        }
+
+        match pin.command {
+            Commands::Goal {
+                command:
+                    GoalCommands::Pin {
+                        task,
+                        memory_id,
+                        output,
+                    },
+            } => {
+                assert_eq!(task, "deploy-incident");
+                assert_eq!(memory_id, 7);
+                assert!(!output.json);
+            }
+            other => panic!("expected goal pin command, got {other:?}"),
+        }
+
+        match snapshot.command {
+            Commands::Goal {
+                command: GoalCommands::Snapshot { task, note, output },
+            } => {
+                assert_eq!(task, "deploy-incident");
+                assert_eq!(note.as_deref(), Some("handoff"));
+                assert!(!output.json);
+            }
+            other => panic!("expected goal snapshot command, got {other:?}"),
         }
     }
 
@@ -6616,6 +8677,63 @@ mod tests {
         );
         assert_eq!(unshared.audit_rows[0].kind, "policy_redacted");
         assert!(unshared.audit_rows[0].redacted);
+    }
+
+    #[test]
+    fn fork_and_merge_outputs_preserve_governed_branch_metadata() {
+        let namespace = NamespaceId::new("team.alpha").unwrap();
+        let mut store = BrainStore::default();
+        let fork = fork_output(
+            &mut store,
+            "agent-specialist".to_string(),
+            namespace.clone(),
+            None,
+            "shared",
+            Some("testing".to_string()),
+        )
+        .unwrap();
+        assert_eq!(fork.outcome, "accepted");
+        assert_eq!(fork.fork.name, "agent-specialist");
+        assert_eq!(fork.fork.namespace, "agent-specialist");
+        assert_eq!(fork.fork.parent_namespace, "team.alpha");
+        assert_eq!(fork.fork.inherit_visibility, "shared");
+        assert_eq!(fork.fork.status, "active");
+        assert_eq!(fork.fork.fork_local_procedure_count, 0);
+        assert_eq!(fork.fork.fork_working_state_count, 0);
+        assert!(!fork.fork.diverged);
+        assert_eq!(fork.fork.divergence_basis, "fork_namespace_local_state");
+        assert_eq!(
+            fork.fork.isolation_semantics,
+            "inherit_by_reference_until_explicit_merge"
+        );
+        assert_eq!(fork.audit.actor_source, "cli_fork");
+        assert_eq!(fork.audit.event_kind, "approved_sharing");
+
+        let merge = merge_output(
+            &mut store,
+            "agent-specialist".to_string(),
+            namespace,
+            "manual",
+            true,
+        )
+        .unwrap();
+        assert_eq!(merge.outcome, "accepted");
+        assert_eq!(merge.report.fork_name, "agent-specialist");
+        assert_eq!(merge.report.target_namespace, "team.alpha");
+        assert!(merge.report.dry_run);
+        assert_eq!(merge.report.conflict_strategy, "manual");
+        assert_eq!(merge.report.fork_local_procedure_count, 0);
+        assert_eq!(merge.report.fork_working_state_count, 0);
+        assert_eq!(merge.report.merged_items, Vec::<String>::new());
+        assert_eq!(merge.report.conflict_items.len(), 0);
+        assert_eq!(merge.report.audit_sequences, Vec::<u64>::new());
+        assert!(!merge.report.divergence_detected);
+        assert_eq!(merge.report.divergence_basis, "fork_namespace_local_state");
+        assert_eq!(
+            merge.report.isolation_semantics,
+            "inherit_by_reference_until_explicit_merge"
+        );
+        assert_eq!(merge.audit.actor_source, "cli_merge");
     }
 
     #[test]

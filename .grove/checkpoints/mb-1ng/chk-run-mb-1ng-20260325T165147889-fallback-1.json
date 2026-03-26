@@ -1,0 +1,45 @@
+{
+  "id": "chk-run-mb-1ng-20260325T165147889-fallback-1",
+  "bead_id": "mb-1ng",
+  "run_id": "run-mb-1ng-20260325T165147889",
+  "session_id": "ses-run-mb-1ng-20260325T165147889",
+  "progress": "Synthetic fallback checkpoint after NoProgress",
+  "next_step": "Resume from the transcript tail, avoid repeating completed setup, and continue with the smallest safe remaining step.",
+  "payload": {
+    "claimed_paths": [],
+    "confidence": 0.25,
+    "context": {
+      "failure_class": "NoProgress",
+      "failure_detail": "session ended with Unknown",
+      "stderr_tail": [],
+      "stdout_tail": [
+        "      \"holders\": [\"SwiftHawk\", \"PearlHill\", \"TopazValley\"],",
+        "      \"reason\": \"active exclusive reservations on the smallest live blocker\"",
+        "    },",
+        "    {",
+        "      \"file\": \"docs/MCP_API.md\",",
+        "      \"reason\": \"active overlapping reservations\"",
+        "    },",
+        "    {",
+        "      \"file\": \"crates/membrain-core/tests/working_memory_admission.rs\",",
+        "      \"reason\": \"active overlapping reservations\"",
+        "    }",
+        "  ],",
+        "  \"coordination\": {",
+        "    \"agent_name\": \"GentleGate\",",
+        "    \"thread_id\": \"mb-1ng.11\",",
+        "    \"direct_message_sent\": true",
+        "  }",
+        "}",
+        "```",
+        ""
+      ],
+      "synthetic": true
+    },
+    "next_step": "Resume from the transcript tail, avoid repeating completed setup, and continue with the smallest safe remaining step.",
+    "open_questions": [],
+    "progress": "Synthetic fallback checkpoint after NoProgress"
+  },
+  "saved_at": "2026-03-25T16:58:10.399013628Z",
+  "resume_generation": 1
+}

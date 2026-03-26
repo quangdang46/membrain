@@ -1,0 +1,16 @@
+{"ts":"2026-03-25T21:31:33.063339636Z","kind":"session_started","session_id":"ses-run-mb-2db.7-20260325T213132968"}
+{"ts":"2026-03-25T22:05:44.814755422Z","kind":"stdout","line":"Also stale."}
+{"ts":"2026-03-25T22:05:50.165761788Z","kind":"stdout","line":""}
+{"ts":"2026-03-25T22:05:50.165776403Z","kind":"stdout","line":"This one is the intermediate rerun after I fixed the JSON envelope shape, but before I fixed the fixture expectations. It still expected:"}
+{"ts":"2026-03-25T22:05:50.165779627Z","kind":"stdout","line":"- `source_count == 4`"}
+{"ts":"2026-03-25T22:05:50.165781883Z","kind":"stdout","line":""}
+{"ts":"2026-03-25T22:05:50.165785537Z","kind":"stdout","line":"while actual output was:"}
+{"ts":"2026-03-25T22:05:50.165787578Z","kind":"stdout","line":"- `source_count == 3`"}
+{"ts":"2026-03-25T22:05:50.165789728Z","kind":"stdout","line":""}
+{"ts":"2026-03-25T22:05:50.165791877Z","kind":"stdout","line":"After that, I fixed all remaining mismatches and re-ran the latest focused test successfully."}
+{"ts":"2026-03-25T22:05:50.165794456Z","kind":"stdout","line":""}
+{"ts":"2026-03-25T22:05:50.165796498Z","kind":"stdout","line":"Latest confirmed passing run:"}
+{"ts":"2026-03-25T22:05:50.165798647Z","kind":"stdout","line":"- `cargo test -p membrain-cli --test cli_end_to_end cli_schemas_json_lists_bounded_schema_artifacts -- --nocapture` ✅"}
+{"ts":"2026-03-25T22:05:50.165801011Z","kind":"stdout","line":""}
+{"ts":"2026-03-25T22:05:50.165803053Z","kind":"stdout","line":"So both `brjw86bxm` and `b4j3sfcz0` are obsolete failures from earlier iterations, not the final state."}
+{"ts":"2026-03-25T22:05:54.754469719Z","kind":"session_ended","exit_code":0}

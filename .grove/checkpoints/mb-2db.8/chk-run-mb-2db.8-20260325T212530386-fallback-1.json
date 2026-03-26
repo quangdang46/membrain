@@ -1,0 +1,45 @@
+{
+  "id": "chk-run-mb-2db.8-20260325T212530386-fallback-1",
+  "bead_id": "mb-2db.8",
+  "run_id": "run-mb-2db.8-20260325T212530386",
+  "session_id": "ses-run-mb-2db.8-20260325T212530386",
+  "progress": "Synthetic fallback checkpoint after NoProgress",
+  "next_step": "Resume from the transcript tail, avoid repeating completed setup, and continue with the smallest safe remaining step.",
+  "payload": {
+    "claimed_paths": [],
+    "confidence": 0.25,
+    "context": {
+      "failure_class": "NoProgress",
+      "failure_detail": "session ended with Unknown",
+      "stderr_tail": [],
+      "stdout_tail": [
+        "What I changed",
+        "- Added CLI `mood-history` command in `crates/membrain-cli/src/main.rs`.",
+        "- Wired the local CLI encode path to actually record affect trajectory rows when `--valence/--arousal` are provided.",
+        "- Added CLI regression test:",
+        "  - `crates/membrain-cli/tests/cli_end_to_end.rs`",
+        "",
+        "Small fixes encountered during validation",
+        "- Fixed daemon health tick typing in `crates/membrain-daemon/src/daemon.rs:631`",
+        "- Added the missing `Schemas` dispatch arm in `crates/membrain-cli/src/main.rs`",
+        "",
+        "Focused validation passed",
+        "- `cargo test -p membrain-cli cli_mood_history_json_surfaces_emotional_trajectory_rows -- --nocapture`",
+        "- `cargo test -p membrain-cli cli_encode_json_emits_expected_machine_readable_fields -- --nocapture`",
+        "- `cargo test -p membrain-cli cli_health_json_reports_dashboard_contract_fields -- --nocapture`",
+        "",
+        "Key locations",
+        "- `crates/membrain-cli/src/main.rs`",
+        "- `crates/membrain-cli/tests/cli_end_to_end.rs`",
+        "- `crates/membrain-daemon/src/daemon.rs:631`",
+        ""
+      ],
+      "synthetic": true
+    },
+    "next_step": "Resume from the transcript tail, avoid repeating completed setup, and continue with the smallest safe remaining step.",
+    "open_questions": [],
+    "progress": "Synthetic fallback checkpoint after NoProgress"
+  },
+  "saved_at": "2026-03-25T22:03:03.182540765Z",
+  "resume_generation": 1
+}

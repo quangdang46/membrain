@@ -1,0 +1,45 @@
+{
+  "id": "chk-run-mb-2db.8-20260325T222147588-fallback-1",
+  "bead_id": "mb-2db.8",
+  "run_id": "run-mb-2db.8-20260325T222147588",
+  "session_id": "ses-run-mb-2db.8-20260325T222147588",
+  "progress": "Synthetic fallback checkpoint after NoProgress",
+  "next_step": "Resume from the transcript tail, avoid repeating completed setup, and continue with the smallest safe remaining step.",
+  "payload": {
+    "claimed_paths": [],
+    "confidence": 0.25,
+    "context": {
+      "failure_class": "NoProgress",
+      "failure_detail": "session ended with Unknown",
+      "stderr_tail": [],
+      "stdout_tail": [
+        "- `crates/membrain-daemon/src/daemon.rs:4213`",
+        "  - `build_context_budget_result_set(...)` now accepts `mood_congruent`",
+        "  - uses it for `ranking_profile_name_for_recall(...)`",
+        "  - uses it for affect-aware shortlist ranking instead of hardcoded `false`",
+        "- `crates/membrain-daemon/src/daemon.rs:6409`",
+        "  - runtime test now sends `mood_congruent: true`",
+        "  - asserts `result.explain.ranking_profile == \"mood_congruent\"` at `crates/membrain-daemon/src/daemon.rs:6448`",
+        "",
+        "Why this mattered",
+        "- RPC/MCP already exposed `mood_congruent`, but `context_budget` dropped it before execution.",
+        "- One shortlist ranking path in daemon also hardcoded balanced behavior.",
+        "- So the F18 opt-in existed on paper but could be ignored in this path.",
+        "",
+        "Validation status",
+        "Targeted tests are currently blocked by unrelated pre-existing `membrain-core` compile drift:",
+        "- `crates/membrain-core/src/observability.rs:508` — `api::TraceStage` vs `observability::TraceStage`",
+        "- `crates/membrain-core/src/api.rs:1273` — lifetime error in `from_result_set`",
+        "",
+        "I also coordinated via Agent Mail and reported the exact blocker to the active F18 agents.",
+        ""
+      ],
+      "synthetic": true
+    },
+    "next_step": "Resume from the transcript tail, avoid repeating completed setup, and continue with the smallest safe remaining step.",
+    "open_questions": [],
+    "progress": "Synthetic fallback checkpoint after NoProgress"
+  },
+  "saved_at": "2026-03-25T22:33:40.864798840Z",
+  "resume_generation": 1
+}

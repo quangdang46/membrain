@@ -10,6 +10,32 @@ use crate::types::{MemoryId, NormalizedMemoryEnvelope, SnapshotMetadata};
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeSet;
 
+/// Inspectable summary of one field-level semantic diff row.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SnapshotFieldInspectRow {
+    pub field: ComparisonField,
+    pub field_name: String,
+    pub change_kind: String,
+    pub before: Option<String>,
+    pub after: Option<String>,
+    pub explanation: String,
+}
+
+/// Inspectable surface emitted for structural semantic diff exploration.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SnapshotDiffInspectSurface {
+    pub subject_kind: ComparisonSubjectKind,
+    pub before_subject_label: String,
+    pub before_subject_identity: String,
+    pub after_subject_label: String,
+    pub after_subject_identity: String,
+    pub changed_count: usize,
+    pub unchanged_count: usize,
+    pub changed_fields: Vec<SnapshotFieldInspectRow>,
+    pub unchanged_fields: Vec<String>,
+    pub explanation_summary: String,
+}
+
 /// Stable kind of object participating in semantic comparison.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -276,7 +302,9 @@ impl SnapshotFieldDiff {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SnapshotDiff {
     pub subject_kind: ComparisonSubjectKind,
+    pub before_subject_label: String,
     pub before_subject_identity: String,
+    pub after_subject_label: String,
     pub after_subject_identity: String,
     pub changed_fields: Vec<SnapshotFieldDiff>,
     pub unchanged_fields: Vec<ComparisonField>,
@@ -321,7 +349,9 @@ impl SnapshotDiff {
 
         Ok(Self {
             subject_kind: before.subject_kind,
+            before_subject_label: before.subject_label.clone(),
             before_subject_identity: before.subject_identity.clone(),
+            after_subject_label: after.subject_label.clone(),
             after_subject_identity: after.subject_identity.clone(),
             changed_fields,
             unchanged_fields,
@@ -339,6 +369,40 @@ impl SnapshotDiff {
             .iter()
             .map(|entry| entry.field.as_str())
             .collect()
+    }
+
+    /// Builds the inspectable structural diff surface used by callers and wrappers.
+    pub fn inspect_surface(&self) -> SnapshotDiffInspectSurface {
+        let changed_fields = self
+            .changed_fields
+            .iter()
+            .map(|entry| SnapshotFieldInspectRow {
+                field: entry.field,
+                field_name: entry.field.as_str().to_string(),
+                change_kind: entry.change_kind().to_string(),
+                before: entry.before.clone(),
+                after: entry.after.clone(),
+                explanation: explain_field_change(entry),
+            })
+            .collect::<Vec<_>>();
+        let unchanged_fields = self
+            .unchanged_fields
+            .iter()
+            .map(|field| field.as_str().to_string())
+            .collect::<Vec<_>>();
+
+        SnapshotDiffInspectSurface {
+            subject_kind: self.subject_kind,
+            before_subject_label: self.before_subject_label.clone(),
+            before_subject_identity: self.before_subject_identity.clone(),
+            after_subject_label: self.after_subject_label.clone(),
+            after_subject_identity: self.after_subject_identity.clone(),
+            changed_count: changed_fields.len(),
+            unchanged_count: unchanged_fields.len(),
+            changed_fields,
+            unchanged_fields,
+            explanation_summary: explain_snapshot_diff_summary(self),
+        }
     }
 }
 
@@ -377,6 +441,51 @@ fn normalize_text_field(value: &str) -> String {
     value.split_whitespace().collect::<Vec<_>>().join(" ")
 }
 
+fn explain_snapshot_diff_summary(diff: &SnapshotDiff) -> String {
+    if diff.changed_fields.is_empty() {
+        return format!(
+            "no semantic changes between {} and {}",
+            diff.before_subject_label, diff.after_subject_label
+        );
+    }
+
+    let field_list = diff
+        .changed_fields
+        .iter()
+        .map(|entry| entry.field.as_str())
+        .collect::<Vec<_>>()
+        .join(", ");
+    format!(
+        "{} semantic field(s) changed between {} and {}: {}",
+        diff.changed_fields.len(),
+        diff.before_subject_label,
+        diff.after_subject_label,
+        field_list
+    )
+}
+
+fn explain_field_change(entry: &SnapshotFieldDiff) -> String {
+    match entry.change_kind() {
+        "added" => format!(
+            "{} was added with value '{}'",
+            entry.field.as_str(),
+            entry.after.as_deref().unwrap_or("")
+        ),
+        "removed" => format!(
+            "{} was removed from value '{}'",
+            entry.field.as_str(),
+            entry.before.as_deref().unwrap_or("")
+        ),
+        "changed" => format!(
+            "{} changed from '{}' to '{}'",
+            entry.field.as_str(),
+            entry.before.as_deref().unwrap_or(""),
+            entry.after.as_deref().unwrap_or("")
+        ),
+        _ => format!("{} did not change", entry.field.as_str()),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::{
@@ -387,8 +496,8 @@ mod tests {
     use crate::engine::lease::{FreshnessState, LeaseMetadata, LeasePolicy};
     use crate::policy::SharingVisibility;
     use crate::types::{
-        LandmarkMetadata, MemoryId, NormalizedMemoryEnvelope, RawIntakeKind, SharingMetadata,
-        SnapshotId, SnapshotMetadata, SnapshotRetentionClass,
+        CompressionMetadata, LandmarkMetadata, MemoryId, NormalizedMemoryEnvelope, RawIntakeKind,
+        SharingMetadata, SnapshotId, SnapshotMetadata, SnapshotRetentionClass,
     };
 
     fn normalized_memory() -> NormalizedMemoryEnvelope {
@@ -399,11 +508,13 @@ mod tests {
             compact_text: "  compact   summary  ".to_string(),
             normalization_generation: "norm-v2",
             payload_size_bytes: 128,
+            affect: None,
             landmark: LandmarkMetadata::non_landmark(),
             observation_source: Some("stdin".to_string()),
             observation_chunk_id: Some("chunk-1".to_string()),
             has_causal_parents: true,
             has_causal_children: false,
+            compression: CompressionMetadata::default(),
             sharing: SharingMetadata::new(SharingVisibility::Shared)
                 .with_workspace_id(WorkspaceId::new("ws.alpha"))
                 .with_agent_id(AgentId::new("agent.writer")),
@@ -558,6 +669,56 @@ mod tests {
                 after: ComparisonSubjectKind::SnapshotState,
             }
         );
+    }
+
+    #[test]
+    fn snapshot_diff_inspect_surface_explains_changed_and_unchanged_fields() {
+        let namespace = NamespaceId::new("team.alpha").unwrap();
+        let before = SnapshotMetadata::captured(
+            SnapshotId(8),
+            namespace.clone(),
+            "baseline",
+            20,
+            21,
+            Some("before patch".to_string()),
+            11,
+            SnapshotRetentionClass::Standard,
+        );
+        let after = SnapshotMetadata::captured(
+            SnapshotId(8),
+            namespace,
+            "baseline",
+            25,
+            26,
+            Some("after patch".to_string()),
+            14,
+            SnapshotRetentionClass::Restorable,
+        );
+
+        let diff = SnapshotDiff::between(
+            &SemanticComparisonInput::from_snapshot_state(&before),
+            &SemanticComparisonInput::from_snapshot_state(&after),
+        )
+        .unwrap();
+        let inspect = diff.inspect_surface();
+
+        assert_eq!(inspect.before_subject_label, "snapshot:baseline");
+        assert_eq!(inspect.after_subject_identity, "snapshot_id:8");
+        assert_eq!(inspect.changed_count, 5);
+        assert!(inspect
+            .changed_fields
+            .iter()
+            .any(|row| row.field_name == "snapshot_note"
+                && row
+                    .explanation
+                    .contains("changed from 'before patch' to 'after patch'")));
+        assert!(inspect
+            .unchanged_fields
+            .iter()
+            .any(|field| *field == "snapshot_active"));
+        assert!(inspect
+            .explanation_summary
+            .contains("semantic field(s) changed between snapshot:baseline and snapshot:baseline"));
     }
 
     #[test]

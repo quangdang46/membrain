@@ -14,8 +14,10 @@ use membrain_core::graph::{
     BoundedExpansionPlanner, CutoffReason, EntityId, EntityKind, ExpansionConstraints, GraphEdge,
     GraphEntity, RelationKind,
 };
-use membrain_core::health::{BrainHealthInputs, BrainHealthReport, FeatureAvailabilityEntry};
-use membrain_core::index::IndexModule;
+use membrain_core::health::{
+    AttentionNamespaceInputs, BrainHealthInputs, BrainHealthReport, FeatureAvailabilityEntry,
+};
+use membrain_core::index::{IndexApi, IndexModule};
 use membrain_core::observability::{
     CacheEvalTrace, CacheEventLabel, CacheFamilyLabel, CacheLookupOutcome, CacheReasonLabel,
     GenerationStatusLabel, WarmSourceLabel,
@@ -834,7 +836,7 @@ fn health_report_surfaces_batch1_metrics_and_status_rollups() {
         &ns("health_surface"),
         membrain_core::store::cache::PrefetchBypassReason::NamespaceNarrowed,
     );
-    assert_eq!(dropped, 2);
+    assert_eq!(dropped, 1);
 
     let report = BrainHealthReport::from_inputs(
         BrainHealthInputs {
@@ -854,15 +856,26 @@ fn health_report_surfaces_batch1_metrics_and_status_rollups() {
             uncertain_count: 1,
             dream_links_total: 7,
             last_dream_tick: Some(99),
+            affect_history_rows: 1,
+            latest_affect_snapshot: Some((0.4, 0.9)),
+            latest_affect_tick: Some(118),
+            attention_namespaces: vec![AttentionNamespaceInputs {
+                namespace: "health_surface".to_string(),
+                recall_count: 9,
+                encode_count: 3,
+                working_memory_pressure: 5,
+                promotion_count: 1,
+                overflow_count: 1,
+            }],
             total_recalls: 15,
             total_encodes: 6,
             current_tick: 120,
             daemon_uptime_ticks: 90,
-            index_reports: IndexModule::health_reports(),
+            index_reports: IndexModule.health_reports(),
             availability: Some(membrain_core::api::AvailabilitySummary::degraded(
                 vec!["recall", "health"],
                 vec!["encode"],
-                vec![membrain_core::api::AvailabilityReason::PrefetchBypassed],
+                vec![membrain_core::api::AvailabilityReason::CacheInvalidated],
                 vec![membrain_core::api::RemediationStep::CheckHealth],
             )),
             feature_availability: vec![
@@ -900,22 +913,33 @@ fn health_report_surfaces_batch1_metrics_and_status_rollups() {
 
     assert_eq!(report.dream_links_total, 7);
     assert_eq!(report.last_dream_tick, Some(99));
+    assert_eq!(report.affect_history_rows, 1);
+    assert_eq!(report.latest_affect_snapshot, Some((0.4, 0.9)));
+    assert_eq!(report.latest_affect_tick, Some(118));
+    assert_eq!(report.attention.hotspot_count, 1);
+    assert_eq!(report.attention.total_recall_count, 9);
+    assert_eq!(report.attention.hotspots[0].namespace, "health_surface");
+    assert_eq!(report.attention.hotspots[0].attention_score, 163);
+    assert_eq!(report.attention.hotspots[0].status, "warming");
     assert_eq!(report.feature_availability.len(), 2);
     assert!(report.feature_availability.iter().any(|feature| {
         feature.feature == "dream"
             && feature.posture == membrain_core::api::AvailabilityPosture::Degraded
             && feature.note.as_deref() == Some("offline_scheduler_only")
     }));
-    assert_eq!(report.backpressure_state, Some("elevated"));
-    assert_eq!(report.availability_posture, Some(membrain_core::api::AvailabilityPosture::Degraded));
+    assert_eq!(report.backpressure_state, Some("normal"));
+    assert_eq!(
+        report.availability_posture,
+        Some(membrain_core::api::AvailabilityPosture::Degraded)
+    );
     assert!(report
         .availability_notes
         .as_deref()
-        .is_some_and(|notes| notes.contains("prefetch_bypassed")));
+        .is_some_and(|notes| notes.contains("cache_invalidated")));
     assert!(report.subsystem_status.iter().any(|status| {
         status.subsystem == "availability"
             && status.detail.contains("posture=degraded")
-            && status.reasons.contains(&"prefetch_bypassed")
+            && status.reasons.contains(&"cache_invalidated")
     }));
     assert!(report.trends.iter().any(|trend| {
         trend.subsystem == "memory"
@@ -929,6 +953,15 @@ fn health_report_surfaces_batch1_metrics_and_status_rollups() {
                 .iter()
                 .any(|trend| trend.metric == "availability_posture")
     }));
+    assert!(report.dashboard_views.iter().any(|view| {
+        view.view.as_str() == "affect_trajectory"
+            && view.summary.contains("rows=1")
+            && view.drill_down_targets.contains(&"/mood_history")
+    }));
+    assert!(report
+        .drill_down_paths
+        .iter()
+        .any(|path| path.path == "/mood_history" && path.target_ref == "mood_history"));
 }
 
 #[test]

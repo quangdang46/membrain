@@ -1,0 +1,45 @@
+{
+  "id": "chk-run-mb-2db.8.1-20260325T202533829-fallback-1",
+  "bead_id": "mb-2db.8.1",
+  "run_id": "run-mb-2db.8.1-20260325T202533829",
+  "session_id": "ses-run-mb-2db.8.1-20260325T202533829",
+  "progress": "Synthetic fallback checkpoint after NoProgress",
+  "next_step": "Resume from the transcript tail, avoid repeating completed setup, and continue with the smallest safe remaining step.",
+  "payload": {
+    "claimed_paths": [],
+    "confidence": 0.25,
+    "context": {
+      "failure_class": "NoProgress",
+      "failure_detail": "session ended with Unknown",
+      "stderr_tail": [],
+      "stdout_tail": [
+        "  - records trajectory rows into core store",
+        "  - serves `mood_history`",
+        "  - added focused daemon integration test",
+        "",
+        "Validation:",
+        "- `cargo test -p membrain-core mood_history_returns_recorded_affect_trajectory_rows -- --nocapture`",
+        "- `cargo test -p membrain-daemon parse_method_accepts_mood_history_params -- --nocapture`",
+        "- `cargo test -p membrain-daemon runtime_encode_records_affect_history_and_serves_mood_history -- --nocapture`",
+        "- `cargo check --all-targets`",
+        "",
+        "Key refs:",
+        "- `crates/membrain-core/src/types.rs`",
+        "- `crates/membrain-core/src/brain_store.rs`",
+        "- `crates/membrain-daemon/src/rpc.rs`",
+        "- `crates/membrain-daemon/src/daemon.rs`",
+        "",
+        "",
+        "",
+        "",
+        ""
+      ],
+      "synthetic": true
+    },
+    "next_step": "Resume from the transcript tail, avoid repeating completed setup, and continue with the smallest safe remaining step.",
+    "open_questions": [],
+    "progress": "Synthetic fallback checkpoint after NoProgress"
+  },
+  "saved_at": "2026-03-25T20:56:37.402029001Z",
+  "resume_generation": 1
+}

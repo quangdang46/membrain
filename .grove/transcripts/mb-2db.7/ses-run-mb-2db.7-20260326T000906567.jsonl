@@ -1,0 +1,3 @@
+{"ts":"2026-03-26T00:09:06.685518335Z","kind":"session_started","session_id":"ses-run-mb-2db.7-20260326T000906567"}
+{"ts":"2026-03-26T00:11:14.256274813Z","kind":"stdout","line":"Execution error"}
+{"ts":"2026-03-26T00:11:14.256319119Z","kind":"session_ended","exit_code":0}

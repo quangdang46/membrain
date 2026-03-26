@@ -1,0 +1,49 @@
+{"ts":"2026-03-25T23:18:32.414986152Z","kind":"session_started","session_id":"ses-run-mb-2db.8-20260325T231832313"}
+{"ts":"2026-03-25T23:26:36.725298336Z","kind":"stdout","line":"Implemented the smallest clean F18 gap: the CLI now exposes the documented primary `mood` surface."}
+{"ts":"2026-03-25T23:26:37.035464540Z","kind":"stdout","line":""}
+{"ts":"2026-03-25T23:26:37.035507802Z","kind":"stdout","line":"Changed:"}
+{"ts":"2026-03-25T23:26:37.035521616Z","kind":"stdout","line":"- Added `membrain mood` for current bounded mood snapshot in `crates/membrain-cli/src/main.rs`"}
+{"ts":"2026-03-25T23:26:37.035534145Z","kind":"stdout","line":"- Added `membrain mood --history` as the history view, reusing the existing trajectory path in `crates/membrain-cli/src/main.rs`"}
+{"ts":"2026-03-25T23:26:37.035573444Z","kind":"stdout","line":"- Added a focused snapshot regression test in `crates/membrain-cli/tests/cli_end_to_end.rs`"}
+{"ts":"2026-03-25T23:26:37.035585010Z","kind":"stdout","line":""}
+{"ts":"2026-03-25T23:26:37.035595825Z","kind":"stdout","line":"Validated:"}
+{"ts":"2026-03-25T23:26:37.035607176Z","kind":"stdout","line":"- `cargo test -p membrain-cli cli_mood_json_surfaces_current_snapshot -- --nocapture`"}
+{"ts":"2026-03-25T23:26:37.035619705Z","kind":"stdout","line":"- `cargo test -p membrain-cli cli_mood_history_json_surfaces_emotional_trajectory_rows -- --nocapture`"}
+{"ts":"2026-03-25T23:26:37.035631270Z","kind":"stdout","line":"- `cargo check -p membrain-cli --all-targets`"}
+{"ts":"2026-03-25T23:26:37.035642407Z","kind":"stdout","line":""}
+{"ts":"2026-03-25T23:26:37.035653115Z","kind":"stdout","line":"Notes:"}
+{"ts":"2026-03-25T23:26:37.035664252Z","kind":"stdout","line":"- Existing `mood-history` handling remains intact."}
+{"ts":"2026-03-25T23:26:37.035674960Z","kind":"stdout","line":"- I did not broaden scope into core recall centralization or trajectory aggregation; those still look like the main remaining F18 follow-ups."}
+{"ts":"2026-03-25T23:26:37.035781723Z","kind":"stdout","line":""}
+{"ts":"2026-03-25T23:26:37.035797358Z","kind":"stdout","line":"Key locations:"}
+{"ts":"2026-03-25T23:26:37.035812778Z","kind":"stdout","line":"- `crates/membrain-cli/src/main.rs:555`"}
+{"ts":"2026-03-25T23:26:37.035825521Z","kind":"stdout","line":"- `crates/membrain-cli/src/main.rs:784`"}
+{"ts":"2026-03-25T23:26:37.035837086Z","kind":"stdout","line":"- `crates/membrain-cli/src/main.rs:4812`"}
+{"ts":"2026-03-25T23:26:37.035848223Z","kind":"stdout","line":"- `crates/membrain-cli/src/main.rs:6684`"}
+{"ts":"2026-03-25T23:26:37.035858931Z","kind":"stdout","line":"- `crates/membrain-cli/tests/cli_end_to_end.rs:584`"}
+{"ts":"2026-03-25T23:26:37.035869639Z","kind":"stdout","line":""}
+{"ts":"2026-03-25T23:26:37.035880990Z","kind":"stdout","line":"GROVE_RESULT: success  "}
+{"ts":"2026-03-25T23:26:37.035880990Z","kind":"protocol","event":{"type":"result","summary":"success"}}
+{"ts":"2026-03-25T23:26:37.055399336Z","kind":"stdout","line":"GROVE_ARTIFACTS:"}
+{"ts":"2026-03-25T23:26:37.055399336Z","kind":"protocol","event":{"type":"artifacts","items":[]}}
+{"ts":"2026-03-25T23:26:37.064120810Z","kind":"stdout","line":"- `crates/membrain-cli/src/main.rs`"}
+{"ts":"2026-03-25T23:26:37.064120810Z","kind":"protocol","event":{"type":"artifacts","items":["`crates/membrain-cli/src/main.rs`"]}}
+{"ts":"2026-03-25T23:26:37.064158718Z","kind":"stdout","line":"- `crates/membrain-cli/tests/cli_end_to_end.rs`"}
+{"ts":"2026-03-25T23:26:37.064158718Z","kind":"protocol","event":{"type":"artifacts","items":["`crates/membrain-cli/tests/cli_end_to_end.rs`"]}}
+{"ts":"2026-03-25T23:26:37.064182276Z","kind":"stdout","line":"GROVE_LESSONS:"}
+{"ts":"2026-03-25T23:26:37.064182276Z","kind":"protocol","event":{"type":"lessons","items":[]}}
+{"ts":"2026-03-25T23:26:37.064215044Z","kind":"stdout","line":"- The cleanest remaining F18 gap was CLI contract parity: docs promised `membrain mood`, while implementation only exposed `mood-history`."}
+{"ts":"2026-03-25T23:26:37.064215044Z","kind":"protocol","event":{"type":"lessons","items":["The cleanest remaining F18 gap was CLI contract parity: docs promised `membrain mood`, while implementation only exposed `mood-history`."]}}
+{"ts":"2026-03-25T23:26:37.064569386Z","kind":"stdout","line":"- Mood-congruent ranking remains wrapper-local rather than core-owned."}
+{"ts":"2026-03-25T23:26:37.064569386Z","kind":"protocol","event":{"type":"lessons","items":["Mood-congruent ranking remains wrapper-local rather than core-owned."]}}
+{"ts":"2026-03-25T23:26:37.064595836Z","kind":"stdout","line":"GROVE_DECISIONS:"}
+{"ts":"2026-03-25T23:26:37.064595836Z","kind":"protocol","event":{"type":"decision","items":[]}}
+{"ts":"2026-03-25T23:26:37.064614147Z","kind":"stdout","line":"- Kept scope to the documented CLI introspection surface and did not reopen broader recall architecture."}
+{"ts":"2026-03-25T23:26:37.064614147Z","kind":"protocol","event":{"type":"decision","items":["Kept scope to the documented CLI introspection surface and did not reopen broader recall architecture."]}}
+{"ts":"2026-03-25T23:26:37.064633851Z","kind":"stdout","line":"GROVE_WARNINGS:"}
+{"ts":"2026-03-25T23:26:37.064633851Z","kind":"protocol","event":{"type":"warning","items":[]}}
+{"ts":"2026-03-25T23:26:37.064648200Z","kind":"stdout","line":"- `cargo check -p membrain-cli --all-targets` still reports a pre-existing warning for an unrelated unused variable at `crates/membrain-cli/src/main.rs:2219`."}
+{"ts":"2026-03-25T23:26:37.064648200Z","kind":"protocol","event":{"type":"warning","items":["`cargo check -p membrain-cli --all-targets` still reports a pre-existing warning for an unrelated unused variable at `crates/membrain-cli/src/main.rs:2219`."]}}
+{"ts":"2026-03-25T23:26:37.064664798Z","kind":"stdout","line":"GROVE_EXIT: false"}
+{"ts":"2026-03-25T23:26:37.064664798Z","kind":"protocol","event":{"type":"exit","value":false}}
+{"ts":"2026-03-25T23:26:38.507816827Z","kind":"session_ended","exit_code":0}

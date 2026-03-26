@@ -1,0 +1,203 @@
+{
+  "prompt_id": "prompt-run-mb-2db.5-20260325T165235765",
+  "bead_id": "mb-2db.5",
+  "run_id": "run-mb-2db.5-20260325T165235765",
+  "session_id": "ses-run-mb-2db.5-20260325T165235765",
+  "contract": "SingleTask",
+  "created_at": "2026-03-25T16:52:35.771100712Z",
+  "token_budget": null,
+  "estimated_tokens": 734,
+  "prompt_bytes": 2936,
+  "trimmed": false,
+  "retry_delta_summary": null,
+  "retrieval_query": "unrestricted OR specialized OR Implement OR Implement OR namespace",
+  "retrieval_ranking_summary": [
+    "Historical snippet (Score: 8.47)",
+    "Historical snippet (Score: 7.99)",
+    "Historical snippet (Score: 7.94)",
+    "Historical snippet (Score: 7.94)",
+    "Historical snippet (Score: 7.94)"
+  ],
+  "sections": [
+    {
+      "ordinal": 1,
+      "kind": "StartupPrompt",
+      "heading": "Startup prompt",
+      "included": true,
+      "estimated_tokens": 280,
+      "char_count": 1118,
+      "trim_reason": null,
+      "provenance": {
+        "source_ids": [],
+        "bullet_ids": [],
+        "checkpoint_id": null,
+        "handoff_run_id": null,
+        "archive_message_id": null,
+        "playbook_bullet_id": null
+      },
+      "preview": "First read ALL of the AGENTS.md file and README.md file super carefully and unde…"
+    },
+    {
+      "ordinal": 2,
+      "kind": "Contract",
+      "heading": "Execution contract",
+      "included": true,
+      "estimated_tokens": 61,
+      "char_count": 241,
+      "trim_reason": null,
+      "provenance": {
+        "source_ids": [],
+        "bullet_ids": [],
+        "checkpoint_id": null,
+        "handoff_run_id": null,
+        "archive_message_id": null,
+        "playbook_bullet_id": null
+      },
+      "preview": "[EXECUTION CONTRACT]\nComplete this single Grove task end-to-end without entering…"
+    },
+    {
+      "ordinal": 3,
+      "kind": "Task",
+      "heading": "Task",
+      "included": true,
+      "estimated_tokens": 66,
+      "char_count": 262,
+      "trim_reason": null,
+      "provenance": {
+        "source_ids": [],
+        "bullet_ids": [],
+        "checkpoint_id": null,
+        "handoff_run_id": null,
+        "archive_message_id": null,
+        "playbook_bullet_id": null
+      },
+      "preview": "[TASK]\nTitle: Implement fork and merge brain states (F15)\n\nImplement namespace-l…"
+    },
+    {
+      "ordinal": 4,
+      "kind": "ArchiveSnippet",
+      "heading": "Historical snippet (Score: 8.47)",
+      "included": true,
+      "estimated_tokens": 49,
+      "char_count": 196,
+      "trim_reason": null,
+      "provenance": {
+        "source_ids": [],
+        "bullet_ids": [],
+        "checkpoint_id": null,
+        "handoff_run_id": null,
+        "archive_message_id": "1148",
+        "playbook_bullet_id": null
+      },
+      "preview": "From .grove/transcripts/mb-1ng.1/ses-run-mb-1ng.1-20260325T155807372.jsonl\n- <b>…"
+    },
+    {
+      "ordinal": 5,
+      "kind": "ArchiveSnippet",
+      "heading": "Historical snippet (Score: 7.99)",
+      "included": true,
+      "estimated_tokens": 49,
+      "char_count": 196,
+      "trim_reason": null,
+      "provenance": {
+        "source_ids": [],
+        "bullet_ids": [],
+        "checkpoint_id": null,
+        "handoff_run_id": null,
+        "archive_message_id": "1149",
+        "playbook_bullet_id": null
+      },
+      "preview": "From .grove/transcripts/mb-1ng.1/ses-run-mb-1ng.1-20260325T155807372.jsonl\nGROVE…"
+    },
+    {
+      "ordinal": 6,
+      "kind": "ArchiveSnippet",
+      "heading": "Historical snippet (Score: 7.94)",
+      "included": true,
+      "estimated_tokens": 37,
+      "char_count": 146,
+      "trim_reason": null,
+      "provenance": {
+        "source_ids": [],
+        "bullet_ids": [],
+        "checkpoint_id": null,
+        "handoff_run_id": null,
+        "archive_message_id": "390",
+        "playbook_bullet_id": null
+      },
+      "preview": "From .grove/transcripts/mb-1ng.10/ses-run-mb-1ng.10-20260325T145908327.jsonl\n- K…"
+    },
+    {
+      "ordinal": 7,
+      "kind": "ArchiveSnippet",
+      "heading": "Historical snippet (Score: 7.94)",
+      "included": true,
+      "estimated_tokens": 33,
+      "char_count": 132,
+      "trim_reason": null,
+      "provenance": {
+        "source_ids": [],
+        "bullet_ids": [],
+        "checkpoint_id": null,
+        "handoff_run_id": null,
+        "archive_message_id": "1875",
+        "playbook_bullet_id": null
+      },
+      "preview": "From .grove/transcripts/mb-2db.3/ses-run-mb-2db.3-20260325T163340850.jsonl\n<b>Im…"
+    },
+    {
+      "ordinal": 8,
+      "kind": "ArchiveSnippet",
+      "heading": "Historical snippet (Score: 7.94)",
+      "included": true,
+      "estimated_tokens": 38,
+      "char_count": 150,
+      "trim_reason": null,
+      "provenance": {
+        "source_ids": [],
+        "bullet_ids": [],
+        "checkpoint_id": null,
+        "handoff_run_id": null,
+        "archive_message_id": "2024",
+        "playbook_bullet_id": null
+      },
+      "preview": "From .grove/transcripts/mb-2db.4.2/ses-run-mb-2db.4.2-20260325T163525109.jsonl\n<…"
+    },
+    {
+      "ordinal": 9,
+      "kind": "EscalationContext",
+      "heading": "Escalation context (tier 0)",
+      "included": true,
+      "estimated_tokens": 13,
+      "char_count": 103,
+      "trim_reason": null,
+      "provenance": {
+        "source_ids": [],
+        "bullet_ids": [],
+        "checkpoint_id": null,
+        "handoff_run_id": null,
+        "archive_message_id": null,
+        "playbook_bullet_id": null
+      },
+      "preview": "[ESCALATION CONTEXT]\nTier: FirstAttempt (attempt 0)\nInitial attempt. Proceed nor…"
+    },
+    {
+      "ordinal": 10,
+      "kind": "Protocol",
+      "heading": "Grove protocol",
+      "included": true,
+      "estimated_tokens": 94,
+      "char_count": 374,
+      "trim_reason": null,
+      "provenance": {
+        "source_ids": [],
+        "bullet_ids": [],
+        "checkpoint_id": null,
+        "handoff_run_id": null,
+        "archive_message_id": null,
+        "playbook_bullet_id": null
+      },
+      "preview": "[GROVE PROTOCOL]\nEmit GROVE_RESULT, GROVE_ARTIFACTS, GROVE_LESSONS, GROVE_DECISI…"
+    }
+  ]
+}

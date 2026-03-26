@@ -1,0 +1,42 @@
+{
+  "id": "chk-run-mb-1ng-20260325T171950063-fallback-1",
+  "bead_id": "mb-1ng",
+  "run_id": "run-mb-1ng-20260325T171950063",
+  "session_id": "ses-run-mb-1ng-20260325T171950063",
+  "progress": "Synthetic fallback checkpoint after NoProgress",
+  "next_step": "Resume from the transcript tail, avoid repeating completed setup, and continue with the smallest safe remaining step.",
+  "payload": {
+    "claimed_paths": [],
+    "confidence": 0.25,
+    "context": {
+      "failure_class": "NoProgress",
+      "failure_detail": "session ended with Unknown",
+      "stderr_tail": [],
+      "stdout_tail": [
+        "",
+        "",
+        "",
+        "",
+        "",
+        "What changed:",
+        "- No code edits.",
+        "- Confirmed the smallest live remaining `mb-1ng.11` blocker is now:",
+        "  - daemon goal working-state parity in `crates/membrain-daemon/src/daemon.rs:1282`",
+        "  - specifically the blackboard projection returned by `handle_goal_pin` / `handle_goal_dismiss`",
+        "",
+        "Next safe step:",
+        "- Wait for the current holders of the daemon parity surface to land or release.",
+        "- Then the bounded fix is:",
+        "  - make daemon goal handlers return the same blackboard projection contract as core, starting with `goal_pin` / `goal_dismiss`",
+        "  - rerun `crates/membrain-daemon/tests/runtime_doctor_parity.rs:82`",
+        ""
+      ],
+      "synthetic": true
+    },
+    "next_step": "Resume from the transcript tail, avoid repeating completed setup, and continue with the smallest safe remaining step.",
+    "open_questions": [],
+    "progress": "Synthetic fallback checkpoint after NoProgress"
+  },
+  "saved_at": "2026-03-25T17:36:08.357110667Z",
+  "resume_generation": 1
+}

@@ -1,0 +1,45 @@
+{
+  "id": "chk-run-mb-2db.7-20260325T223517157-fallback-1",
+  "bead_id": "mb-2db.7",
+  "run_id": "run-mb-2db.7-20260325T223517157",
+  "session_id": "ses-run-mb-2db.7-20260325T223517157",
+  "progress": "Synthetic fallback checkpoint after NoProgress",
+  "next_step": "Resume from the transcript tail, avoid repeating completed setup, and continue with the smallest safe remaining step.",
+  "payload": {
+    "claimed_paths": [],
+    "confidence": 0.25,
+    "context": {
+      "failure_class": "NoProgress",
+      "failure_detail": "session ended with Unknown",
+      "stderr_tail": [],
+      "stdout_tail": [
+        "- Broadening into `compressed_into` durability would have pulled this into a larger schema/write-path project",
+        "",
+        "GROVE_DECISIONS",
+        "",
+        "- Did not redo completed compression engine work",
+        "- Chose the narrowest remaining durable slice:",
+        "  - persist compression log rows",
+        "  - expose bounded readback",
+        "  - cover apply vs dry-run",
+        "- Did not broaden into:",
+        "  - durable `compressed_into`",
+        "  - durable `compression_tick`",
+        "  - daemon RPC / MCP execution wiring",
+        "",
+        "GROVE_WARNINGS",
+        "",
+        "- `compression_log` is now persisted in the core facade’s bounded durable-pattern state, but not yet wired to the declared SQLite table",
+        "- Source-memory durability for `compressed_into` remains unimplemented",
+        "- Full workspace-wide test success is still blocked by unrelated existing failures outside this slice",
+        ""
+      ],
+      "synthetic": true
+    },
+    "next_step": "Resume from the transcript tail, avoid repeating completed setup, and continue with the smallest safe remaining step.",
+    "open_questions": [],
+    "progress": "Synthetic fallback checkpoint after NoProgress"
+  },
+  "saved_at": "2026-03-25T22:46:32.768305940Z",
+  "resume_generation": 1
+}

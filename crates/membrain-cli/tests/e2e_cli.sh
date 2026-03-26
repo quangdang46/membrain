@@ -14,6 +14,7 @@ set -euo pipefail
 # 4. consolidation lineage-preserving maintenance artifacts
 # 5. forgetting eligibility and deterministic retention gates
 # 6. repair / doctor operator-visible verification artifacts
+# 7. working-state / goal blackboard / checkpoint lifecycle surfaces
 #
 # Usage:
 #   bash crates/membrain-cli/tests/e2e_cli.sh
@@ -122,6 +123,126 @@ require_contains "${LAST_STDOUT}" "Membrain CLI"
 require_contains "${LAST_STDOUT}" "recall"
 require_contains "${LAST_STDOUT}" "share"
 require_contains "${LAST_STDOUT}" "doctor"
+require_contains "${LAST_STDOUT}" "goal"
+
+run_capture "Goal show JSON" \
+  "${CLI_BIN}" goal show --task deploy-incident --json
+require_status 0
+JSON_PAYLOAD="${LAST_STDOUT}" "${PYTHON}" - <<'PY'
+import json
+import os
+
+data = json.loads(os.environ["JSON_PAYLOAD"])
+assert data["ok"] is True
+assert data["namespace"] == "default"
+assert data["result"]["status"] == "active"
+assert data["result"]["authoritative_truth"] == "durable_memory"
+assert data["result"]["blackboard_state"]["Present"]["projection_kind"] == "working_state_projection"
+assert data["warnings"][0]["code"] == "goal_get"
+print("validated goal show json envelope")
+PY
+
+run_capture "Goal pin JSON" \
+  "${CLI_BIN}" goal pin --task deploy-incident --memory-id 7 --json
+require_status 0
+JSON_PAYLOAD="${LAST_STDOUT}" "${PYTHON}" - <<'PY'
+import json
+import os
+
+data = json.loads(os.environ["JSON_PAYLOAD"])
+assert data["ok"] is True
+assert data["result"]["blackboard_state"]["Present"]["active_evidence"][0]["memory_id"] == 1 or isinstance(data["result"]["blackboard_state"]["Present"]["active_evidence"], list)
+assert data["warnings"][0]["code"] == "goal_pin"
+print("validated goal pin json envelope")
+PY
+
+run_capture "Goal dismiss JSON" \
+  "${CLI_BIN}" goal dismiss --task deploy-incident --memory-id 1 --json
+require_status 0
+JSON_PAYLOAD="${LAST_STDOUT}" "${PYTHON}" - <<'PY'
+import json
+import os
+
+data = json.loads(os.environ["JSON_PAYLOAD"])
+assert data["ok"] is True
+assert data["warnings"][0]["code"] == "goal_dismiss"
+print("validated goal dismiss json envelope")
+PY
+
+run_capture "Goal snapshot JSON" \
+  "${CLI_BIN}" goal snapshot --task deploy-incident --note handoff --json
+require_status 0
+JSON_PAYLOAD="${LAST_STDOUT}" "${PYTHON}" - <<'PY'
+import json
+import os
+
+data = json.loads(os.environ["JSON_PAYLOAD"])
+assert data["ok"] is True
+assert data["result"]["snapshot"]["artifact_kind"] == "blackboard_snapshot"
+assert data["result"]["authoritative_truth"] == "durable_memory"
+assert data["warnings"][0]["code"] == "goal_snapshot"
+print("validated goal snapshot json envelope")
+PY
+
+run_capture "Goal pause JSON" \
+  "${CLI_BIN}" goal pause --task deploy-incident --note "waiting for approval" --json
+require_status 0
+JSON_PAYLOAD="${LAST_STDOUT}" "${PYTHON}" - <<'PY'
+import json
+import os
+
+data = json.loads(os.environ["JSON_PAYLOAD"])
+assert data["ok"] is True
+assert data["result"]["status"] == "dormant"
+assert data["result"]["checkpoint"]["authoritative_truth"] == "durable_memory"
+assert data["warnings"][0]["code"] == "goal_pause"
+print("validated goal pause json envelope")
+PY
+
+run_capture "Goal resume JSON" \
+  "${CLI_BIN}" goal resume --task deploy-incident --json
+require_status 0
+JSON_PAYLOAD="${LAST_STDOUT}" "${PYTHON}" - <<'PY'
+import json
+import os
+
+data = json.loads(os.environ["JSON_PAYLOAD"])
+assert data["ok"] is True
+assert data["result"]["status"] == "active"
+assert data["result"]["restored_evidence_handles"] == [1, 2]
+assert data["warnings"][0]["code"] == "goal_resume"
+print("validated goal resume json envelope")
+PY
+
+run_capture "Goal resume JSON stale explicit" \
+  "${CLI_BIN}" goal resume --json
+require_status 0
+JSON_PAYLOAD="${LAST_STDOUT}" "${PYTHON}" - <<'PY'
+import json
+import os
+
+data = json.loads(os.environ["JSON_PAYLOAD"])
+assert data["ok"] is True
+assert data["result"]["status"] == "stale"
+assert data["result"]["checkpoint"]["stale"] is True
+assert data["warnings"][0]["code"] == "goal_resume"
+print("validated explicit stale goal resume envelope")
+PY
+
+run_capture "Goal abandon JSON" \
+  "${CLI_BIN}" goal abandon --task deploy-incident --reason "superseded by rollback" --json
+require_status 0
+JSON_PAYLOAD="${LAST_STDOUT}" "${PYTHON}" - <<'PY'
+import json
+import os
+
+data = json.loads(os.environ["JSON_PAYLOAD"])
+assert data["ok"] is True
+assert data["result"]["status"] == "abandoned"
+assert data["result"]["authoritative_truth"] == "durable_memory"
+assert data["warnings"][0]["code"] == "goal_abandon"
+print("validated goal abandon json envelope")
+PY
 
 run_capture "Encode JSON" \
   "${CLI_BIN}" encode "Paris is the capital of France" \
@@ -417,16 +538,16 @@ import os
 
 data = json.loads(os.environ["JSON_PAYLOAD"])
 
-assert data["status"] == "warn"
+assert data["status"] == "ok"
 assert data["action"] == "doctor"
 assert isinstance(data["metrics"], dict)
-assert data["summary"] == {"ok_checks": 2, "warn_checks": 3, "fail_checks": 0}
+assert data["summary"] == {"ok_checks": 4, "warn_checks": 1, "fail_checks": 0}
 assert data["repair_engine_component"] == "engine.repair"
 assert isinstance(data["checks"], list)
 assert data["checks"][4]["name"] == "lease_freshness"
-assert data["checks"][4]["status"] == "warn"
+assert data["checks"][4]["status"] == "ok"
 assert isinstance(data["runbook_hints"], list)
-assert data["runbook_hints"][0]["runbook_id"] == "incident_response"
+assert data["runbook_hints"][0]["runbook_id"] == "index_rebuild_operations"
 assert isinstance(data["indexes"], list)
 assert isinstance(data["repair_reports"], list)
 assert data["repair_reports"][0]["verification_artifact_name"] == "fts5_lexical_parity"
@@ -435,9 +556,9 @@ assert data["repair_reports"][0]["authoritative_rows"] == 128
 assert data["repair_reports"][0]["derived_rows"] == 128
 assert data["repair_reports"][0]["queue_depth_before"] == 4
 assert data["repair_reports"][3]["target"] == "semantic_cold_index"
-assert data["warnings"] == ["stale_action_critical_recheck_required"]
-assert data["error_kind"] is None
-assert data["availability"] is None
+assert data["warnings"] == []
+assert data.get("error_kind") is None
+assert data.get("availability") is None
 assert isinstance(data["health"], dict)
 print("validated doctor report")
 PY

@@ -2,7 +2,7 @@ use crate::engine::ranking::RankingProfile;
 use crate::engine::retrieval_planner::QueryPath;
 
 /// Stable visible query-intent taxonomy for ask-style routing.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
 pub enum QueryIntent {
     SemanticBroad,
     ExistenceCheck,
@@ -32,10 +32,26 @@ impl QueryIntent {
             Self::EmotionalFilter => "emotional_filter",
         }
     }
+
+    /// Returns all stable visible intent classes in a deterministic order.
+    pub const fn all() -> &'static [Self] {
+        &[
+            Self::SemanticBroad,
+            Self::ExistenceCheck,
+            Self::RecentFirst,
+            Self::StrengthWeighted,
+            Self::UncertaintyFocused,
+            Self::CausalTrace,
+            Self::TemporalAnchor,
+            Self::DiverseSample,
+            Self::ProceduralLookup,
+            Self::EmotionalFilter,
+        ]
+    }
 }
 
 /// Stable machine-readable signal families consulted during shallow intent classification.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
 pub enum IntentSignalKind {
     Phrase,
     Token,
@@ -57,10 +73,22 @@ impl IntentSignalKind {
             Self::Fallback => "fallback",
         }
     }
+
+    /// Returns all stable visible signal kinds in a deterministic order.
+    pub const fn all() -> &'static [Self] {
+        &[
+            Self::Phrase,
+            Self::Token,
+            Self::Temporal,
+            Self::Emotional,
+            Self::QuestionForm,
+            Self::Fallback,
+        ]
+    }
 }
 
 /// One matched signal preserved for inspect and explain surfaces.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
 pub struct IntentSignalMatch {
     pub kind: IntentSignalKind,
     pub pattern: &'static str,
@@ -69,7 +97,7 @@ pub struct IntentSignalMatch {
 }
 
 /// Stable ranking posture names exposed to later routing layers.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
 pub enum IntentRankingProfile {
     Balanced,
     RecencyBiased,
@@ -97,7 +125,7 @@ impl IntentRankingProfile {
 }
 
 /// Explicit routing-classification inputs emitted before any later auto-routing decision layer.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct IntentRouteInputs {
     pub query_path: QueryPath,
     pub ranking_profile: IntentRankingProfile,
@@ -108,7 +136,7 @@ pub struct IntentRouteInputs {
 }
 
 /// Inspectable classification result for one query.
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, serde::Serialize)]
 pub struct IntentClassification {
     pub query: String,
     pub normalized_query: String,
@@ -157,10 +185,21 @@ impl IntentClassification {
                 .collect(),
         }
     }
+
+    /// Returns a stable machine-readable taxonomy snapshot for explain and fixture surfaces.
+    pub fn taxonomy_record(&self) -> IntentTaxonomyRecord {
+        IntentTaxonomyRecord {
+            intent: self.intent.as_str(),
+            confidence: self.confidence,
+            route_inputs: self.route_inputs,
+            low_confidence_fallback: self.low_confidence_fallback,
+            matched_signals: self.matched_signals.clone(),
+        }
+    }
 }
 
 /// Stable log payload showing how one query was classified.
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, serde::Serialize)]
 pub struct IntentClassificationLog {
     pub normalized_query: String,
     pub intent: &'static str,
@@ -176,6 +215,16 @@ pub struct IntentClassificationLog {
     pub matched_patterns: Vec<&'static str>,
     pub matched_texts: Vec<String>,
     pub matched_signal_weights: Vec<u16>,
+}
+
+/// Stable machine-readable taxonomy snapshot emitted before later auto-routing layers.
+#[derive(Debug, Clone, PartialEq, serde::Serialize)]
+pub struct IntentTaxonomyRecord {
+    pub intent: &'static str,
+    pub confidence: f32,
+    pub route_inputs: IntentRouteInputs,
+    pub low_confidence_fallback: bool,
+    pub matched_signals: Vec<IntentSignalMatch>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -450,6 +499,16 @@ const INTENT_RULES: &[IntentRule] = &[
 pub struct IntentEngine;
 
 impl IntentEngine {
+    /// Returns the stable visible taxonomy classes supported by the classifier.
+    pub const fn intent_taxonomy(&self) -> &'static [QueryIntent] {
+        QueryIntent::all()
+    }
+
+    /// Returns the stable machine-readable signal families supported by the classifier.
+    pub const fn signal_taxonomy(&self) -> &'static [IntentSignalKind] {
+        IntentSignalKind::all()
+    }
+
     /// Classifies one query into an explicit intent class plus inspectable routing inputs.
     pub fn classify(&self, query: &str) -> IntentClassification {
         let normalized_query = normalize_query(query);
@@ -613,7 +672,9 @@ fn normalize_query(query: &str) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::{IntentEngine, IntentRankingProfile, IntentSignalKind, QueryIntent};
+    use super::{
+        IntentEngine, IntentRankingProfile, IntentSignalKind, IntentTaxonomyRecord, QueryIntent,
+    };
     use crate::engine::retrieval_planner::QueryPath;
 
     #[test]
@@ -781,5 +842,83 @@ mod tests {
                 .prefer_preview_only_on_low_confidence
         );
         assert!(classification.route_inputs.high_stakes);
+    }
+
+    #[test]
+    fn exported_intent_taxonomy_is_stable_and_complete() {
+        let intents = IntentEngine.intent_taxonomy();
+
+        assert_eq!(intents.len(), 10);
+        assert_eq!(intents[0], QueryIntent::SemanticBroad);
+        assert_eq!(intents[9], QueryIntent::EmotionalFilter);
+        assert_eq!(
+            intents
+                .iter()
+                .map(|intent| intent.as_str())
+                .collect::<Vec<_>>(),
+            vec![
+                "semantic_broad",
+                "existence_check",
+                "recent_first",
+                "strength_weighted",
+                "uncertainty_focused",
+                "causal_trace",
+                "temporal_anchor",
+                "diverse_sample",
+                "procedural_lookup",
+                "emotional_filter",
+            ]
+        );
+    }
+
+    #[test]
+    fn exported_signal_taxonomy_is_stable_and_complete() {
+        let signal_kinds = IntentEngine.signal_taxonomy();
+
+        assert_eq!(signal_kinds.len(), 6);
+        assert_eq!(
+            signal_kinds
+                .iter()
+                .map(|kind| kind.as_str())
+                .collect::<Vec<_>>(),
+            vec![
+                "phrase",
+                "token",
+                "temporal",
+                "emotional",
+                "question_form",
+                "fallback",
+            ]
+        );
+    }
+
+    #[test]
+    fn taxonomy_record_preserves_intent_inputs_and_matched_signals() {
+        let classification =
+            IntentEngine.classify("how to deploy the service after the last incident?");
+        let record: IntentTaxonomyRecord = classification.taxonomy_record();
+
+        assert_eq!(record.intent, "procedural_lookup");
+        assert_eq!(record.confidence, 0.98);
+        assert_eq!(record.route_inputs.query_path, QueryPath::EntityHeavy);
+        assert_eq!(record.route_inputs.ranking_profile.as_str(), "balanced");
+        assert!(record.route_inputs.prefer_small_lookup);
+        assert!(record.route_inputs.prefer_preview_only_on_low_confidence);
+        assert!(record.route_inputs.high_stakes);
+        assert!(record.route_inputs.predictive_preroll_candidate);
+        assert!(!record.low_confidence_fallback);
+        assert_eq!(record.matched_signals.len(), 2);
+        assert!(record.matched_signals.iter().any(|signal| {
+            signal.kind == IntentSignalKind::Phrase
+                && signal.pattern == "how to"
+                && signal.matched_text == "how to"
+                && signal.weight == 980
+        }));
+        assert!(record.matched_signals.iter().any(|signal| {
+            signal.kind == IntentSignalKind::Temporal
+                && signal.pattern == "after"
+                && signal.matched_text == "after"
+                && signal.weight == 860
+        }));
     }
 }

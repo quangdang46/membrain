@@ -96,12 +96,13 @@ Do not treat distribution as default roadmap direction. Promote it only when bou
 
 Required readiness evidence should include:
 - sustained benchmark pressure against current latency, throughput, rebuild, or maintenance budgets rather than isolated anecdote
+- rerunnable machine-readable benchmark artifacts that preserve `target`, `iterations`, `total_duration_ms`, `avg_duration_us`, `p50_duration_us`, and `p95_duration_us` so reviewers can compare single-node baselines, post-tuning baselines, and the claimed promotion trigger directly
 - workload shape evidence showing that namespace, workspace, or temporal locality no longer fits the single-node operating model cleanly
 - operator pain that remains unacceptable after bounded indexing, caching, repair, and maintenance improvements are applied
 - recovery, repair, or compaction windows that are too large for the intended operating envelope
 - governance and isolation proof showing that sharding would preserve policy enforcement, auditability, and repairability rather than weakening them
 
-Distribution should stay blocked when the observed problem could still be solved by simpler bounded work such as better Tier1/Tier2 budgets, cache and prefetch tuning, maintenance scheduling, repair throughput improvements, or clearer operator tooling.
+Distribution should stay blocked when the observed problem could still be solved by simpler bounded work such as better Tier1/Tier2 budgets, cache and prefetch tuning, maintenance scheduling, repair throughput improvements, or clearer operator tooling. It should also stay blocked when the single-node system is not yet benchmarked, not yet repairable from durable truth, or not yet operationally understood well enough to separate real workload pressure from correctable local failure modes.
 
 ## Sequencing rules
 1. Contracts, memory semantics, and namespace policy land before expensive retrieval work.
