@@ -3323,7 +3323,7 @@ impl DaemonRuntime {
                             {
                                 "name": "recall",
                                 "title": "Search Memories",
-                                "description": "Search and retrieve memories from a namespace.\n\nThis tool searches the Membrain memory system using semantic similarity. It returns the most relevant memories matching the query.\n\nArgs:\n  - query_text (string, optional): The search query for semantic matching\n  - namespace (string, required): The namespace to search in\n  - limit (integer, optional): Maximum number of results (default: 10, max: 100)\n\nReturns:\n  { \"memories\": [...], \"namespace\": string }\n\nExamples:\n  - Search by query: { \"query_text\": \"authentication error\", \"namespace\": \"default\" }\n  - List recent: { \"namespace\": \"project-x\", \"limit\": 20 }\n\nError Handling:\n  - Returns empty results if no matches found\n  - Returns error if namespace is malformed",
+                                "description": "Search and retrieve memories from a namespace.\n\nThis tool searches the Membrain memory system using semantic similarity. It returns the most relevant memories matching the query.\n\nArgs:\n  - query_text (string, required): The search query for semantic matching\n  - namespace (string, required): The namespace to search in\n  - limit (integer, optional): Maximum number of results (default: 10, max: 100)\n\nReturns:\n  { \"memories\": [...], \"namespace\": string }\n\nExamples:\n  - Search by query: { \"query_text\": \"authentication error\", \"namespace\": \"default\" }\n  - Search with limit: { \"query_text\": \"database\", \"namespace\": \"project-x\", \"limit\": 20 }\n\nError Handling:\n  - Returns empty results if no matches found\n  - Returns error if namespace is malformed",
                                 "inputSchema": {
                                     "type": "object",
                                     "properties": {
@@ -3331,7 +3331,7 @@ impl DaemonRuntime {
                                         "namespace": { "type": "string", "description": "The namespace to search in" },
                                         "limit": { "type": "integer", "minimum": 1, "maximum": 100, "description": "Maximum number of results (default: 10)" }
                                     },
-                                    "required": ["namespace"]
+                                    "required": ["query_text", "namespace"]
                                 },
                                 "annotations": {
                                     "readOnlyHint": true,
