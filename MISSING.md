@@ -561,6 +561,98 @@ Implication for Membrain:
 - doctor/health must prove whether daemon mode is actually delivering the runtime guarantees promised in docs
 - embedder loaded/warm status, queue depth, degraded mode, and parity issues should be explicit
 
+## Study conclusions — what to adopt, adapt, and reject
+
+The local comparative study supports the broad direction already captured above, but sharpens it in a few concrete ways.
+
+### Adopt directly
+
+1. **One authority per truth domain**
+   - Runtime mode, warm state, queue state, and semantic readiness need one canonical owner.
+   - For Membrain, that means daemon-owned runtime truth rather than inferring readiness from static storage alone.
+   - Downstream beads: `mb-2lye`, `mb-2wb3`
+
+2. **Materialization must be explicit and rank-preserving**
+   - Ranked candidate selection and hydrated evidence should be different stages with explicit boundaries.
+   - This directly supports replacing planner-only envelopes with evidence-backed recall/explain paths.
+   - Downstream beads: `mb-uw37`, `mb-1ps7`
+
+3. **Cross-surface wrappers may differ in format, not in truth**
+   - CLI, daemon, and MCP should share one substrate and one contract for ids, ranking, hydration, and omission/degraded semantics.
+   - Downstream beads: `mb-3g6d`, `mb-2lye`
+
+4. **Observability must describe runtime posture, not optimistic assumptions**
+   - Health/doctor output needs to expose mode, readiness, queue/embedder posture, degradation, and recent semantic failures.
+   - Downstream beads: `mb-2lye`, `mb-2wb3`, `mb-3drx`
+
+### Adapt rather than copy
+
+1. **Append-first ingest, but sized for a local-first tool**
+   - The pattern is correct: capture should stay cheap and durable, with slower semantic work decoupled behind the runtime.
+   - Membrain should adapt this to a local daemon/subprocess footprint rather than introducing unnecessary distributed queue machinery.
+   - Downstream beads: `mb-2lye`, `mb-1jho`
+
+2. **Staged representations, but keep the initial cut minimal**
+   - Raw records, structured observations, summaries/checkpoints, and rankable semantic shards are useful distinctions.
+   - Membrain should implement only the smallest set of stages needed to make recall, why, and lifecycle behavior visibly better than persistence-plus-query.
+   - Downstream beads: `mb-uw37`, `mb-21vk`, `mb-1jho`
+
+3. **Progressive disclosure retrieval, but without forcing every client through a multi-call protocol**
+   - Internally, retrieval should still separate ranking, optional expansion, and hydration.
+   - Externally, Membrain can present a simple default recall API as long as explainability and logs preserve those stage boundaries.
+   - Downstream beads: `mb-uw37`, `mb-1ps7`, `mb-3drx`
+
+4. **Semantic shards, but only where they improve retrieval quality measurably**
+   - Smaller units such as facts, decisions, rationale, and next steps are likely to outperform single large blobs.
+   - Membrain should prove this with comparative tests before broadening storage/index complexity.
+   - Downstream beads: `mb-21vk`
+
+### Reject or defer for now
+
+1. **Do not introduce a second canonical store for semantic artifacts**
+   - Derived embedding/ranking state should remain rebuildable; canonical truth must stay in Membrain's durable memory records.
+   - Downstream beads: `mb-2wb3`, `mb-uw37`
+
+2. **Do not over-model worker topology or distributed orchestration**
+   - Membrain's current gap is not lack of infrastructure breadth; it is lack of truthful runtime authority and hydration completion.
+   - Downstream beads: `mb-2lye`
+
+3. **Do not expose planner skeletons as if they were completed retrieval evidence**
+   - Route scaffolding is useful internally and in degraded/debug output, but not as the default success result.
+   - Downstream beads: `mb-uw37`, `mb-1ps7`, `mb-3drx`
+
+## Concrete implementation guidance from the study
+
+1. **Decide runtime authority first**
+   - Land `mb-2lye` before broad retrieval/lifecycle work expands further.
+   - Without a clear runtime owner, every later parity and health fix stays ambiguous.
+
+2. **Finish hydration before tuning retrieval quality**
+   - Land `mb-uw37` and `mb-1ps7` before treating retrieval-quality claims as meaningful.
+   - Otherwise tests risk proving ranking behavior on top of incomplete evidence materialization.
+
+3. **Treat parity as a contract, not a patch**
+   - `mb-3g6d` should harden one shared cross-surface substrate with identical ids, policy defaults, omission semantics, and degraded signaling.
+
+4. **Use semantic shards only when tests prove they help**
+   - `mb-21vk` should compare whole-record ranking against smaller rankable units and log which stage changed the result.
+
+5. **Make lifecycle observable through user-visible deltas**
+   - `mb-1jho` should focus on scenarios where a lifecycle action changes later recall/why/health output, not just internal counters.
+
+6. **Keep docs behind runtime truth**
+   - `mb-3drx` should not claim unified warm-runtime behavior until `mb-2lye`, `mb-uw37`, and `mb-1ps7` make that statement true.
+
+## Next bead changes implied by the study
+
+The study does not require creating new beads right now. It sharpens the execution order and implementation focus of existing ones:
+
+- `mb-2lye` stays the architectural gate because runtime authority must precede trustworthy health, parity, and lifecycle claims.
+- `mb-uw37` and `mb-1ps7` remain the next essential implementation pair because retrieval quality and docs truth cannot be trusted while planner-only envelopes are still normal-path results.
+- `mb-3g6d` should be treated as a contract-enforcement bead, not merely a startup hydration patch.
+- `mb-21vk` should explicitly treat semantic shards as a hypothesis to prove, not an assumption to bake in.
+- `mb-1jho` should stay minimal and user-visible: lifecycle work only counts if recall/why/health behavior changes in a logged, testable way.
+
 ## Proposed bead decomposition
 
 This section is here to make bead conversion easier. It is not the beads themselves.
