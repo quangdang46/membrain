@@ -3300,34 +3300,50 @@ impl DaemonRuntime {
                     json!({
                         "tools": [
                             {
-                                "name": "encode",
-                                "description": "Store a new memory in the specified namespace",
+                                "name": "membrain_encode",
+                                "title": "Store Memory",
+                                "description": "Store a new memory in the specified namespace.\n\nThis tool ingests content into the Membrain memory system, making it available for future recall and inspection. The memory is stored in the specified namespace with optional metadata.\n\nArgs:\n  - content (string, required): The memory content to store\n  - namespace (string, required): The namespace to store the memory in (e.g., 'default', 'project-x')\n  - memory_type (string, optional): Classification of the memory type\n  - visibility (string, optional): Visibility setting ('private', 'shared', 'public')\n\nReturns:\n  { \"status\": \"accepted\", \"memory_id\": number, \"namespace\": string, \"visibility\": string }\n\nExamples:\n  - Store a fact: { \"content\": \"API endpoint /users requires authentication\", \"namespace\": \"project-api\" }\n  - Store with type: { \"content\": \"...\", \"namespace\": \"default\", \"memory_type\": \"incident\" }\n\nError Handling:\n  - Returns error if namespace is malformed\n  - Returns error if visibility value is invalid",
                                 "inputSchema": {
                                     "type": "object",
                                     "properties": {
                                         "content": { "type": "string", "description": "The memory content to store" },
                                         "namespace": { "type": "string", "description": "The namespace to store the memory in" },
-                                        "memory_type": { "type": "string", "description": "Optional memory type classification" }
+                                        "memory_type": { "type": "string", "description": "Optional memory type classification" },
+                                        "visibility": { "type": "string", "enum": ["private", "shared", "public"], "description": "Visibility setting (default: private)" }
                                     },
                                     "required": ["content", "namespace"]
+                                },
+                                "annotations": {
+                                    "readOnlyHint": false,
+                                    "destructiveHint": false,
+                                    "idempotentHint": false,
+                                    "openWorldHint": false
                                 }
                             },
                             {
-                                "name": "recall",
-                                "description": "Search and retrieve memories from a namespace",
+                                "name": "membrain_recall",
+                                "title": "Search Memories",
+                                "description": "Search and retrieve memories from a namespace.\n\nThis tool searches the Membrain memory system using semantic similarity. It returns the most relevant memories matching the query.\n\nArgs:\n  - query_text (string, optional): The search query for semantic matching\n  - namespace (string, required): The namespace to search in\n  - limit (integer, optional): Maximum number of results (default: 10, max: 100)\n\nReturns:\n  { \"memories\": [...], \"namespace\": string }\n\nExamples:\n  - Search by query: { \"query_text\": \"authentication error\", \"namespace\": \"default\" }\n  - List recent: { \"namespace\": \"project-x\", \"limit\": 20 }\n\nError Handling:\n  - Returns empty results if no matches found\n  - Returns error if namespace is malformed",
                                 "inputSchema": {
                                     "type": "object",
                                     "properties": {
-                                        "query_text": { "type": "string", "description": "The search query" },
+                                        "query_text": { "type": "string", "description": "The search query for semantic matching" },
                                         "namespace": { "type": "string", "description": "The namespace to search in" },
-                                        "limit": { "type": "integer", "description": "Maximum number of results" }
+                                        "limit": { "type": "integer", "minimum": 1, "maximum": 100, "description": "Maximum number of results (default: 10)" }
                                     },
                                     "required": ["namespace"]
+                                },
+                                "annotations": {
+                                    "readOnlyHint": true,
+                                    "destructiveHint": false,
+                                    "idempotentHint": true,
+                                    "openWorldHint": false
                                 }
                             },
                             {
-                                "name": "inspect",
-                                "description": "Get detailed information about a specific memory",
+                                "name": "membrain_inspect",
+                                "title": "Inspect Memory",
+                                "description": "Get detailed information about a specific memory.\n\nThis tool retrieves the full content and metadata of a specific memory by its ID.\n\nArgs:\n  - id (integer, required): The memory ID to inspect\n  - namespace (string, required): The namespace containing the memory\n\nReturns:\n  Full memory object with content, metadata, timestamps, etc.\n\nExamples:\n  - Inspect memory: { \"id\": 42, \"namespace\": \"default\" }\n\nError Handling:\n  - Returns error if memory ID not found in namespace\n  - Returns error if namespace is malformed",
                                 "inputSchema": {
                                     "type": "object",
                                     "properties": {
@@ -3335,35 +3351,62 @@ impl DaemonRuntime {
                                         "namespace": { "type": "string", "description": "The namespace containing the memory" }
                                     },
                                     "required": ["id", "namespace"]
+                                },
+                                "annotations": {
+                                    "readOnlyHint": true,
+                                    "destructiveHint": false,
+                                    "idempotentHint": true,
+                                    "openWorldHint": false
                                 }
                             },
                             {
-                                "name": "why",
-                                "description": "Explain why a memory was retrieved or how it relates to a query",
+                                "name": "membrain_why",
+                                "title": "Explain Memory Relevance",
+                                "description": "Explain why a memory was retrieved or how it relates to a query.\n\nThis tool provides explainability for memory retrieval, showing why certain memories match a query and their relevance scores.\n\nArgs:\n  - query (string, required): The query to explain\n  - namespace (string, required): The namespace to search in\n  - limit (integer, optional): Maximum number of results to explain (default: 5)\n\nReturns:\n  Explanation object with relevance scores, matching factors, and memory references\n\nExamples:\n  - Explain retrieval: { \"query\": \"database connection timeout\", \"namespace\": \"incidents\" }\n\nError Handling:\n  - Returns empty explanation if no relevant memories found",
                                 "inputSchema": {
                                     "type": "object",
                                     "properties": {
                                         "query": { "type": "string", "description": "The query to explain" },
                                         "namespace": { "type": "string", "description": "The namespace to search in" },
-                                        "limit": { "type": "integer", "description": "Maximum number of results to explain" }
+                                        "limit": { "type": "integer", "minimum": 1, "maximum": 20, "description": "Maximum number of results to explain" }
                                     },
                                     "required": ["query", "namespace"]
+                                },
+                                "annotations": {
+                                    "readOnlyHint": true,
+                                    "destructiveHint": false,
+                                    "idempotentHint": true,
+                                    "openWorldHint": false
                                 }
                             },
                             {
-                                "name": "health",
-                                "description": "Check the health status of the memory system",
+                                "name": "membrain_health",
+                                "title": "Check System Health",
+                                "description": "Check the health status of the memory system.\n\nThis tool returns the current health status including subsystem states, alerts, and key metrics.\n\nArgs:\n  (none)\n\nReturns:\n  Health report with subsystem status, alerts, cache metrics, and attention heatmap\n\nExamples:\n  - Check health: {}\n\nError Handling:\n  - Always returns a health report, even if some subsystems are degraded",
                                 "inputSchema": {
                                     "type": "object",
                                     "properties": {}
+                                },
+                                "annotations": {
+                                    "readOnlyHint": true,
+                                    "destructiveHint": false,
+                                    "idempotentHint": true,
+                                    "openWorldHint": false
                                 }
                             },
                             {
-                                "name": "doctor",
-                                "description": "Run diagnostics on the memory system",
+                                "name": "membrain_doctor",
+                                "title": "Run Diagnostics",
+                                "description": "Run diagnostics on the memory system.\n\nThis tool performs comprehensive diagnostics and returns a detailed report of system status, including any issues found and recommended remediation steps.\n\nArgs:\n  (none)\n\nReturns:\n  Doctor report with status, checks performed, and any issues found\n\nExamples:\n  - Run diagnostics: {}\n\nError Handling:\n  - Always returns a doctor report",
                                 "inputSchema": {
                                     "type": "object",
                                     "properties": {}
+                                },
+                                "annotations": {
+                                    "readOnlyHint": true,
+                                    "destructiveHint": false,
+                                    "idempotentHint": true,
+                                    "openWorldHint": false
                                 }
                             }
                         ]
@@ -3373,7 +3416,7 @@ impl DaemonRuntime {
             RuntimeRequest::McpToolsCall { name, arguments } => {
                 // Dispatch tool call to the appropriate runtime method
                 match name.as_str() {
-                    "encode" => {
+                    "membrain_encode" => {
                         let content = arguments.get("content").and_then(|v| v.as_str()).unwrap_or("");
                         let namespace = arguments.get("namespace").and_then(|v| v.as_str()).unwrap_or("default").to_string();
                         let _memory_type = arguments.get("memory_type").and_then(|v| v.as_str()).map(|s| s.to_string());
@@ -3438,7 +3481,7 @@ impl DaemonRuntime {
                             }),
                         )
                     }
-                    "recall" => {
+                    "membrain_recall" => {
                         let query_text = arguments.get("query_text").and_then(|v| v.as_str()).map(|s| s.to_string());
                         let namespace = arguments.get("namespace").and_then(|v| v.as_str()).unwrap_or("default").to_string();
                         let result_budget = arguments.get("limit").and_then(|v| v.as_u64()).map(|n| n as usize);
@@ -3477,7 +3520,7 @@ impl DaemonRuntime {
                             Err(message) => JsonRpcResponse::error(request_id, -32602, message, None),
                         }
                     }
-                    "inspect" => {
+                    "membrain_inspect" => {
                         let id = arguments.get("id").and_then(|v| v.as_u64()).unwrap_or(0);
                         let namespace = arguments.get("namespace").and_then(|v| v.as_str()).unwrap_or("default").to_string();
 
@@ -3492,7 +3535,7 @@ impl DaemonRuntime {
                             Err(message) => JsonRpcResponse::error(request_id, -32602, message, None),
                         }
                     }
-                    "why" => {
+                    "membrain_why" => {
                         let query = arguments.get("query").and_then(|v| v.as_str()).unwrap_or("");
                         let namespace = arguments.get("namespace").and_then(|v| v.as_str()).unwrap_or("default").to_string();
                         let limit = arguments.get("limit").and_then(|v| v.as_u64()).map(|n| n as usize);
@@ -3510,11 +3553,11 @@ impl DaemonRuntime {
                             Err(message) => JsonRpcResponse::error(request_id, -32602, message, None),
                         }
                     }
-                    "health" => {
+                    "membrain_health" => {
                         let report = state.health_report().await;
                         JsonRpcResponse::success(request_id, report)
                     }
-                    "doctor" => {
+                    "membrain_doctor" => {
                         let report = state.doctor_report().await;
                         JsonRpcResponse::success(request_id, json!(report))
                     }
