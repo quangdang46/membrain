@@ -390,6 +390,34 @@ fn doctor_report(local_records: &[LocalMemoryRecord]) -> DoctorReport {
             degraded_impact: None,
             remediation: None,
         },
+        DoctorCheck {
+            name: "runtime_authority",
+            surface_kind: "runtime_authority",
+            status: if status.authoritative_runtime { "ok" } else { "warn" },
+            severity: if status.authoritative_runtime { "info" } else { "warn" },
+            affected_scope: status.authority_mode.as_str().to_string(),
+            degraded_impact: if status.authoritative_runtime {
+                None
+            } else {
+                Some(format!(
+                    "authoritative_runtime={} maintenance_active={} warm_runtime_guarantees={}",
+                    status.authoritative_runtime,
+                    status.maintenance_active,
+                    status.warm_runtime_guarantees.join(",")
+                ))
+            },
+            remediation: if status.authoritative_runtime {
+                None
+            } else {
+                Some(DoctorRemediation {
+                    summary: "run membrain daemon to obtain daemon-owned warm-runtime guarantees".to_string(),
+                    next_steps: vec![
+                        "start membrain daemon or membrain-daemon",
+                        "re-run doctor after the daemon is serving the unix socket",
+                    ],
+                })
+            },
+        },
     ];
     let summary = DoctorSummary {
         ok_checks: checks.len(),
@@ -4333,11 +4361,28 @@ fn legacy_doctor_report_sample() -> DoctorReport {
             daemon_uptime_ticks: 180,
             index_reports,
             availability: availability.clone(),
-            feature_availability: vec![FeatureAvailabilityEntry {
-                feature: "health".to_string(),
-                posture: membrain_core::api::AvailabilityPosture::Full,
-                note: Some("cli_doctor_embeds_brain_health_report".to_string()),
-            }],
+            feature_availability: vec![
+                FeatureAvailabilityEntry {
+                    feature: "health".to_string(),
+                    posture: membrain_core::api::AvailabilityPosture::Full,
+                    note: Some("cli_doctor_embeds_brain_health_report".to_string()),
+                },
+                FeatureAvailabilityEntry {
+                    feature: "runtime_authority".to_string(),
+                    posture: if status.authoritative_runtime {
+                        membrain_core::api::AvailabilityPosture::Full
+                    } else {
+                        membrain_core::api::AvailabilityPosture::Degraded
+                    },
+                    note: Some(format!(
+                        "mode={} authoritative_runtime={} maintenance_active={} warm_runtime_guarantees={}",
+                        status.authority_mode.as_str(),
+                        status.authoritative_runtime,
+                        status.maintenance_active,
+                        status.warm_runtime_guarantees.join(",")
+                    )),
+                },
+            ],
             previous_total_recalls: Some(44),
             previous_total_encodes: Some(10),
             previous_repair_queue_depth: Some(0),

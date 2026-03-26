@@ -382,13 +382,19 @@ impl RuntimeState {
 
     async fn status(&self) -> RuntimeStatus {
         let authority_mode = self.authority_mode.lock().await.clone();
-        let maintenance_active = matches!(authority_mode, RuntimeAuthorityMode::UnixSocketDaemon);
+        let maintenance_active = matches!(authority_mode, RuntimeAuthorityMode::UnixSocketDaemon)
+            && !self.shutdown_requested.load(Ordering::SeqCst);
         let warm_runtime_guarantees = match authority_mode {
-            RuntimeAuthorityMode::UnixSocketDaemon => vec![
-                "shared_process_state".to_string(),
-                "background_maintenance_loop".to_string(),
-                "unix_socket_authority".to_string(),
-            ],
+            RuntimeAuthorityMode::UnixSocketDaemon => {
+                let mut guarantees = vec![
+                    "shared_process_state".to_string(),
+                    "unix_socket_authority".to_string(),
+                ];
+                if maintenance_active {
+                    guarantees.push("background_maintenance_loop".to_string());
+                }
+                guarantees
+            }
             RuntimeAuthorityMode::StdioFacade => vec![
                 "single_process_request_state".to_string(),
                 "stdio_transport".to_string(),
