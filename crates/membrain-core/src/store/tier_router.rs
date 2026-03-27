@@ -27,6 +27,49 @@ impl TierOwnership {
     }
 }
 
+/// Durable lifecycle state used as canonical persisted truth across memory engines.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum DurableLifecycleState {
+    /// Recently encoded and still within the labile / immediate-post-encode phase.
+    Labile,
+    /// Stabilized enough to persist but not yet consolidated to colder durable form.
+    SynapticDone,
+    /// Mid-transition while consolidation is producing colder durable artifacts.
+    Consolidating,
+    /// Consolidated durable state suitable for cold canonical ownership.
+    Consolidated,
+    /// A prior durable memory retained for lineage but superseded operationally.
+    Superseded,
+    /// Explicitly archived and only restorable through the archive/restore path.
+    Archived,
+}
+
+impl DurableLifecycleState {
+    /// Returns the stable machine-readable name for this durable lifecycle state.
+    pub const fn as_str(&self) -> &'static str {
+        match self {
+            Self::Labile => "labile",
+            Self::SynapticDone => "synaptic_done",
+            Self::Consolidating => "consolidating",
+            Self::Consolidated => "consolidated",
+            Self::Superseded => "superseded",
+            Self::Archived => "archived",
+        }
+    }
+
+    /// Maps canonical durable truth into the current routing-facing lifecycle vocabulary.
+    pub const fn routing_state(self) -> LifecycleState {
+        match self {
+            Self::Labile => LifecycleState::Fresh,
+            Self::SynapticDone => LifecycleState::Active,
+            Self::Consolidating => LifecycleState::Dormant,
+            Self::Consolidated => LifecycleState::Dormant,
+            Self::Superseded => LifecycleState::Dormant,
+            Self::Archived => LifecycleState::Archived,
+        }
+    }
+}
+
 /// Lifecycle state influencing tier routing decisions.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum LifecycleState {
@@ -48,6 +91,16 @@ impl LifecycleState {
             Self::Active => "active",
             Self::Dormant => "dormant",
             Self::Archived => "archived",
+        }
+    }
+
+    /// Best-effort projection back into the richer durable lifecycle vocabulary.
+    pub const fn durable_state(self) -> DurableLifecycleState {
+        match self {
+            Self::Fresh => DurableLifecycleState::Labile,
+            Self::Active => DurableLifecycleState::SynapticDone,
+            Self::Dormant => DurableLifecycleState::Consolidated,
+            Self::Archived => DurableLifecycleState::Archived,
         }
     }
 }

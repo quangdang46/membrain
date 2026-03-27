@@ -20,8 +20,8 @@ pub use tier2::Tier2Store;
 
 use crate::migrate::DurableSchemaObject;
 pub use tier_router::{
-    LifecycleState, TierOwnership, TierRouter, TierRoutingConfig, TierRoutingDecision,
-    TierRoutingInput, TierRoutingReason, TierRoutingTrace,
+    DurableLifecycleState, LifecycleState, TierOwnership, TierRouter, TierRoutingConfig,
+    TierRoutingDecision, TierRoutingInput, TierRoutingReason, TierRoutingTrace,
 };
 
 /// Shared hot-store boundary for request-path planners.

@@ -12,7 +12,7 @@ use crate::engine::maintenance::{
 use crate::observability::AuditEventKind;
 use crate::store::audit::AuditLogEntry;
 use crate::store::cold::ArchiveState;
-use crate::store::tier_router::{LifecycleState, TierOwnership};
+use crate::store::tier_router::{DurableLifecycleState, LifecycleState, TierOwnership};
 use crate::types::MemoryId;
 
 // ── Forgetting policy ────────────────────────────────────────────────────────
@@ -117,6 +117,7 @@ pub struct ForgettingAuditRecordFlat {
     pub archive_reason: Option<&'static str>,
     pub retention_state: &'static str,
     pub lifecycle_state: &'static str,
+    pub durable_lifecycle_state: &'static str,
     pub current_tier: &'static str,
     pub partial_restore: bool,
     pub audit_kind: &'static str,
@@ -245,6 +246,8 @@ pub struct ForgettingExplainEntry {
     pub retention_state: Option<&'static str>,
     /// Lifecycle state seen during evaluation.
     pub lifecycle_state: Option<&'static str>,
+    /// Durable lifecycle state seen during evaluation.
+    pub durable_lifecycle_state: Option<&'static str>,
     /// Current canonical tier seen during evaluation.
     pub current_tier: Option<&'static str>,
     /// Resulting archive lifecycle state, when applicable.
@@ -417,6 +420,7 @@ impl ForgettingRun {
                 archive_reason: record.archive_reason,
                 retention_state: self.retention_state_for_record(record),
                 lifecycle_state: self.lifecycle_state_for_record(record),
+                durable_lifecycle_state: self.durable_lifecycle_state_for_record(record),
                 current_tier: self.current_tier_for_record(record),
                 partial_restore: record.partial_restore,
                 audit_kind: ForgettingEngine.audit_event_kind(&record.action).as_str(),
@@ -455,6 +459,16 @@ impl ForgettingRun {
             | "demotion_requires_dormant_lifecycle"
             | "demotion_requires_idle_days" => LifecycleState::Dormant.as_str(),
             _ => LifecycleState::Active.as_str(),
+        }
+    }
+
+    fn durable_lifecycle_state_for_record(&self, record: &ForgettingAuditRecord) -> &'static str {
+        match record.reason {
+            "archived_requires_restore_path" => DurableLifecycleState::Archived.as_str(),
+            "below_demotion_threshold"
+            | "demotion_requires_dormant_lifecycle"
+            | "demotion_requires_idle_days" => DurableLifecycleState::Consolidated.as_str(),
+            _ => DurableLifecycleState::SynapticDone.as_str(),
         }
     }
 
@@ -569,6 +583,7 @@ impl ForgettingRun {
                     target_tier: record.target_tier,
                     retention_state: Some(self.retention_state_for_record(record)),
                     lifecycle_state: Some(self.lifecycle_state_for_record(record)),
+                    durable_lifecycle_state: Some(self.durable_lifecycle_state_for_record(record)),
                     current_tier: Some(self.current_tier_for_record(record)),
                     resulting_archive_state: record.resulting_archive_state,
                     partial_restore: record.partial_restore,
