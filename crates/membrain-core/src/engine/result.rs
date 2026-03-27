@@ -655,7 +655,7 @@ fn apply_lifecycle_observability(
             explain,
             "cold_consolidated",
             format!(
-                "{cold_count} retained evidence item(s) were served from tier3_cold after lifecycle consolidation moved them out of the bounded hot path"
+                "{cold_count} retained evidence item(s) were served from tier3_cold after lifecycle consolidation moved them out of the bounded hot path; durable_lifecycle_state=consolidated routing_lifecycle_state=dormant"
             ),
         );
         freshness_markers.stale_warning = true;
@@ -678,7 +678,7 @@ fn apply_lifecycle_observability(
             explain,
             "reconsolidation_window_open",
             format!(
-                "{reconsolidating_count} retained evidence item(s) remain volatile because recent recall reopened a reconsolidation window"
+                "{reconsolidating_count} retained evidence item(s) remain volatile because recent recall reopened a reconsolidation window; durable_lifecycle_state=labile routing_lifecycle_state=fresh"
             ),
         );
         freshness_markers.volatile_items_included = true;
