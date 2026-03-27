@@ -824,6 +824,8 @@ fn reason_code_label(reason_code: &str) -> &'static str {
         "confidence_display_rule" => "confidence_display_rule",
         "strength_threshold_applied" => "strength_threshold_applied",
         "below_min_strength" => "below_min_strength",
+        "cold_consolidated" => "cold_consolidated",
+        "reconsolidation_window_open" => "reconsolidation_window_open",
         "intent_classification" => "intent_classification",
         "route_override_applied" => "route_override_applied",
         "route_override_not_applied" => "route_override_not_applied",

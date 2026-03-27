@@ -1,0 +1,55 @@
+{"ts":"2026-03-26T16:55:13.361254212Z","kind":"session_started","session_id":"ses-run-mb-3g6d-20260326T165513342"}
+{"ts":"2026-03-26T17:09:06.680722663Z","kind":"stdout","line":"GROVE_RESULT"}
+{"ts":"2026-03-26T17:09:06.764987286Z","kind":"stdout","line":""}
+{"ts":"2026-03-26T17:09:06.765012502Z","kind":"stdout","line":"Persisted hydration parity is materially improved, but full daemon/MCP validation is still blocked by unrelated existing compile failures in `membrain-daemon`."}
+{"ts":"2026-03-26T17:09:06.765026897Z","kind":"stdout","line":""}
+{"ts":"2026-03-26T17:09:06.765032716Z","kind":"stdout","line":"GROVE_ARTIFACTS"}
+{"ts":"2026-03-26T17:09:06.765048029Z","kind":"stdout","line":""}
+{"ts":"2026-03-26T17:09:06.765055890Z","kind":"stdout","line":"- Added daemon-specific persisted storage so runtime-only fields survive restart instead of collapsing into CLI-only rows:"}
+{"ts":"2026-03-26T17:09:06.765062322Z","kind":"stdout","line":"  - `crates/membrain-core/src/persistence.rs:22`"}
+{"ts":"2026-03-26T17:09:06.765069876Z","kind":"stdout","line":"  - `crates/membrain-core/src/persistence.rs:144`"}
+{"ts":"2026-03-26T17:09:06.765076308Z","kind":"stdout","line":"  - `crates/membrain-core/src/persistence.rs:375`"}
+{"ts":"2026-03-26T17:09:06.765081514Z","kind":"stdout","line":"  - `crates/membrain-core/src/persistence.rs:417`"}
+{"ts":"2026-03-26T17:09:06.765087946Z","kind":"stdout","line":"- Kept CLI compatibility by continuing to write the existing `memories` table while also writing `daemon_memories` with full serialized runtime records:"}
+{"ts":"2026-03-26T17:09:06.765094990Z","kind":"stdout","line":"  - `crates/membrain-core/src/persistence.rs:379`"}
+{"ts":"2026-03-26T17:09:06.765102443Z","kind":"stdout","line":"  - `crates/membrain-core/src/persistence.rs:400`"}
+{"ts":"2026-03-26T17:09:06.765107955Z","kind":"stdout","line":"- Preserved fallback behavior for legacy/CLI-only persisted rows when no daemon table data exists:"}
+{"ts":"2026-03-26T17:09:06.765113774Z","kind":"stdout","line":"  - `crates/membrain-core/src/persistence.rs:430`"}
+{"ts":"2026-03-26T17:09:06.765120002Z","kind":"stdout","line":"- Added focused persistence tests:"}
+{"ts":"2026-03-26T17:09:06.765128577Z","kind":"stdout","line":"  - full runtime-field round-trip: `crates/membrain-core/src/persistence.rs:679`"}
+{"ts":"2026-03-26T17:09:06.765153895Z","kind":"stdout","line":"  - legacy CLI-row fallback: `crates/membrain-core/src/persistence.rs:692`"}
+{"ts":"2026-03-26T17:09:06.765163492Z","kind":"stdout","line":"- Added a daemon restart parity test covering inspect / recall / why after restart:"}
+{"ts":"2026-03-26T17:09:06.765171557Z","kind":"stdout","line":"  - `crates/membrain-daemon/src/daemon.rs:9280`"}
+{"ts":"2026-03-26T17:09:06.765175028Z","kind":"stdout","line":""}
+{"ts":"2026-03-26T17:09:06.765177886Z","kind":"stdout","line":"GROVE_LESSONS"}
+{"ts":"2026-03-26T17:09:06.765182684Z","kind":"stdout","line":""}
+{"ts":"2026-03-26T17:09:06.765192893Z","kind":"stdout","line":"- The remaining parity gap was not startup hydration alone; it was persistence shape. `save_runtime_records` was still flattening runtime memories into CLI rows, so restart could never preserve passive observation, visibility, causal lineage, or confidence metadata."}
+{"ts":"2026-03-26T17:09:06.765204736Z","kind":"stdout","line":"- The least risky fix was additive: keep the CLI-compatible `memories` table for CLI surfaces, and add a daemon-specific persisted table for full runtime fidelity."}
+{"ts":"2026-03-26T17:09:06.765208615Z","kind":"stdout","line":"- This preserves backward compatibility and gives explicit degraded fallback only when daemon-grade persisted state is unavailable."}
+{"ts":"2026-03-26T17:09:06.765250982Z","kind":"stdout","line":""}
+{"ts":"2026-03-26T17:09:06.765258434Z","kind":"stdout","line":"GROVE_DECISIONS"}
+{"ts":"2026-03-26T17:09:06.765267112Z","kind":"stdout","line":""}
+{"ts":"2026-03-26T17:09:06.765272421Z","kind":"stdout","line":"- Chose additive storage (`daemon_memories`) over widening the existing `memories` schema, to avoid breaking CLI assumptions and keep migration scope tight."}
+{"ts":"2026-03-26T17:09:06.765384004Z","kind":"stdout","line":"- Kept legacy fallback semantics in `load_runtime_records` so old persisted stores still hydrate, but clearly as degraded/private/defaulted runtime records."}
+{"ts":"2026-03-26T17:09:06.765393192Z","kind":"stdout","line":"- Added a daemon restart parity test even though it cannot run yet in the current workspace, so the acceptance path is encoded once the repo is green."}
+{"ts":"2026-03-26T17:09:06.765397786Z","kind":"stdout","line":""}
+{"ts":"2026-03-26T17:09:06.765403095Z","kind":"stdout","line":"GROVE_WARNINGS"}
+{"ts":"2026-03-26T17:09:06.765408199Z","kind":"stdout","line":""}
+{"ts":"2026-03-26T17:09:06.765412997Z","kind":"stdout","line":"- Focused persistence test passed:"}
+{"ts":"2026-03-26T17:09:06.765416060Z","kind":"stdout","line":"  - `cargo test -p membrain-core persistence::tests::runtime_record_round_trips_with_daemon_table_preserving_runtime_fields -- --nocapture`"}
+{"ts":"2026-03-26T17:09:06.765444338Z","kind":"stdout","line":"- Full daemon validation is currently blocked by unrelated existing compile errors outside this bead:"}
+{"ts":"2026-03-26T17:09:06.765447912Z","kind":"stdout","line":"  - `crates/membrain-daemon/src/daemon.rs:339` — `FastembedTextEmbedder` missing `Debug`"}
+{"ts":"2026-03-26T17:09:06.765453731Z","kind":"stdout","line":"  - `crates/membrain-daemon/src/rpc.rs:200` — serde/lifetime issue on `RuntimeEmbedderStatus`"}
+{"ts":"2026-03-26T17:09:06.765456895Z","kind":"stdout","line":"  - `crates/membrain-daemon/src/daemon.rs:4270` — unused variable warning only"}
+{"ts":"2026-03-26T17:09:06.765461081Z","kind":"stdout","line":"- Because of those unrelated daemon build failures, I could not finish:"}
+{"ts":"2026-03-26T17:09:06.765465165Z","kind":"stdout","line":"  - `cargo test -p membrain-daemon runtime_restart_rehydrates_persisted_memory_for_recall_inspect_and_why -- --nocapture`"}
+{"ts":"2026-03-26T17:09:06.765467717Z","kind":"stdout","line":"  - full `cargo check` across daemon/CLI/MCP surfaces"}
+{"ts":"2026-03-26T17:09:06.765474455Z","kind":"stdout","line":""}
+{"ts":"2026-03-26T17:09:06.765479661Z","kind":"stdout","line":"GROVE_EXIT: false"}
+{"ts":"2026-03-26T17:09:06.765479661Z","kind":"protocol","event":{"type":"exit","value":false}}
+{"ts":"2026-03-26T17:09:06.765489156Z","kind":"stdout","line":""}
+{"ts":"2026-03-26T17:09:06.765491504Z","kind":"stdout","line":"What I changed, briefly:"}
+{"ts":"2026-03-26T17:09:06.765493750Z","kind":"stdout","line":"- The daemon now has a path to persist and reload canonical runtime records instead of reconstructing them from CLI-flattened rows."}
+{"ts":"2026-03-26T17:09:06.765519374Z","kind":"stdout","line":"- CLI compatibility remains intact because the old table is still written."}
+{"ts":"2026-03-26T17:09:06.765525397Z","kind":"stdout","line":"- There is now a focused persistence test that passes, plus a restart parity daemon test ready to run once the unrelated daemon compile blockers are fixed."}
+{"ts":"2026-03-26T17:09:07.353535157Z","kind":"session_ended","exit_code":0}

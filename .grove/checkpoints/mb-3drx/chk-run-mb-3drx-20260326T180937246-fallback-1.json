@@ -1,0 +1,32 @@
+{
+  "id": "chk-run-mb-3drx-20260326T180937246-fallback-1",
+  "bead_id": "mb-3drx",
+  "run_id": "run-mb-3drx-20260326T180937246",
+  "session_id": "ses-run-mb-3drx-20260326T180937246",
+  "progress": "Synthetic fallback checkpoint after NoProgress",
+  "next_step": "Resume from the transcript tail, avoid repeating completed setup, and continue with the smallest safe remaining step.",
+  "payload": {
+    "claimed_paths": [],
+    "confidence": 0.25,
+    "context": {
+      "failure_class": "NoProgress",
+      "failure_detail": "session ended with Unknown",
+      "stderr_tail": [],
+      "stdout_tail": [
+        "",
+        "",
+        "",
+        "",
+        "",
+        "GROVE_CHECKPOINT: {\"status\":\"partial\",\"bead\":\"mb-3drx\",\"agent\":\"VioletValley\",\"completed\":[\"AGENTS.md truth pass\",\"MISSING.md truth pass\",\"docs/MCP_API.md truth framing\"],\"remaining\":[\"tighten live MCP tool descriptions in crates/membrain-daemon/src/daemon.rs to match implemented behavior\"],\"blockers\":[{\"type\":\"file_reservation_conflict\",\"path\":\"crates/membrain-daemon/src/daemon.rs\",\"holders\":[\"FoggyPrairie\",\"WindyEagle\",\"CoralOtter\",\"RubyCanyon\"]}],\"next_step\":\"When daemon.rs becomes available, replace overstated MCP tool descriptions with bounded live-runtime wording and then close/sync mb-3drx.\"}",
+        ""
+      ],
+      "synthetic": true
+    },
+    "next_step": "Resume from the transcript tail, avoid repeating completed setup, and continue with the smallest safe remaining step.",
+    "open_questions": [],
+    "progress": "Synthetic fallback checkpoint after NoProgress"
+  },
+  "saved_at": "2026-03-26T18:18:09.322285792Z",
+  "resume_generation": 1
+}

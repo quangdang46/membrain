@@ -36,6 +36,8 @@ pub mod observe;
 pub mod predictive;
 /// Ranking and score-fusion surfaces.
 pub mod ranking;
+/// Shared bounded lexical+semantic retrieval executor over hydrated records.
+pub mod semantic_retrieval;
 /// Recall-path orchestration surfaces.
 pub mod recall;
 /// Reconsolidation, labile-window, and pending-update surfaces.

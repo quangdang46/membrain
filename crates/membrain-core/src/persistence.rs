@@ -19,7 +19,7 @@ const APP_DIR: &str = ".membrain";
 const HOT_DB: &str = "hot.db";
 const COLD_DB: &str = "cold.db";
 const SOCKET_FILE: &str = "membrain.sock";
-const HOT_SCHEMA_VERSION: i64 = 1;
+const HOT_SCHEMA_VERSION: i64 = 2;
 const COLD_SCHEMA_VERSION: i64 = 1;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -48,7 +48,7 @@ pub struct PersistedLocalMemoryRecord {
     pub raw_text: String,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct PersistedDaemonMemoryRecord {
     pub layout: PersistedTier2Layout,
     pub passive_observation: Option<PersistedPassiveObservationSummary>,
@@ -58,7 +58,7 @@ pub struct PersistedDaemonMemoryRecord {
     pub confidence_output: ConfidenceOutput,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct PersistedPassiveObservationSummary {
     pub source_kind: String,
     pub write_decision: String,
@@ -68,7 +68,7 @@ pub struct PersistedPassiveObservationSummary {
     pub retention_marker: Option<String>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct PersistedTier2Layout {
     pub namespace: String,
     pub memory_id: u64,
@@ -167,6 +167,12 @@ fn bootstrap_hot_db(conn: &Connection) -> rusqlite::Result<()> {
             era_id TEXT,
             PRIMARY KEY(namespace, memory_id)
         );
+        CREATE TABLE IF NOT EXISTS daemon_memories (
+            namespace TEXT NOT NULL,
+            memory_id INTEGER NOT NULL,
+            persisted_record_json TEXT NOT NULL,
+            PRIMARY KEY(namespace, memory_id)
+        );
         CREATE TABLE IF NOT EXISTS memory_audit_log (
             sequence INTEGER PRIMARY KEY,
             category TEXT NOT NULL,
@@ -188,6 +194,7 @@ fn bootstrap_hot_db(conn: &Connection) -> rusqlite::Result<()> {
         );
         CREATE INDEX IF NOT EXISTS idx_memories_namespace_id ON memories(namespace, memory_id);
         CREATE INDEX IF NOT EXISTS idx_memories_namespace_text ON memories(namespace, compact_text);
+        CREATE INDEX IF NOT EXISTS idx_daemon_memories_namespace_id ON daemon_memories(namespace, memory_id);
         CREATE INDEX IF NOT EXISTS idx_audit_namespace_seq ON memory_audit_log(namespace, sequence DESC);
         CREATE INDEX IF NOT EXISTS idx_audit_memory ON memory_audit_log(memory_id, sequence DESC);
         CREATE TABLE IF NOT EXISTS emotional_timeline (
@@ -388,12 +395,42 @@ pub fn save_runtime_records(
             raw_text: record.layout.raw_text.clone(),
         })
         .collect::<Vec<_>>();
-    save_cli_records(conn, &cli_records)
+    save_cli_records(conn, &cli_records)?;
+
+    let tx = conn.transaction()?;
+    tx.execute("DELETE FROM daemon_memories", [])?;
+    for record in records {
+        let persisted_record_json = serde_json::to_string(record).map_err(to_sql_err)?;
+        tx.execute(
+            "INSERT INTO daemon_memories(namespace, memory_id, persisted_record_json)
+             VALUES(?1, ?2, ?3)",
+            params![
+                record.layout.namespace,
+                record.layout.memory_id,
+                persisted_record_json,
+            ],
+        )?;
+    }
+    tx.commit()
 }
 
 pub fn load_runtime_records(
     conn: &Connection,
 ) -> rusqlite::Result<Vec<PersistedDaemonMemoryRecord>> {
+    let mut stmt = conn.prepare(
+        "SELECT persisted_record_json
+         FROM daemon_memories
+         ORDER BY memory_id ASC",
+    )?;
+    let rows = stmt.query_map([], |row| {
+        let raw: String = row.get(0)?;
+        serde_json::from_str::<PersistedDaemonMemoryRecord>(&raw).map_err(to_sql_err)
+    })?;
+    let daemon_records = rows.collect::<rusqlite::Result<Vec<_>>>()?;
+    if !daemon_records.is_empty() {
+        return Ok(daemon_records);
+    }
+
     load_cli_records(conn).map(|rows| {
         rows.into_iter()
             .map(|row| PersistedDaemonMemoryRecord {
@@ -578,4 +615,112 @@ pub fn current_schema_version(conn: &Connection, key: &str) -> rusqlite::Result<
     )
     .optional()
     .map(|value| value.and_then(|raw| raw.parse::<i64>().ok()))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::engine::contradiction::ResolutionState;
+    use crate::graph::CausalLinkType;
+    use crate::types::{CanonicalMemoryType, FastPathRouteFamily};
+
+    fn sample_runtime_record() -> PersistedDaemonMemoryRecord {
+        PersistedDaemonMemoryRecord {
+            layout: PersistedTier2Layout {
+                namespace: "team.alpha".to_string(),
+                memory_id: 7,
+                session_id: 11,
+                memory_type: CanonicalMemoryType::UserPreference,
+                route_family: FastPathRouteFamily::UserPreference,
+                compact_text: "Dang prefers concise answers".to_string(),
+                fingerprint: 42,
+                payload_size_bytes: 29,
+                affect: Some(AffectSignals::new(0.2, 0.4).clamped()),
+                is_landmark: true,
+                landmark_label: Some("preference".to_string()),
+                era_id: Some("era-1".to_string()),
+                visibility: "shared".to_string(),
+                raw_text: "Dang prefers concise answers".to_string(),
+            },
+            passive_observation: Some(PersistedPassiveObservationSummary {
+                source_kind: "tool_output".to_string(),
+                write_decision: "retain".to_string(),
+                captured_as_observation: true,
+                observation_source: Some("cli".to_string()),
+                observation_chunk_id: Some("chunk-1".to_string()),
+                retention_marker: Some("keep".to_string()),
+            }),
+            causal_parents: vec![3, 5],
+            causal_link_type: Some(CausalLinkType::Derived),
+            confidence_inputs: ConfidenceInputs {
+                corroboration_count: 2,
+                reconsolidation_count: 1,
+                ticks_since_last_access: 4,
+                age_ticks: 9,
+                resolution_state: ResolutionState::None,
+                conflict_score: 7,
+                causal_parent_count: 2,
+                authoritativeness: 800,
+                recall_count: 6,
+            },
+            confidence_output: ConfidenceOutput {
+                uncertainty_score: 120,
+                corroboration_uncertainty: 130,
+                reconsolidation_uncertainty: 140,
+                freshness_uncertainty: 150,
+                contradiction_uncertainty: 10,
+                missing_evidence_uncertainty: 20,
+                confidence: 910,
+                confidence_interval: None,
+            },
+        }
+    }
+
+    #[test]
+    fn runtime_record_round_trips_with_daemon_table_preserving_runtime_fields() {
+        let mut conn = Connection::open_in_memory().expect("in-memory sqlite should open");
+        bootstrap_hot_db(&conn).expect("hot db should bootstrap");
+
+        let record = sample_runtime_record();
+        save_runtime_records(&mut conn, std::slice::from_ref(&record))
+            .expect("runtime records should save");
+
+        let restored = load_runtime_records(&conn).expect("runtime records should load");
+        assert_eq!(restored, vec![record]);
+    }
+
+    #[test]
+    fn runtime_record_load_falls_back_to_cli_rows_when_daemon_table_is_empty() {
+        let conn = Connection::open_in_memory().expect("in-memory sqlite should open");
+        bootstrap_hot_db(&conn).expect("hot db should bootstrap");
+        conn.execute(
+            "INSERT INTO memories(namespace, memory_id, session_id, memory_type, route_family, compact_text, raw_text, provisional_salience, fingerprint, payload_size_bytes, affect_json, is_landmark, landmark_label, era_id)
+             VALUES(?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14)",
+            params![
+                "team.alpha",
+                9u64,
+                12u64,
+                "user_preference",
+                "user_preference",
+                "fallback text",
+                "fallback text",
+                0u16,
+                "99",
+                13usize,
+                Option::<String>::None,
+                0i64,
+                Option::<String>::None,
+                Option::<String>::None,
+            ],
+        )
+        .expect("cli row should insert");
+
+        let restored = load_runtime_records(&conn).expect("runtime records should load");
+        assert_eq!(restored.len(), 1);
+        assert_eq!(restored[0].layout.memory_id, 9);
+        assert_eq!(restored[0].layout.visibility, "private");
+        assert!(restored[0].passive_observation.is_none());
+        assert!(restored[0].causal_parents.is_empty());
+        assert_eq!(restored[0].confidence_output.confidence, 0);
+    }
 }

@@ -1,0 +1,221 @@
+{
+  "prompt_id": "prompt-run-mb-2lye-20260326T161917439",
+  "bead_id": "mb-2lye",
+  "run_id": "run-mb-2lye-20260326T161917439",
+  "session_id": "ses-run-mb-2lye-20260326T161917439",
+  "contract": "Resume",
+  "created_at": "2026-03-26T16:19:17.458101005Z",
+  "token_budget": null,
+  "estimated_tokens": 978,
+  "prompt_bytes": 3912,
+  "trimmed": false,
+  "retry_delta_summary": null,
+  "retrieval_query": "authoritative OR authoritative OR inaccurately OR distinguish OR operational",
+  "retrieval_ranking_summary": [
+    "Historical snippet (Score: 8.31)",
+    "Historical snippet (Score: 7.61)",
+    "Historical snippet (Score: 3.88)",
+    "Historical snippet (Score: 3.72)",
+    "Historical snippet (Score: 2.76)"
+  ],
+  "sections": [
+    {
+      "ordinal": 1,
+      "kind": "StartupPrompt",
+      "heading": "Startup prompt",
+      "included": true,
+      "estimated_tokens": 280,
+      "char_count": 1118,
+      "trim_reason": null,
+      "provenance": {
+        "source_ids": [],
+        "bullet_ids": [],
+        "checkpoint_id": null,
+        "handoff_run_id": null,
+        "archive_message_id": null,
+        "playbook_bullet_id": null
+      },
+      "preview": "First read ALL of the AGENTS.md file and README.md file super carefully and unde…"
+    },
+    {
+      "ordinal": 2,
+      "kind": "Contract",
+      "heading": "Execution contract",
+      "included": true,
+      "estimated_tokens": 30,
+      "char_count": 120,
+      "trim_reason": null,
+      "provenance": {
+        "source_ids": [],
+        "bullet_ids": [],
+        "checkpoint_id": null,
+        "handoff_run_id": null,
+        "archive_message_id": null,
+        "playbook_bullet_id": null
+      },
+      "preview": "[EXECUTION CONTRACT]\nResume from the latest checkpoint and continue the in-progr…"
+    },
+    {
+      "ordinal": 3,
+      "kind": "Task",
+      "heading": "Task",
+      "included": true,
+      "estimated_tokens": 279,
+      "char_count": 1116,
+      "trim_reason": null,
+      "provenance": {
+        "source_ids": [],
+        "bullet_ids": [],
+        "checkpoint_id": null,
+        "handoff_run_id": null,
+        "archive_message_id": null,
+        "playbook_bullet_id": null
+      },
+      "preview": "[TASK]\nTitle: Close daemon runtime authority gap\n\nMake the daemon (or an equival…"
+    },
+    {
+      "ordinal": 4,
+      "kind": "ArchiveSnippet",
+      "heading": "Historical snippet (Score: 8.31)",
+      "included": true,
+      "estimated_tokens": 33,
+      "char_count": 131,
+      "trim_reason": null,
+      "provenance": {
+        "source_ids": [],
+        "bullet_ids": [],
+        "checkpoint_id": null,
+        "handoff_run_id": null,
+        "archive_message_id": "49",
+        "playbook_bullet_id": null
+      },
+      "preview": "From .grove/transcripts/mb-2lvr/ses-run-mb-2lvr-20260326T160712688.jsonl\n  - <b>…"
+    },
+    {
+      "ordinal": 5,
+      "kind": "ArchiveSnippet",
+      "heading": "Historical snippet (Score: 7.61)",
+      "included": true,
+      "estimated_tokens": 36,
+      "char_count": 142,
+      "trim_reason": null,
+      "provenance": {
+        "source_ids": [],
+        "bullet_ids": [],
+        "checkpoint_id": null,
+        "handoff_run_id": null,
+        "archive_message_id": "50",
+        "playbook_bullet_id": null
+      },
+      "preview": "From .grove/transcripts/mb-2lvr/ses-run-mb-2lvr-20260326T160712688.jsonl\nGROVE_L…"
+    },
+    {
+      "ordinal": 6,
+      "kind": "ArchiveSnippet",
+      "heading": "Historical snippet (Score: 3.88)",
+      "included": true,
+      "estimated_tokens": 51,
+      "char_count": 202,
+      "trim_reason": null,
+      "provenance": {
+        "source_ids": [],
+        "bullet_ids": [],
+        "checkpoint_id": null,
+        "handoff_run_id": null,
+        "archive_message_id": "110",
+        "playbook_bullet_id": null
+      },
+      "preview": "From .grove/transcripts/mb-2lye/ses-run-mb-2lye-20260326T160712687.jsonl\n...docs…"
+    },
+    {
+      "ordinal": 7,
+      "kind": "ArchiveSnippet",
+      "heading": "Historical snippet (Score: 3.72)",
+      "included": true,
+      "estimated_tokens": 51,
+      "char_count": 202,
+      "trim_reason": null,
+      "provenance": {
+        "source_ids": [],
+        "bullet_ids": [],
+        "checkpoint_id": null,
+        "handoff_run_id": null,
+        "archive_message_id": "111",
+        "playbook_bullet_id": null
+      },
+      "preview": "From .grove/transcripts/mb-2lye/ses-run-mb-2lye-20260326T160712687.jsonl\n...docs…"
+    },
+    {
+      "ordinal": 8,
+      "kind": "ArchiveSnippet",
+      "heading": "Historical snippet (Score: 2.76)",
+      "included": true,
+      "estimated_tokens": 47,
+      "char_count": 186,
+      "trim_reason": null,
+      "provenance": {
+        "source_ids": [],
+        "bullet_ids": [],
+        "checkpoint_id": null,
+        "handoff_run_id": null,
+        "archive_message_id": "103",
+        "playbook_bullet_id": null
+      },
+      "preview": "From .grove/transcripts/mb-2lye/ses-run-mb-2lye-20260326T160712687.jsonl\n- Updat…"
+    },
+    {
+      "ordinal": 9,
+      "kind": "Checkpoint",
+      "heading": "Latest checkpoint",
+      "included": true,
+      "estimated_tokens": 50,
+      "char_count": 198,
+      "trim_reason": null,
+      "provenance": {
+        "source_ids": [],
+        "bullet_ids": [],
+        "checkpoint_id": "chk-run-mb-2lye-20260326T160712687-fallback-1",
+        "handoff_run_id": null,
+        "archive_message_id": null,
+        "playbook_bullet_id": null
+      },
+      "preview": "[CHECKPOINT]\nProgress: Synthetic fallback checkpoint after NoProgress\nNext step:…"
+    },
+    {
+      "ordinal": 10,
+      "kind": "EscalationContext",
+      "heading": "Escalation context (tier 0)",
+      "included": true,
+      "estimated_tokens": 13,
+      "char_count": 103,
+      "trim_reason": null,
+      "provenance": {
+        "source_ids": [],
+        "bullet_ids": [],
+        "checkpoint_id": null,
+        "handoff_run_id": null,
+        "archive_message_id": null,
+        "playbook_bullet_id": null
+      },
+      "preview": "[ESCALATION CONTEXT]\nTier: FirstAttempt (attempt 0)\nInitial attempt. Proceed nor…"
+    },
+    {
+      "ordinal": 11,
+      "kind": "Protocol",
+      "heading": "Grove protocol",
+      "included": true,
+      "estimated_tokens": 94,
+      "char_count": 374,
+      "trim_reason": null,
+      "provenance": {
+        "source_ids": [],
+        "bullet_ids": [],
+        "checkpoint_id": null,
+        "handoff_run_id": null,
+        "archive_message_id": null,
+        "playbook_bullet_id": null
+      },
+      "preview": "[GROVE PROTOCOL]\nEmit GROVE_RESULT, GROVE_ARTIFACTS, GROVE_LESSONS, GROVE_DECISI…"
+    }
+  ]
+}

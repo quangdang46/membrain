@@ -401,6 +401,16 @@ pub struct RepairHealthReport {
     pub remediation_steps: Vec<&'static str>,
 }
 
+/// Lifecycle counters that make background memory processing observable in health output.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+pub struct LifecycleHealthReport {
+    pub consolidated_to_cold_count: usize,
+    pub reconsolidation_active_count: usize,
+    pub forgetting_archive_count: usize,
+    pub background_maintenance_runs: usize,
+    pub background_maintenance_log: Vec<String>,
+}
+
 /// Inputs used to build the shared health report.
 #[derive(Debug, Clone, PartialEq)]
 pub struct BrainHealthInputs {
@@ -412,6 +422,7 @@ pub struct BrainHealthInputs {
     pub low_confidence_count: usize,
     pub decay_rate: f32,
     pub archive_count: usize,
+    pub lifecycle: LifecycleHealthReport,
     pub total_engrams: usize,
     pub avg_cluster_size: f32,
     pub top_engrams: Vec<(String, usize)>,
@@ -461,6 +472,7 @@ pub struct BrainHealthReport {
     pub low_confidence_count: usize,
     pub decay_rate: f32,
     pub archive_count: usize,
+    pub lifecycle: LifecycleHealthReport,
     pub total_engrams: usize,
     pub avg_cluster_size: f32,
     pub top_engrams: Vec<(String, usize)>,
@@ -525,7 +537,7 @@ impl BrainHealthReport {
                 inputs.uncertain_count,
             ),
             detail: format!(
-                "hot_memories={} hot_utilization_pct={} low_confidence={} conflicts={} uncertain={} hotspots={} highest_pressure={} affect_rows={} latest_affect_tick={}",
+                "hot_memories={} hot_utilization_pct={} low_confidence={} conflicts={} uncertain={} hotspots={} highest_pressure={} affect_rows={} latest_affect_tick={} consolidated_to_cold={} reconsolidation_active={} forgetting_archived={} maintenance_runs={}",
                 inputs.hot_memories,
                 hot_utilization_pct.round() as u64,
                 inputs.low_confidence_count,
@@ -534,7 +546,11 @@ impl BrainHealthReport {
                 attention.hotspot_count,
                 attention.highest_namespace_pressure,
                 inputs.affect_history_rows,
-                inputs.latest_affect_tick.unwrap_or(0)
+                inputs.latest_affect_tick.unwrap_or(0),
+                inputs.lifecycle.consolidated_to_cold_count,
+                inputs.lifecycle.reconsolidation_active_count,
+                inputs.lifecycle.forgetting_archive_count,
+                inputs.lifecycle.background_maintenance_runs,
             ),
             metrics: vec![
                 SubsystemMetric {
@@ -577,6 +593,22 @@ impl BrainHealthReport {
                     metric: "latest_affect_tick",
                     value: inputs.latest_affect_tick.unwrap_or(0),
                 },
+                SubsystemMetric {
+                    metric: "consolidated_to_cold_count",
+                    value: inputs.lifecycle.consolidated_to_cold_count as u64,
+                },
+                SubsystemMetric {
+                    metric: "reconsolidation_active_count",
+                    value: inputs.lifecycle.reconsolidation_active_count as u64,
+                },
+                SubsystemMetric {
+                    metric: "forgetting_archive_count",
+                    value: inputs.lifecycle.forgetting_archive_count as u64,
+                },
+                SubsystemMetric {
+                    metric: "background_maintenance_runs",
+                    value: inputs.lifecycle.background_maintenance_runs as u64,
+                },
             ],
             reasons: memory_reasons(
                 inputs.low_confidence_count,
@@ -584,6 +616,49 @@ impl BrainHealthReport {
                 inputs.uncertain_count,
             ),
         }];
+        subsystem_status.push(SubsystemStatus {
+            subsystem: "lifecycle",
+            state: if inputs.lifecycle.background_maintenance_runs == 0 {
+                SubsystemHealthState::Degraded
+            } else if inputs.lifecycle.reconsolidation_active_count > 0 {
+                SubsystemHealthState::Degraded
+            } else {
+                SubsystemHealthState::Healthy
+            },
+            detail: format!(
+                "consolidated_to_cold={} reconsolidation_active={} forgetting_archived={} maintenance_runs={} background_log={}",
+                inputs.lifecycle.consolidated_to_cold_count,
+                inputs.lifecycle.reconsolidation_active_count,
+                inputs.lifecycle.forgetting_archive_count,
+                inputs.lifecycle.background_maintenance_runs,
+                join_owned_or_none(&inputs.lifecycle.background_maintenance_log),
+            ),
+            metrics: vec![
+                SubsystemMetric {
+                    metric: "consolidated_to_cold_count",
+                    value: inputs.lifecycle.consolidated_to_cold_count as u64,
+                },
+                SubsystemMetric {
+                    metric: "reconsolidation_active_count",
+                    value: inputs.lifecycle.reconsolidation_active_count as u64,
+                },
+                SubsystemMetric {
+                    metric: "forgetting_archive_count",
+                    value: inputs.lifecycle.forgetting_archive_count as u64,
+                },
+                SubsystemMetric {
+                    metric: "background_maintenance_runs",
+                    value: inputs.lifecycle.background_maintenance_runs as u64,
+                },
+            ],
+            reasons: if inputs.lifecycle.background_maintenance_runs == 0 {
+                vec!["no_background_lifecycle_activity_recorded"]
+            } else if inputs.lifecycle.reconsolidation_active_count > 0 {
+                vec!["reconsolidation_window_open", "background_lifecycle_activity_recorded"]
+            } else {
+                vec!["background_lifecycle_activity_recorded"]
+            },
+        });
         subsystem_status.push(SubsystemStatus {
             subsystem: "cache",
             state: cache.state,
@@ -760,6 +835,38 @@ impl BrainHealthReport {
         );
         push_trend(
             &mut trends,
+            "lifecycle",
+            "consolidated_to_cold_count",
+            Some(0),
+            Some(inputs.lifecycle.consolidated_to_cold_count as u64),
+            higher_is_better,
+        );
+        push_trend(
+            &mut trends,
+            "lifecycle",
+            "reconsolidation_active_count",
+            Some(0),
+            Some(inputs.lifecycle.reconsolidation_active_count as u64),
+            lower_is_better,
+        );
+        push_trend(
+            &mut trends,
+            "lifecycle",
+            "forgetting_archive_count",
+            Some(0),
+            Some(inputs.lifecycle.forgetting_archive_count as u64),
+            higher_is_better,
+        );
+        push_trend(
+            &mut trends,
+            "lifecycle",
+            "background_maintenance_runs",
+            Some(0),
+            Some(inputs.lifecycle.background_maintenance_runs as u64),
+            higher_is_better,
+        );
+        push_trend(
+            &mut trends,
             "activity",
             "total_recalls",
             inputs.previous_total_recalls,
@@ -888,6 +995,7 @@ impl BrainHealthReport {
             low_confidence_count: inputs.low_confidence_count,
             decay_rate: inputs.decay_rate,
             archive_count: inputs.archive_count,
+            lifecycle: inputs.lifecycle,
             total_engrams: inputs.total_engrams,
             avg_cluster_size: inputs.avg_cluster_size,
             top_engrams: inputs.top_engrams,
@@ -1840,6 +1948,14 @@ fn join_or_none(values: &[&'static str]) -> String {
     }
 }
 
+fn join_owned_or_none(values: &[String]) -> String {
+    if values.is_empty() {
+        "none".to_string()
+    } else {
+        values.join(",")
+    }
+}
+
 fn backpressure_state(
     prefetch_queue_depth: usize,
     repair_queue_depth: Option<u64>,
@@ -1883,7 +1999,7 @@ fn lower_is_better(previous: u64, current: u64) -> TrendDirection {
 mod tests {
     use super::{
         AttentionNamespaceInputs, BrainHealthInputs, BrainHealthReport, FeatureAvailabilityEntry,
-        RepairHealthReport, SubsystemHealthState, TrendDirection,
+        LifecycleHealthReport, RepairHealthReport, SubsystemHealthState, TrendDirection,
     };
     use crate::api::{
         AvailabilityPosture, AvailabilityReason, AvailabilitySummary, NamespaceId, RemediationStep,
@@ -2058,6 +2174,17 @@ mod tests {
                 low_confidence_count: 3,
                 decay_rate: 0.012,
                 archive_count: 5,
+                lifecycle: LifecycleHealthReport {
+                    consolidated_to_cold_count: 12,
+                    reconsolidation_active_count: 2,
+                    forgetting_archive_count: 5,
+                    background_maintenance_runs: 3,
+                    background_maintenance_log: vec![
+                        "maintenance_consolidation_completed:cold_migration=12".to_string(),
+                        "maintenance_reconsolidation_applied:volatile_results=2".to_string(),
+                        "maintenance_forgetting_evaluated:archived=5".to_string(),
+                    ],
+                },
                 total_engrams: 14,
                 avg_cluster_size: 2.5,
                 top_engrams: vec![("ops".to_string(), 4)],
@@ -2200,6 +2327,36 @@ mod tests {
             report.repair.as_ref().map(|r| r.state),
             Some(SubsystemHealthState::Blocked)
         );
+        assert_eq!(report.lifecycle.consolidated_to_cold_count, 12);
+        assert_eq!(report.lifecycle.reconsolidation_active_count, 2);
+        assert_eq!(report.lifecycle.forgetting_archive_count, 5);
+        assert_eq!(report.lifecycle.background_maintenance_runs, 3);
+        assert!(report
+            .lifecycle
+            .background_maintenance_log
+            .iter()
+            .any(|entry| entry.contains("maintenance_consolidation_completed")));
+        assert!(report
+            .subsystem_status
+            .iter()
+            .find(|status| status.subsystem == "lifecycle")
+            .is_some_and(|status| {
+                status.detail.contains("consolidated_to_cold=12")
+                    && status.detail.contains("reconsolidation_active=2")
+                    && status.detail.contains("forgetting_archived=5")
+                    && status.detail.contains("maintenance_runs=3")
+                    && status.reasons.contains(&"reconsolidation_window_open")
+            }));
+        assert!(report
+            .trend_summary
+            .iter()
+            .find(|summary| summary.subsystem == "lifecycle")
+            .is_some_and(|summary| {
+                summary
+                    .trends
+                    .iter()
+                    .any(|trend| trend.metric == "consolidated_to_cold_count")
+            }));
         assert!(report
             .subsystem_status
             .iter()
@@ -2325,6 +2482,15 @@ mod tests {
                 low_confidence_count: 0,
                 decay_rate: 0.0,
                 archive_count: 0,
+                lifecycle: LifecycleHealthReport {
+                    consolidated_to_cold_count: 0,
+                    reconsolidation_active_count: 0,
+                    forgetting_archive_count: 0,
+                    background_maintenance_runs: 0,
+                    background_maintenance_log: vec![
+                        "no_background_lifecycle_activity_recorded".to_string()
+                    ],
+                },
                 total_engrams: 0,
                 avg_cluster_size: 0.0,
                 top_engrams: Vec::new(),

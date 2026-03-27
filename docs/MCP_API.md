@@ -5,6 +5,13 @@
 
 ## Global Design Rules
 
+Status note:
+- This document mixes the long-term MCP contract with the currently implemented runtime surfaces.
+- The live daemon/MCP tool catalog is presently the bounded six-tool surface (`encode`, `recall`, `inspect`, `why`, `health`, `doctor`) plus `resources.list`, `resource.read`, `streams.list`, and `shutdown` on the transport side.
+- The broader `memory_*`, feature-specific, and later-stage operator tools described below remain the canonical target contract unless a section explicitly says they are live today.
+- Normal daemon/MCP recall now returns hydrated evidence on success; explicit degraded/fallback language below should be read as applying to no-hydrated-evidence, capped, or repair/degraded cases rather than the default success path.
+- `membrain mcp` is a stdio transport adapter with process-local reuse only; daemon-owned repeated-request warm-runtime guarantees belong to the long-lived Unix-socket daemon.
+
 1. Every MCP tool preserves namespace and policy context
 2. Never bypass governance checks
 3. Return enough metadata for explainability
@@ -89,6 +96,8 @@ When degraded or repair-aware serving changes what can still be queried or mutat
 - `policy_filters_applied` should still record which policies materially shaped the result
 
 #### Idempotency Expectations
+
+The table below is the canonical contract vocabulary for the full planned MCP surface. It is broader than the live MCP tool catalog advertised by the current runtime. For the currently exposed runtime tools, the relevant entries are `health()`, `doctor()`, `why()`, and the recall/inspect semantics that map onto `memory_recall` / `memory_inspect`.
 
 | Tool | Idempotent? | Notes |
 |------|--------------|-------|
@@ -213,6 +222,8 @@ membrain mcp
 ```
 
 This launches Membrain as a stdio MCP-style server so clients can spawn it directly instead of manually connecting to the Unix daemon socket.
+
+This stdio path is a transport adapter, not the authoritative warm-runtime service. It may reuse state within the current process, but runtime-authority reporting must keep that scoped to local-process guarantees like `local_process_state` and `best_effort_same_process_reuse`; daemon-owned guarantees like `daemon_owned_runtime_state` and `repeated_request_warmth` belong to the long-lived Unix-socket daemon. The same rule applies to `embedder_runtime`: stdio may report process-local `not_loaded` → `loaded` or `warm` transitions, but only the daemon can claim long-lived repeated-request warm reuse as the authoritative runtime.
 
 ### Claude Code integration
 
@@ -368,7 +379,7 @@ Bounded search over indexes, tags, entities, time ranges, or semantic hints.
 
 ### `memory_recall`
 
-Task-oriented bounded retrieval for context construction. The primary retrieval tool.
+Task-oriented bounded retrieval for context construction. The canonical retrieval contract; the current live MCP runtime exposes this behavior through the bounded `recall` tool rather than a `memory_recall`-named tool.
 
 **Canonical request model**:
 - `query_text` or task text as the primary cue
@@ -385,7 +396,9 @@ Task-oriented bounded retrieval for context construction. The primary retrieval 
 
 When `at_snapshot` is present, the request becomes bounded historical inspection rather than live recall: later-created memories are excluded, time-sensitive strength or freshness is recomputed against the snapshot tick, and the result must disclose partial/degraded historical visibility if current retention, policy, or repair state prevents a full reconstruction of what was once visible.
 
-**Outputs**: the canonical `RetrievalResult` envelope, including bounded `evidence_pack`, optional `action_pack`, `outcome_class`, score summaries, graph-assistance and associative-context summaries when applicable, contradiction markers, decaying-soon markers, deferred-payload state, packaging metadata for prompt construction, and explain metadata sufficient to summarize route choice, omitted-result reasons, provenance, freshness, cache or degraded-serving behavior, and full trace stages when requested
+**Outputs**: the canonical `RetrievalResult` envelope, including bounded `evidence_pack`, optional `action_pack`, `outcome_class`, score summaries, graph-assistance and associative-context summaries when applicable, contradiction markers, decaying-soon markers, deferred-payload state, packaging metadata for prompt construction, and explain metadata sufficient to summarize route choice, omitted-result reasons, provenance, freshness, cache or degraded-serving behavior, and full trace stages when requested.
+
+On the live normal-success path, `evidence_pack` should contain hydrated canonical evidence rather than planner-only route scaffolding. Explicit degraded summaries belong to no-hydrated-evidence, capped, repair-limited, or otherwise degraded/fallback cases and should remain machine-visible as degraded state rather than masquerading as ordinary success retrieval.
 
 When explanation is embedded, `memory_recall` should preserve the same stable machine-readable families named in the canonical retrieval contract: `route_summary`, `result_reasons`, `omitted_summary`, `policy_summary`, `provenance_summary`, `freshness_markers`, `conflict_markers`, `trace_stages`, `uncertainty_markers` when full routing detail is requested.
 
@@ -422,7 +435,7 @@ Create or update explicit relations between memories, entities, or goals.
 
 ### `memory_inspect`
 
-Retrieve diagnostic and structural details about a memory.
+Retrieve diagnostic and structural details about a memory. The current live MCP runtime exposes this behavior through the bounded `inspect` tool rather than a `memory_inspect`-named tool.
 
 **Exposes**: current tier, lineage, policy flags, lifecycle state, archive reason and restore eligibility when relevant, index presence, graph neighborhood summary, decay/retention info, cache-related routing metadata when relevant, provenance summary, freshness markers, duplicate-family or interference-maintenance summaries when present, degraded or partial-fidelity markers when archival recovery is incomplete, passive-observation inspect metadata (`source_kind`, `write_decision`, `captured_as_observation`, `observation_source`, `observation_chunk_id`, `retention_marker`) when relevant, and linked contradiction state (`conflict_state`, related `ConflictRecord` handles, preferred memory if resolved)
 
@@ -430,7 +443,7 @@ When `memory_inspect` includes embedded explanation or route context, it should 
 
 ### `memory_explain`
 
-Explain why a memory was stored, routed, recalled, ranked, filtered, demoted, or forgotten.
+Explain why a memory was stored, routed, recalled, ranked, filtered, demoted, or forgotten. The current live MCP runtime exposes the currently landed explanation behavior through the bounded `why` tool rather than a `memory_explain`-named tool.
 
 **Explains**: routing signals, ranking components, cache family/event/reason metadata when cache behavior materially affected the route, policy filters, exclusion or omission reasons, lineage ancestry, consolidation ancestry, provenance summary, freshness markers, trace stages when full detail is requested, which context/emotional/tagging inputs were explicit versus bounded-derived, whether duplicate-family or interference lanes fired/bypassed/deferred, forgetting/demotion reasons, archive-versus-delete reasoning, restore eligibility or denial basis when relevant, and any contradiction resolution path (open conflict, supersession, or authoritative override)
 
@@ -492,12 +505,13 @@ Return the bounded operator summary shared with CLI `membrain stats`.
 
 ### `doctor()`
 
-Diagnose corruption, stale derived state, and degraded-serving posture.
+Diagnose current runtime posture, stale derived state, and degraded-serving posture.
 
 **Returns**: `{ checks: [{name, surface_kind, status, severity, affected_scope, degraded_impact?, remediation?}], summary, repair_engine_component, runbook_hints, availability?, remediation?, error_kind? }`
 
 **Rules**:
 - `doctor()` is a read-only diagnostic surface; repair remains an explicit `memory_repair` or CLI `membrain repair ...` flow.
+- In the currently landed runtime, `doctor()` should be read as a bounded operator report over the active mode, health report, feature availability, and surfaced checks; it is not evidence that every later-stage subsystem in the design contract is already implemented.
 - Per-check machine-readable results should stay stable enough that CLI text, daemon/JSON-RPC, and MCP can agree on what failed, which scope is affected, and what remediation comes next.
 - `summary` should count ok/warn/fail check totals, and `runbook_hints[*]` should point to the canonical docs section operators should follow for the surfaced degraded-mode or incident class.
 - When authoritative inputs are unreadable or corruption blocks safe serving, the response should use the shared `error_kind`, `remediation`, and `availability` semantics rather than burying the state in prose only.
@@ -647,10 +661,12 @@ Adjust visibility for cross-agent access without changing the memory's canonical
 
 ### `health()` — Feature 10
 
-**Returns**: `BrainHealthReport` as JSON (tiers, quality, engrams, signals, activity)
+**Returns**: `BrainHealthReport` as JSON for the current visible runtime posture (tiers, quality, engrams, signals, activity, and feature availability within the active mode)
 
 **Rules**:
 - `health()` is the bounded machine-readable operator dashboard shared with CLI `membrain health`; transport-specific rendering may differ, but the underlying report semantics must not.
+- In stdio MCP mode, `health()` reports process-local runtime posture and best-effort reuse within that process. Only the Unix-socket daemon may claim daemon-owned repeated-request warm-runtime guarantees.
+- `health()` and `doctor()` should surface `embedder_runtime` explicitly with stable machine-readable state (`not_loaded`, `loaded`, `warm`, `degraded`, `unavailable`) plus backend/generation/cache counters so clients do not guess whether fastembed is actually operational in the current runtime.
 - The report should preserve tier and capacity counters, quality/conflict/uncertainty signals, runtime activity, repair/backpressure indicators, availability posture, explicit degraded-status guidance, and feature-availability facts strongly enough that automation can make the same decisions a human operator would make from the CLI dashboard.
 - The machine-readable view should expose enough detail to distinguish healthy service from degraded-but-servable posture, including repair-queue growth or backlog signals, backpressure state, which read or write paths still survive, and which feature surfaces are unavailable or maturity-gated.
 - The canonical `BrainHealthReport` should expose `dashboard_views`, `alerts`, and `drill_down_paths` in addition to raw counters so MCP clients can render the same overview, alerting, and subsystem-investigation flow as CLI and daemon surfaces without inventing wrapper-local logic.

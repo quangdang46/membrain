@@ -1,0 +1,63 @@
+{"ts":"2026-03-26T17:37:12.999344348Z","kind":"session_started","session_id":"ses-run-mb-uw37-20260326T173712975"}
+{"ts":"2026-03-26T17:43:30.220991735Z","kind":"stdout","line":"Read and verified."}
+{"ts":"2026-03-26T17:43:30.221423402Z","kind":"stdout","line":""}
+{"ts":"2026-03-26T17:43:30.221429222Z","kind":"stdout","line":"GROVE_RESULT: `mb-uw37` is already satisfied in the live tree; no new code changes were needed."}
+{"ts":"2026-03-26T17:43:30.221429222Z","kind":"protocol","event":{"type":"result","summary":"`mb-uw37` is already satisfied in the live tree; no new code changes were needed."}}
+{"ts":"2026-03-26T17:43:30.221438206Z","kind":"stdout","line":"GROVE_ARTIFACTS:"}
+{"ts":"2026-03-26T17:43:30.221438206Z","kind":"protocol","event":{"type":"artifacts","items":[]}}
+{"ts":"2026-03-26T17:43:30.221443924Z","kind":"stdout","line":"- `crates/membrain-daemon/src/daemon.rs:5301` still uses degraded wording only for explicit no-hydrated-evidence explain fallback"}
+{"ts":"2026-03-26T17:43:30.221443924Z","kind":"protocol","event":{"type":"artifacts","items":["`crates/membrain-daemon/src/daemon.rs:5301` still uses degraded wording only for explicit no-hydrated-evidence explain fallback"]}}
+{"ts":"2026-03-26T17:43:30.221450050Z","kind":"stdout","line":"- `crates/membrain-daemon/src/daemon.rs:5306` builds real runtime `RetrievalResultSet` evidence from stored records"}
+{"ts":"2026-03-26T17:43:30.221450050Z","kind":"protocol","event":{"type":"artifacts","items":["`crates/membrain-daemon/src/daemon.rs:5306` builds real runtime `RetrievalResultSet` evidence from stored records"]}}
+{"ts":"2026-03-26T17:43:30.221455665Z","kind":"stdout","line":"- `crates/membrain-daemon/src/daemon.rs:5410` adds hydrated entries via `AnsweredFrom::Tier2Indexed`"}
+{"ts":"2026-03-26T17:43:30.221455665Z","kind":"protocol","event":{"type":"artifacts","items":["`crates/membrain-daemon/src/daemon.rs:5410` adds hydrated entries via `AnsweredFrom::Tier2Indexed`"]}}
+{"ts":"2026-03-26T17:43:30.221461689Z","kind":"stdout","line":"- `crates/membrain-daemon/src/daemon.rs:5466` clears degraded summary on nominal context-budget results"}
+{"ts":"2026-03-26T17:43:30.221461689Z","kind":"protocol","event":{"type":"artifacts","items":["`crates/membrain-daemon/src/daemon.rs:5466` clears degraded summary on nominal context-budget results"]}}
+{"ts":"2026-03-26T17:43:30.221467202Z","kind":"stdout","line":"- `crates/membrain-daemon/src/daemon.rs:5568` sets degraded summary only when `evidence_pack` is empty"}
+{"ts":"2026-03-26T17:43:30.221467202Z","kind":"protocol","event":{"type":"artifacts","items":["`crates/membrain-daemon/src/daemon.rs:5568` sets degraded summary only when `evidence_pack` is empty"]}}
+{"ts":"2026-03-26T17:43:30.221472613Z","kind":"stdout","line":"- `crates/membrain-daemon/src/daemon.rs:8513` covers semantic recall hydration + default budget"}
+{"ts":"2026-03-26T17:43:30.221472613Z","kind":"protocol","event":{"type":"artifacts","items":["`crates/membrain-daemon/src/daemon.rs:8513` covers semantic recall hydration + default budget"]}}
+{"ts":"2026-03-26T17:43:30.221477922Z","kind":"stdout","line":"- `crates/membrain-daemon/src/daemon.rs:8591` covers persisted-state reload hydration for inspect/recall/explain"}
+{"ts":"2026-03-26T17:43:30.221477922Z","kind":"protocol","event":{"type":"artifacts","items":["`crates/membrain-daemon/src/daemon.rs:8591` covers persisted-state reload hydration for inspect/recall/explain"]}}
+{"ts":"2026-03-26T17:43:30.221483639Z","kind":"stdout","line":"- `crates/membrain-daemon/src/daemon.rs:8709` covers explicit degraded no-match explain behavior"}
+{"ts":"2026-03-26T17:43:30.221483639Z","kind":"protocol","event":{"type":"artifacts","items":["`crates/membrain-daemon/src/daemon.rs:8709` covers explicit degraded no-match explain behavior"]}}
+{"ts":"2026-03-26T17:43:30.221488949Z","kind":"stdout","line":"- `crates/membrain-cli/tests/cli_end_to_end.rs:97` covers CLI restart hydration"}
+{"ts":"2026-03-26T17:43:30.221488949Z","kind":"protocol","event":{"type":"artifacts","items":["`crates/membrain-cli/tests/cli_end_to_end.rs:97` covers CLI restart hydration"]}}
+{"ts":"2026-03-26T17:43:30.221502630Z","kind":"stdout","line":"- `crates/membrain-cli/tests/cli_end_to_end.rs:167` covers MCP restart hydration"}
+{"ts":"2026-03-26T17:43:30.221502630Z","kind":"protocol","event":{"type":"artifacts","items":["`crates/membrain-cli/tests/cli_end_to_end.rs:167` covers MCP restart hydration"]}}
+{"ts":"2026-03-26T17:43:30.221506918Z","kind":"stdout","line":"- `crates/membrain-core/tests/recall_pipeline_integration.rs:255` covers empty-result envelope semantics"}
+{"ts":"2026-03-26T17:43:30.221506918Z","kind":"protocol","event":{"type":"artifacts","items":["`crates/membrain-core/tests/recall_pipeline_integration.rs:255` covers empty-result envelope semantics"]}}
+{"ts":"2026-03-26T17:43:30.221511002Z","kind":"stdout","line":""}
+{"ts":"2026-03-26T17:43:30.221512737Z","kind":"stdout","line":"GROVE_LESSONS:"}
+{"ts":"2026-03-26T17:43:30.221512737Z","kind":"protocol","event":{"type":"lessons","items":[]}}
+{"ts":"2026-03-26T17:43:30.221516311Z","kind":"stdout","line":"- The task text is stale relative to the current implementation."}
+{"ts":"2026-03-26T17:43:30.221516311Z","kind":"protocol","event":{"type":"lessons","items":["The task text is stale relative to the current implementation."]}}
+{"ts":"2026-03-26T17:43:30.221520394Z","kind":"stdout","line":"- Normal daemon/MCP semantic recall already returns hydrated `evidence_pack` entries."}
+{"ts":"2026-03-26T17:43:30.221520394Z","kind":"protocol","event":{"type":"lessons","items":["Normal daemon/MCP semantic recall already returns hydrated `evidence_pack` entries."]}}
+{"ts":"2026-03-26T17:43:30.221524376Z","kind":"stdout","line":"- Degraded summaries are already confined to explicit empty/no-match cases."}
+{"ts":"2026-03-26T17:43:30.221524376Z","kind":"protocol","event":{"type":"lessons","items":["Degraded summaries are already confined to explicit empty/no-match cases."]}}
+{"ts":"2026-03-26T17:43:30.221528358Z","kind":"stdout","line":""}
+{"ts":"2026-03-26T17:43:30.221530094Z","kind":"stdout","line":"GROVE_DECISIONS:"}
+{"ts":"2026-03-26T17:43:30.221530094Z","kind":"protocol","event":{"type":"decision","items":[]}}
+{"ts":"2026-03-26T17:43:30.221533565Z","kind":"stdout","line":"- I did not reopen or duplicate finished recall-path work."}
+{"ts":"2026-03-26T17:43:30.221533565Z","kind":"protocol","event":{"type":"decision","items":["I did not reopen or duplicate finished recall-path work."]}}
+{"ts":"2026-03-26T17:43:30.221537649Z","kind":"stdout","line":"- I registered with MCP Agent Mail as `CoralOtter`."}
+{"ts":"2026-03-26T17:43:30.221537649Z","kind":"protocol","event":{"type":"decision","items":["I registered with MCP Agent Mail as `CoralOtter`."]}}
+{"ts":"2026-03-26T17:43:30.221541529Z","kind":"stdout","line":"- I opened coordination channels with `GentleDeer`, `BlackEagle`, and `GentleSparrow`."}
+{"ts":"2026-03-26T17:43:30.221541529Z","kind":"protocol","event":{"type":"decision","items":["I opened coordination channels with `GentleDeer`, `BlackEagle`, and `GentleSparrow`."]}}
+{"ts":"2026-03-26T17:43:30.221545408Z","kind":"stdout","line":"- I used `bv --robot-triage`; it still ranks `mb-uw37` highest because bead state is stale, but open actionable follow-up work is `mb-1ps7`."}
+{"ts":"2026-03-26T17:43:30.221545408Z","kind":"protocol","event":{"type":"decision","items":["I used `bv --robot-triage`; it still ranks `mb-uw37` highest because bead state is stale, but open actionable follow-up work is `mb-1ps7`."]}}
+{"ts":"2026-03-26T17:43:30.221549390Z","kind":"stdout","line":""}
+{"ts":"2026-03-26T17:43:30.221551228Z","kind":"stdout","line":"GROVE_WARNINGS:"}
+{"ts":"2026-03-26T17:43:30.221551228Z","kind":"protocol","event":{"type":"warning","items":[]}}
+{"ts":"2026-03-26T17:43:30.221554801Z","kind":"stdout","line":"- Bead/triage state is behind code reality: `mb-uw37` still shows in progress even though the implementation/tests are present."}
+{"ts":"2026-03-26T17:43:30.221554801Z","kind":"protocol","event":{"type":"warning","items":["Bead/triage state is behind code reality: `mb-uw37` still shows in progress even though the implementation/tests are present."]}}
+{"ts":"2026-03-26T17:43:30.221561540Z","kind":"stdout","line":"- Broad broadcast intro via Agent Mail was blocked by contact policy, so I used explicit handshakes instead."}
+{"ts":"2026-03-26T17:43:30.221561540Z","kind":"protocol","event":{"type":"warning","items":["Broad broadcast intro via Agent Mail was blocked by contact policy, so I used explicit handshakes instead."]}}
+{"ts":"2026-03-26T17:43:30.221566440Z","kind":"stdout","line":""}
+{"ts":"2026-03-26T17:43:30.221568176Z","kind":"stdout","line":"Next actionable bead:"}
+{"ts":"2026-03-26T17:43:30.221570014Z","kind":"stdout","line":"- `mb-1ps7` — “Replace planner-only explain with hydrated why evidence”"}
+{"ts":"2026-03-26T17:43:30.221571851Z","kind":"stdout","line":""}
+{"ts":"2026-03-26T17:43:30.221573587Z","kind":"stdout","line":"GROVE_EXIT: false"}
+{"ts":"2026-03-26T17:43:30.221573587Z","kind":"protocol","event":{"type":"exit","value":false}}
+{"ts":"2026-03-26T17:43:30.521900195Z","kind":"session_ended","exit_code":0}

@@ -1,5 +1,6 @@
 use serde_json::{json, Value};
-use std::process::Command;
+use std::io::{BufRead, BufReader, Write};
+use std::process::{Child, Command, Stdio};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 fn test_db_root() -> std::path::PathBuf {
@@ -12,9 +13,13 @@ fn test_db_root() -> std::path::PathBuf {
 
 fn run_membrain(args: &[&str]) -> (bool, String, String) {
     let db_root = test_db_root();
+    run_membrain_with_db(&db_root, args)
+}
+
+fn run_membrain_with_db(db_root: &std::path::Path, args: &[&str]) -> (bool, String, String) {
     let output = Command::new(env!("CARGO_BIN_EXE_membrain"))
         .arg("--db-path")
-        .arg(&db_root)
+        .arg(db_root)
         .args(args)
         .output()
         .expect("membrain binary should run");
@@ -30,10 +35,38 @@ fn parse_json(stdout: &str) -> Value {
     serde_json::from_str(stdout).expect("command should emit valid json")
 }
 
+fn spawn_membrain_mcp(db_root: &std::path::Path) -> Child {
+    Command::new(env!("CARGO_BIN_EXE_membrain"))
+        .arg("--db-path")
+        .arg(db_root)
+        .arg("mcp")
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("membrain mcp should spawn")
+}
+
+fn send_mcp_request(child: &mut Child, request: Value) -> Value {
+    let stdin = child.stdin.as_mut().expect("child stdin should be piped");
+    let payload = serde_json::to_string(&request).expect("request should serialize");
+    stdin
+        .write_all(payload.as_bytes())
+        .expect("request should write");
+    stdin.write_all(b"\n").expect("newline should write");
+    stdin.flush().expect("stdin should flush");
+
+    let stdout = child.stdout.as_mut().expect("child stdout should be piped");
+    let mut reader = BufReader::new(stdout);
+    let mut line = String::new();
+    reader.read_line(&mut line).expect("response should read");
+    serde_json::from_str(&line).expect("response should be valid json")
+}
+
 #[test]
 fn cli_encode_json_emits_expected_machine_readable_fields() {
     let (ok, stdout, stderr) = run_membrain(&[
-        "encode",
+        "remember",
         "Paris is the capital of France",
         "--namespace",
         "test_ns",
@@ -61,18 +94,183 @@ fn cli_encode_json_emits_expected_machine_readable_fields() {
 }
 
 #[test]
+fn cli_restart_rehydrates_persisted_memory_for_inspect_recall_and_explain() {
+    let db_root = test_db_root();
+
+    let (encode_ok, encode_stdout, encode_stderr) = run_membrain_with_db(
+        &db_root,
+        &[
+            "remember",
+            "Dang prefers concise answers",
+            "--namespace",
+            "test_ns",
+            "--json",
+        ],
+    );
+    assert!(encode_ok, "stderr: {encode_stderr}");
+    let encode_json = parse_json(&encode_stdout);
+    let memory_id = encode_json["result"]["memory_id"]
+        .as_u64()
+        .expect("encode should return memory id");
+
+    let (inspect_ok, inspect_stdout, inspect_stderr) = run_membrain_with_db(
+        &db_root,
+        &[
+            "inspect",
+            "--id",
+            &memory_id.to_string(),
+            "--namespace",
+            "test_ns",
+            "--json",
+        ],
+    );
+    assert!(inspect_ok, "stderr: {inspect_stderr}");
+    let inspect_json = parse_json(&inspect_stdout);
+    assert_eq!(inspect_json["result"]["memory_id"], json!(memory_id));
+
+    let (recall_ok, recall_stdout, recall_stderr) = run_membrain_with_db(
+        &db_root,
+        &[
+            "recall",
+            &format!("memory:{memory_id}"),
+            "--namespace",
+            "test_ns",
+            "--json",
+        ],
+    );
+    assert!(recall_ok, "stderr: {recall_stderr}");
+    let recall_json = parse_json(&recall_stdout);
+    assert_eq!(
+        recall_json["result"]["evidence_pack"][0]["result"]["memory_id"],
+        json!(memory_id)
+    );
+
+    let (explain_ok, explain_stdout, explain_stderr) = run_membrain_with_db(
+        &db_root,
+        &[
+            "why",
+            &memory_id.to_string(),
+            "--namespace",
+            "test_ns",
+            "--json",
+        ],
+    );
+    assert!(explain_ok, "stderr: {explain_stderr}");
+    let explain_json = parse_json(&explain_stdout);
+    assert_eq!(
+        explain_json["result"]["evidence_pack"][0]["result"]["memory_id"],
+        json!(memory_id)
+    );
+}
+
+#[test]
+fn mcp_restart_rehydrates_persisted_memory_for_recall_inspect_and_why() {
+    let db_root = test_db_root();
+
+    let (encode_ok, encode_stdout, encode_stderr) = run_membrain_with_db(
+        &db_root,
+        &[
+            "remember",
+            "Dang prefers concise answers",
+            "--namespace",
+            "test_ns",
+            "--json",
+        ],
+    );
+    assert!(encode_ok, "stderr: {encode_stderr}");
+    let encode_json = parse_json(&encode_stdout);
+    let expected_memory_id = encode_json["result"]["memory_id"]
+        .as_u64()
+        .expect("encode should return memory id");
+
+    let mut mcp = spawn_membrain_mcp(&db_root);
+    let recall_json = send_mcp_request(
+        &mut mcp,
+        json!({
+            "jsonrpc": "2.0",
+            "method": "recall",
+            "params": {"query_text": format!("memory:{expected_memory_id}"), "namespace": "test_ns"},
+            "id": "mcp-recall-restart"
+        }),
+    );
+    assert_eq!(recall_json["result"]["status"], json!("ok"));
+    let memory_id = recall_json["result"]["retrieval"]["result"]["evidence_pack"][0]["result"]["memory_id"]
+        .as_u64()
+        .expect("recalled evidence should include memory id");
+    assert_eq!(memory_id, expected_memory_id);
+
+    let inspect_json = send_mcp_request(
+        &mut mcp,
+        json!({
+            "jsonrpc": "2.0",
+            "method": "inspect",
+            "params": {"id": memory_id, "namespace": "test_ns"},
+            "id": "mcp-inspect-restart"
+        }),
+    );
+    assert_eq!(inspect_json["result"]["status"], json!("ok"));
+    assert_eq!(inspect_json["result"]["payload"]["memory_id"], json!(memory_id));
+
+    let why_json = send_mcp_request(
+        &mut mcp,
+        json!({
+            "jsonrpc": "2.0",
+            "method": "why",
+            "params": {"id": memory_id, "namespace": "test_ns"},
+            "id": "mcp-why-restart"
+        }),
+    );
+    assert_eq!(why_json["result"]["status"], json!("ok"));
+    assert_eq!(
+        why_json["result"]["retrieval"]["result"]["explain"]["query_by_example"]["materialized_seed_descriptors"][0],
+        json!(format!("memory:{memory_id}"))
+    );
+
+    let shutdown_json = send_mcp_request(
+        &mut mcp,
+        json!({
+            "jsonrpc": "2.0",
+            "method": "shutdown",
+            "params": {},
+            "id": "mcp-shutdown"
+        }),
+    );
+    assert_eq!(shutdown_json["result"]["shutting_down"], json!(true));
+    let status = mcp.wait().expect("mcp process should exit");
+    assert!(status.success(), "mcp exit status: {status}");
+}
+
+#[test]
 fn cli_recall_json_preserves_route_and_result_fields() {
-    let (ok, stdout, stderr) = run_membrain(&[
-        "recall",
-        "capital of France",
-        "--namespace",
-        "test_ns",
-        "--top",
-        "3",
-        "--explain",
-        "full",
-        "--json",
-    ]);
+    let db_root = test_db_root();
+    let (remember_ok, _remember_stdout, remember_stderr) = run_membrain_with_db(
+        &db_root,
+        &[
+            "remember",
+            "Paris is the capital of France",
+            "--namespace",
+            "test_ns",
+            "--kind",
+            "semantic",
+            "--json",
+        ],
+    );
+    assert!(remember_ok, "stderr: {remember_stderr}");
+
+    let (ok, stdout, stderr) = run_membrain_with_db(
+        &db_root,
+        &[
+            "recall",
+            "capital of France",
+            "--namespace",
+            "test_ns",
+            "--top",
+            "3",
+            "--explain",
+            "full",
+            "--json",
+        ],
+    );
 
     assert!(ok, "stderr: {stderr}");
     let json = parse_json(&stdout);
@@ -84,13 +282,23 @@ fn cli_recall_json_preserves_route_and_result_fields() {
         .as_bool()
         .is_some());
     assert!(json["result"]["evidence_pack"].is_array());
+    assert_eq!(json["result"]["evidence_pack"][0]["result"]["compact_text"], "Paris is the capital of France");
     assert_eq!(json["result"]["output_mode"], "balanced");
-    assert!(json["result"]["action_pack"].is_null());
+    assert!(json["result"]["action_pack"].is_array());
     assert_eq!(json["result"]["packaging_metadata"]["result_budget"], 3);
     assert_eq!(
         json["result"]["packaging_metadata"]["packaging_mode"],
-        "evidence_only"
+        "evidence_plus_action"
     );
+    assert_eq!(
+        json["result"]["packaging_metadata"]["degraded_summary"],
+        json!(null)
+    );
+    assert!(json["result"]["explain"]["result_reasons"]
+        .as_array()
+        .expect("result_reasons should be an array")
+        .iter()
+        .any(|value| value["reason_code"] == "semantic_recall_trace"));
 }
 
 #[test]
@@ -121,13 +329,31 @@ fn cli_recall_high_mode_can_suppress_action_pack_when_policy_caveat_exists() {
 
 #[test]
 fn cli_explain_json_preserves_trace_stages_and_patterns() {
-    let (ok, stdout, stderr) = run_membrain(&[
-        "explain",
-        "how to deploy the service after the last incident?",
-        "--namespace",
-        "test_ns",
-        "--json",
-    ]);
+    let db_root = test_db_root();
+    let (remember_ok, _remember_stdout, remember_stderr) = run_membrain_with_db(
+        &db_root,
+        &[
+            "remember",
+            "deploy the service after the last incident by restoring the healthy release and verifying the rollback checklist",
+            "--namespace",
+            "test_ns",
+            "--kind",
+            "semantic",
+            "--json",
+        ],
+    );
+    assert!(remember_ok, "stderr: {remember_stderr}");
+
+    let (ok, stdout, stderr) = run_membrain_with_db(
+        &db_root,
+        &[
+            "why",
+            "how to deploy the service after the last incident?",
+            "--namespace",
+            "test_ns",
+            "--json",
+        ],
+    );
 
     assert!(ok, "stderr: {stderr}");
     let json = parse_json(&stdout);
@@ -136,6 +362,7 @@ fn cli_explain_json_preserves_trace_stages_and_patterns() {
     assert_eq!(json["outcome_class"], "accepted");
     assert!(json["trace_stages"].is_array());
     assert_eq!(json["result"]["explain"]["ranking_profile"], "balanced");
+    assert_eq!(json["result"]["evidence_pack"][0]["result"]["memory_id"], 1);
     assert!(json["result"]["explain"]["result_reasons"]
         .as_array()
         .expect("result_reasons should be an array")
@@ -143,6 +370,11 @@ fn cli_explain_json_preserves_trace_stages_and_patterns() {
         .any(|value| value["detail"]
             .as_str()
             .is_some_and(|detail| detail.contains("matched_patterns=how to"))));
+    assert!(json["result"]["explain"]["result_reasons"]
+        .as_array()
+        .expect("result_reasons should be an array")
+        .iter()
+        .any(|value| value["reason_code"] == "semantic_explain_trace"));
 }
 
 #[test]
@@ -502,8 +734,44 @@ fn cli_doctor_json_reports_health_and_repair_state() {
     assert_eq!(json["summary"]["fail_checks"], 0);
     assert_eq!(json["repair_engine_component"], "engine.repair");
     assert!(json["checks"].is_array());
+    assert_eq!(json["checks"][1]["name"], "derived_indexes");
+    assert_eq!(json["checks"][1]["status"], "warn");
+    assert_eq!(json["checks"][3]["name"], "serving_posture");
+    assert_eq!(json["checks"][3]["status"], "ok");
     assert_eq!(json["checks"][4]["name"], "lease_freshness");
     assert_eq!(json["checks"][4]["status"], "ok");
+    assert_eq!(
+        json["health"]["feature_availability"][1]["feature"],
+        "runtime_authority"
+    );
+    assert_eq!(
+        json["health"]["feature_availability"][1]["posture"],
+        "Degraded"
+    );
+    assert_eq!(
+        json["health"]["feature_availability"][1]["note"],
+        "mode=stdio_facade authoritative_runtime=false maintenance_active=false warm_runtime_guarantees=local_process_state,best_effort_same_process_reuse,stdio_transport"
+    );
+    assert_eq!(
+        json["health"]["feature_availability"][2]["feature"],
+        "embedder_runtime"
+    );
+    assert_eq!(
+        json["health"]["feature_availability"][2]["posture"],
+        "Degraded"
+    );
+    assert_eq!(
+        json["health"]["feature_availability"][2]["note"],
+        "state=not_loaded backend=local_fastembed generation=all-minilm-l6-v2@default dimensions=384 loads=0 requests=0 cache_hits=0 cache_misses=0"
+    );
+    assert_eq!(json["health"]["lifecycle"]["consolidated_to_cold_count"], 12);
+    assert_eq!(json["health"]["lifecycle"]["reconsolidation_active_count"], 2);
+    assert_eq!(json["health"]["lifecycle"]["forgetting_archive_count"], 5);
+    assert_eq!(json["health"]["lifecycle"]["background_maintenance_runs"], 3);
+    assert_eq!(
+        json["health"]["lifecycle"]["background_maintenance_log"][0],
+        "maintenance_consolidation_completed:cold_migration=12"
+    );
     assert!(json["runbook_hints"].is_array());
     assert_eq!(
         json["runbook_hints"][0]["runbook_id"],
@@ -541,6 +809,24 @@ fn cli_health_json_reports_dashboard_contract_fields() {
     assert_eq!(json["unresolved_conflicts"], 1);
     assert_eq!(json["availability_posture"], json!(null));
     assert_eq!(json["backpressure_state"], "normal");
+    assert_eq!(
+        json["feature_availability"][1]["feature"],
+        "runtime_authority"
+    );
+    assert_eq!(json["feature_availability"][1]["posture"], "Degraded");
+    assert_eq!(
+        json["feature_availability"][1]["note"],
+        "mode=stdio_facade authoritative_runtime=false maintenance_active=false warm_runtime_guarantees=local_process_state,best_effort_same_process_reuse,stdio_transport"
+    );
+    assert_eq!(
+        json["feature_availability"][2]["feature"],
+        "embedder_runtime"
+    );
+    assert_eq!(json["feature_availability"][2]["posture"], "Degraded");
+    assert_eq!(
+        json["feature_availability"][2]["note"],
+        "state=not_loaded backend=local_fastembed generation=all-minilm-l6-v2@default dimensions=384 loads=0 requests=0 cache_hits=0 cache_misses=0"
+    );
     assert_eq!(json["attention"]["total_recall_count"], 29);
     assert_eq!(json["attention"]["hotspot_count"], 2);
     assert_eq!(json["attention"]["highest_namespace_pressure"], 6);
@@ -608,6 +894,8 @@ fn cli_health_human_output_renders_operator_dashboard_sections() {
     assert!(stdout.contains("SUBSYSTEM STATUS"));
     assert!(stdout.contains("ACTIVITY"));
     assert!(stdout.contains("Features      health:full"));
+    assert!(stdout.contains("runtime_authority:degraded (mode=stdio_facade authoritative_runtime=false maintenance_active=false warm_runtime_guarantees=local_process_state,best_effort_same_process_reuse,stdio_transport)"));
+    assert!(stdout.contains("embedder_runtime:degraded (state=not_loaded backend=local_fastembed generation=all-minilm-l6-v2@default dimensions=384 loads=0 requests=0 cache_hits=0 cache_misses=0)"));
     assert!(stdout.contains("Cache=unavailable"));
     assert!(stdout.contains("Index=healthy"));
 }
@@ -923,22 +1211,41 @@ fn cli_share_and_unshare_json_audit_surfaces_keep_required_correlation_fields() 
 
 #[test]
 fn cli_recall_human_output_logs_route_and_result_lines() {
-    let (ok, stdout, stderr) = run_membrain(&[
-        "recall",
-        "capital of France",
-        "--namespace",
-        "test_ns",
-        "--top",
-        "3",
-        "--explain",
-        "full",
-    ]);
+    let db_root = test_db_root();
+    let (remember_ok, _remember_stdout, remember_stderr) = run_membrain_with_db(
+        &db_root,
+        &[
+            "remember",
+            "Paris is the capital of France",
+            "--namespace",
+            "test_ns",
+            "--kind",
+            "semantic",
+            "--json",
+        ],
+    );
+    assert!(remember_ok, "stderr: {remember_stderr}");
+
+    let (ok, stdout, stderr) = run_membrain_with_db(
+        &db_root,
+        &[
+            "recall",
+            "capital of France",
+            "--namespace",
+            "test_ns",
+            "--top",
+            "3",
+            "--explain",
+            "full",
+        ],
+    );
 
     assert!(ok, "stderr: {stderr}");
     assert!(stderr.is_empty(), "stderr should stay empty: {stderr}");
-    assert!(stdout.contains("Recall 'capital of France' in 'test_ns' → 0 results"));
+    assert!(stdout.contains("Recall 'capital of France' in 'test_ns' → 1 results"));
     assert!(stdout.contains("route: tier2_exact_then_graph_expansion → small_session_lookup"));
     assert!(stdout.contains("tier1: consulted=false, answered_directly=false, deeper=true"));
+    assert!(stdout.contains("derived actions: 1"));
 }
 
 #[test]

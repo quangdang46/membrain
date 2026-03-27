@@ -596,6 +596,82 @@ impl RetrievalResultSet {
         ObservabilityModule.explain_route(self)
     }
 
+    /// Returns whether any retained evidence was served from the cold tier after consolidation.
+    pub fn has_cold_consolidated_evidence(&self) -> bool {
+        self.evidence_pack
+            .iter()
+            .any(|item| item.result.answered_from == AnsweredFrom::Tier3Cold)
+    }
+
+    /// Returns whether any retained evidence remains volatile due to reconsolidation churn.
+    pub fn has_reconsolidation_window(&self) -> bool {
+        self.evidence_pack.iter().any(|item| {
+            item.result
+                .uncertainty_markers
+                .reconsolidation_uncertainty
+                .unwrap_or(0)
+                >= 500
+        })
+    }
+}
+
+fn append_lifecycle_reason(explain: &mut RetrievalExplain, reason_code: &str, detail: String) {
+    let already_present = explain
+        .result_reasons
+        .iter()
+        .any(|reason| reason.memory_id.is_none() && reason.reason_code == reason_code);
+    if !already_present {
+        explain.result_reasons.push(ResultReason {
+            memory_id: None,
+            reason_code: reason_code.to_string(),
+            detail,
+        });
+    }
+}
+
+fn apply_lifecycle_observability(
+    evidence_pack: &[EvidenceItem],
+    explain: &mut RetrievalExplain,
+    freshness_markers: &mut FreshnessMarkers,
+) {
+    let cold_count = evidence_pack
+        .iter()
+        .filter(|item| item.result.answered_from == AnsweredFrom::Tier3Cold)
+        .count();
+    if cold_count > 0 {
+        append_lifecycle_reason(
+            explain,
+            "cold_consolidated",
+            format!(
+                "{cold_count} retained evidence item(s) were served from tier3_cold after lifecycle consolidation moved them out of the bounded hot path"
+            ),
+        );
+        freshness_markers.stale_warning = true;
+    }
+
+    let reconsolidating_count = evidence_pack
+        .iter()
+        .filter(|item| {
+            item.result
+                .uncertainty_markers
+                .reconsolidation_uncertainty
+                .unwrap_or(0)
+                >= 500
+        })
+        .count();
+    if reconsolidating_count > 0 {
+        append_lifecycle_reason(
+            explain,
+            "reconsolidation_window_open",
+            format!(
+                "{reconsolidating_count} retained evidence item(s) remain volatile because recent recall reopened a reconsolidation window"
+            ),
+        );
+        freshness_markers.volatile_items_included = true;
+    }
+}
+
+impl RetrievalResultSet {
     /// Builds the shared result-reason family from the canonical envelope.
     pub fn explain_result_reasons(&self) -> Vec<ExplainResultReason> {
         ObservabilityModule.explain_result_reasons(self)
@@ -1230,7 +1306,7 @@ impl ResultBuilder {
     }
 
     /// Builds the final result set, sorting by score and truncating.
-    pub fn build(mut self, explain: RetrievalExplain) -> RetrievalResultSet {
+    pub fn build(mut self, mut explain: RetrievalExplain) -> RetrievalResultSet {
         self.evidence_pack
             .sort_by(|a, b| b.result.score.cmp(&a.result.score));
         let truncated = self.evidence_pack.len() > self.max_results;
@@ -1276,11 +1352,12 @@ impl ResultBuilder {
         if let Some(as_of_tick) = historical_as_of_tick {
             self.apply_as_of_tick(as_of_tick);
         }
-        let freshness_markers = self
+        let mut freshness_markers = self
             .evidence_pack
             .first()
             .map(|item| item.freshness_markers.clone())
             .unwrap_or_else(|| FreshnessMarkers::fresh(historical_as_of_tick));
+        apply_lifecycle_observability(&self.evidence_pack, &mut explain, &mut freshness_markers);
 
         RetrievalResultSet {
             outcome_class,
@@ -1427,11 +1504,12 @@ impl ResultBuilder {
         if let Some(as_of_tick) = historical_as_of_tick {
             self.apply_as_of_tick(as_of_tick);
         }
-        let freshness_markers = self
+        let mut freshness_markers = self
             .evidence_pack
             .first()
             .map(|item| item.freshness_markers.clone())
             .unwrap_or_else(|| FreshnessMarkers::fresh(historical_as_of_tick));
+        apply_lifecycle_observability(&self.evidence_pack, &mut explain, &mut freshness_markers);
 
         RetrievalResultSet {
             outcome_class,
@@ -2880,6 +2958,92 @@ mod tests {
         assert_eq!(reasons.len(), 2);
         assert_eq!(reasons[0].reason_code, "score_kept");
         assert_eq!(reasons[1].reason_code, "no_match");
+    }
+
+    #[test]
+    fn lifecycle_observability_adds_cold_and_reconsolidation_reasons() {
+        let mut builder = ResultBuilder::new(2, ns("lifecycle_reasons"));
+        let cold_ranked = fuse_scores(
+            RankingInput {
+                recency: 700,
+                salience: 650,
+                strength: 600,
+                provenance: 700,
+                conflict: 500,
+                confidence: 900,
+            },
+            RankingProfile::balanced(),
+        );
+        builder.add(
+            MemoryId(41),
+            ns("lifecycle_reasons"),
+            SessionId(2),
+            CanonicalMemoryType::Event,
+            "consolidated memory".into(),
+            &cold_ranked,
+            AnsweredFrom::Tier3Cold,
+        );
+
+        let recon_ranked = fuse_scores(
+            RankingInput {
+                recency: 760,
+                salience: 700,
+                strength: 650,
+                provenance: 720,
+                conflict: 500,
+                confidence: 920,
+            },
+            RankingProfile::balanced(),
+        );
+        builder.add_with_confidence(
+            MemoryId(42),
+            ns("lifecycle_reasons"),
+            SessionId(2),
+            CanonicalMemoryType::Observation,
+            "recently reopened memory".into(),
+            &recon_ranked,
+            AnsweredFrom::Tier2Indexed,
+            &crate::engine::confidence::ConfidenceInputs {
+                corroboration_count: 1,
+                reconsolidation_count: 8,
+                ticks_since_last_access: 1,
+                age_ticks: 1,
+                resolution_state: ResolutionState::None,
+                conflict_score: 0,
+                causal_parent_count: 0,
+                authoritativeness: 900,
+                recall_count: 2,
+            },
+            &crate::engine::confidence::ConfidencePolicy::default(),
+        );
+
+        let result_set = builder.build(RetrievalExplain {
+            recall_plan: RecallPlanKind::Tier2ExactThenTier3Fallback,
+            route_reason: "lifecycle test".to_string(),
+            tiers_consulted: vec!["tier2_exact".to_string(), "tier3_fallback".to_string()],
+            trace_stages: vec![RecallTraceStage::Tier2Exact, RecallTraceStage::Tier3Fallback],
+            tier1_answered_directly: false,
+            candidate_budget: 2,
+            time_consumed_ms: Some(4),
+            ranking_profile: "balanced".to_string(),
+            contradictions_found: 0,
+            historical_context: None,
+            query_by_example: None,
+            result_reasons: vec![],
+        });
+
+        let reasons = result_set.explain_result_reasons();
+        assert!(result_set.has_cold_consolidated_evidence());
+        assert!(result_set.has_reconsolidation_window());
+        assert!(reasons.iter().any(|reason| reason.reason_code == "cold_consolidated"));
+        assert!(reasons
+            .iter()
+            .any(|reason| reason.reason_code == "reconsolidation_window_open"));
+        let (freshness_markers, _, uncertainty_markers) = result_set.explain_markers();
+        assert!(freshness_markers.iter().any(|marker| marker.code == "stale_warning"));
+        assert!(uncertainty_markers
+            .iter()
+            .any(|marker| marker.code == "reconsolidation_churn"));
     }
 
     #[test]

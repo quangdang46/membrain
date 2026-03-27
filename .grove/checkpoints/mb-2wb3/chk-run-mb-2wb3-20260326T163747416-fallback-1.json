@@ -1,0 +1,45 @@
+{
+  "id": "chk-run-mb-2wb3-20260326T163747416-fallback-1",
+  "bead_id": "mb-2wb3",
+  "run_id": "run-mb-2wb3-20260326T163747416",
+  "session_id": "ses-run-mb-2wb3-20260326T163747416",
+  "progress": "Synthetic fallback checkpoint after NoProgress",
+  "next_step": "Resume from the transcript tail, avoid repeating completed setup, and continue with the smallest safe remaining step.",
+  "payload": {
+    "claimed_paths": [],
+    "confidence": 0.25,
+    "context": {
+      "failure_class": "NoProgress",
+      "failure_detail": "session ended with Unknown",
+      "stderr_tail": [],
+      "stdout_tail": [
+        "    \"Refresh daemon status test assertions for embedder payload\",",
+        "    \"Run targeted daemon/CLI tests\",",
+        "    \"Run cargo check after unrelated membrain-core blockers are cleared\",",
+        "    \"Sync bead/mail completion state\"",
+        "  ],",
+        "  \"blockers\": [",
+        "    {",
+        "      \"type\": \"compile\",",
+        "      \"file\": \"crates/membrain-core/src/engine/result.rs\",",
+        "      \"issue\": \"duplicate definitions and mutable borrow error\"",
+        "    },",
+        "    {",
+        "      \"type\": \"compile\",",
+        "      \"file\": \"crates/membrain-core/src/health.rs\",",
+        "      \"issue\": \"lifecycle type mismatches and missing field initializers\"",
+        "    }",
+        "  ]",
+        "}",
+        "```",
+        ""
+      ],
+      "synthetic": true
+    },
+    "next_step": "Resume from the transcript tail, avoid repeating completed setup, and continue with the smallest safe remaining step.",
+    "open_questions": [],
+    "progress": "Synthetic fallback checkpoint after NoProgress"
+  },
+  "saved_at": "2026-03-26T17:00:55.093054299Z",
+  "resume_generation": 1
+}

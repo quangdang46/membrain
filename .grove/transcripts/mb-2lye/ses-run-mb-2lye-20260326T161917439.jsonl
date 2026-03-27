@@ -1,0 +1,49 @@
+{"ts":"2026-03-26T16:19:17.458101005Z","kind":"session_started","session_id":"ses-run-mb-2lye-20260326T161917439"}
+{"ts":"2026-03-26T16:38:43.860676285Z","kind":"stdout","line":"Done."}
+{"ts":"2026-03-26T16:38:43.895671619Z","kind":"stdout","line":""}
+{"ts":"2026-03-26T16:38:43.895682125Z","kind":"stdout","line":"Closed `mb-2lye` by landing the missing measurable warm-runtime proof in `crates/membrain-daemon/src/daemon.rs:7439`."}
+{"ts":"2026-03-26T16:38:43.895685287Z","kind":"stdout","line":""}
+{"ts":"2026-03-26T16:38:43.895687837Z","kind":"stdout","line":"What changed:"}
+{"ts":"2026-03-26T16:38:43.895691305Z","kind":"stdout","line":"- The daemon recall test now performs two recalls of the same memory under the same daemon runtime."}
+{"ts":"2026-03-26T16:38:43.895694569Z","kind":"stdout","line":"- It proves warm reuse on the repeated request by asserting:"}
+{"ts":"2026-03-26T16:38:43.895697425Z","kind":"stdout","line":"  - `tier1_item_hit_count == 1`"}
+{"ts":"2026-03-26T16:38:43.895700281Z","kind":"stdout","line":"  - `cold_fallback_count == 0`"}
+{"ts":"2026-03-26T16:38:43.895703341Z","kind":"stdout","line":"  - `cache_traces[0].warm_reuse == true`"}
+{"ts":"2026-03-26T16:38:43.895706299Z","kind":"stdout","line":"  - `cache_traces[0].warm_source == \"tier1_item_cache\"`"}
+{"ts":"2026-03-26T16:38:43.895708951Z","kind":"stdout","line":"- It also updates the attention-side expectation to `recall_count == 2`, matching two successful recalls."}
+{"ts":"2026-03-26T16:38:43.895711705Z","kind":"stdout","line":""}
+{"ts":"2026-03-26T16:38:43.895714153Z","kind":"stdout","line":"Validation passed:"}
+{"ts":"2026-03-26T16:38:43.895716805Z","kind":"stdout","line":"- `cargo test -p membrain-daemon runtime_recall_records_attention_signals_for_hot_paths_and_dead_zones -- --nocapture`"}
+{"ts":"2026-03-26T16:38:43.895719355Z","kind":"stdout","line":"- `cargo test -p membrain-daemon runtime_serves_status_and_shutdown_over_unix_socket -- --nocapture`"}
+{"ts":"2026-03-26T16:38:43.895722007Z","kind":"stdout","line":"- `cargo test -p membrain-cli cli_doctor_json_reports_health_and_repair_state -- --nocapture`"}
+{"ts":"2026-03-26T16:38:43.895725067Z","kind":"stdout","line":"- `cargo check --all-targets`"}
+{"ts":"2026-03-26T16:38:43.895727617Z","kind":"stdout","line":""}
+{"ts":"2026-03-26T16:38:43.895729963Z","kind":"stdout","line":"Coordination/status:"}
+{"ts":"2026-03-26T16:38:43.895732411Z","kind":"stdout","line":"- Registered with Agent Mail as `GentleSparrow`"}
+{"ts":"2026-03-26T16:38:43.895734961Z","kind":"stdout","line":"- Synced/updated bead state"}
+{"ts":"2026-03-26T16:38:43.895737817Z","kind":"stdout","line":"- Closed `mb-2lye`"}
+{"ts":"2026-03-26T16:38:43.895740265Z","kind":"stdout","line":"- Released my file reservations"}
+{"ts":"2026-03-26T16:38:43.895742713Z","kind":"stdout","line":""}
+{"ts":"2026-03-26T16:38:43.895745059Z","kind":"stdout","line":"GROVE_RESULT: success"}
+{"ts":"2026-03-26T16:38:43.895745059Z","kind":"protocol","event":{"type":"result","summary":"success"}}
+{"ts":"2026-03-26T16:38:43.896201103Z","kind":"stdout","line":"GROVE_ARTIFACTS:"}
+{"ts":"2026-03-26T16:38:43.896201103Z","kind":"protocol","event":{"type":"artifacts","items":[]}}
+{"ts":"2026-03-26T16:38:43.896208447Z","kind":"stdout","line":"- `crates/membrain-daemon/src/daemon.rs:7439` now includes repeated-request daemon warm-runtime proof assertions"}
+{"ts":"2026-03-26T16:38:43.896208447Z","kind":"protocol","event":{"type":"artifacts","items":["`crates/membrain-daemon/src/daemon.rs:7439` now includes repeated-request daemon warm-runtime proof assertions"]}}
+{"ts":"2026-03-26T16:38:43.896215179Z","kind":"stdout","line":"- `mb-2lye` closed and beads synced"}
+{"ts":"2026-03-26T16:38:43.896215179Z","kind":"protocol","event":{"type":"artifacts","items":["`mb-2lye` closed and beads synced"]}}
+{"ts":"2026-03-26T16:38:43.896220687Z","kind":"stdout","line":"GROVE_LESSONS:"}
+{"ts":"2026-03-26T16:38:43.896220687Z","kind":"protocol","event":{"type":"lessons","items":[]}}
+{"ts":"2026-03-26T16:38:43.896227011Z","kind":"stdout","line":"- The right measurable proof was specific warm-reuse trace fields, not aggregate cache-hit totals"}
+{"ts":"2026-03-26T16:38:43.896227011Z","kind":"protocol","event":{"type":"lessons","items":["The right measurable proof was specific warm-reuse trace fields, not aggregate cache-hit totals"]}}
+{"ts":"2026-03-26T16:38:43.896688155Z","kind":"stdout","line":"GROVE_DECISIONS:"}
+{"ts":"2026-03-26T16:38:43.896688155Z","kind":"protocol","event":{"type":"decision","items":[]}}
+{"ts":"2026-03-26T16:38:43.896692541Z","kind":"stdout","line":"- Kept the final fix surgical and test-focused because contract/docs/mode reporting were already landed"}
+{"ts":"2026-03-26T16:38:43.896692541Z","kind":"protocol","event":{"type":"decision","items":["Kept the final fix surgical and test-focused because contract/docs/mode reporting were already landed"]}}
+{"ts":"2026-03-26T16:38:43.896696825Z","kind":"stdout","line":"GROVE_WARNINGS:"}
+{"ts":"2026-03-26T16:38:43.896696825Z","kind":"protocol","event":{"type":"warning","items":[]}}
+{"ts":"2026-03-26T16:38:43.896701415Z","kind":"stdout","line":"- The broad shell e2e script remains stale in unrelated sections; I validated this bead with targeted Rust tests instead"}
+{"ts":"2026-03-26T16:38:43.896701415Z","kind":"protocol","event":{"type":"warning","items":["The broad shell e2e script remains stale in unrelated sections; I validated this bead with targeted Rust tests instead"]}}
+{"ts":"2026-03-26T16:38:43.896705495Z","kind":"stdout","line":"GROVE_EXIT: true"}
+{"ts":"2026-03-26T16:38:43.896705495Z","kind":"protocol","event":{"type":"exit","value":true}}
+{"ts":"2026-03-26T16:38:44.593181492Z","kind":"session_ended","exit_code":0}

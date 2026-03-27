@@ -1,0 +1,61 @@
+{"ts":"2026-03-26T17:48:21.312018822Z","kind":"session_started","session_id":"ses-run-mb-1ps7-20260326T174821307"}
+{"ts":"2026-03-26T18:10:19.340731793Z","kind":"stdout","line":"Done."}
+{"ts":"2026-03-26T18:10:19.351681651Z","kind":"stdout","line":""}
+{"ts":"2026-03-26T18:10:19.351691462Z","kind":"stdout","line":"GROVE_RESULT: completed `mb-1ps7` by making the daemon text-query explain path report hydrated outcomes and explicit omission reasons instead of only route scaffolding"}
+{"ts":"2026-03-26T18:10:19.351691462Z","kind":"protocol","event":{"type":"result","summary":"completed `mb-1ps7` by making the daemon text-query explain path report hydrated outcomes and explicit omission reasons instead of only route scaffolding"}}
+{"ts":"2026-03-26T18:10:19.352307600Z","kind":"stdout","line":""}
+{"ts":"2026-03-26T18:10:19.352312709Z","kind":"stdout","line":"GROVE_ARTIFACTS:"}
+{"ts":"2026-03-26T18:10:19.352312709Z","kind":"protocol","event":{"type":"artifacts","items":[]}}
+{"ts":"2026-03-26T18:10:19.352319250Z","kind":"stdout","line":"- `crates/membrain-daemon/src/daemon.rs:5306`"}
+{"ts":"2026-03-26T18:10:19.352319250Z","kind":"protocol","event":{"type":"artifacts","items":["`crates/membrain-daemon/src/daemon.rs:5306`"]}}
+{"ts":"2026-03-26T18:10:19.352326199Z","kind":"stdout","line":"- `crates/membrain-daemon/src/daemon.rs:8709`"}
+{"ts":"2026-03-26T18:10:19.352326199Z","kind":"protocol","event":{"type":"artifacts","items":["`crates/membrain-daemon/src/daemon.rs:8709`"]}}
+{"ts":"2026-03-26T18:10:19.352331616Z","kind":"stdout","line":"- `crates/membrain-daemon/src/daemon.rs:8770`"}
+{"ts":"2026-03-26T18:10:19.352331616Z","kind":"protocol","event":{"type":"artifacts","items":["`crates/membrain-daemon/src/daemon.rs:8770`"]}}
+{"ts":"2026-03-26T18:10:19.352337339Z","kind":"stdout","line":"- `crates/membrain-daemon/src/daemon.rs:8831`"}
+{"ts":"2026-03-26T18:10:19.352337339Z","kind":"protocol","event":{"type":"artifacts","items":["`crates/membrain-daemon/src/daemon.rs:8831`"]}}
+{"ts":"2026-03-26T18:10:19.352342959Z","kind":"stdout","line":""}
+{"ts":"2026-03-26T18:10:19.352345514Z","kind":"stdout","line":"GROVE_LESSONS:"}
+{"ts":"2026-03-26T18:10:19.352345514Z","kind":"protocol","event":{"type":"lessons","items":[]}}
+{"ts":"2026-03-26T18:10:19.352350522Z","kind":"stdout","line":"- `mb-uw37` had already validated the numeric-ID / restart hydration lane; the remaining live gap was the daemon’s text-query explain fallback."}
+{"ts":"2026-03-26T18:10:19.352350522Z","kind":"protocol","event":{"type":"lessons","items":["`mb-uw37` had already validated the numeric-ID / restart hydration lane; the remaining live gap was the daemon’s text-query explain fallback."]}}
+{"ts":"2026-03-26T18:10:19.352357471Z","kind":"stdout","line":"- The daemon MCP explain trace normalizes custom daemon reason codes into transport-friendly families, so policy-filter assertions must match the transported shape, not the raw internal code string."}
+{"ts":"2026-03-26T18:10:19.352357471Z","kind":"protocol","event":{"type":"lessons","items":["The daemon MCP explain trace normalizes custom daemon reason codes into transport-friendly families, so policy-filter assertions must match the transported shape, not the raw internal code string."]}}
+{"ts":"2026-03-26T18:10:19.352364012Z","kind":"stdout","line":""}
+{"ts":"2026-03-26T18:10:19.352366771Z","kind":"stdout","line":"GROVE_DECISIONS:"}
+{"ts":"2026-03-26T18:10:19.352366771Z","kind":"protocol","event":{"type":"decision","items":[]}}
+{"ts":"2026-03-26T18:10:19.352371778Z","kind":"stdout","line":"- Reused existing canonical query-by-example materialization tracing instead of inventing a new explain schema."}
+{"ts":"2026-03-26T18:10:19.352371778Z","kind":"protocol","event":{"type":"decision","items":["Reused existing canonical query-by-example materialization tracing instead of inventing a new explain schema."]}}
+{"ts":"2026-03-26T18:10:19.352377808Z","kind":"stdout","line":"- Kept the fix scoped to daemon explain fallback behavior and focused tests; did not reopen adjacent docs lanes."}
+{"ts":"2026-03-26T18:10:19.352377808Z","kind":"protocol","event":{"type":"decision","items":["Kept the fix scoped to daemon explain fallback behavior and focused tests; did not reopen adjacent docs lanes."]}}
+{"ts":"2026-03-26T18:10:19.352392626Z","kind":"stdout","line":""}
+{"ts":"2026-03-26T18:10:19.352394772Z","kind":"stdout","line":"GROVE_WARNINGS:"}
+{"ts":"2026-03-26T18:10:19.352394772Z","kind":"protocol","event":{"type":"warning","items":[]}}
+{"ts":"2026-03-26T18:10:19.352398452Z","kind":"stdout","line":"- `cargo check -p membrain-daemon --tests` still emits the existing warning for unused `persisted_memory_count` in `crates/membrain-daemon/src/daemon.rs:1750`; I left that untouched as out of scope."}
+{"ts":"2026-03-26T18:10:19.352398452Z","kind":"protocol","event":{"type":"warning","items":["`cargo check -p membrain-daemon --tests` still emits the existing warning for unused `persisted_memory_count` in `crates/membrain-daemon/src/daemon.rs:1750`; I left that untouched as out of scope."]}}
+{"ts":"2026-03-26T18:10:19.352402744Z","kind":"stdout","line":""}
+{"ts":"2026-03-26T18:10:19.352404379Z","kind":"stdout","line":"What changed:"}
+{"ts":"2026-03-26T18:10:19.352406116Z","kind":"stdout","line":"- Daemon bounded explain fallback now uses canonical query-by-example materialization/missing-seed tracing when seeds are present."}
+{"ts":"2026-03-26T18:10:19.352408569Z","kind":"stdout","line":"- Empty explain results now emit a concrete `no_match` reason."}
+{"ts":"2026-03-26T18:10:19.352410511Z","kind":"stdout","line":"- Matching text-query explain results now explicitly reflect hydrated compact-text evidence."}
+{"ts":"2026-03-26T18:10:19.352412555Z","kind":"stdout","line":"- Added targeted daemon coverage for:"}
+{"ts":"2026-03-26T18:10:19.352414701Z","kind":"stdout","line":"  - hydrated explain success"}
+{"ts":"2026-03-26T18:10:19.352416438Z","kind":"stdout","line":"  - no-match degraded explain"}
+{"ts":"2026-03-26T18:10:19.352418482Z","kind":"stdout","line":"  - policy-filtered omission visibility"}
+{"ts":"2026-03-26T18:10:19.352420321Z","kind":"stdout","line":""}
+{"ts":"2026-03-26T18:10:19.352422365Z","kind":"stdout","line":"Validation:"}
+{"ts":"2026-03-26T18:10:19.352424409Z","kind":"stdout","line":"- `cargo test -p membrain-daemon runtime_query_explain -- --nocapture`"}
+{"ts":"2026-03-26T18:10:19.352426453Z","kind":"stdout","line":"- `cargo check -p membrain-daemon --tests`"}
+{"ts":"2026-03-26T18:10:19.352428190Z","kind":"stdout","line":"- `cargo test -p membrain-cli cli_restart_rehydrates_persisted_memory_for_inspect_recall_and_explain -- --nocapture`"}
+{"ts":"2026-03-26T18:10:19.352430030Z","kind":"stdout","line":"- `cargo test -p membrain-cli mcp_restart_rehydrates_persisted_memory_for_recall_inspect_and_why -- --nocapture`"}
+{"ts":"2026-03-26T18:10:19.352431870Z","kind":"stdout","line":"- `cargo test -p membrain-daemon runtime_restart_hydrates_persisted_memories_for_inspect_recall_and_explain -- --nocapture`"}
+{"ts":"2026-03-26T18:10:19.352433811Z","kind":"stdout","line":""}
+{"ts":"2026-03-26T18:10:19.352435549Z","kind":"stdout","line":"Bead status:"}
+{"ts":"2026-03-26T18:10:19.352437286Z","kind":"stdout","line":"- Closed `mb-1ps7`"}
+{"ts":"2026-03-26T18:10:19.352439125Z","kind":"stdout","line":"- Synced beads"}
+{"ts":"2026-03-26T18:10:19.352441067Z","kind":"stdout","line":"- Released reservations"}
+{"ts":"2026-03-26T18:10:19.352442804Z","kind":"stdout","line":"- Posted completion update to Agent Mail"}
+{"ts":"2026-03-26T18:10:19.352444848Z","kind":"stdout","line":""}
+{"ts":"2026-03-26T18:10:19.352446381Z","kind":"stdout","line":"GROVE_EXIT: true"}
+{"ts":"2026-03-26T18:10:19.352446381Z","kind":"protocol","event":{"type":"exit","value":true}}
+{"ts":"2026-03-26T18:10:19.823485668Z","kind":"session_ended","exit_code":0}

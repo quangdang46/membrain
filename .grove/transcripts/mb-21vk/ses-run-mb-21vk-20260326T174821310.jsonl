@@ -1,0 +1,46 @@
+{"ts":"2026-03-26T17:48:21.315437465Z","kind":"session_started","session_id":"ses-run-mb-21vk-20260326T174821310"}
+{"ts":"2026-03-26T18:06:37.043592175Z","kind":"stdout","line":"Done."}
+{"ts":"2026-03-26T18:06:37.084689986Z","kind":"stdout","line":""}
+{"ts":"2026-03-26T18:06:37.084702355Z","kind":"stdout","line":"- Read `AGENTS.md` and both readmes."}
+{"ts":"2026-03-26T18:06:37.084705626Z","kind":"stdout","line":"- Registered on Agent Mail as `CyanEagle`, checked inbox, coordinated with other agents, acknowledged follow-up, and released reservations."}
+{"ts":"2026-03-26T18:06:37.084708488Z","kind":"stdout","line":"- Claimed and closed `mb-21vk`."}
+{"ts":"2026-03-26T18:06:37.084712986Z","kind":"stdout","line":""}
+{"ts":"2026-03-26T18:06:37.084715439Z","kind":"stdout","line":"What I added:"}
+{"ts":"2026-03-26T18:06:37.084718403Z","kind":"stdout","line":"- `crates/membrain-core/tests/retrieval_quality_proof.rs`"}
+{"ts":"2026-03-26T18:06:37.084721265Z","kind":"stdout","line":""}
+{"ts":"2026-03-26T18:06:37.084724025Z","kind":"stdout","line":"What it proves:"}
+{"ts":"2026-03-26T18:06:37.084726581Z","kind":"stdout","line":"- embedding-backed similarity can beat naive compact-text overlap on a realistic release/deploy query,"}
+{"ts":"2026-03-26T18:06:37.084729239Z","kind":"stdout","line":"- reranking can change final ordering and leaves inspectable rerank metadata/reasons,"}
+{"ts":"2026-03-26T18:06:37.084732203Z","kind":"stdout","line":"- planner/cache diagnostics expose semantic stages, embedding/ranking invalidation, and degraded fallback behavior."}
+{"ts":"2026-03-26T18:06:37.084734963Z","kind":"stdout","line":""}
+{"ts":"2026-03-26T18:06:37.084737314Z","kind":"stdout","line":"Validation:"}
+{"ts":"2026-03-26T18:06:37.084739869Z","kind":"stdout","line":"- `cargo test -p membrain-core --test retrieval_quality_proof -- --nocapture`"}
+{"ts":"2026-03-26T18:06:37.084742323Z","kind":"stdout","line":"- `cargo check -p membrain-core --tests`"}
+{"ts":"2026-03-26T18:06:37.084745185Z","kind":"stdout","line":""}
+{"ts":"2026-03-26T18:06:37.084747536Z","kind":"stdout","line":"GROVE_RESULT: success"}
+{"ts":"2026-03-26T18:06:37.084747536Z","kind":"protocol","event":{"type":"result","summary":"success"}}
+{"ts":"2026-03-26T18:06:37.085344601Z","kind":"stdout","line":"GROVE_ARTIFACTS:"}
+{"ts":"2026-03-26T18:06:37.085344601Z","kind":"protocol","event":{"type":"artifacts","items":[]}}
+{"ts":"2026-03-26T18:06:37.086660883Z","kind":"stdout","line":"- Added `crates/membrain-core/tests/retrieval_quality_proof.rs`"}
+{"ts":"2026-03-26T18:06:37.086660883Z","kind":"protocol","event":{"type":"artifacts","items":["Added `crates/membrain-core/tests/retrieval_quality_proof.rs`"]}}
+{"ts":"2026-03-26T18:06:37.086671003Z","kind":"stdout","line":"- Closed bead `mb-21vk`"}
+{"ts":"2026-03-26T18:06:37.086671003Z","kind":"protocol","event":{"type":"artifacts","items":["Closed bead `mb-21vk`"]}}
+{"ts":"2026-03-26T18:06:37.086677136Z","kind":"stdout","line":"GROVE_LESSONS:"}
+{"ts":"2026-03-26T18:06:37.086677136Z","kind":"protocol","event":{"type":"lessons","items":[]}}
+{"ts":"2026-03-26T18:06:37.086685007Z","kind":"stdout","line":"- Existing retrieval/result test surfaces were heavily reserved by other agents; isolating proof coverage into a dedicated test file avoided communication purgatory and edit collisions."}
+{"ts":"2026-03-26T18:06:37.086685007Z","kind":"protocol","event":{"type":"lessons","items":["Existing retrieval/result test surfaces were heavily reserved by other agents; isolating proof coverage into a dedicated test file avoided communication purgatory and edit collisions."]}}
+{"ts":"2026-03-26T18:06:37.086691753Z","kind":"stdout","line":"- Pack-level rerank metadata is intentionally suppressed when retained items disagree, so proof coverage must assert item-level rerank influence in mixed-result scenarios."}
+{"ts":"2026-03-26T18:06:37.086691753Z","kind":"protocol","event":{"type":"lessons","items":["Pack-level rerank metadata is intentionally suppressed when retained items disagree, so proof coverage must assert item-level rerank influence in mixed-result scenarios."]}}
+{"ts":"2026-03-26T18:06:37.086707393Z","kind":"stdout","line":"GROVE_DECISIONS:"}
+{"ts":"2026-03-26T18:06:37.086707393Z","kind":"protocol","event":{"type":"decision","items":[]}}
+{"ts":"2026-03-26T18:06:37.086711584Z","kind":"stdout","line":"- Used a new isolated core integration test file instead of contested files like `crates/membrain-core/tests/recall_pipeline_integration.rs`"}
+{"ts":"2026-03-26T18:06:37.086711584Z","kind":"protocol","event":{"type":"decision","items":["Used a new isolated core integration test file instead of contested files like `crates/membrain-core/tests/recall_pipeline_integration.rs`"]}}
+{"ts":"2026-03-26T18:06:37.086717410Z","kind":"stdout","line":"- Proved the acceptance criteria through public planner/ranking/embed/cache/result APIs rather than editing shared retrieval internals"}
+{"ts":"2026-03-26T18:06:37.086717410Z","kind":"protocol","event":{"type":"decision","items":["Proved the acceptance criteria through public planner/ranking/embed/cache/result APIs rather than editing shared retrieval internals"]}}
+{"ts":"2026-03-26T18:06:37.086721806Z","kind":"stdout","line":"GROVE_WARNINGS:"}
+{"ts":"2026-03-26T18:06:37.086721806Z","kind":"protocol","event":{"type":"warning","items":[]}}
+{"ts":"2026-03-26T18:06:37.086725384Z","kind":"stdout","line":"- The proof is currently concentrated in core integration coverage; CLI/daemon-specific presentation of the same diagnostics is still separate work if broader parity evidence is desired."}
+{"ts":"2026-03-26T18:06:37.086725384Z","kind":"protocol","event":{"type":"warning","items":["The proof is currently concentrated in core integration coverage; CLI/daemon-specific presentation of the same diagnostics is still separate work if broader parity evidence is desired."]}}
+{"ts":"2026-03-26T18:06:37.086730290Z","kind":"stdout","line":"GROVE_EXIT: true"}
+{"ts":"2026-03-26T18:06:37.086730290Z","kind":"protocol","event":{"type":"exit","value":true}}
+{"ts":"2026-03-26T18:06:37.666356894Z","kind":"session_ended","exit_code":0}

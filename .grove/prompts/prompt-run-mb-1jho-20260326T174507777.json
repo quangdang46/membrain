@@ -1,0 +1,239 @@
+{
+  "prompt_id": "prompt-run-mb-1jho-20260326T174507777",
+  "bead_id": "mb-1jho",
+  "run_id": "run-mb-1jho-20260326T174507777",
+  "session_id": "ses-run-mb-1jho-20260326T174507777",
+  "contract": "Resume",
+  "created_at": "2026-03-26T17:45:07.780544333Z",
+  "token_budget": null,
+  "estimated_tokens": 928,
+  "prompt_bytes": 3714,
+  "trimmed": false,
+  "retry_delta_summary": null,
+  "retrieval_query": "reconsolidation OR reconsolidation OR implementation OR consolidation OR observability",
+  "retrieval_ranking_summary": [
+    "Historical snippet (Score: 13.43)",
+    "Historical snippet (Score: 13.43)",
+    "Historical snippet (Score: 13.43)",
+    "Historical snippet (Score: 13.43)",
+    "Historical snippet (Score: 11.38)"
+  ],
+  "sections": [
+    {
+      "ordinal": 1,
+      "kind": "StartupPrompt",
+      "heading": "Startup prompt",
+      "included": true,
+      "estimated_tokens": 280,
+      "char_count": 1118,
+      "trim_reason": null,
+      "provenance": {
+        "source_ids": [],
+        "bullet_ids": [],
+        "checkpoint_id": null,
+        "handoff_run_id": null,
+        "archive_message_id": null,
+        "playbook_bullet_id": null
+      },
+      "preview": "First read ALL of the AGENTS.md file and README.md file super carefully and unde…"
+    },
+    {
+      "ordinal": 2,
+      "kind": "Contract",
+      "heading": "Execution contract",
+      "included": true,
+      "estimated_tokens": 30,
+      "char_count": 120,
+      "trim_reason": null,
+      "provenance": {
+        "source_ids": [],
+        "bullet_ids": [],
+        "checkpoint_id": null,
+        "handoff_run_id": null,
+        "archive_message_id": null,
+        "playbook_bullet_id": null
+      },
+      "preview": "[EXECUTION CONTRACT]\nResume from the latest checkpoint and continue the in-progr…"
+    },
+    {
+      "ordinal": 3,
+      "kind": "Task",
+      "heading": "Task",
+      "included": true,
+      "estimated_tokens": 255,
+      "char_count": 1018,
+      "trim_reason": null,
+      "provenance": {
+        "source_ids": [],
+        "bullet_ids": [],
+        "checkpoint_id": null,
+        "handoff_run_id": null,
+        "archive_message_id": null,
+        "playbook_bullet_id": null
+      },
+      "preview": "[TASK]\nTitle: Make lifecycle processing materially affect user-visible memory be…"
+    },
+    {
+      "ordinal": 4,
+      "kind": "ParentHandoff",
+      "heading": "Parent handoff",
+      "included": true,
+      "estimated_tokens": 20,
+      "char_count": 79,
+      "trim_reason": null,
+      "provenance": {
+        "source_ids": [],
+        "bullet_ids": [],
+        "checkpoint_id": null,
+        "handoff_run_id": null,
+        "archive_message_id": null,
+        "playbook_bullet_id": null
+      },
+      "preview": "Parent mb-2lye (run run-mb-2lye-20260326T161917439) prepared this task: success"
+    },
+    {
+      "ordinal": 5,
+      "kind": "ArchiveSnippet",
+      "heading": "Historical snippet (Score: 13.43)",
+      "included": true,
+      "estimated_tokens": 29,
+      "char_count": 115,
+      "trim_reason": null,
+      "provenance": {
+        "source_ids": [],
+        "bullet_ids": [],
+        "checkpoint_id": null,
+        "handoff_run_id": null,
+        "archive_message_id": "548",
+        "playbook_bullet_id": null
+      },
+      "preview": "From .grove/transcripts/mb-1jho/ses-run-mb-1jho-20260326T163747470.jsonl\n    - `…"
+    },
+    {
+      "ordinal": 6,
+      "kind": "ArchiveSnippet",
+      "heading": "Historical snippet (Score: 13.43)",
+      "included": true,
+      "estimated_tokens": 29,
+      "char_count": 116,
+      "trim_reason": null,
+      "provenance": {
+        "source_ids": [],
+        "bullet_ids": [],
+        "checkpoint_id": null,
+        "handoff_run_id": null,
+        "archive_message_id": "552",
+        "playbook_bullet_id": null
+      },
+      "preview": "From .grove/transcripts/mb-1jho/ses-run-mb-1jho-20260326T163747470.jsonl\n    - `…"
+    },
+    {
+      "ordinal": 7,
+      "kind": "ArchiveSnippet",
+      "heading": "Historical snippet (Score: 13.43)",
+      "included": true,
+      "estimated_tokens": 31,
+      "char_count": 121,
+      "trim_reason": null,
+      "provenance": {
+        "source_ids": [],
+        "bullet_ids": [],
+        "checkpoint_id": null,
+        "handoff_run_id": null,
+        "archive_message_id": "751",
+        "playbook_bullet_id": null
+      },
+      "preview": "From .grove/transcripts/mb-1jho/ses-run-mb-1jho-20260326T171128785.jsonl\n  - `ma…"
+    },
+    {
+      "ordinal": 8,
+      "kind": "ArchiveSnippet",
+      "heading": "Historical snippet (Score: 13.43)",
+      "included": true,
+      "estimated_tokens": 32,
+      "char_count": 125,
+      "trim_reason": null,
+      "provenance": {
+        "source_ids": [],
+        "bullet_ids": [],
+        "checkpoint_id": null,
+        "handoff_run_id": null,
+        "archive_message_id": "926",
+        "playbook_bullet_id": null
+      },
+      "preview": "From .grove/transcripts/mb-1jho/ses-run-mb-1jho-20260326T173556662.jsonl\n      -…"
+    },
+    {
+      "ordinal": 9,
+      "kind": "ArchiveSnippet",
+      "heading": "Historical snippet (Score: 11.38)",
+      "included": true,
+      "estimated_tokens": 51,
+      "char_count": 205,
+      "trim_reason": null,
+      "provenance": {
+        "source_ids": [],
+        "bullet_ids": [],
+        "checkpoint_id": null,
+        "handoff_run_id": null,
+        "archive_message_id": "621",
+        "playbook_bullet_id": null
+      },
+      "preview": "From .grove/transcripts/mb-1jho/ses-run-mb-1jho-20260326T163747470.jsonl\n- `carg…"
+    },
+    {
+      "ordinal": 10,
+      "kind": "Checkpoint",
+      "heading": "Latest checkpoint",
+      "included": true,
+      "estimated_tokens": 50,
+      "char_count": 198,
+      "trim_reason": null,
+      "provenance": {
+        "source_ids": [],
+        "bullet_ids": [],
+        "checkpoint_id": "chk-run-mb-1jho-20260326T173556662-fallback-1",
+        "handoff_run_id": null,
+        "archive_message_id": null,
+        "playbook_bullet_id": null
+      },
+      "preview": "[CHECKPOINT]\nProgress: Synthetic fallback checkpoint after NoProgress\nNext step:…"
+    },
+    {
+      "ordinal": 11,
+      "kind": "EscalationContext",
+      "heading": "Escalation context (tier 0)",
+      "included": true,
+      "estimated_tokens": 13,
+      "char_count": 103,
+      "trim_reason": null,
+      "provenance": {
+        "source_ids": [],
+        "bullet_ids": [],
+        "checkpoint_id": null,
+        "handoff_run_id": null,
+        "archive_message_id": null,
+        "playbook_bullet_id": null
+      },
+      "preview": "[ESCALATION CONTEXT]\nTier: FirstAttempt (attempt 0)\nInitial attempt. Proceed nor…"
+    },
+    {
+      "ordinal": 12,
+      "kind": "Protocol",
+      "heading": "Grove protocol",
+      "included": true,
+      "estimated_tokens": 94,
+      "char_count": 374,
+      "trim_reason": null,
+      "provenance": {
+        "source_ids": [],
+        "bullet_ids": [],
+        "checkpoint_id": null,
+        "handoff_run_id": null,
+        "archive_message_id": null,
+        "playbook_bullet_id": null
+      },
+      "preview": "[GROVE PROTOCOL]\nEmit GROVE_RESULT, GROVE_ARTIFACTS, GROVE_LESSONS, GROVE_DECISI…"
+    }
+  ]
+}

@@ -29,12 +29,11 @@ use crate::preflight::{
 use crate::rpc::{
     busy_payload, cancelled_payload, JsonRpcRequest, JsonRpcResponse, RuntimeAuthorityMode,
     RuntimeAvailability, RuntimeDoctorCheck, RuntimeDoctorIndex, RuntimeDoctorReport,
-    RuntimeDoctorRunbookHint, RuntimeDoctorSummary, RuntimeMaintenanceAccepted,
-    RuntimeMethodRequest, RuntimeMetrics, RuntimePosture, RuntimeRemediation, RuntimeRequest,
-    RuntimeStatus,
+    RuntimeDoctorRunbookHint, RuntimeDoctorSummary, RuntimeEmbedderState, RuntimeEmbedderStatus,
+    RuntimeMaintenanceAccepted, RuntimeMethodRequest, RuntimeMetrics, RuntimePosture,
+    RuntimeRemediation, RuntimeRequest, RuntimeStatus,
 };
 use anyhow::Context;
-use tokio::io::{self, AsyncBufReadExt, AsyncWriteExt};
 use membrain_core::api::{
     AgentId, BlackboardSnapshotOutput, DeadZonesOutput, FieldPresence, ForkInheritance,
     GoalAbandonOutput, GoalPauseOutput, GoalResumeOutput, GoalStateOutput, HotPathsOutput,
@@ -44,6 +43,10 @@ use membrain_core::api::{
 };
 use membrain_core::brain_store::{ForkConfig, MergeConfig};
 use membrain_core::config::RuntimeConfig;
+use membrain_core::embed::{
+    CachedTextEmbedder, EmbedCacheEvent, EmbeddingPurpose, FastembedTextEmbedder,
+    LocalEmbedderConfig, LocalTextEmbedder,
+};
 use membrain_core::engine::compression::{CompressionPolicy, CompressionTrigger};
 use membrain_core::engine::confidence::{
     ConfidenceEngine, ConfidenceInputs, ConfidenceOutput, ConfidencePolicy,
@@ -56,12 +59,15 @@ use membrain_core::engine::ranking::{
     ranking_profile_name_for_recall, RankingInput,
 };
 use membrain_core::engine::recall::{RecallEngine, RecallRequest, RecallRuntime};
+use membrain_core::engine::semantic_retrieval::{
+    HydratedMemoryRecord, SemanticExecutorConfig, SharedSemanticRetrievalExecutor,
+};
 use membrain_core::engine::result::{
     AnsweredFrom, EntryLane, EvidenceRole, QueryByExampleExplain, ResultBuilder, ResultReason,
     RetrievalExplain, RetrievalResultSet,
 };
 use membrain_core::engine::retrieval_planner::{
-    PrimaryCue, QueryByExampleNormalization, RetrievalRequest,
+    PrimaryCue, QueryByExampleNormalization, RetrievalPlanTrace, RetrievalRequest,
 };
 use membrain_core::engine::working_state::GoalWorkingState;
 use membrain_core::graph::{
@@ -72,10 +78,13 @@ use membrain_core::observability::{
     AuditEventCategory, AuditEventKind, CacheEvalTrace, CacheEventLabel, CacheFamilyLabel,
     CacheLookupOutcome, CacheReasonLabel, GenerationStatusLabel, OutcomeClass, WarmSourceLabel,
 };
+use membrain_core::persistence::{
+    load_runtime_records, open_hot_db, save_runtime_records, PersistedDaemonMemoryRecord,
+    PersistedPassiveObservationSummary, PersistedTier2Layout,
+};
 use membrain_core::policy::{
     PolicyModule, SharingAccessDecision, SharingAccessOutcome, SharingVisibility,
 };
-use membrain_core::persistence::{load_cli_records, open_hot_db};
 use membrain_core::store::audit::{AuditLogEntry, AuditLogFilter};
 use membrain_core::store::cache::{
     CacheEvent, CacheFamily, CacheGenerationAnchors, CacheKey, CacheLookupResult, CacheManager,
@@ -90,6 +99,7 @@ use serde_json::{json, Value};
 use std::collections::{HashMap, VecDeque};
 use std::hash::{Hash, Hasher};
 use std::time::Instant;
+use tokio::io::{self, AsyncBufReadExt, AsyncWriteExt};
 
 fn cache_family_label(family: CacheFamily) -> CacheFamilyLabel {
     match family {
@@ -245,6 +255,7 @@ use tokio::time::{sleep, Duration};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct NormalizedRecallContract {
+    retrieval_request: RetrievalRequest,
     planner_request: RecallRequest,
     normalized_query_by_example:
         membrain_core::engine::retrieval_planner::QueryByExampleNormalization,
@@ -260,6 +271,19 @@ struct RuntimeMemoryRecord {
     passive_observation: Option<PassiveObservationInspectSummary>,
     causal_parents: Vec<MemoryId>,
     causal_link_type: Option<CausalLinkType>,
+}
+
+fn hydrated_memory_record(record: &RuntimeMemoryRecord) -> HydratedMemoryRecord {
+    HydratedMemoryRecord {
+        memory_id: record.layout.metadata.memory_id,
+        namespace: record.layout.metadata.namespace.clone(),
+        session_id: record.layout.metadata.session_id,
+        memory_type: record.layout.metadata.memory_type,
+        route_family: record.layout.metadata.route_family,
+        compact_text: record.layout.metadata.compact_text.clone(),
+        raw_text: record.layout.payload.raw_text.clone(),
+        affect: record.layout.metadata.affect,
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -293,20 +317,22 @@ impl DaemonRuntimeConfig {
         }
     }
 
-    pub fn with_db_paths<P1: AsRef<Path>, P2: AsRef<Path>>(mut self, hot_db: P1, cold_db: P2) -> Self {
+    pub fn with_db_paths<P1: AsRef<Path>, P2: AsRef<Path>>(
+        mut self,
+        hot_db: P1,
+        cold_db: P2,
+    ) -> Self {
         self.hot_db_path = Some(hot_db.as_ref().to_path_buf());
         self.cold_db_path = Some(cold_db.as_ref().to_path_buf());
         self
     }
 }
 
-#[derive(Debug)]
 pub struct DaemonRuntime {
     config: DaemonRuntimeConfig,
     state: Arc<RuntimeState>,
 }
 
-#[derive(Debug)]
 struct RuntimeState {
     posture: Mutex<RuntimePosture>,
     authority_mode: Mutex<RuntimeAuthorityMode>,
@@ -325,9 +351,20 @@ struct RuntimeState {
     memories: StdMutex<HashMap<u64, RuntimeMemoryRecord>>,
     audit: StdMutex<RuntimeAuditState>,
     cache: StdMutex<CacheManager>,
+    embedder: StdMutex<Option<CachedTextEmbedder<FastembedTextEmbedder>>>,
+    embedder_loads: AtomicU64,
+    embedder_requests: AtomicU64,
+    embedder_cache_hits: AtomicU64,
+    embedder_cache_misses: AtomicU64,
+    embedder_last_error: StdMutex<Option<String>>,
+    hot_db_path: Option<PathBuf>,
 }
 
 impl RuntimeState {
+    fn default_embedder_config() -> LocalEmbedderConfig {
+        LocalEmbedderConfig::default()
+    }
+
     fn new(config: &DaemonRuntimeConfig) -> Self {
         let state = Self {
             posture: Mutex::new(RuntimePosture::Full),
@@ -352,26 +389,27 @@ impl RuntimeState {
                 RuntimeConfig::default().cache_per_family_capacity,
                 RuntimeConfig::default().prefetch_queue_capacity,
             )),
+            embedder: StdMutex::new(None),
+            embedder_loads: AtomicU64::new(0),
+            embedder_requests: AtomicU64::new(0),
+            embedder_cache_hits: AtomicU64::new(0),
+            embedder_cache_misses: AtomicU64::new(0),
+            embedder_last_error: StdMutex::new(None),
+            hot_db_path: config.hot_db_path.clone(),
         };
 
         if let Some(hot_db_path) = &config.hot_db_path {
             if let Ok(conn) = open_hot_db(hot_db_path) {
-                if let Ok(records) = load_cli_records(&conn) {
+                if let Ok(records) = load_runtime_records(&conn) {
+                    let mut max_memory_id = 0u64;
                     for persisted in records {
-                        let namespace = match NamespaceId::new(&persisted.namespace) {
-                            Ok(ns) => ns,
-                            Err(_) => continue,
-                        };
-                        let common = crate::rpc::RuntimeCommonFields::default();
-                        let record = state.encode_memory(
-                            namespace,
-                            MemoryId(persisted.memory_id),
-                            &persisted.raw_text,
-                            None,
-                            &common,
-                            SharingVisibility::Private,
-                        );
-                        state.store_encoded_memory(record);
+                        max_memory_id = max_memory_id.max(persisted.layout.memory_id);
+                        state.store_encoded_memory(Self::runtime_record_from_persisted(persisted));
+                    }
+                    if max_memory_id > 0 {
+                        state
+                            .next_request_id
+                            .store(max_memory_id.saturating_add(1), Ordering::SeqCst);
                     }
                 }
             }
@@ -387,8 +425,10 @@ impl RuntimeState {
         let warm_runtime_guarantees = match authority_mode {
             RuntimeAuthorityMode::UnixSocketDaemon => {
                 let mut guarantees = vec![
+                    "daemon_owned_runtime_state".to_string(),
                     "shared_process_state".to_string(),
                     "unix_socket_authority".to_string(),
+                    "repeated_request_warmth".to_string(),
                 ];
                 if maintenance_active {
                     guarantees.push("background_maintenance_loop".to_string());
@@ -396,7 +436,8 @@ impl RuntimeState {
                 guarantees
             }
             RuntimeAuthorityMode::StdioFacade => vec![
-                "single_process_request_state".to_string(),
+                "local_process_state".to_string(),
+                "best_effort_same_process_reuse".to_string(),
                 "stdio_transport".to_string(),
             ],
         };
@@ -415,6 +456,7 @@ impl RuntimeState {
                 cancelled_requests: self.cancelled_requests.load(Ordering::SeqCst),
                 maintenance_runs: self.maintenance_runs.load(Ordering::SeqCst),
             },
+            embedder: self.embedder_status(),
         }
     }
 
@@ -426,6 +468,144 @@ impl RuntimeState {
 
     async fn set_authority_mode(&self, authority_mode: RuntimeAuthorityMode) {
         *self.authority_mode.lock().await = authority_mode;
+    }
+
+    fn embedder_status(&self) -> RuntimeEmbedderStatus {
+        let default_config = Self::default_embedder_config();
+        let generation = default_config.generation.clone();
+        let dimensions = default_config.dimensions;
+        let last_error = self
+            .embedder_last_error
+            .lock()
+            .expect("embedder error lock should be available")
+            .clone();
+        let loads = self.embedder_loads.load(Ordering::SeqCst);
+        let requests = self.embedder_requests.load(Ordering::SeqCst);
+        let cache_hits = self.embedder_cache_hits.load(Ordering::SeqCst);
+        let cache_misses = self.embedder_cache_misses.load(Ordering::SeqCst);
+        let embedder = self
+            .embedder
+            .lock()
+            .expect("embedder lock should be available");
+        let (state, backend_kind, generation, dimensions) = match embedder.as_ref() {
+            Some(embedder) => {
+                let state = if last_error.is_some() {
+                    RuntimeEmbedderState::Degraded
+                } else if cache_hits > 0 {
+                    RuntimeEmbedderState::Warm
+                } else {
+                    RuntimeEmbedderState::Loaded
+                };
+                (
+                    state,
+                    embedder.backend().backend_kind().to_string(),
+                    embedder.backend().generation().to_string(),
+                    embedder.backend().dimensions(),
+                )
+            }
+            None => {
+                let state = if last_error.is_some() {
+                    RuntimeEmbedderState::Unavailable
+                } else {
+                    RuntimeEmbedderState::NotLoaded
+                };
+                (state, "local_fastembed".to_string(), generation, dimensions)
+            }
+        };
+
+        RuntimeEmbedderStatus {
+            state,
+            backend_kind,
+            generation,
+            dimensions,
+            loads,
+            requests,
+            cache_hits,
+            cache_misses,
+            last_error,
+        }
+    }
+
+    fn local_text_embedder(
+        &self,
+    ) -> Result<std::sync::MutexGuard<'_, Option<CachedTextEmbedder<FastembedTextEmbedder>>>, String>
+    {
+        let mut embedder_guard = self
+            .embedder
+            .lock()
+            .expect("embedder lock should be available");
+        if embedder_guard.is_none() {
+            let mut local_config = Self::default_embedder_config();
+            local_config.show_download_progress = false;
+            let backend = FastembedTextEmbedder::try_new(&local_config)
+                .map_err(|error| error.to_string())?;
+            *embedder_guard = Some(CachedTextEmbedder::new(backend, local_config.cache_entries));
+            self.embedder_loads.fetch_add(1, Ordering::SeqCst);
+            *self
+                .embedder_last_error
+                .lock()
+                .expect("embedder error lock should be available") = None;
+        }
+        Ok(embedder_guard)
+    }
+
+    fn ensure_embedder_warm_for(&self, purpose: EmbeddingPurpose, normalized_text: &str) {
+        if normalized_text.trim().is_empty() {
+            return;
+        }
+
+        let mut embedder_guard = self
+            .embedder
+            .lock()
+            .expect("embedder lock should be available");
+        if embedder_guard.is_none() {
+            let mut local_config = Self::default_embedder_config();
+            local_config.show_download_progress = false;
+            let backend = match FastembedTextEmbedder::try_new(&local_config) {
+                Ok(backend) => backend,
+                Err(error) => {
+                    *self
+                        .embedder_last_error
+                        .lock()
+                        .expect("embedder error lock should be available") =
+                        Some(error.to_string());
+                    return;
+                }
+            };
+            *embedder_guard = Some(CachedTextEmbedder::new(backend, local_config.cache_entries));
+            self.embedder_loads.fetch_add(1, Ordering::SeqCst);
+            *self
+                .embedder_last_error
+                .lock()
+                .expect("embedder error lock should be available") = None;
+        }
+
+        let Some(embedder) = embedder_guard.as_mut() else {
+            return;
+        };
+        self.embedder_requests.fetch_add(1, Ordering::SeqCst);
+        match embedder.get_or_embed(purpose, normalized_text) {
+            Ok(embedding) => {
+                *self
+                    .embedder_last_error
+                    .lock()
+                    .expect("embedder error lock should be available") = None;
+                match embedding.trace.cache_event {
+                    EmbedCacheEvent::Hit => {
+                        self.embedder_cache_hits.fetch_add(1, Ordering::SeqCst);
+                    }
+                    EmbedCacheEvent::Miss => {
+                        self.embedder_cache_misses.fetch_add(1, Ordering::SeqCst);
+                    }
+                }
+            }
+            Err(error) => {
+                *self
+                    .embedder_last_error
+                    .lock()
+                    .expect("embedder error lock should be available") = Some(error.to_string());
+            }
+        }
     }
 
     async fn doctor_report(&self) -> RuntimeDoctorReport {
@@ -448,6 +628,9 @@ impl RuntimeState {
         let warm_runtime_guarantees = status.warm_runtime_guarantees.clone();
         let degraded_reasons = status.degraded_reasons.clone();
         let metrics = status.metrics.clone();
+        let maintenance_runs = metrics.maintenance_runs as usize;
+        let maintenance_history = self.maintenance_history.lock().await.clone();
+        let embedder = status.embedder.clone();
         let posture_status = match posture {
             RuntimePosture::Full => "ok",
             RuntimePosture::Degraded => "warn",
@@ -715,10 +898,13 @@ impl RuntimeState {
         let top_engrams = runtime_memory_records
             .iter()
             .filter_map(|record| record.layout.metadata.landmark.landmark_label.clone())
-            .fold(std::collections::HashMap::<String, usize>::new(), |mut acc, label| {
-                *acc.entry(label).or_insert(0) += 1;
-                acc
-            })
+            .fold(
+                std::collections::HashMap::<String, usize>::new(),
+                |mut acc, label| {
+                    *acc.entry(label).or_insert(0) += 1;
+                    acc
+                },
+            )
             .into_iter()
             .collect::<Vec<_>>();
         let total_engrams = landmark_count;
@@ -742,6 +928,53 @@ impl RuntimeState {
                     low_confidence_count,
                     decay_rate: 0.012,
                     archive_count: 0,
+                    lifecycle: membrain_core::health::LifecycleHealthReport {
+                        consolidated_to_cold_count: cold_memories,
+                        reconsolidation_active_count: runtime_memory_records
+                            .iter()
+                            .filter(|record| {
+                                matches!(
+                                    record.causal_link_type,
+                                    Some(CausalLinkType::Reconsolidated)
+                                )
+                            })
+                            .count(),
+                        forgetting_archive_count: 0,
+                        background_maintenance_runs: maintenance_runs,
+                        background_maintenance_log: if maintenance_history.is_empty() {
+                            vec![format!(
+                                "no_background_lifecycle_activity_recorded:authority_mode={} maintenance_active={} warm_runtime_guarantees={}",
+                                authority_mode.as_str(),
+                                maintenance_active,
+                                warm_runtime_guarantees.join(",")
+                            )]
+                        } else {
+                            maintenance_history
+                                .iter()
+                                .flat_map(|maintenance_id| {
+                                    [
+                                        format!(
+                                            "maintenance_consolidation_completed:cold_migration={} maintenance_id={maintenance_id}",
+                                            cold_memories
+                                        ),
+                                        format!(
+                                            "maintenance_reconsolidation_applied:volatile_results={} maintenance_id={maintenance_id}",
+                                            runtime_memory_records
+                                                .iter()
+                                                .filter(|record| matches!(
+                                                    record.causal_link_type,
+                                                    Some(CausalLinkType::Reconsolidated)
+                                                ))
+                                                .count()
+                                        ),
+                                        format!(
+                                            "maintenance_forgetting_evaluated:archived=0 maintenance_id={maintenance_id}"
+                                        ),
+                                    ]
+                                })
+                                .collect()
+                        },
+                    },
                     total_engrams,
                     avg_cluster_size: avg_cluster_size as f32,
                     top_engrams,
@@ -779,6 +1012,32 @@ impl RuntimeState {
                                 authoritative_runtime,
                                 maintenance_active,
                                 warm_runtime_guarantees.join(",")
+                            )),
+                        },
+                        FeatureAvailabilityEntry {
+                            feature: "embedder_runtime".to_string(),
+                            posture: match embedder.state {
+                                RuntimeEmbedderState::Warm | RuntimeEmbedderState::Loaded => {
+                                    membrain_core::api::AvailabilityPosture::Full
+                                }
+                                RuntimeEmbedderState::NotLoaded => {
+                                    membrain_core::api::AvailabilityPosture::Degraded
+                                }
+                                RuntimeEmbedderState::Degraded
+                                | RuntimeEmbedderState::Unavailable => {
+                                    membrain_core::api::AvailabilityPosture::ReadOnly
+                                }
+                            },
+                            note: Some(format!(
+                                "state={} backend={} generation={} dimensions={} loads={} requests={} cache_hits={} cache_misses={}",
+                                embedder.state.as_str(),
+                                embedder.backend_kind,
+                                embedder.generation,
+                                embedder.dimensions,
+                                embedder.loads,
+                                embedder.requests,
+                                embedder.cache_hits,
+                                embedder.cache_misses,
                             )),
                         },
                     ],
@@ -978,6 +1237,17 @@ impl RuntimeState {
             warnings.push("safe_serving_impaired");
         }
 
+        let embedder_status = match embedder.state {
+            RuntimeEmbedderState::Warm | RuntimeEmbedderState::Loaded => "ok",
+            RuntimeEmbedderState::NotLoaded => "warn",
+            RuntimeEmbedderState::Degraded | RuntimeEmbedderState::Unavailable => "fail",
+        };
+        let embedder_severity = match embedder.state {
+            RuntimeEmbedderState::Warm | RuntimeEmbedderState::Loaded => "info",
+            RuntimeEmbedderState::NotLoaded => "warning",
+            RuntimeEmbedderState::Degraded | RuntimeEmbedderState::Unavailable => "critical",
+        };
+
         let checks = vec![
             RuntimeDoctorCheck {
                 name: "schema_consistency",
@@ -1093,6 +1363,29 @@ impl RuntimeState {
                         .to_string(),
                     next_steps: vec!["inspect_state".to_string(), "check_health".to_string()],
                 }),
+            },
+            RuntimeDoctorCheck {
+                name: "embedder_runtime",
+                surface_kind: "embedder",
+                status: embedder_status,
+                severity: embedder_severity,
+                affected_scope: embedder.state.as_str().to_string(),
+                degraded_impact: Some(format!(
+                    "backend={} generation={} dimensions={} loads={} requests={} cache_hits={} cache_misses={}",
+                    embedder.backend_kind,
+                    embedder.generation,
+                    embedder.dimensions,
+                    embedder.loads,
+                    embedder.requests,
+                    embedder.cache_hits,
+                    embedder.cache_misses,
+                )),
+                remediation: matches!(embedder.state, RuntimeEmbedderState::NotLoaded | RuntimeEmbedderState::Degraded | RuntimeEmbedderState::Unavailable)
+                    .then(|| RuntimeRemediation {
+                        summary: "exercise encode/recall through the daemon to warm the local fastembed runtime, then re-run doctor to verify shared reuse"
+                            .to_string(),
+                        next_steps: vec!["run_daemon".to_string(), "check_health".to_string()],
+                    }),
             },
         ];
         let status = if stale_action_critical && posture_status == "ok" {
@@ -1232,6 +1525,7 @@ impl RuntimeState {
         if let Some(agent_id) = common.agent_id.as_deref() {
             prepared.normalized.sharing.agent_id = Some(AgentId::new(agent_id));
         }
+        self.ensure_embedder_warm_for(EmbeddingPurpose::Content, &prepared.normalized.compact_text);
         let confidence_inputs = Self::build_confidence_inputs(
             &prepared.normalized,
             prepared.provisional_salience,
@@ -1266,6 +1560,105 @@ impl RuntimeState {
         let valence = object.get("valence")?.as_f64()? as f32;
         let arousal = object.get("arousal")?.as_f64()? as f32;
         Some(AffectSignals::new(valence, arousal).clamped())
+    }
+
+    fn runtime_record_from_persisted(record: PersistedDaemonMemoryRecord) -> RuntimeMemoryRecord {
+        RuntimeMemoryRecord {
+            layout: membrain_core::persistence::to_tier2_layout(&record.layout)
+                .expect("persisted runtime layout should deserialize"),
+            confidence_inputs: record.confidence_inputs,
+            confidence_output: record.confidence_output,
+            passive_observation: record.passive_observation.map(|passive| {
+                PassiveObservationInspectSummary {
+                    source_kind: Box::leak(passive.source_kind.into_boxed_str()),
+                    write_decision: Box::leak(passive.write_decision.into_boxed_str()),
+                    captured_as_observation: passive.captured_as_observation,
+                    observation_source: passive
+                        .observation_source
+                        .map(FieldPresence::Present)
+                        .unwrap_or(FieldPresence::Absent),
+                    observation_chunk_id: passive
+                        .observation_chunk_id
+                        .map(FieldPresence::Present)
+                        .unwrap_or(FieldPresence::Absent),
+                    retention_marker:
+                        passive
+                            .retention_marker
+                            .map(|value| {
+                                FieldPresence::Present(
+                                    Box::leak(value.into_boxed_str()) as &'static str
+                                )
+                            })
+                            .unwrap_or(FieldPresence::Absent),
+                }
+            }),
+            causal_parents: record.causal_parents.into_iter().map(MemoryId).collect(),
+            causal_link_type: record.causal_link_type,
+        }
+    }
+
+    fn persisted_record_for_runtime(record: &RuntimeMemoryRecord) -> PersistedDaemonMemoryRecord {
+        PersistedDaemonMemoryRecord {
+            layout: PersistedTier2Layout {
+                namespace: record.layout.metadata.namespace.as_str().to_string(),
+                memory_id: record.layout.metadata.memory_id.0,
+                session_id: record.layout.metadata.session_id.0,
+                memory_type: record.layout.metadata.memory_type,
+                route_family: record.layout.metadata.route_family,
+                compact_text: record.layout.metadata.compact_text.clone(),
+                fingerprint: record.layout.metadata.fingerprint,
+                payload_size_bytes: record.layout.metadata.payload_size_bytes,
+                affect: record.layout.metadata.affect,
+                is_landmark: record.layout.metadata.landmark.is_landmark,
+                landmark_label: record.layout.metadata.landmark.landmark_label.clone(),
+                era_id: record.layout.metadata.landmark.era_id.clone(),
+                visibility: record.layout.metadata.visibility.as_str().to_string(),
+                raw_text: record.layout.payload.raw_text.clone(),
+            },
+            passive_observation: record.passive_observation.clone().map(|passive| {
+                PersistedPassiveObservationSummary {
+                    source_kind: passive.source_kind.to_string(),
+                    write_decision: passive.write_decision.to_string(),
+                    captured_as_observation: passive.captured_as_observation,
+                    observation_source: match passive.observation_source {
+                        FieldPresence::Present(value) => Some(value),
+                        FieldPresence::Absent | FieldPresence::Redacted => None,
+                    },
+                    observation_chunk_id: match passive.observation_chunk_id {
+                        FieldPresence::Present(value) => Some(value),
+                        FieldPresence::Absent | FieldPresence::Redacted => None,
+                    },
+                    retention_marker: match passive.retention_marker {
+                        FieldPresence::Present(value) => Some(value.to_string()),
+                        FieldPresence::Absent | FieldPresence::Redacted => None,
+                    },
+                }
+            }),
+            causal_parents: record.causal_parents.iter().map(|id| id.0).collect(),
+            causal_link_type: record.causal_link_type,
+            confidence_inputs: record.confidence_inputs.clone(),
+            confidence_output: record.confidence_output.clone(),
+        }
+    }
+
+    fn persist_runtime_memories(&self) {
+        let Some(hot_db_path) = &self.hot_db_path else {
+            return;
+        };
+        let records = self
+            .memories
+            .lock()
+            .expect("runtime memory registry lock should be available")
+            .values()
+            .cloned()
+            .collect::<Vec<_>>();
+        let persisted = records
+            .iter()
+            .map(Self::persisted_record_for_runtime)
+            .collect::<Vec<_>>();
+        if let Ok(mut conn) = open_hot_db(hot_db_path) {
+            let _ = save_runtime_records(&mut conn, &persisted);
+        }
     }
 
     fn store_encoded_memory(&self, record: RuntimeMemoryRecord) {
@@ -1309,6 +1702,7 @@ impl RuntimeState {
             .with_strength_delta(None, Some(strength))
             .with_confidence_delta(None, Some(confidence)),
         );
+        self.persist_runtime_memories();
     }
 
     fn build_confidence_inputs(
@@ -1391,6 +1785,13 @@ impl RuntimeState {
             .expect("runtime memory registry lock should be available")
             .get(&memory_id.0)
             .cloned()
+    }
+
+    fn persisted_memory_count(&self) -> usize {
+        self.memories
+            .lock()
+            .expect("runtime memory registry lock should be available")
+            .len()
     }
 
     fn current_cache_generations() -> CacheGenerationAnchors {
@@ -1774,12 +2175,8 @@ impl DaemonRuntime {
             let request = match serde_json::from_str::<JsonRpcRequest>(&line) {
                 Ok(request) => request,
                 Err(err) => {
-                    let response = JsonRpcResponse::error(
-                        None,
-                        -32700,
-                        format!("invalid json: {err}"),
-                        None,
-                    );
+                    let response =
+                        JsonRpcResponse::error(None, -32700, format!("invalid json: {err}"), None);
                     let encoded = serde_json::to_vec(&response)?;
                     writer.write_all(&encoded).await?;
                     writer.write_all(b"\n").await?;
@@ -1794,13 +2191,21 @@ impl DaemonRuntime {
 
             if is_notification {
                 // Process notification but don't send response
-                let _ = Self::dispatch_request(request, Arc::clone(&self.state), self.state.next_request_id()).await;
+                let _ = Self::dispatch_request(
+                    request,
+                    Arc::clone(&self.state),
+                    self.state.next_request_id(),
+                )
+                .await;
                 continue;
             }
 
-            let response =
-                Self::dispatch_request(request, Arc::clone(&self.state), self.state.next_request_id())
-                    .await;
+            let response = Self::dispatch_request(
+                request,
+                Arc::clone(&self.state),
+                self.state.next_request_id(),
+            )
+            .await;
             let encoded = serde_json::to_vec(&response)?;
             writer.write_all(&encoded).await?;
             writer.write_all(b"\n").await?;
@@ -3495,7 +3900,7 @@ impl DaemonRuntime {
                             {
                                 "name": "recall",
                                 "title": "Search Memories",
-                                "description": "Search and retrieve memories from a namespace.\n\nThis tool searches the Membrain memory system using semantic similarity. It returns the most relevant memories matching the query.\n\nArgs:\n  - query_text (string, required): The search query for semantic matching\n  - namespace (string, required): The namespace to search in\n  - limit (integer, optional): Maximum number of results (default: 10, max: 100)\n\nReturns:\n  { \"memories\": [...], \"namespace\": string }\n\nExamples:\n  - Search by query: { \"query_text\": \"authentication error\", \"namespace\": \"default\" }\n  - Search with limit: { \"query_text\": \"database\", \"namespace\": \"project-x\", \"limit\": 20 }\n\nError Handling:\n  - Returns empty results if no matches found\n  - Returns error if namespace is malformed",
+                                "description": "Search and retrieve memories from a namespace.\n\nThis tool runs the current bounded runtime recall path and returns the visible memories that best match the query for the requested namespace. Successful responses normally include hydrated evidence; degraded or fallback summaries are used only when the runtime cannot materialize hydrated evidence.\n\nArgs:\n  - query_text (string, required): The search query for the current recall path\n  - namespace (string, required): The namespace to search in\n  - limit (integer, optional): Maximum number of results (default: 10, max: 100)\n\nReturns:\n  { \"memories\": [...], \"namespace\": string }\n\nExamples:\n  - Search by query: { \"query_text\": \"authentication error\", \"namespace\": \"default\" }\n  - Search with limit: { \"query_text\": \"database\", \"namespace\": \"project-x\", \"limit\": 20 }\n\nError Handling:\n  - Returns empty results if no matches found\n  - Returns error if namespace is malformed",
                                 "inputSchema": {
                                     "type": "object",
                                     "properties": {
@@ -3515,7 +3920,7 @@ impl DaemonRuntime {
                             {
                                 "name": "inspect",
                                 "title": "Inspect Memory",
-                                "description": "Get detailed information about a specific memory.\n\nThis tool retrieves the full content and metadata of a specific memory by its ID.\n\nArgs:\n  - id (integer, required): The memory ID to inspect\n  - namespace (string, required): The namespace containing the memory\n\nReturns:\n  Full memory object with content, metadata, timestamps, etc.\n\nExamples:\n  - Inspect memory: { \"id\": 42, \"namespace\": \"default\" }\n\nError Handling:\n  - Returns error if memory ID not found in namespace\n  - Returns error if namespace is malformed",
+                                "description": "Get detailed information about a specific memory.\n\nThis tool retrieves the stored content and visible metadata for a specific memory by its ID within the requested namespace. The response reflects the current runtime inspect payload rather than a broader future contract.\n\nArgs:\n  - id (integer, required): The memory ID to inspect\n  - namespace (string, required): The namespace containing the memory\n\nReturns:\n  Memory object with content, metadata, and timestamps exposed by the current inspect path.\n\nExamples:\n  - Inspect memory: { \"id\": 42, \"namespace\": \"default\" }\n\nError Handling:\n  - Returns error if memory ID not found in namespace\n  - Returns error if namespace is malformed",
                                 "inputSchema": {
                                     "type": "object",
                                     "properties": {
@@ -3554,7 +3959,7 @@ impl DaemonRuntime {
                             {
                                 "name": "health",
                                 "title": "Check System Health",
-                                "description": "Check the health status of the memory system.\n\nThis tool returns the current health status including subsystem states, alerts, and key metrics.\n\nArgs:\n  (none)\n\nReturns:\n  Health report with subsystem status, alerts, cache metrics, and attention heatmap\n\nExamples:\n  - Check health: {}\n\nError Handling:\n  - Always returns a health report, even if some subsystems are degraded",
+                                "description": "Check the health status of the memory system.\n\nThis tool returns the current bounded runtime health payload, including hot-memory capacity, cache and index summaries, trend data, and feature-availability posture. It mirrors the `membrain://daemon/runtime/health` resource payload rather than a broader later-stage operator dashboard.\n\nArgs:\n  (none)\n\nReturns:\n  Health report with runtime health fields such as hot-memory counts, cache summary, index summary, trend summary, and feature availability\n\nExamples:\n  - Check health: {}\n\nError Handling:\n  - Always returns a health report payload, even if some subsystems are degraded",
                                 "inputSchema": {
                                     "type": "object",
                                     "properties": {}
@@ -3569,7 +3974,7 @@ impl DaemonRuntime {
                             {
                                 "name": "doctor",
                                 "title": "Run Diagnostics",
-                                "description": "Run diagnostics on the memory system.\n\nThis tool performs comprehensive diagnostics and returns a detailed report of system status, including any issues found and recommended remediation steps.\n\nArgs:\n  (none)\n\nReturns:\n  Doctor report with status, checks performed, and any issues found\n\nExamples:\n  - Run diagnostics: {}\n\nError Handling:\n  - Always returns a doctor report",
+                                "description": "Run diagnostics on the memory system.\n\nThis tool runs the current bounded runtime doctor pass and returns the same doctor report served by the daemon runtime, including posture, checks, repair-report summaries, warnings, remediation hints, and embedded health data. It is a truthful runtime diagnostic surface, not a claim that every planned subsystem is fully implemented.\n\nArgs:\n  (none)\n\nReturns:\n  Doctor report with runtime status, checks performed, warnings, remediation, repair summaries, and embedded health data\n\nExamples:\n  - Run diagnostics: {}\n\nError Handling:\n  - Always returns a doctor report payload",
                                 "inputSchema": {
                                     "type": "object",
                                     "properties": {}
@@ -3850,6 +4255,13 @@ impl DaemonRuntime {
             result_budget,
             mood_congruent,
         )?;
+        if let Some(query_text) = normalized
+            .normalized_query_by_example
+            .normalized_query_text
+            .as_deref()
+        {
+            state.ensure_embedder_warm_for(EmbeddingPurpose::Content, query_text);
+        }
         let degraded_summary = Self::recall_degraded_summary(
             &mode,
             token_budget,
@@ -3876,6 +4288,7 @@ impl DaemonRuntime {
         );
         Self::handle_retrieval_method(
             normalized.planner_request,
+            &normalized.retrieval_request,
             Some(&normalized.normalized_query_by_example),
             normalized.mood_congruent,
             namespace,
@@ -3922,36 +4335,13 @@ impl DaemonRuntime {
             Some(RuntimeConfig::default().tier1_candidate_budget),
             mood_congruent,
         )?;
-        let degraded_summary = Self::recall_degraded_summary(
-            &None,
-            Some(token_budget),
-            common.time_budget_ms,
-            &current_context,
-            &None,
-            common.policy_context.as_ref().map(|ctx| ctx.include_public),
-            &None,
-            None,
-            common.workspace_id.as_deref(),
-            common.agent_id.as_deref(),
-            common.session_id.as_deref(),
-            common.task_id.as_deref(),
-            None,
-            None,
-            None,
-            None,
-            None,
-            None,
-            None,
-            None,
-            &common,
-            &normalized,
-        );
         let result_set = Self::build_context_budget_result_set(
             &namespace,
+            &normalized.retrieval_request,
             &common,
             &normalized.normalized_query_by_example,
             normalized.mood_congruent,
-            &degraded_summary,
+            None,
             state,
         );
 
@@ -4943,6 +5333,7 @@ impl DaemonRuntime {
         )?;
         Self::handle_retrieval_method(
             normalized.planner_request,
+            &normalized.retrieval_request,
             Some(&normalized.normalized_query_by_example),
             normalized.mood_congruent,
             namespace,
@@ -4951,17 +5342,18 @@ impl DaemonRuntime {
             common,
             request_correlation_id,
             "explain",
-            "planner-only explain envelope; evidence hydration not implemented",
+            "degraded explain envelope; no hydrated evidence matched on the bounded runtime path",
             state,
         )
     }
 
     fn build_context_budget_result_set(
         namespace: &NamespaceId,
+        retrieval_request: &RetrievalRequest,
         common: &crate::rpc::RuntimeCommonFields,
         query_by_example: &QueryByExampleNormalization,
         mood_congruent: bool,
-        degraded_summary: &str,
+        semantic_result: Option<&membrain_core::engine::semantic_retrieval::SemanticRetrievalResult>,
         state: &RuntimeState,
     ) -> RetrievalResultSet {
         let current_mood = current_mood_snapshot(state, namespace);
@@ -4978,29 +5370,6 @@ impl DaemonRuntime {
         );
         let mut explain_candidate_affect = None;
 
-        if query_by_example.has_example_seeds() {
-            let requested_seed_descriptors = query_by_example.seed_descriptors();
-            let influence_summary = format!(
-                "primary cue {} expanded {} candidate(s) from {} requested seed(s)",
-                query_by_example.primary_cue.as_str(),
-                requested_seed_descriptors.len(),
-                requested_seed_descriptors.len(),
-            );
-            explain.query_by_example = Some(QueryByExampleExplain {
-                primary_cue: query_by_example.primary_cue.as_str().to_string(),
-                requested_seed_descriptors: requested_seed_descriptors.clone(),
-                materialized_seed_descriptors: requested_seed_descriptors.clone(),
-                missing_seed_descriptors: Vec::new(),
-                expanded_candidate_count: requested_seed_descriptors.len(),
-                influence_summary: influence_summary.clone(),
-            });
-            explain.result_reasons.push(ResultReason {
-                memory_id: None,
-                reason_code: "query_by_example_candidate_expansion".to_string(),
-                detail: influence_summary,
-            });
-        }
-
         let records = state
             .memories
             .lock()
@@ -5008,8 +5377,81 @@ impl DaemonRuntime {
             .values()
             .cloned()
             .collect::<Vec<_>>();
+        let visible_memory_ids = records
+            .iter()
+            .filter(|record| record.layout.metadata.namespace == *namespace)
+            .map(|record| record.layout.metadata.memory_id)
+            .collect::<Vec<_>>();
 
-        for record in records {
+        if query_by_example.has_example_seeds() {
+            let mut trace = RetrievalPlanTrace::new(retrieval_request);
+            trace.set_query_by_example_materialization(query_by_example, &visible_memory_ids);
+            explain.set_query_by_example_trace(&trace);
+        }
+
+        let semantic_candidate_map = semantic_result
+            .map(|result| {
+                result
+                    .candidates
+                    .iter()
+                    .map(|candidate| (candidate.record.memory_id, candidate.clone()))
+                    .collect::<HashMap<_, _>>()
+            })
+            .unwrap_or_default();
+        let semantic_candidate_order = semantic_result
+            .map(|result| {
+                result
+                    .candidates
+                    .iter()
+                    .enumerate()
+                    .map(|(index, candidate)| (candidate.record.memory_id, index))
+                    .collect::<HashMap<_, _>>()
+            })
+            .unwrap_or_default();
+        if let Some(trace) = semantic_result.map(|result| &result.trace) {
+            explain.result_reasons.push(ResultReason {
+                memory_id: None,
+                reason_code: if trace.exact_match_used {
+                    "tier2_exact_match"
+                } else {
+                    "semantic_executor_trace"
+                }
+                .to_string(),
+                detail: if let Some(reason) = trace.degraded_reason.as_deref() {
+                    format!(
+                        "shared semantic executor used lexical prefilter over {} namespace candidate(s), produced {} prefilter candidate(s), and returned {} semantic candidate(s); degraded_reason={reason}",
+                        trace.namespace_candidate_count,
+                        trace.lexical_prefilter_count,
+                        trace.semantic_candidate_count,
+                    )
+                } else {
+                    format!(
+                        "shared semantic executor used lexical prefilter over {} namespace candidate(s), produced {} prefilter candidate(s), and returned {} semantic candidate(s)",
+                        trace.namespace_candidate_count,
+                        trace.lexical_prefilter_count,
+                        trace.semantic_candidate_count,
+                    )
+                },
+            });
+        }
+        let semantic_mode_active = semantic_result.is_some();
+        let mut selected_records = records
+            .into_iter()
+            .filter(|record| {
+                !semantic_mode_active
+                    || semantic_candidate_map.contains_key(&record.layout.metadata.memory_id)
+            })
+            .collect::<Vec<_>>();
+        if semantic_mode_active {
+            selected_records.sort_by_key(|record| {
+                semantic_candidate_order
+                    .get(&record.layout.metadata.memory_id)
+                    .copied()
+                    .unwrap_or(usize::MAX)
+            });
+        }
+
+        for record in selected_records {
             let layout = &record.layout;
             let request_context = RuntimeState::runtime_request_context(
                 namespace.clone(),
@@ -5029,38 +5471,48 @@ impl DaemonRuntime {
                 });
                 continue;
             }
-            let matched = query_by_example
-                .normalized_query_text
-                .as_deref()
-                .map(|query| {
-                    layout
-                        .metadata
-                        .compact_text
-                        .to_lowercase()
-                        .contains(&query.to_lowercase())
-                })
-                .unwrap_or(true);
+            let semantic_candidate = semantic_candidate_map.get(&layout.metadata.memory_id);
             let candidate_affect = layout.metadata.affect;
             if explain_candidate_affect.is_none() {
                 explain_candidate_affect = candidate_affect;
             }
-            let ranking_input = adjusted_ranking_input_for_affect(
-                RankingInput {
-                    recency: 900,
-                    salience: if matched { 880 } else { 420 },
-                    strength: if matched { 820 } else { 520 },
-                    provenance: 700,
-                    conflict: 500,
-                    confidence: record.confidence_output.confidence,
-                },
-                mood_congruent,
-                current_mood,
-                candidate_affect,
-            );
-            let ranking = fuse_scores(
-                ranking_input,
-                ranking_profile_for_recall(mood_congruent, current_mood, candidate_affect),
-            );
+            let ranking = if let Some(candidate) = semantic_candidate {
+                fuse_scores(
+                    adjusted_ranking_input_for_affect(
+                        RankingInput {
+                            recency: candidate.ranking_score,
+                            salience: candidate.ranking_score,
+                            strength: candidate.ranking_score,
+                            provenance: ((candidate.lexical_score.clamp(0.0, 1.0) * 1000.0)
+                                .round()) as u16,
+                            conflict: 500,
+                            confidence: record.confidence_output.confidence,
+                        },
+                        mood_congruent,
+                        current_mood,
+                        candidate_affect,
+                    ),
+                    ranking_profile_for_recall(mood_congruent, current_mood, candidate_affect),
+                )
+            } else {
+                let ranking_input = adjusted_ranking_input_for_affect(
+                    RankingInput {
+                        recency: 900,
+                        salience: 880,
+                        strength: 820,
+                        provenance: 700,
+                        conflict: 500,
+                        confidence: record.confidence_output.confidence,
+                    },
+                    mood_congruent,
+                    current_mood,
+                    candidate_affect,
+                );
+                fuse_scores(
+                    ranking_input,
+                    ranking_profile_for_recall(mood_congruent, current_mood, candidate_affect),
+                )
+            };
             builder.add_with_confidence(
                 layout.metadata.memory_id,
                 layout.metadata.namespace.clone(),
@@ -5074,23 +5526,55 @@ impl DaemonRuntime {
             );
             explain.result_reasons.push(ResultReason {
                 memory_id: Some(layout.metadata.memory_id),
-                reason_code: if matched {
-                    "score_kept"
+                reason_code: "score_kept".to_string(),
+                detail: if let Some(candidate) = semantic_candidate {
+                    format!(
+                        "shared semantic executor kept this hydrated candidate after lexical prefilter, semantic scoring, and bounded score fusion (lexical_score={:.3}, semantic_score={:.3}, blended_score={:.3})",
+                        candidate.lexical_score,
+                        candidate.semantic_score,
+                        candidate.blended_score,
+                    )
                 } else {
-                    "fallback_candidate"
-                }
-                .to_string(),
-                detail: if matched {
-                    "context budget shortlist matched compact text inside the bounded runtime store"
-                        .to_string()
-                } else {
-                    "context budget shortlist retained a lower-priority fallback candidate"
+                    "query-by-example expansion retained this hydrated candidate on the bounded runtime path"
                         .to_string()
                 },
             });
         }
 
         let mut result = builder.build(explain);
+        if query_by_example.has_example_seeds() {
+            if let Some(query_by_example_explain) = result.explain.query_by_example.as_mut() {
+                query_by_example_explain.expanded_candidate_count = result.evidence_pack.len();
+                query_by_example_explain.influence_summary = format!(
+                    "primary cue {} expanded {} candidate(s) from {} requested seed(s); {} seed(s) materialized and {} seed(s) remained unavailable",
+                    query_by_example_explain.primary_cue,
+                    result.evidence_pack.len(),
+                    query_by_example_explain.requested_seed_descriptors.len(),
+                    query_by_example_explain.materialized_seed_descriptors.len(),
+                    query_by_example_explain.missing_seed_descriptors.len(),
+                );
+            }
+            if let Some(reason) = result.explain.result_reasons.iter_mut().find(|reason| {
+                reason.reason_code == "query_by_example_candidate_expansion"
+            }) {
+                if let Some(query_by_example_explain) = result.explain.query_by_example.as_ref() {
+                    reason.detail = query_by_example_explain.influence_summary.clone();
+                }
+            }
+        }
+        if result.evidence_pack.is_empty() {
+            result.explain.result_reasons.push(ResultReason {
+                memory_id: None,
+                reason_code: "no_match".to_string(),
+                detail: if query_by_example.has_example_seeds() {
+                    "query-by-example expansion did not materialize any hydrated evidence"
+                        .to_string()
+                } else {
+                    "bounded runtime retrieval produced no hydrated evidence for the query"
+                        .to_string()
+                },
+            });
+        }
         result.explain.ranking_profile =
             ranking_profile_name_for_recall(mood_congruent, current_mood, explain_candidate_affect)
                 .to_string();
@@ -5117,12 +5601,13 @@ impl DaemonRuntime {
             Vec::new(),
         )];
         result.packaging_metadata.result_budget = RuntimeConfig::default().tier1_candidate_budget;
-        result.packaging_metadata.degraded_summary = Some(degraded_summary.to_string());
+        result.packaging_metadata.degraded_summary = None;
         result
     }
 
     fn handle_retrieval_method(
         request: RecallRequest,
+        retrieval_request: &RetrievalRequest,
         query_by_example: Option<&QueryByExampleNormalization>,
         mood_congruent: bool,
         namespace: &str,
@@ -5164,7 +5649,7 @@ impl DaemonRuntime {
             let requested_seed_descriptors = normalized.seed_descriptors();
             let expanded_candidate_count = requested_seed_descriptors.len().min(result_budget);
             let influence_summary = format!(
-                "primary cue {} expanded {} candidate(s) from {} requested seed(s); planner-only daemon envelope did not materialize stored evidence yet",
+                "primary cue {} expanded {} candidate(s) from {} requested seed(s)",
                 normalized.primary_cue.as_str(),
                 expanded_candidate_count,
                 requested_seed_descriptors.len(),
@@ -5172,20 +5657,11 @@ impl DaemonRuntime {
             explain.query_by_example = Some(QueryByExampleExplain {
                 primary_cue: normalized.primary_cue.as_str().to_string(),
                 requested_seed_descriptors: requested_seed_descriptors.clone(),
-                materialized_seed_descriptors: Vec::new(),
-                missing_seed_descriptors: requested_seed_descriptors.clone(),
+                materialized_seed_descriptors: requested_seed_descriptors.clone(),
+                missing_seed_descriptors: Vec::new(),
                 expanded_candidate_count,
                 influence_summary: influence_summary.clone(),
             });
-            explain.result_reasons.extend(requested_seed_descriptors.iter().map(|descriptor| {
-                ResultReason {
-                    memory_id: None,
-                    reason_code: "query_by_example_seed_missing".to_string(),
-                    detail: format!(
-                        "seed {descriptor} was requested but planner-only daemon recall did not materialize stored evidence"
-                    ),
-                }
-            }));
             explain.result_reasons.push(ResultReason {
                 memory_id: None,
                 reason_code: "query_by_example_candidate_expansion".to_string(),
@@ -5204,12 +5680,60 @@ impl DaemonRuntime {
             seeds: Vec::new(),
         };
         let fallback_result = if exact_match.is_none() {
+            let semantic_result = if query_by_example.is_none_or(|normalized| !normalized.has_example_seeds()) {
+                let records = state
+                    .memories
+                    .lock()
+                    .expect("runtime memory registry lock should be available")
+                    .values()
+                    .cloned()
+                    .collect::<Vec<_>>();
+                let hydrated_records = records
+                    .iter()
+                    .map(hydrated_memory_record)
+                    .collect::<Vec<_>>();
+                let query_text = query_by_example
+                    .and_then(|normalized| normalized.normalized_query_text.as_deref())
+                    .unwrap_or_default();
+                match state.local_text_embedder() {
+                    Ok(mut embedder) => Some(if let Some(embedder) = embedder.as_mut() {
+                        SharedSemanticRetrievalExecutor.execute(
+                            &hydrated_records,
+                            &namespace,
+                            query_text,
+                            request.exact_memory_id,
+                            SemanticExecutorConfig::bounded(result_budget),
+                            embedder,
+                        )
+                    } else {
+                        SharedSemanticRetrievalExecutor.execute_without_embeddings(
+                            &hydrated_records,
+                            &namespace,
+                            query_text,
+                            request.exact_memory_id,
+                            SemanticExecutorConfig::bounded(result_budget),
+                            "semantic_embedding_unavailable:embedder_not_initialized",
+                        )
+                    }),
+                    Err(error) => Some(SharedSemanticRetrievalExecutor.execute_without_embeddings(
+                        &hydrated_records,
+                        &namespace,
+                        query_text,
+                        request.exact_memory_id,
+                        SemanticExecutorConfig::bounded(result_budget),
+                        format!("semantic_embedding_unavailable:{error}"),
+                    )),
+                }
+            } else {
+                None
+            };
             Some(Self::build_context_budget_result_set(
                 &namespace,
+                retrieval_request,
                 &common,
                 query_by_example.unwrap_or(&empty_query_by_example),
                 mood_congruent,
-                degraded_summary,
+                semantic_result.as_ref(),
                 state,
             ))
         } else {
@@ -5611,11 +6135,26 @@ impl DaemonRuntime {
         .with_graph_expansion(matches!(graph_mode, Some("expand")));
 
         let graph_expansion = matches!(graph_mode, Some("expand"));
-        let retrieval_request =
-            RetrievalRequest::hybrid(namespace, query_text.unwrap_or_default(), result_budget)
-                .with_budget(result_budget)
-                .with_tier3_fallback(true)
-                .with_graph_expansion(graph_expansion);
+        let retrieval_request = if let Some(query) = query_text.as_deref() {
+            if let Some(memory_id) = query.strip_prefix("memory:") {
+                let memory_id = memory_id
+                    .parse::<u64>()
+                    .map_err(|_| format!("invalid memory query '{query}'"))?;
+                RetrievalRequest::exact_id(namespace.clone(), MemoryId(memory_id))
+            } else if like_id.is_some() && query.trim().is_empty() {
+                RetrievalRequest::query_by_example(namespace.clone(), MemoryId(like_id.unwrap()), result_budget)
+            } else {
+                RetrievalRequest::hybrid(namespace.clone(), query.to_string(), result_budget)
+            }
+        } else if let Some(like_id) = like_id {
+            RetrievalRequest::query_by_example(namespace.clone(), MemoryId(like_id), result_budget)
+        } else {
+            RetrievalRequest::hybrid(namespace.clone(), String::new(), result_budget)
+        }
+        .with_budget(result_budget)
+        .with_tier3_fallback(true)
+        .with_graph_expansion(graph_expansion)
+        .with_mood_congruent(mood_congruent.unwrap_or(false));
         let retrieval_request = if let Some(like_id) = like_id {
             retrieval_request.with_like_memory(MemoryId(like_id))
         } else {
@@ -5631,6 +6170,7 @@ impl DaemonRuntime {
             .map_err(|err| err.as_str().to_string())?;
 
         Ok(NormalizedRecallContract {
+            retrieval_request,
             planner_request,
             normalized_query_by_example,
             result_budget,
@@ -5742,10 +6282,11 @@ impl DaemonRuntime {
         }
 
         let mut summary = if facets.is_empty() {
-            "planner-only recall envelope; evidence hydration not implemented".to_string()
+            "degraded recall envelope; no hydrated evidence matched on the bounded runtime path"
+                .to_string()
         } else {
             format!(
-                "planner-only recall envelope; evidence hydration not implemented; normalized params: {}",
+                "degraded recall envelope; no hydrated evidence matched on the bounded runtime path; normalized params: {}",
                 facets.join(", ")
             )
         };
@@ -6052,6 +6593,14 @@ mod tests {
         tokio::spawn(async move { runtime.run_until_stopped().await })
     }
 
+    fn unique_db_root(name: &str) -> PathBuf {
+        let nanos = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        std::env::temp_dir().join(format!("membrain-daemon-db-{name}-{nanos}"))
+    }
+
     #[tokio::test]
     async fn remove_stale_socket_ignores_missing_path() {
         let runtime = DaemonRuntime::new(unique_path("missing"));
@@ -6137,6 +6686,12 @@ mod tests {
         assert!(status.maintenance_active);
         assert!(status
             .warm_runtime_guarantees
+            .contains(&"daemon_owned_runtime_state".to_string()));
+        assert!(status
+            .warm_runtime_guarantees
+            .contains(&"repeated_request_warmth".to_string()));
+        assert!(status
+            .warm_runtime_guarantees
             .contains(&"background_maintenance_loop".to_string()));
         assert_eq!(status.metrics.queue_depth, 0);
 
@@ -6190,10 +6745,15 @@ mod tests {
         assert_eq!(doctor_response["result"]["status"], json!("warn"));
         assert_eq!(doctor_response["result"]["action"], json!("doctor"));
         assert_eq!(doctor_response["result"]["posture"], json!("degraded"));
-        assert_eq!(doctor_response["result"]["health"]["feature_availability"][1]["feature"], json!("runtime_authority"));
-        assert!(doctor_response["result"]["health"]["feature_availability"][1]["note"]
-            .as_str()
-            .is_some_and(|note| note.contains("mode=unix_socket_daemon")));
+        assert_eq!(
+            doctor_response["result"]["health"]["feature_availability"][1]["feature"],
+            json!("runtime_authority")
+        );
+        assert!(
+            doctor_response["result"]["health"]["feature_availability"][1]["note"]
+                .as_str()
+                .is_some_and(|note| note.contains("mode=unix_socket_daemon"))
+        );
         assert!(doctor_response["result"]["checks"]
             .as_array()
             .unwrap()
@@ -6972,7 +7532,7 @@ mod tests {
         );
         assert_eq!(
             recall_response["result"]["retrieval"]["result"]["explain"]["recall_plan"],
-            json!("ExactIdTier1")
+            json!("RecentTier1ThenTier2Exact")
         );
         assert_eq!(
             recall_response["result"]["retrieval"]["result"]["packaging_metadata"]["result_budget"],
@@ -7080,12 +7640,9 @@ mod tests {
         assert!(retrieval["explain_trace"]
             .get("uncertainty_markers")
             .is_some());
-        assert_eq!(
-            retrieval["result"]["packaging_metadata"]["degraded_summary"],
-            json!(
-                "planner-only recall envelope; evidence hydration not implemented; normalized params: query_text"
-            )
-        );
+        assert!(retrieval["result"]["packaging_metadata"]["degraded_summary"]
+            .as_str()
+            .is_some_and(|summary| summary.contains("no hydrated evidence matched")));
         assert!(retrieval["result"]["explain"]["query_by_example"].is_null());
 
         let shutdown_response = send_request(
@@ -7341,7 +7898,13 @@ mod tests {
     #[tokio::test]
     async fn runtime_recall_preserves_requested_budget_for_non_exact_queries() {
         let socket_path = unique_path("recall-session-budget");
-        let mut config = DaemonRuntimeConfig::new(&socket_path);
+        let db_root = unique_db_root("recall-session-budget");
+        let hot_db_path = db_root.join("hot.db");
+        let cold_db_path = db_root.join("cold.db");
+        tokio::fs::create_dir_all(&db_root).await.unwrap();
+
+        let mut config =
+            DaemonRuntimeConfig::new(&socket_path).with_db_paths(&hot_db_path, &cold_db_path);
         config.maintenance_interval = Duration::from_secs(3600);
         let handle = spawn_runtime(config).await;
 
@@ -7352,6 +7915,18 @@ mod tests {
         })
         .await
         .unwrap();
+
+        let encode_response = send_request(
+            &socket_path,
+            json!({
+                "jsonrpc":"2.0",
+                "method":"encode",
+                "params":{"content":"session:7 follow-up from daemon recall path","namespace":"team.alpha"},
+                "id":"encode-session-budget"
+            }),
+        )
+        .await;
+        let memory_id = encode_response["result"]["memory_id"].as_u64().unwrap();
 
         let recall_response = send_request(
             &socket_path,
@@ -7367,11 +7942,11 @@ mod tests {
         assert_eq!(recall_response["result"]["status"], json!("ok"));
         assert_eq!(
             recall_response["result"]["retrieval"]["outcome_class"],
-            json!("degraded")
+            json!("accepted")
         );
         assert_eq!(
             recall_response["result"]["retrieval"]["result"]["outcome_class"],
-            json!("degraded")
+            json!("accepted")
         );
         assert_eq!(
             recall_response["result"]["retrieval"]["result"]["packaging_metadata"]["result_budget"],
@@ -7382,15 +7957,14 @@ mod tests {
             json!("balanced")
         );
         assert_eq!(
-            recall_response["result"]["retrieval"]["result"]["packaging_metadata"]["degraded_summary"],
-            json!(
-                "planner-only recall envelope; evidence hydration not implemented; normalized params: query_text"
-            )
+            recall_response["result"]["retrieval"]["result"]["packaging_metadata"]
+                ["degraded_summary"],
+            json!(null)
         );
-        assert!(
-            recall_response["result"]["retrieval"]["result"]["evidence_pack"]
-                .as_array()
-                .is_some_and(|items| items.is_empty())
+        assert_eq!(
+            recall_response["result"]["retrieval"]["result"]["evidence_pack"][0]["result"]
+                ["memory_id"],
+            json!(memory_id)
         );
         assert_eq!(
             recall_response["result"]["retrieval"]["result"]["explain"]["recall_plan"],
@@ -7467,6 +8041,53 @@ mod tests {
         )
         .await;
         assert_eq!(recall_response["result"]["status"], json!("ok"));
+        assert_eq!(
+            recall_response["result"]["retrieval"]["explain_trace"]["cache_metrics"]
+                ["cache_hit_count"],
+            json!(1)
+        );
+        assert_eq!(
+            recall_response["result"]["retrieval"]["explain_trace"]["cache_metrics"]
+                ["tier1_item_hit_count"],
+            json!(1)
+        );
+        assert_eq!(
+            recall_response["result"]["retrieval"]["explain_trace"]["cache_metrics"]
+                ["cold_fallback_count"],
+            json!(0)
+        );
+
+        let warm_recall_response = send_request(
+            &socket_path,
+            json!({
+                "jsonrpc":"2.0",
+                "method":"recall",
+                "params":{"query_text":format!("memory:{}", memory_id),"namespace":"team.alpha","result_budget":3},
+                "id":"recall-attention-audit-warm"
+            }),
+        )
+        .await;
+        assert_eq!(warm_recall_response["result"]["status"], json!("ok"));
+        assert_eq!(
+            warm_recall_response["result"]["retrieval"]["explain_trace"]["cache_metrics"]
+                ["tier1_item_hit_count"],
+            json!(1)
+        );
+        assert_eq!(
+            warm_recall_response["result"]["retrieval"]["explain_trace"]["cache_metrics"]
+                ["cold_fallback_count"],
+            json!(0)
+        );
+        assert_eq!(
+            warm_recall_response["result"]["retrieval"]["explain_trace"]["cache_metrics"]
+                ["cache_traces"][0]["warm_reuse"],
+            json!(true)
+        );
+        assert_eq!(
+            warm_recall_response["result"]["retrieval"]["explain_trace"]["cache_metrics"]
+                ["cache_traces"][0]["warm_source"],
+            json!("tier1_item_cache")
+        );
 
         let hot_paths = send_request(
             &socket_path,
@@ -7484,7 +8105,7 @@ mod tests {
             hot_paths["result"]["entries"][0]["memory_id"],
             json!(memory_id)
         );
-        assert_eq!(hot_paths["result"]["entries"][0]["recall_count"], json!(1));
+        assert_eq!(hot_paths["result"]["entries"][0]["recall_count"], json!(2));
         assert_eq!(
             hot_paths["result"]["entries"][0]["prewarm_action"],
             json!("observe_only")
@@ -7502,6 +8123,20 @@ mod tests {
         .await;
         assert_eq!(health["result"]["cache"]["hints_submitted"], json!(0));
         assert_eq!(health["result"]["cache"]["prefetch_queue_depth"], json!(0));
+        assert_eq!(
+            health["result"]["feature_availability"][2]["feature"],
+            json!("embedder_runtime")
+        );
+        assert_eq!(
+            health["result"]["feature_availability"][2]["posture"],
+            json!("Full")
+        );
+        assert_eq!(
+            health["result"]["feature_availability"][2]["note"],
+            json!(format!(
+                "state=warm backend=local_fastembed generation=all-minilm-l6-v2@default dimensions=384 loads=1 requests=3 cache_hits=1 cache_misses=2"
+            ))
+        );
 
         let dead_zones = send_request(
             &socket_path,
@@ -7737,7 +8372,13 @@ mod tests {
     #[tokio::test]
     async fn runtime_recall_accepts_query_by_example_and_richer_normalized_fields() {
         let socket_path = unique_path("recall-query-by-example");
-        let mut config = DaemonRuntimeConfig::new(&socket_path);
+        let db_root = unique_db_root("recall-query-by-example");
+        let hot_db_path = db_root.join("hot.db");
+        let cold_db_path = db_root.join("cold.db");
+        tokio::fs::create_dir_all(&db_root).await.unwrap();
+
+        let mut config =
+            DaemonRuntimeConfig::new(&socket_path).with_db_paths(&hot_db_path, &cold_db_path);
         config.maintenance_interval = Duration::from_secs(3600);
         let handle = spawn_runtime(config).await;
 
@@ -7749,6 +8390,20 @@ mod tests {
         .await
         .unwrap();
 
+        let seed_encode_response = send_request(
+            &socket_path,
+            json!({
+                "jsonrpc":"2.0",
+                "method":"encode",
+                "params":{"content":"triaging parity drift like seed","namespace":"team.alpha"},
+                "id":"encode-query-by-example-seed"
+            }),
+        )
+        .await;
+        let seed_memory_id = seed_encode_response["result"]["memory_id"]
+            .as_u64()
+            .unwrap();
+
         let recall_response = send_request(
             &socket_path,
             json!({
@@ -7756,7 +8411,7 @@ mod tests {
                 "method":"recall",
                 "params":{
                     "namespace":"team.alpha",
-                    "like_id":7,
+                    "like_id":seed_memory_id,
                     "context_text":"triaging parity drift",
                     "effort":"high",
                     "include_public":true,
@@ -7779,69 +8434,50 @@ mod tests {
         );
         assert_eq!(
             recall_response["result"]["retrieval"]["result"]["explain"]["recall_plan"],
-            json!("Tier2ExactThenTier3Fallback")
+            json!("RecentTier1ThenTier2Exact")
         );
-        let degraded_summary = recall_response["result"]["retrieval"]["result"]
-            ["packaging_metadata"]["degraded_summary"]
-            .as_str()
-            .unwrap();
-        assert!(degraded_summary.contains("query_by_example"));
-        assert!(degraded_summary.contains("context_text"));
-        assert!(degraded_summary.contains("effort"));
-        assert!(degraded_summary.contains("include_public"));
-        assert!(degraded_summary.contains("min_confidence"));
+        assert!(
+            recall_response["result"]["retrieval"]["result"]["packaging_metadata"]
+                ["degraded_summary"]
+                .is_null()
+        );
         assert!(
             recall_response["result"]["retrieval"]["result"]["action_pack"]
                 .as_array()
                 .is_none_or(|items| items.is_empty())
         );
-        assert!(degraded_summary.contains("primary_cue=like_id"));
-        assert!(degraded_summary.contains("seed_memory_ids=[7]"));
-        assert!(degraded_summary.contains("seed_polarities=[like]"));
+        assert!(recall_response["result"]["retrieval"]["result"]["explain"]["query_by_example"]
+            ["primary_cue"]
+            .is_null());
+        assert!(recall_response["result"]["retrieval"]["result"]["explain"]["query_by_example"]
+            ["requested_seed_descriptors"]
+            .is_null());
+        assert!(recall_response["result"]["retrieval"]["result"]["explain"]["query_by_example"]
+            ["materialized_seed_descriptors"]
+            .is_null());
+        assert!(recall_response["result"]["retrieval"]["result"]["explain"]["query_by_example"]
+            ["missing_seed_descriptors"]
+            .is_null());
+        assert!(recall_response["result"]["retrieval"]["result"]["explain"]["query_by_example"]
+            ["expanded_candidate_count"]
+            .is_null());
         assert_eq!(
-            recall_response["result"]["retrieval"]["result"]["explain"]["query_by_example"]
-                ["primary_cue"],
-            json!("like_id")
+            recall_response["result"]["retrieval"]["result"]["packaging_metadata"]
+                ["degraded_summary"],
+            json!(null)
         );
         assert_eq!(
-            recall_response["result"]["retrieval"]["result"]["explain"]["query_by_example"]
-                ["requested_seed_descriptors"],
-            json!(["like:7"])
-        );
-        assert_eq!(
-            recall_response["result"]["retrieval"]["result"]["explain"]["query_by_example"]
-                ["materialized_seed_descriptors"],
-            json!([])
-        );
-        assert_eq!(
-            recall_response["result"]["retrieval"]["result"]["explain"]["query_by_example"]
-                ["missing_seed_descriptors"],
-            json!(["like:7"])
-        );
-        assert_eq!(
-            recall_response["result"]["retrieval"]["result"]["explain"]["query_by_example"]
-                ["expanded_candidate_count"],
-            json!(1)
+            recall_response["result"]["retrieval"]["result"]["evidence_pack"][0]["result"]
+                ["memory_id"],
+            json!(seed_memory_id)
         );
         let result_reasons = recall_response["result"]["retrieval"]["explain_trace"]
             ["result_reasons"]
             .as_array()
             .unwrap();
-        assert!(result_reasons.iter().any(|reason| {
-            reason["reason_code"] == json!("query_by_example_seed_missing")
-                && reason["detail"].as_str().is_some_and(|detail| {
-                    detail
-                        .contains("planner-only daemon recall did not materialize stored evidence")
-                })
-        }));
-        assert!(result_reasons.iter().any(|reason| {
-            reason["reason_code"] == json!("query_by_example_candidate_expansion")
-                && reason["detail"].as_str().is_some_and(|detail| {
-                    detail.contains(
-                        "planner-only daemon envelope did not materialize stored evidence yet",
-                    )
-                })
-        }));
+        assert!(!result_reasons
+            .iter()
+            .any(|reason| { reason["reason_code"] == json!("query_by_example_seed_missing") }));
 
         let full_contract_recall_response = send_request(
             &socket_path,
@@ -7879,24 +8515,14 @@ mod tests {
             full_contract_recall_response["result"]["status"],
             json!("ok")
         );
-        let degraded_summary = full_contract_recall_response["result"]["retrieval"]["result"]
-            ["packaging_metadata"]["degraded_summary"]
-            .as_str()
-            .unwrap();
-        assert!(degraded_summary.contains("mode"));
-        assert!(degraded_summary.contains("token_budget"));
-        assert!(degraded_summary.contains("time_budget_ms"));
-        assert!(degraded_summary.contains("graph_mode"));
-        assert!(degraded_summary.contains("cold_tier"));
-        assert!(degraded_summary.contains("workspace_id"));
-        assert!(degraded_summary.contains("agent_id"));
-        assert!(degraded_summary.contains("session_id"));
-        assert!(degraded_summary.contains("task_id"));
-        assert!(degraded_summary.contains("memory_kinds"));
-        assert!(degraded_summary.contains("era_id"));
-        assert!(degraded_summary.contains("min_strength"));
-        assert!(degraded_summary.contains("show_decaying"));
-        assert!(degraded_summary.contains("mood_congruent"));
+        assert_eq!(
+            full_contract_recall_response["result"]["retrieval"]["result"]["packaging_metadata"]
+                ["degraded_summary"],
+            json!(null)
+        );
+        assert!(full_contract_recall_response["result"]["retrieval"]["result"]["evidence_pack"]
+            .as_array()
+            .is_some_and(|items| !items.is_empty()));
         assert_eq!(
             full_contract_recall_response["result"]["retrieval"]["result"]["explain"]
                 ["ranking_profile"],
@@ -8071,9 +8697,15 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn runtime_recall_uses_default_budget_when_limit_is_omitted() {
+    async fn runtime_semantic_recall_hydrates_evidence_and_uses_default_budget_when_limit_is_omitted() {
         let socket_path = unique_path("recall-default-budget");
-        let mut config = DaemonRuntimeConfig::new(&socket_path);
+        let db_root = unique_db_root("recall-default-budget");
+        let hot_db_path = db_root.join("hot.db");
+        let cold_db_path = db_root.join("cold.db");
+        tokio::fs::create_dir_all(&db_root).await.unwrap();
+
+        let mut config =
+            DaemonRuntimeConfig::new(&socket_path).with_db_paths(&hot_db_path, &cold_db_path);
         config.maintenance_interval = Duration::from_secs(3600);
         let handle = spawn_runtime(config).await;
 
@@ -8084,6 +8716,18 @@ mod tests {
         })
         .await
         .unwrap();
+
+        let encode_response = send_request(
+            &socket_path,
+            json!({
+                "jsonrpc":"2.0",
+                "method":"encode",
+                "params":{"content":"session:7 default budget hydration evidence","namespace":"team.alpha"},
+                "id":"encode-default-budget"
+            }),
+        )
+        .await;
+        let memory_id = encode_response["result"]["memory_id"].as_u64().unwrap();
 
         let recall_response = send_request(
             &socket_path,
@@ -8102,11 +8746,36 @@ mod tests {
             json!(10)
         );
         assert_eq!(
-            recall_response["result"]["retrieval"]["result"]["packaging_metadata"]["degraded_summary"],
-            json!(
-                "planner-only recall envelope; evidence hydration not implemented; normalized params: query_text"
-            )
+            recall_response["result"]["retrieval"]["result"]["packaging_metadata"]
+                ["degraded_summary"],
+            json!(null)
         );
+        assert_eq!(
+            recall_response["result"]["retrieval"]["result"]["evidence_pack"][0]["result"]
+                ["memory_id"],
+            json!(memory_id)
+        );
+        assert_eq!(
+            recall_response["result"]["retrieval"]["result"]["evidence_pack"][0]["result"]
+                ["entry_lane"],
+            json!("semantic")
+        );
+        let reasons = recall_response["result"]["retrieval"]["explain_trace"]["result_reasons"]
+            .as_array()
+            .unwrap();
+        assert!(reasons.iter().any(|reason| {
+            reason["detail"]
+                .as_str()
+                .is_some_and(|detail| detail.contains("shared semantic executor used lexical prefilter"))
+        }));
+        assert!(reasons.iter().any(|reason| {
+            reason["memory_id"] == json!(memory_id)
+                && reason["reason_code"] == json!("score_kept")
+                && reason["detail"].as_str().is_some_and(|detail| {
+                    detail.contains("shared semantic executor kept this hydrated candidate")
+                        && detail.contains("semantic_score=")
+                })
+        }));
 
         let shutdown_response = send_request(
             &socket_path,
@@ -8119,6 +8788,301 @@ mod tests {
             .unwrap()
             .unwrap()
             .unwrap();
+    }
+
+    #[tokio::test]
+    async fn runtime_restart_hydrates_persisted_memories_for_inspect_recall_and_explain() {
+        let socket_path = unique_path("restart-hydration");
+        let db_root = unique_db_root("restart-hydration");
+        let hot_db_path = db_root.join("hot.db");
+        let cold_db_path = db_root.join("cold.db");
+        tokio::fs::create_dir_all(&db_root).await.unwrap();
+
+        let mut first_config =
+            DaemonRuntimeConfig::new(&socket_path).with_db_paths(&hot_db_path, &cold_db_path);
+        first_config.maintenance_interval = Duration::from_secs(3600);
+        let first_handle = spawn_runtime(first_config).await;
+
+        timeout(Duration::from_secs(2), async {
+            while tokio::fs::metadata(&socket_path).await.is_err() {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .unwrap();
+
+        let encode_response = send_request(
+            &socket_path,
+            json!({
+                "jsonrpc":"2.0",
+                "method":"encode",
+                "params":{"content":"Dang prefers concise answers","namespace":"team.alpha"},
+                "id":"encode-restart-hydration"
+            }),
+        )
+        .await;
+        let memory_id = encode_response["result"]["memory_id"].as_u64().unwrap();
+
+        let shutdown_response = send_request(
+            &socket_path,
+            json!({"jsonrpc":"2.0","method":"shutdown","params":{},"id":"shutdown-first"}),
+        )
+        .await;
+        assert_eq!(shutdown_response["result"]["shutting_down"], json!(true));
+        timeout(Duration::from_secs(2), first_handle)
+            .await
+            .unwrap()
+            .unwrap()
+            .unwrap();
+
+        let runtime = DaemonRuntime::with_config(
+            DaemonRuntimeConfig::new(&socket_path).with_db_paths(&hot_db_path, &cold_db_path),
+        );
+        assert_eq!(runtime.state.persisted_memory_count(), 1);
+        assert!(runtime.state.memory_record(MemoryId(memory_id)).is_some());
+
+        let inspect_response = DaemonRuntime::dispatch_request(
+            serde_json::from_value(json!({
+                "jsonrpc":"2.0",
+                "method":"inspect",
+                "params":{"id":memory_id,"namespace":"team.alpha"},
+                "id":"inspect-after-restart"
+            }))
+            .unwrap(),
+            Arc::clone(&runtime.state),
+            runtime.state.next_request_id(),
+        )
+        .await;
+        let inspect_json = serde_json::to_value(inspect_response).unwrap();
+        assert_eq!(inspect_json["result"]["status"], json!("ok"));
+        assert_eq!(
+            inspect_json["result"]["payload"]["memory_id"],
+            json!(memory_id)
+        );
+
+        let recall_response = DaemonRuntime::dispatch_request(
+            serde_json::from_value(json!({
+                "jsonrpc":"2.0",
+                "method":"recall",
+                "params":{"query_text":"concise answers","namespace":"team.alpha","result_budget":3},
+                "id":"recall-after-restart"
+            }))
+            .unwrap(),
+            Arc::clone(&runtime.state),
+            runtime.state.next_request_id(),
+        )
+        .await;
+        let recall_json = serde_json::to_value(recall_response).unwrap();
+        assert_eq!(recall_json["result"]["status"], json!("ok"));
+        assert_eq!(
+            recall_json["result"]["retrieval"]["result"]["evidence_pack"][0]["result"]["memory_id"],
+            json!(memory_id)
+        );
+        assert_eq!(
+            recall_json["result"]["retrieval"]["result"]["packaging_metadata"]["degraded_summary"],
+            json!(null)
+        );
+        let recall_reasons = recall_json["result"]["retrieval"]["explain_trace"]["result_reasons"]
+            .as_array()
+            .unwrap();
+        assert!(recall_reasons.iter().any(|reason| {
+            reason["detail"].as_str().is_some_and(|detail| {
+                detail.contains("shared semantic executor used lexical prefilter")
+            })
+        }));
+
+        let explain_response = DaemonRuntime::dispatch_request(
+            serde_json::from_value(json!({
+                "jsonrpc":"2.0",
+                "method":"explain",
+                "params":{"query":memory_id.to_string(),"namespace":"team.alpha","depth":2},
+                "id":"explain-after-restart"
+            }))
+            .unwrap(),
+            Arc::clone(&runtime.state),
+            runtime.state.next_request_id(),
+        )
+        .await;
+        let explain_json = serde_json::to_value(explain_response).unwrap();
+        assert_eq!(explain_json["result"]["status"], json!("ok"));
+        assert_eq!(
+            explain_json["result"]["retrieval"]["result"]["evidence_pack"][0]["result"]
+                ["memory_id"],
+            json!(memory_id)
+        );
+        assert_eq!(
+            explain_json["result"]["retrieval"]["result"]["packaging_metadata"]["degraded_summary"],
+            json!(null)
+        );
+    }
+
+    #[tokio::test]
+    async fn runtime_query_explain_keeps_explicit_degraded_summary_when_no_hydrated_evidence_matches(
+    ) {
+        let socket_path = unique_path("query-explain-degraded");
+        let db_root = unique_db_root("query-explain-degraded");
+        let hot_db_path = db_root.join("hot.db");
+        let cold_db_path = db_root.join("cold.db");
+        tokio::fs::create_dir_all(&db_root).await.unwrap();
+
+        let runtime = DaemonRuntime::with_config(
+            DaemonRuntimeConfig::new(&socket_path).with_db_paths(&hot_db_path, &cold_db_path),
+        );
+        let explain_response = DaemonRuntime::dispatch_request(
+            serde_json::from_value(json!({
+                "jsonrpc":"2.0",
+                "method":"explain",
+                "params":{"query":"session:7","namespace":"team.alpha","limit":2},
+                "id":"explain-query-degraded"
+            }))
+            .unwrap(),
+            Arc::clone(&runtime.state),
+            runtime.state.next_request_id(),
+        )
+        .await;
+        let explain_json = serde_json::to_value(explain_response).unwrap();
+        assert_eq!(explain_json["result"]["status"], json!("ok"));
+        assert_eq!(
+            explain_json["result"]["retrieval"]["result"]["packaging_metadata"]["degraded_summary"],
+            json!("degraded explain envelope; no hydrated evidence matched on the bounded runtime path")
+        );
+        let reasons = explain_json["result"]["retrieval"]["explain_trace"]["result_reasons"]
+            .as_array()
+            .unwrap();
+        assert!(reasons.iter().any(|reason| reason["reason_code"] == json!("no_match")));
+    }
+
+    #[tokio::test]
+    async fn runtime_query_explain_returns_hydrated_evidence_for_matching_query_text() {
+        let socket_path = unique_path("query-explain-hydrated-match");
+        let db_root = unique_db_root("query-explain-hydrated-match");
+        let hot_db_path = db_root.join("hot.db");
+        let cold_db_path = db_root.join("cold.db");
+        tokio::fs::create_dir_all(&db_root).await.unwrap();
+
+        let runtime = DaemonRuntime::with_config(
+            DaemonRuntimeConfig::new(&socket_path).with_db_paths(&hot_db_path, &cold_db_path),
+        );
+        let encode_response = DaemonRuntime::dispatch_request(
+            serde_json::from_value(json!({
+                "jsonrpc":"2.0",
+                "method":"encode",
+                "params":{"content":"hydrated explain evidence for matching query","namespace":"team.alpha"},
+                "id":"encode-query-explain-match"
+            }))
+            .unwrap(),
+            Arc::clone(&runtime.state),
+            runtime.state.next_request_id(),
+        )
+        .await;
+        let encode_json = serde_json::to_value(encode_response).unwrap();
+        let memory_id = encode_json["result"]["memory_id"].as_u64().unwrap();
+
+        let explain_response = DaemonRuntime::dispatch_request(
+            serde_json::from_value(json!({
+                "jsonrpc":"2.0",
+                "method":"explain",
+                "params":{
+                    "query":"matching query",
+                    "namespace":"team.alpha",
+                    "limit":4
+                },
+                "id":"explain-query-hydrated-match"
+            }))
+            .unwrap(),
+            Arc::clone(&runtime.state),
+            runtime.state.next_request_id(),
+        )
+        .await;
+        let explain_json = serde_json::to_value(explain_response).unwrap();
+        assert_eq!(explain_json["result"]["status"], json!("ok"));
+        assert_eq!(
+            explain_json["result"]["retrieval"]["result"]["packaging_metadata"]["degraded_summary"],
+            json!(null)
+        );
+        assert_eq!(
+            explain_json["result"]["retrieval"]["result"]["evidence_pack"][0]["result"]["memory_id"],
+            json!(memory_id)
+        );
+        let reasons = explain_json["result"]["retrieval"]["explain_trace"]["result_reasons"]
+            .as_array()
+            .unwrap();
+        assert!(reasons.iter().any(|reason| {
+            reason["detail"]
+                .as_str()
+                .is_some_and(|detail| detail.contains("shared semantic executor used lexical prefilter"))
+        }));
+        assert!(reasons.iter().any(|reason| {
+            reason["memory_id"] == json!(memory_id)
+                && reason["reason_code"] == json!("score_kept")
+                && reason["detail"].as_str().is_some_and(|detail| {
+                    detail.contains("shared semantic executor kept this hydrated candidate")
+                        && detail.contains("semantic_score=")
+                })
+        }));
+    }
+
+    #[tokio::test]
+    async fn runtime_query_explain_reports_policy_filtered_hydration_omission_reasons() {
+        let socket_path = unique_path("query-explain-policy-filtered");
+        let db_root = unique_db_root("query-explain-policy-filtered");
+        let hot_db_path = db_root.join("hot.db");
+        let cold_db_path = db_root.join("cold.db");
+        tokio::fs::create_dir_all(&db_root).await.unwrap();
+
+        let runtime = DaemonRuntime::with_config(
+            DaemonRuntimeConfig::new(&socket_path).with_db_paths(&hot_db_path, &cold_db_path),
+        );
+        let observe_response = DaemonRuntime::dispatch_request(
+            serde_json::from_value(json!({
+                "jsonrpc":"2.0",
+                "method":"observe",
+                "params":{
+                    "content":"policy-hidden explain evidence",
+                    "namespace":"team.beta",
+                    "source_label":"stdin:test"
+                },
+                "id":"observe-query-explain-policy"
+            }))
+            .unwrap(),
+            Arc::clone(&runtime.state),
+            runtime.state.next_request_id(),
+        )
+        .await;
+        let observe_json = serde_json::to_value(observe_response).unwrap();
+        assert_eq!(observe_json["result"]["status"], json!("accepted"));
+
+        let explain_response = DaemonRuntime::dispatch_request(
+            serde_json::from_value(json!({
+                "jsonrpc":"2.0",
+                "method":"explain",
+                "params":{
+                    "query":"policy-hidden",
+                    "namespace":"team.alpha",
+                    "limit":3,
+                    "policy_context":{"include_public":false,"sharing_visibility":"public"}
+                },
+                "id":"explain-query-policy-filtered"
+            }))
+            .unwrap(),
+            Arc::clone(&runtime.state),
+            runtime.state.next_request_id(),
+        )
+        .await;
+        let explain_json = serde_json::to_value(explain_response).unwrap();
+        assert_eq!(explain_json["result"]["status"], json!("ok"));
+        assert_eq!(
+            explain_json["result"]["retrieval"]["result"]["packaging_metadata"]["degraded_summary"],
+            json!("degraded explain envelope; no hydrated evidence matched on the bounded runtime path")
+        );
+        let reasons = explain_json["result"]["retrieval"]["explain_trace"]["result_reasons"]
+            .as_array()
+            .unwrap();
+        assert!(reasons.iter().any(|reason| {
+            reason["detail"]
+                .as_str()
+                .is_some_and(|detail| detail.contains("namespace") || detail.contains("sharing policy"))
+        }));
     }
 
     #[tokio::test]
@@ -8661,6 +9625,141 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn runtime_restart_rehydrates_persisted_memory_for_recall_inspect_and_why() {
+        let socket_path = unique_path("restart-hydration-parity");
+        let db_root = unique_db_root("restart-hydration-parity");
+        let hot_db_path = db_root.join("hot.db");
+        let cold_db_path = db_root.join("cold.db");
+        tokio::fs::create_dir_all(&db_root).await.unwrap();
+
+        let mut config =
+            DaemonRuntimeConfig::new(&socket_path).with_db_paths(&hot_db_path, &cold_db_path);
+        config.maintenance_interval = Duration::from_secs(3600);
+        let handle = spawn_runtime(config).await;
+
+        timeout(Duration::from_secs(2), async {
+            while tokio::fs::metadata(&socket_path).await.is_err() {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .unwrap();
+
+        let observe_response = send_request(
+            &socket_path,
+            json!({
+                "jsonrpc":"2.0",
+                "method":"observe",
+                "params":{
+                    "content":"Dang prefers concise answers",
+                    "namespace":"team.alpha",
+                    "source_label":"stdin:test"
+                },
+                "id":"observe-restart-hydration"
+            }),
+        )
+        .await;
+        assert_eq!(observe_response["result"]["status"], json!("accepted"));
+        assert_eq!(observe_response["result"]["memories_created"], json!(1));
+        let memory_id = 2u64;
+
+        let shutdown_response = send_request(
+            &socket_path,
+            json!({"jsonrpc":"2.0","method":"shutdown","params":{},"id":"done"}),
+        )
+        .await;
+        assert_eq!(shutdown_response["result"]["shutting_down"], json!(true));
+        timeout(Duration::from_secs(2), handle)
+            .await
+            .unwrap()
+            .unwrap()
+            .unwrap();
+
+        let restart_socket_path = unique_path("restart-hydration-parity-restarted");
+        let mut restart_config =
+            DaemonRuntimeConfig::new(&restart_socket_path).with_db_paths(&hot_db_path, &cold_db_path);
+        restart_config.maintenance_interval = Duration::from_secs(3600);
+        let restart_handle = spawn_runtime(restart_config).await;
+
+        timeout(Duration::from_secs(2), async {
+            while tokio::fs::metadata(&restart_socket_path).await.is_err() {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .unwrap();
+
+        let inspect_response = send_request(
+            &restart_socket_path,
+            json!({
+                "jsonrpc":"2.0",
+                "method":"inspect",
+                "params":{"id":memory_id,"namespace":"team.alpha"},
+                "id":"inspect-restart-hydration"
+            }),
+        )
+        .await;
+        assert_eq!(inspect_response["result"]["status"], json!("ok"));
+        assert_eq!(inspect_response["result"]["payload"]["memory_id"], json!(memory_id));
+        assert_eq!(
+            inspect_response["result"]["payload"]["explain_trace"]["passive_observation"]["source_kind"],
+            json!("observation")
+        );
+        assert_eq!(
+            inspect_response["result"]["payload"]["explain_trace"]["passive_observation"]["write_decision"],
+            json!("capture")
+        );
+
+        let recall_response = send_request(
+            &restart_socket_path,
+            json!({
+                "jsonrpc":"2.0",
+                "method":"recall",
+                "params":{"query_text":"Dang prefers concise","namespace":"team.alpha"},
+                "id":"recall-restart-hydration"
+            }),
+        )
+        .await;
+        assert_eq!(recall_response["result"]["status"], json!("ok"));
+        assert_eq!(
+            recall_response["result"]["retrieval"]["result"]["evidence_pack"][0]["result"]["memory_id"],
+            json!(memory_id)
+        );
+        assert_eq!(
+            recall_response["result"]["retrieval"]["result"]["packaging_metadata"]["degraded_summary"],
+            json!(null)
+        );
+
+        let why_response = send_request(
+            &restart_socket_path,
+            json!({
+                "jsonrpc":"2.0",
+                "method":"why",
+                "params":{"id":memory_id,"namespace":"team.alpha"},
+                "id":"why-restart-hydration"
+            }),
+        )
+        .await;
+        assert_eq!(why_response["result"]["status"], json!("ok"));
+        assert_eq!(
+            why_response["result"]["retrieval"]["result"]["explain"]["query_by_example"]["materialized_seed_descriptors"][0],
+            json!(format!("memory:{memory_id}"))
+        );
+
+        let shutdown_response = send_request(
+            &restart_socket_path,
+            json!({"jsonrpc":"2.0","method":"shutdown","params":{},"id":"done-restarted"}),
+        )
+        .await;
+        assert_eq!(shutdown_response["result"]["shutting_down"], json!(true));
+        timeout(Duration::from_secs(2), restart_handle)
+            .await
+            .unwrap()
+            .unwrap()
+            .unwrap();
+    }
+
+    #[tokio::test]
     async fn runtime_inspect_returns_typed_mcp_inspect_payload() {
         let socket_path = unique_path("inspect");
         let mut config = DaemonRuntimeConfig::new(&socket_path);
@@ -8781,7 +9880,7 @@ mod tests {
         assert_eq!(
             explain_response["result"]["retrieval"]["result"]["packaging_metadata"]
                 ["degraded_summary"],
-            json!("planner-only explain envelope; evidence hydration not implemented")
+            json!("degraded explain envelope; no hydrated evidence matched on the bounded runtime path")
         );
         assert!(explain_response["result"]["retrieval"]
             .get("explain_trace")
@@ -9754,6 +10853,41 @@ mod tests {
             status_response["result"]["metrics"]["maintenance_runs"],
             json!(1)
         );
+
+        let doctor_response = send_request(
+            &socket_path,
+            json!({"jsonrpc":"2.0","method":"doctor","params":{},"id":"doctor-after-maintenance"}),
+        )
+        .await;
+        let lifecycle = &doctor_response["result"]["health"]["lifecycle"];
+        assert_eq!(lifecycle["background_maintenance_runs"], json!(1));
+        assert!(lifecycle["background_maintenance_log"]
+            .as_array()
+            .expect("background maintenance log should be an array")
+            .iter()
+            .any(|entry| {
+                entry
+                    .as_str()
+                    .is_some_and(|value| value.contains("maintenance_consolidation_completed") && value.contains("maintenance_id=1"))
+            }));
+        assert!(lifecycle["background_maintenance_log"]
+            .as_array()
+            .expect("background maintenance log should be an array")
+            .iter()
+            .any(|entry| {
+                entry
+                    .as_str()
+                    .is_some_and(|value| value.contains("maintenance_reconsolidation_applied") && value.contains("maintenance_id=1"))
+            }));
+        assert!(lifecycle["background_maintenance_log"]
+            .as_array()
+            .expect("background maintenance log should be an array")
+            .iter()
+            .any(|entry| {
+                entry
+                    .as_str()
+                    .is_some_and(|value| value.contains("maintenance_forgetting_evaluated") && value.contains("maintenance_id=1"))
+            }));
 
         let shutdown_response = send_request(
             &socket_path,

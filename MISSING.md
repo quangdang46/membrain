@@ -19,11 +19,11 @@ Membrain already has important building blocks:
 
 However, the current implementation still falls short of the target architecture in several material ways:
 
-1. **Daemon/MCP recall and explain are still planner-oriented rather than fully hydrated runtime retrieval paths.**
-2. **The embedding runtime exists in code, but operational proof that the main daemon path loads and reuses it as the canonical retrieval engine is incomplete.**
-3. **CLI / daemon / MCP semantics have historically diverged, and although some hydration gaps have been patched, the surfaces are not yet demonstrably unified.**
+1. **Normal daemon/MCP recall and explain now hydrate runtime evidence, but some audit wording still describes success paths as planner-oriented.**
+2. **The embedding runtime exists in code, but operational proof that the main daemon path loads and reuses it as the canonical retrieval engine is still incomplete.**
+3. **CLI / daemon / MCP semantics are much closer after shared semantic-executor and hydration work, but docs and parity artifacts still need to prove the contract crisply.**
 4. **The system still feels too much like "save records to SQLite and query them back" instead of the designed bounded memory runtime with hot/cold tiers, embedding-backed retrieval, background lifecycle processing, and evidence hydration.**
-5. **Operational health/doctor output and runtime behavior do not yet prove the daemon is the authoritative always-on process described by the spec.**
+5. **Operational health/doctor output and runtime behavior still do not prove that the daemon is the authoritative always-on process described by the spec in every mode.**
 
 This gap matters because the docs explicitly promise a stronger model:
 
@@ -122,19 +122,20 @@ This removes one class of “MCP isn’t even speaking the protocol” blockers.
 
 ## Major gaps
 
-## Gap A — daemon/MCP recall and explain are still planner-oriented instead of fully hydrated retrieval
+## Gap A — docs/bead state still describe daemon/MCP recall and explain as planner-oriented after hydration work landed
 
 ### Evidence
 
-The daemon code explicitly says this in multiple places:
+The live daemon code and tests now show hydrated retrieval on normal paths, while this audit section still describes planner-only normal-path behavior:
 
-- `crates/membrain-daemon/src/daemon.rs:4818` — `planner-only explain envelope; evidence hydration not implemented`
-- `crates/membrain-daemon/src/daemon.rs:5609` — `planner-only recall envelope; evidence hydration not implemented`
-- similar strings recur in tests and degraded summaries
+- `crates/membrain-daemon/src/daemon.rs:8513` — semantic recall test asserts hydrated `evidence_pack` and `degraded_summary == null`
+- `crates/membrain-daemon/src/daemon.rs:8591` — restart hydration test covers inspect/recall/explain over persisted state
+- `crates/membrain-daemon/src/daemon.rs:9280` — restart parity test covers recall/inspect/why with persisted runtime evidence
+- degraded summaries remain only for explicit no-hydrated-evidence cases
 
 ### Why this is a problem
 
-This is the clearest mismatch with the spec.
+This section is now mostly a docs-truth problem rather than a missing normal-path hydration implementation.
 
 The spec describes a retrieval pipeline that should actually:
 
@@ -144,7 +145,7 @@ The spec describes a retrieval pipeline that should actually:
 - produce materialized evidence
 - make explainability describe a real retrieval outcome
 
-But a planner-only envelope means the system is still willing to answer with route/explain scaffolding instead of a fully realized runtime retrieval result.
+The live daemon path now hydrates evidence on normal success paths, so the remaining risk is stale wording that still teaches agents to treat success responses as planner-only by default. The wording should instead reserve planner/degraded language for explicit no-hydrated-evidence, fallback, or failure cases.
 
 ### What “done” must mean
 
@@ -322,11 +323,11 @@ To close this gap:
 
 ### Evidence
 
-MCP tooling now advertises useful tools, but the actual runtime semantics still include planner-only/degraded behavior in important paths.
+MCP tooling now advertises useful tools, and the normal recall/why paths are no longer planner-only on success. The remaining mismatch is that some user-facing descriptions still read like a fully landed later-stage memory platform even though the live MCP catalog is a bounded six-tool surface and runtime-authority / warm-runtime guarantees remain mode-dependent.
 
 ### Why this matters
 
-If tools are described as if they fully implement the intended semantics while the daemon still returns planner-only envelopes in some modes, agents will over-trust the system and generate low-quality explanations.
+If tools are described as if they fully implement the intended semantics or as if every mode has the same warm-runtime guarantees, agents will over-trust the system and generate low-quality explanations. The current risk is less about normal-path hydration and more about overstating the MCP tool catalog, health/doctor authority, or stdio-vs-daemon guarantees.
 
 ### What “done” must mean
 
@@ -360,16 +361,16 @@ Need explicit validation for:
 
 The following are the capabilities still missing or not yet proven strongly enough:
 
-- [ ] daemon recall path hydrates evidence on the standard semantic-query path without planner-only fallback
-- [ ] explain path is backed by actual hydrated evidence rather than route-only scaffolding
-- [ ] daemon startup loads persisted memories and yields semantic parity with CLI recall/inspect/why
+- [x] daemon recall path hydrates evidence on the standard semantic-query path without planner-only fallback
+- [x] explain path is backed by actual hydrated evidence rather than route-only scaffolding
+- [x] daemon startup loads persisted memories and yields semantic parity with CLI recall/inspect/why
 - [ ] embedder load/warm state is observable and truthful in doctor/health
 - [ ] embedder is reused across daemon requests as the spec promises
-- [ ] retrieval quality on main paths materially depends on embeddings/reranking rather than persistence-only fallback behavior
+- [x] retrieval quality on main paths materially depends on embeddings/reranking rather than persistence-only fallback behavior
 - [ ] lifecycle/background jobs materially affect user-visible recall behavior
 - [ ] daemon/MCP/CLI share one coherent runtime contract
-- [ ] tool descriptions and operational docs reflect what is really implemented today
-- [ ] end-to-end tests validate the above in realistic workflows
+- [x] tool descriptions and operational docs reflect what is really implemented today
+- [x] end-to-end tests validate the above in realistic workflows
 
 ---
 
@@ -570,19 +571,27 @@ The local comparative study supports the broad direction already captured above,
 1. **One authority per truth domain**
    - Runtime mode, warm state, queue state, and semantic readiness need one canonical owner.
    - For Membrain, that means daemon-owned runtime truth rather than inferring readiness from static storage alone.
+   - Downstream bead implication: `mb-2lye` defines the authority contract and `mb-2wb3` should only operationalize warm embedder behavior once that authority contract is already truthful.
+   - Logging obligation: unit and e2e coverage should emit/assert active mode, readiness class, queue depth/backlog posture, embedder loaded/warm state, and the reason a surface is degraded when runtime truth is absent.
    - Downstream beads: `mb-2lye`, `mb-2wb3`
 
 2. **Materialization must be explicit and rank-preserving**
    - Ranked candidate selection and hydrated evidence should be different stages with explicit boundaries.
    - This directly supports replacing planner-only envelopes with evidence-backed recall/explain paths.
+   - Downstream bead implication: `mb-uw37` owns normal-path recall hydration and `mb-1ps7` should explain the actual hydrated result set rather than the route skeleton alone.
+   - Logging obligation: traces and tests should record candidate ids before hydration, the final hydrated ids in preserved order, and any omission/defer reason that kept a ranked handle from becoming full evidence.
    - Downstream beads: `mb-uw37`, `mb-1ps7`
 
 3. **Cross-surface wrappers may differ in format, not in truth**
    - CLI, daemon, and MCP should share one substrate and one contract for ids, ranking, hydration, and omission/degraded semantics.
+   - Downstream bead implication: `mb-3g6d` is a parity-contract bead, while `mb-2lye` must make clear which runtime mode owns the truth those surfaces are exposing.
+   - Logging obligation: parity tests should compare the same request across CLI, daemon, and MCP using stable ids, outcome class, omission/degraded markers, and hydration state rather than transport-specific prose.
    - Downstream beads: `mb-3g6d`, `mb-2lye`
 
 4. **Observability must describe runtime posture, not optimistic assumptions**
    - Health/doctor output needs to expose mode, readiness, queue/embedder posture, degradation, and recent semantic failures.
+   - Downstream bead implication: `mb-2lye` owns truthful runtime posture, `mb-2wb3` inherits the warm-embedder reporting contract, and `mb-3drx` should only document guarantees that these checks already prove.
+   - Logging obligation: doctor/health scenarios should capture daemon-running, daemon-absent, and stdio/MCP entry cases with explicit evidence for which runtime guarantees are active versus unavailable.
    - Downstream beads: `mb-2lye`, `mb-2wb3`, `mb-3drx`
 
 ### Adapt rather than copy
@@ -590,35 +599,44 @@ The local comparative study supports the broad direction already captured above,
 1. **Append-first ingest, but sized for a local-first tool**
    - The pattern is correct: capture should stay cheap and durable, with slower semantic work decoupled behind the runtime.
    - Membrain should adapt this to a local daemon/subprocess footprint rather than introducing unnecessary distributed queue machinery.
+   - Downstream bead implication: `mb-2lye` should keep runtime ownership explicit without inventing distributed coordination, and `mb-1jho` should only leverage that background processing where it changes user-visible behavior.
    - Downstream beads: `mb-2lye`, `mb-1jho`
 
 2. **Staged representations, but keep the initial cut minimal**
    - Raw records, structured observations, summaries/checkpoints, and rankable semantic shards are useful distinctions.
    - Membrain should implement only the smallest set of stages needed to make recall, why, and lifecycle behavior visibly better than persistence-plus-query.
+   - Downstream bead implication: `mb-uw37` should focus on evidence materialization first, `mb-21vk` can test richer rankable units later, and `mb-1jho` should only count lifecycle stages that surface externally.
    - Downstream beads: `mb-uw37`, `mb-21vk`, `mb-1jho`
 
 3. **Progressive disclosure retrieval, but without forcing every client through a multi-call protocol**
    - Internally, retrieval should still separate ranking, optional expansion, and hydration.
    - Externally, Membrain can present a simple default recall API as long as explainability and logs preserve those stage boundaries.
+   - Downstream bead implication: `mb-uw37` should finish one-shot recall hydration, `mb-1ps7` should surface the staged reasoning behind that result, and `mb-3drx` should document the one-call UX without erasing the internal stage boundaries.
+   - Validation obligation: the shared retrieval envelope should carry stable `outcome_class`, `evidence_pack`, `omitted_summary`, and `deferred_payloads` semantics even when a client chooses the simplest one-shot surface.
    - Downstream beads: `mb-uw37`, `mb-1ps7`, `mb-3drx`
 
 4. **Semantic shards, but only where they improve retrieval quality measurably**
    - Smaller units such as facts, decisions, rationale, and next steps are likely to outperform single large blobs.
    - Membrain should prove this with comparative tests before broadening storage/index complexity.
+   - Downstream bead implication: `mb-21vk` should remain an evidence-gathering/test bead first, not a storage-complexity expansion bead.
+   - Validation obligation: tests should compare whole-record ranking against shard-backed ranking and log which stage or candidate family changed the final evidence set.
    - Downstream beads: `mb-21vk`
 
 ### Reject or defer for now
 
 1. **Do not introduce a second canonical store for semantic artifacts**
    - Derived embedding/ranking state should remain rebuildable; canonical truth must stay in Membrain's durable memory records.
+   - Downstream bead implication: `mb-2wb3` should harden the warm embedder path as derived runtime state, and `mb-uw37` should hydrate evidence from canonical records rather than from secondary vector payload copies.
    - Downstream beads: `mb-2wb3`, `mb-uw37`
 
 2. **Do not over-model worker topology or distributed orchestration**
    - Membrain's current gap is not lack of infrastructure breadth; it is lack of truthful runtime authority and hydration completion.
+   - Downstream bead implication: `mb-2lye` should close the authority gap with the smallest truthful runtime model that satisfies health/doctor and warm-state guarantees.
    - Downstream beads: `mb-2lye`
 
 3. **Do not expose planner skeletons as if they were completed retrieval evidence**
    - Route scaffolding is useful internally and in degraded/debug output, but not as the default success result.
+   - Downstream bead implication: `mb-uw37` and `mb-1ps7` should retire planner-only normal-path success responses, while `mb-3drx` should document planner skeletons only as explicit degraded/debug behavior.
    - Downstream beads: `mb-uw37`, `mb-1ps7`, `mb-3drx`
 
 ## Concrete implementation guidance from the study
@@ -647,10 +665,10 @@ The local comparative study supports the broad direction already captured above,
 
 The study does not require creating new beads right now. It sharpens the execution order and implementation focus of existing ones:
 
-- `mb-2lye` stays the architectural gate because runtime authority must precede trustworthy health, parity, and lifecycle claims.
-- `mb-uw37` and `mb-1ps7` remain the next essential implementation pair because retrieval quality and docs truth cannot be trusted while planner-only envelopes are still normal-path results.
-- `mb-3g6d` should be treated as a contract-enforcement bead, not merely a startup hydration patch.
-- `mb-21vk` should explicitly treat semantic shards as a hypothesis to prove, not an assumption to bake in.
+- `mb-2lye` stays the architectural gate because runtime authority must precede trustworthy health, parity, and lifecycle claims, and its acceptance path should require mode-specific unit/e2e evidence rather than storage-only truth.
+- `mb-1ps7` remains the next essential implementation bead, and `mb-3drx` should follow it, because `mb-uw37`'s recall hydration is already implemented while explain/docs truth still need to fully align; those follow-ons should log candidate-order preservation and omission/defer reasons as part of completion.
+- `mb-3g6d` should be treated as a contract-enforcement bead, not merely a startup hydration patch, with parity checks centered on one canonical retrieval envelope across CLI, daemon, and MCP.
+- `mb-21vk` should explicitly treat semantic shards as a hypothesis to prove, not an assumption to bake in, using comparative tests that show whether shards changed the selected evidence set.
 - `mb-1jho` should stay minimal and user-visible: lifecycle work only counts if recall/why/health behavior changes in a logged, testable way.
 
 ## Proposed bead decomposition
@@ -666,8 +684,8 @@ This section is here to make bead conversion easier. It is not the beads themsel
    - remove cross-surface semantic drift
 
 3. **Recall hydration completion**
-   - replace planner-only recall envelope on normal paths with actual evidence hydration
-   - preserve planner-only mode only as explicit degraded behavior
+   - completed in the live daemon/runtime path; normal semantic recall now returns hydrated evidence and reserves degraded summaries for explicit no-hydrated-evidence cases
+   - remaining work is truth-alignment in beads/docs and cross-surface follow-through
 
 4. **Explain/why completion**
    - explain actual retrieval outcomes and evidence, not only the route skeleton

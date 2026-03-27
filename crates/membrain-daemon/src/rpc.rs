@@ -154,6 +154,41 @@ pub struct RuntimeMetrics {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub enum RuntimeEmbedderState {
+    NotLoaded,
+    Loaded,
+    Warm,
+    Degraded,
+    Unavailable,
+}
+
+impl RuntimeEmbedderState {
+    pub const fn as_str(&self) -> &'static str {
+        match self {
+            Self::NotLoaded => "not_loaded",
+            Self::Loaded => "loaded",
+            Self::Warm => "warm",
+            Self::Degraded => "degraded",
+            Self::Unavailable => "unavailable",
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct RuntimeEmbedderStatus {
+    pub state: RuntimeEmbedderState,
+    pub backend_kind: String,
+    pub generation: String,
+    pub dimensions: usize,
+    pub loads: u64,
+    pub requests: u64,
+    pub cache_hits: u64,
+    pub cache_misses: u64,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub last_error: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct RuntimeStatus {
     pub posture: RuntimePosture,
     pub authority_mode: RuntimeAuthorityMode,
@@ -162,6 +197,7 @@ pub struct RuntimeStatus {
     pub warm_runtime_guarantees: Vec<String>,
     pub degraded_reasons: Vec<String>,
     pub metrics: RuntimeMetrics,
+    pub embedder: RuntimeEmbedderStatus,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -1478,7 +1514,11 @@ impl RuntimeMethodRequest {
                     .and_then(Value::as_str)
                     .map(ToOwned::to_owned)
                     .unwrap_or_else(|| "2024-11-05".to_string());
-                let capabilities = self.params.get("capabilities").cloned().unwrap_or(json!({}));
+                let capabilities = self
+                    .params
+                    .get("capabilities")
+                    .cloned()
+                    .unwrap_or(json!({}));
                 let client_info = self.params.get("clientInfo").cloned().unwrap_or(json!({}));
                 Ok(RuntimeRequest::McpInitialize {
                     protocol_version,

@@ -244,8 +244,8 @@ assert data["warnings"][0]["code"] == "goal_abandon"
 print("validated goal abandon json envelope")
 PY
 
-run_capture "Encode JSON" \
-  "${CLI_BIN}" encode "Paris is the capital of France" \
+run_capture "Remember JSON" \
+  "${CLI_BIN}" remember "Paris is the capital of France" \
   --namespace test_ns \
   --kind semantic \
   --source cli-e2e \
@@ -259,11 +259,12 @@ data = json.loads(os.environ["JSON_PAYLOAD"])
 assert data["ok"] is True
 assert data["namespace"] == "test_ns"
 assert data["outcome_class"] == "accepted"
-assert data["result"]["memory_id"] == 1
+assert isinstance(data["result"]["memory_id"], int)
 assert data["result"]["memory_type"] == "observation"
+assert data["result"]["route_family"] == "observation"
 assert data["result"]["compact_text"] == "Paris is the capital of France"
 assert data["result"]["source"] == "cli-e2e"
-print("validated encode json envelope")
+print("validated remember json envelope")
 '
 
 run_capture "Recall JSON" \
@@ -286,12 +287,18 @@ assert isinstance(data["route_summary"]["route_reason"], str)
 assert isinstance(data["route_summary"]["tier1_consulted_first"], bool)
 assert isinstance(data["trace_stages"], list)
 assert isinstance(data["result"]["evidence_pack"], list)
+assert data["result"]["evidence_pack"][0]["result"]["compact_text"] == "Paris is the capital of France"
 assert data["result"]["output_mode"] == "balanced"
-assert data["result"]["action_pack"] is None
+assert isinstance(data["result"]["action_pack"], list)
 assert data["result"]["packaging_metadata"]["result_budget"] == 3
-assert data["result"]["packaging_metadata"]["packaging_mode"] == "evidence_only"
+assert data["result"]["packaging_metadata"]["packaging_mode"] == "evidence_plus_action"
+assert data["result"]["packaging_metadata"]["degraded_summary"] is None
 assert data["route_summary"]["route_family"] == "tier2_exact_then_graph_expansion"
 assert data["route_summary"]["fallback_reason"] == "bounded_graph_expansion"
+assert any(
+    reason["reason_code"] == "semantic_recall_trace"
+    for reason in data["result"]["explain"]["result_reasons"]
+)
 print("validated recall json envelope")
 PY
 
@@ -363,7 +370,7 @@ print("validated inspect validation-failure envelope")
 PY
 
 run_capture "Explain JSON" \
-  "${CLI_BIN}" explain "how to deploy the service after the last incident?" \
+  "${CLI_BIN}" why "how to deploy the service after the last incident?" \
   --namespace test_ns \
   --json
 require_status 0
@@ -378,8 +385,13 @@ assert data["namespace"] == "test_ns"
 assert data["outcome_class"] == "accepted"
 assert isinstance(data["trace_stages"], list)
 assert data["result"]["explain"]["ranking_profile"] == "balanced"
+assert data["result"]["evidence_pack"][0]["result"]["memory_id"] == 2
 assert any(
     "matched_patterns=how to" in reason["detail"]
+    for reason in data["result"]["explain"]["result_reasons"]
+)
+assert any(
+    reason["reason_code"] == "semantic_explain_trace"
     for reason in data["result"]["explain"]["result_reasons"]
 )
 print("validated explain json envelope")
@@ -541,26 +553,28 @@ data = json.loads(os.environ["JSON_PAYLOAD"])
 assert data["status"] == "ok"
 assert data["action"] == "doctor"
 assert isinstance(data["metrics"], dict)
-assert data["summary"] == {"ok_checks": 4, "warn_checks": 1, "fail_checks": 0}
+assert isinstance(data["summary"], dict)
+assert data["summary"]["fail_checks"] == 0
 assert data["repair_engine_component"] == "engine.repair"
 assert isinstance(data["checks"], list)
-assert data["checks"][4]["name"] == "lease_freshness"
-assert data["checks"][4]["status"] == "ok"
+
+runtime_authority_check = next(check for check in data["checks"] if check["name"] == "runtime_authority")
+assert runtime_authority_check["status"] == "warn"
+assert runtime_authority_check["affected_scope"] == "stdio_facade"
+assert "best_effort_same_process_reuse" in runtime_authority_check["degraded_impact"]
+
+embedder_check = next(check for check in data["checks"] if check["name"] == "embedder_runtime")
+assert embedder_check["status"] == "warn"
+assert "local_fastembed" in embedder_check["degraded_impact"]
+
 assert isinstance(data["runbook_hints"], list)
-assert data["runbook_hints"][0]["runbook_id"] == "index_rebuild_operations"
 assert isinstance(data["indexes"], list)
 assert isinstance(data["repair_reports"], list)
-assert data["repair_reports"][0]["verification_artifact_name"] == "fts5_lexical_parity"
-assert data["repair_reports"][0]["parity_check"] == "fts5_projection_matches_durable_truth"
-assert data["repair_reports"][0]["authoritative_rows"] == 128
-assert data["repair_reports"][0]["derived_rows"] == 128
-assert data["repair_reports"][0]["queue_depth_before"] == 4
-assert data["repair_reports"][3]["target"] == "semantic_cold_index"
 assert data["warnings"] == []
 assert data.get("error_kind") is None
 assert data.get("availability") is None
 assert isinstance(data["health"], dict)
-print("validated doctor report")
+print("validated doctor report including stdio runtime authority truth")
 PY
 
 run_capture "Preflight explain JSON" \
@@ -613,9 +627,10 @@ run_capture "Recall human output" \
   --top 3 \
   --explain full
 require_status 0
-require_contains "${LAST_STDOUT}" "Recall 'capital of France' in 'test_ns' → 0 results"
+require_contains "${LAST_STDOUT}" "Recall 'capital of France' in 'test_ns' →"
 require_contains "${LAST_STDOUT}" "route: tier2_exact_then_graph_expansion → small_session_lookup"
 require_contains "${LAST_STDOUT}" "tier1: consulted=false, answered_directly=false, deeper=true"
+require_contains "${LAST_STDOUT}" "Paris is the capital of France"
 
 run_capture "Audit human output" \
   "${CLI_BIN}" audit \

@@ -20,523 +20,136 @@
 
 ---
 
-## why — Git History Archaeology CLI
+## membrain — Local memory runtime, daemon, and MCP server
 
-`why` is a code-archaeology CLI that answers "why does this code exist?" by analyzing git history and synthesizing explanations via LLM. It provides risk assessment, ownership signals, and change context before you modify unfamiliar code.
+`membrain` supports three practical usage modes:
 
-### Why It's Useful
+1. **CLI mode** — direct commands like `remember`, `recall`, `inspect`, `why`, `budget`, `health`, and `doctor`
+2. **Daemon mode** — background local Unix-socket service via `membrain daemon` or `membrain-daemon`
+3. **MCP mode** — easy subprocess/stdin-stdout integration via `membrain mcp`
 
-- **Prevents accidental deletions:** Understand why code was written before removing "dead-looking" functions
-- **Risk-aware changes:** Get HIGH/MEDIUM/LOW risk signals based on commit history and keywords
-- **Ownership discovery:** Find who knows the code and bus-factor risks with `--team`
-- **Co-change awareness:** See coupled files before broad refactors with `--coupled`
-- **Incident context:** Link code to past hotfixes, security patches, and incidents
-- **LLM-powered synthesis:** One LLM call per query with structured git data as input
+### Why it matters
 
-### Quick Start
+- Real local memory store under `~/.membrain`
+- CLI retrieval and inspection for local testing/debugging
+- Daemon JSON-RPC for background service usage
+- MCP-style stdio integration so tools like Claude Code can launch it directly
+- Local memory, explainability, and persistence in one place instead of ad hoc scratch files
 
-```bash
-# Basic query
-why src/auth.rs:verify_token
+### Canonical local paths
 
-# Validate config and test LLM connectivity
-why doctor
-```
+- root: `~/.membrain`
+- hot db: `~/.membrain/hot.db`
+- cold db: `~/.membrain/cold.db`
+- daemon socket: `~/.membrain/membrain.sock`
 
-### Query Syntax
+### Recommended usage
 
-| Form | Example | Description |
-|------|---------|-------------|
-| `<file>:<line>` | `why src/auth.rs:42` | Query specific line |
-| `<file>:<symbol>` | `why src/auth.rs:verify_token` | Query function/method |
-| `<file>:<Type::method>` | `why src/auth.rs:AuthService::login` | Qualified Rust method |
-| `<file> --lines <start:end>` | `why src/auth.rs --lines 40:45` | Query line range |
-
-### Command Reference
-
-**Core Queries:**
-| Command | Purpose |
-|---------|---------|
-| `why <target>` | Basic archaeology query with LLM synthesis |
-| `why <target> --no-llm` | Heuristic-only mode (no LLM call) |
-| `why <target> --json` | Machine-readable output |
-| `why <target> --since 30` | Limit to recent 30 days |
-
-**Risk & History:**
-| Command | Purpose |
-|---------|---------|
-| `why <target> --blame-chain` | Walk past mechanical edits to true origin |
-| `why <target> --evolution` | Rename-aware target history timeline |
-| `why <target> --team` | Show ownership and bus-factor signals |
-| `why <target> --coupled` | Show file-level co-change coupling |
-
-**Code Actions:**
-| Command | Purpose |
-|---------|---------|
-| `why <target> --annotate` | Write evidence-backed doc annotation |
-| `why <target> --split` | Show archaeology-guided split suggestions |
-| `why <target> --rename-safe` | Assess whether Rust symbol rename is safe |
-| `why <target> --watch` | Refresh report when file changes |
-
-**Repo-Wide Commands:**
-| Command | Purpose |
-|---------|---------|
-| `why hotspots --limit 10` | Top churn × risk files |
-| `why health` | Repo health dashboard |
-| `why health --ci 80` | CI gate with threshold |
-| `why time-bombs` | Aged TODOs and expired markers |
-| `why ghost --limit 10` | Uncalled high-risk functions |
-| `why onboard --limit 10` | Top symbols for new engineers |
-| `why diff-review --no-llm` | Review staged diff |
-| `why pr-template` | Generate PR template from staged diff |
-
-**Config & Diagnostics:**
-| Command | Purpose |
-|---------|---------|
-| `why config init` | Interactive setup (main entry point) |
-| `why config init --local` | Create repo-local config |
-| `why config get` | Show current effective config |
-| `why doctor` | Validate config and test LLM |
-| `why doctor --json` | Machine-readable diagnostics |
-
-### Typical Agent Workflow
-
-1. **Before deleting or refactoring unfamiliar code:**
-   ```bash
-   why src/legacy.rs:old_function --no-llm
-   ```
-   Check risk level and history before touching.
-
-2. **For broader refactors:**
-   ```bash
-   why src/auth.rs:verify_token --coupled --team
-   ```
-   See coupled files and ownership before planning scope.
-
-3. **For rename operations:**
-   ```bash
-   why src/auth.rs:verify_token --rename-safe
-   ```
-   Check caller risk to assess rename safety.
-
-4. **Before PR:**
-   ```bash
-   why diff-review --no-llm
-   why pr-template
-   ```
-   Review staged changes and generate template.
-
-5. **Health check:**
-   ```bash
-   why health --json
-   why hotspots --limit 5
-   ```
-   Understand repo-wide debt signals.
-
-### Risk Levels
-
-| Level | Meaning |
-|-------|---------|
-| **HIGH** | Stop and investigate. Likely security, incident, or critical business logic. |
-| **MEDIUM** | Review carefully. Migration, integration, or compatibility-sensitive code. |
-| **LOW** | Routine code. Standard review practices apply. |
-
-### Supported Languages
-
-Symbol resolution works for: Rust (`.rs`), Go (`.go`), JavaScript (`.js`), TypeScript (`.ts`, `.tsx`), Java (`.java`), Python (`.py`)
-
-### Cache Behavior
-
-- Query results cached in `.why/cache.jsonl`
-- Health snapshots stored in `.why/health.jsonl`
-- Use `--no-cache` to bypass cache
-- Cache keys include `HEAD` hash prefix for natural invalidation
-
-### Common Pitfalls
-
-- **"could not find repository"**: Run from inside a git repo, or use repo-wide commands like `why doctor` from anywhere
-- **Ambiguous symbol**: Use qualified name like `Module::function` instead of just `function`
-- **No LLM synthesis**: Check `why doctor` for config/auth issues; fallback to `--no-llm` for heuristic-only
-- **Missing credentials**: Run `why config init` or set `ANTHROPIC_API_KEY`/`OPENAI_API_KEY`/`ZAI_API_KEY`
-
-### Rules for Agents
-
-- **Always run `why` before deleting unfamiliar code** — it may be a security fix or incident response
-- Treat `HIGH` risk output as a stop-and-investigate signal
-- Use `--blame-chain` to find true origin, not just last mechanical edit
-- Use `--coupled` and `--team` before broader refactors
-- Use `--no-llm` in CI or when LLM is unavailable
-- Use `why doctor` to diagnose config/auth issues
-
----
-## linehash — Hash-Anchored File Editing
-
-`linehash` is a file editing tool that uses content-hashed line anchors (`12:ab3f`) instead of fragile exact-text matching. It's designed for agent-driven editing where concurrent changes are expected and edit safety is critical.
-
-### Why It's Useful
-
-- **Stable anchors:** Uses `line:hash` format that survives nearby edits—line numbers shift but hashes stay valid
-- **Concurrent-safe:** Detects stale anchors when content changed; fails explicitly instead of guessing
-- **Audit trail:** Optional `--receipt` and `--audit-log` for tracking edit history
-- **No merge conflicts:** Each edit is independent; no patch files that conflict
-- **Works with any text:** Language-agnostic; no parsing required
-
-### The Anchor Format
-
-Anchors are `line_number:content_hash` pairs like `42:a3f2`:
-
-- **line_number**: 1-based line number (for human readability)
-- **content_hash**: First 4+ chars of SHA-256 of line content (for stability)
-
-Example output from `linehash read`:
-```
-  1:a1b2  fn main() {
-  2:c3d4      println!("hello");
-  3:e5f6  }
-```
-
-### Command Reference
-
-**Reading:**
-| Command | Purpose |
-|---------|---------|
-| `linehash read <file>` | Show file with line:hash anchors |
-| `linehash read <file> --anchor 42:a3f2` | Show context around specific anchor |
-| `linehash read <file> --context 10` | Set context lines (default: 5) |
-| `linehash index <file>` | Show just anchors, no content |
-
-**Editing:**
-| Command | Purpose |
-|---------|---------|
-| `linehash edit <file> <anchor> <content>` | Replace line at anchor |
-| `linehash edit <file> <start>..<end> <content>` | Replace line range |
-| `linehash insert <file> <anchor> <content>` | Insert after anchor |
-| `linehash insert <file> <anchor> <content> --before` | Insert before anchor |
-| `linehash delete <file> <anchor>` | Delete line at anchor |
-| `linehash delete <file> <start>..<end>` | Delete line range |
-
-**Searching:**
-| Command | Purpose |
-|---------|---------|
-| `linehash grep <file> <pattern>` | Search with anchor output |
-| `linehash grep <file> <pattern> --case-insensitive` | Case-insensitive search |
-| `linehash annotate <file> <query>` | Find and annotate matching lines |
-| `linehash annotate <file> <regex> --regex` | Regex search |
-| `linehash find-block <file> <anchor>` | Find enclosing block (brace/indent) |
-
-**Utilities:**
-| Command | Purpose |
-|---------|---------|
-| `linehash verify <file>` | Verify file integrity |
-| `linehash stats <file>` | File statistics |
-| `linehash patch <file> <patch-file>` | Apply patch by anchors |
-| `linehash swap <file> <anchor1> <anchor2>` | Swap two lines |
-| `linehash move <file> <anchor> <target-anchor>` | Move line to new position |
-| `linehash indent <file> <anchor> <levels>` | Adjust indentation |
-
-**Advanced:**
-| Command | Purpose |
-|---------|---------|
-| `linehash from-diff <diff-file>` | Convert diff to anchor edits |
-| `linehash merge-patches <file> <patch1> <patch2>` | Merge multiple patches |
-| `linehash watch <file>` | Watch file for changes |
-| `linehash explode <file>` | Split file into per-line files |
-| `linehash implode <file>` | Reassemble from per-line files |
-
-### Typical Agent Workflow
-
-1. **Read file with anchors:**
-   ```bash
-   linehash read src/main.rs
-   ```
-
-2. **Find specific content:**
-   ```bash
-   linehash grep src/main.rs "fn process" --json
-   ```
-
-3. **Apply targeted edit:**
-   ```bash
-   linehash edit src/main.rs 42:a3f2 "fn process_data(input: &str) -> Result<()> {"
-   ```
-
-4. **Verify change:**
-   ```bash
-   linehash read src/main.rs --anchor 42:a3f2
-   ```
-
-5. **If anchor is stale, re-read and retry:**
-   ```bash
-   linehash read src/main.rs  # Get fresh anchors
-   linehash edit src/main.rs 42:new_hash "..."
-   ```
-
-### Range Edits
-
-Replace multiple lines with range syntax:
+#### 1. Direct CLI memory operations
 
 ```bash
-# Replace lines 10-15
-linehash edit src/main.rs 10:a1b2..15:c3d4 "new content\nspanning\nmultiple lines"
-
-# Delete lines 20-25
-linehash delete src/main.rs 20:e5f6..25:g7h8
+membrain remember "Checkout failed because the idempotency key middleware was skipped after refactor."
+membrain recall "idempotency middleware checkout retries"
+membrain inspect --id 1 --namespace default
+membrain why "idempotency middleware checkout retries" --namespace default
+membrain health --json
+membrain doctor run --json
 ```
 
-### Safety Features
+Notes:
+- `remember` defaults to namespace `default`
+- `recall` also defaults to namespace `default` in local CLI use
+- prefer realistic incident/debug/task text over toy fragments when validating behavior
 
-**Stale anchor detection:**
-```
-Error: anchor 42:a3f2 is stale (line content changed)
-Hint: re-run `linehash read src/main.rs` to get fresh anchors
-```
-
-**Ambiguous anchor detection:**
-```
-Error: anchor 42:a3 matches multiple lines
-Hint: use more hash characters: 42:a3f2e1
-```
-
-**Dry-run mode:**
-```bash
-linehash edit src/main.rs 42:a3f2 "new content" --dry-run
-```
-
-**Audit logging:**
-```bash
-linehash edit src/main.rs 42:a3f2 "new content" --receipt --audit-log edits.jsonl
-```
-
-### JSON Output
-
-All commands support `--json` for machine-readable output:
+#### 2. Background local daemon mode
 
 ```bash
-linehash read src/main.rs --json
-linehash grep src/main.rs "fn " --json
-linehash edit src/main.rs 42:a3f2 "new" --json
+membrain daemon
+# or
+membrain-daemon
 ```
 
-### Common Pitfalls
+What it does:
+- binds the daemon socket (default `~/.membrain/membrain.sock`)
+- logs the bound socket path on startup
+- serves JSON-RPC 2.0 over the Unix socket
 
-- **Stale anchor:** Content changed since last read → re-run `linehash read`
-- **Ambiguous anchor:** Hash too short → use more characters from original hash
-- **Line shifted:** Nearby edits changed line numbers → hash still works, just re-read
-- **File deleted:** Obviously fails → check file exists before editing
-- **Binary file:** Only works on text files → don't use on binaries
+Use this mode when another local tool or script should connect repeatedly over the socket.
 
-### Rules for Agents
+#### 3. Claude Code / MCP client integration
 
-- **Always prefer `linehash` over `sed`/`awk`** for targeted line edits
-- **Re-read before editing** if file may have changed (other agents, user edits)
-- **Treat stale-anchor failures as safety signals**, not errors to bypass
-- **Use `--dry-run` first** when editing critical files
-- **Use `--json` output** for parsing in scripts
-- **Never force an edit** when anchor is stale—always re-read and retry
+```bash
+membrain mcp
+```
 
-### When NOT to Use linehash
+This mode:
+- listens on **stdio**, not on a port
+- does **not** bind a Unix socket for client traffic
+- prints a startup message to stderr
+- accepts newline-delimited JSON-RPC/MCP-style requests on stdin and writes responses to stdout
 
-- **Large insertions:** For adding many lines, use a heredoc or write the whole file
-- **Whole-file rewrites:** Just use `Write` tool directly
-- **Binary files:** linehash only works on text
-- **Complex refactors:** Use tree-sitter based tools for AST-aware changes
+
+### What currently works in real installed usage
+
+Validated real surfaces include:
+- CLI: `remember`, `observe`, `recall`, `inspect`, `why`, `budget`, `hot-paths`, `dead-zones`, `mood-history`, `audit`, `health`, `doctor`
+- daemon JSON-RPC: `encode`, `inspect`, `recall`, `health`, `doctor`, `shutdown`
+- MCP-style / stdio: `resources.list`, `resource.read`, `streams.list`, `encode`, `observe`, `recall`, `inspect`, `health`, `doctor`, `shutdown`
+
+Current runtime truth:
+- normal daemon/MCP recall paths now return hydrated evidence on success; planner/degraded summaries are for explicit no-hydrated-evidence or fallback cases, not the normal success contract
+- the live MCP tool catalog is currently the bounded six-tool surface above plus runtime resources/streams, even though broader future-facing MCP contract docs describe larger later-stage tool families
+- `membrain mcp` is a stdio transport adapter and may reuse process-local state, but it is not the authoritative always-warm runtime; only the long-lived Unix-socket daemon can claim daemon-owned repeated-request warm-runtime guarantees
+- `health` / `doctor` are truthful bounded operator surfaces for the current runtime posture and feature availability, not proof that every later-stage architectural subsystem is fully landed
+
+### Practical rules for agents
+
+- Prefer `membrain mcp` for easy Claude Code subprocess integration.
+- Prefer `membrain daemon` / `membrain-daemon` only when you explicitly want background local service mode.
+- Do not describe `membrain mcp` as listening on a port; it uses stdio only.
+- When testing the real install, prefer realistic content and verify with `recall`, `inspect`, and `why`.
+- If a test references a memory id, use the actual id returned by `remember`/`encode`.
+- Use canonical commands only: `remember` and `why`.
+
+### Common pitfalls
+
+- `membrain mcp` is stdio, so there is **no port** to connect to.
+- `membrain daemon` is the socket server; `membrain mcp` is the subprocess server.
+- If you use a custom `--db-path`, CLI/MCP/daemon state isolation changes accordingly.
+- If recall results seem wrong, inspect the exact memory id and run `why` to confirm the hydrated evidence, route, or explicit degraded/fallback behavior.
 
 ---
 
-## scope — Static Analysis Dependency & Architecture Engine
+## why / linehash / scope — concise usage rules
 
-`scope` is a local static-analysis workspace that answers "what depends on what?" by maintaining a SQLite-backed dependency/symbol graph. It provides dependency queries, impact analysis, architecture enforcement, capability auditing, and health reporting — all from a persistent local index.
+### `why`
+- Use `why` before deleting or heavily refactoring unfamiliar code.
+- Treat `HIGH` risk output as stop-and-investigate.
+- Most useful commands:
+  - `why path/to/file.rs:symbol`
+  - `why path/to/file.rs:42 --no-llm`
+  - `why path/to/file.rs:symbol --coupled --team`
+  - `why doctor`
+- Use `--no-llm` when you only need heuristic history.
 
-### Why It's Useful
+### `linehash`
+- Prefer `linehash` for surgical line edits in files other agents may also touch.
+- Re-read before editing if the file may have changed.
+- Treat stale-anchor failures as safety signals; do not force them.
+- Most useful commands:
+  - `linehash read <file>`
+  - `linehash grep <file> <pattern>`
+  - `linehash edit <file> <anchor> <content>`
 
-- **Dependency awareness:** Know what a file imports and what imports it before editing
-- **Impact analysis:** Estimate blast radius of body/signature/rename/delete changes
-- **Architecture enforcement:** Layer rules, capability auditing, entry-point reachability
-- **Symbol graph:** Track exports, calls, callers, and public surface across files
-- **Health reporting:** Aggregate metrics, gate checks, snapshot diffs, and risk hotspots
-- **MCP integration:** Same queries available as stdio MCP tools for external clients
-
-### Quick Start
-
-```bash
-# Index the repository
-scope index .
-
-# Query dependencies
-scope deps src/lib.rs
-scope deps src/lib.rs --reverse
-
-# Check health
-scope report
-scope doctor
-```
-
-### Command Reference
-
-**Indexing:**
-| Command | Purpose |
-|---------|---------|
-| `scope index [PATH]` | Scan and index all supported files into `.scope/index.db` |
-| `scope doctor [--fix]` | Validate index health and diagnostics |
-| `scope benchmark [--fixture ...] [--iterations N]` | Performance benchmark with report |
-
-**Dependency Queries:**
-| Command | Purpose |
-|---------|---------|
-| `scope deps <file>` | Forward dependencies of a file |
-| `scope deps <file> --reverse` | Reverse dependencies (what imports this) |
-| `scope deps <file> --transitive [--depth N]` | Transitive closure with optional depth limit |
-| `scope symbols <file> [--public-only] [--kind ...]` | Symbols defined in a file |
-| `scope calls <symbol> [--transitive]` | What a symbol calls |
-| `scope callers <symbol> [--transitive]` | What calls a symbol |
-
-**Impact & Traversal:**
-| Command | Purpose |
-|---------|---------|
-| `scope impact <target> --change-type <type>` | Estimate blast radius (body/signature/rename/delete/visibility/side-effect) |
-| `scope explain <target> [--to ...] [--depth N]` | Explain dependency path |
-| `scope why <from> <to> [--depth N]` | Find shortest path between two nodes |
-| `scope context --target <...> --change-type <...> [--budget N]` | Structured change-planning context |
-| `scope pack <target> --change-type <...> --budget <N>` | Lean plain-text context handoff |
-
-**Architecture & Audit:**
-| Command | Purpose |
-|---------|---------|
-| `scope arch check` | Check layer rule violations |
-| `scope audit --capability <name>` | Capability reach analysis (e.g., network access) |
-| `scope surface [<file>]` | Public surface of a file |
-| `scope surface_diff <before> <after>` | Diff public surface between two files |
-| `scope entry_list / entry_cone / entry_reaches / entry_unreachable` | Entry point analysis |
-
-**Graph Analysis:**
-| Command | Purpose |
-|---------|---------|
-| `scope unused` | Find unused exported symbols |
-| `scope cycles [--severity ...]` | Detect dependency cycles |
-| `scope tree <target> [--reverse] [--depth N]` | Dependency tree view |
-| `scope split <target> --clusters <N>` | Suggest file split clusters |
-| `scope mirror <target> --other <file>` | Similarity analysis between files |
-| `scope stability [--file ...] [--sort ...]` | File instability metrics |
-| `scope risk [--file ...] [--days N] [--top N]` | Risk hotspot analysis |
-| `scope cochange [--file ...] [--min-commits N]` | Co-change coupling from git history |
-
-**Reporting & Gating:**
-| Command | Purpose |
-|---------|---------|
-| `scope report [--compare <snapshot>]` | Full health report with metrics |
-| `scope gate [--compare <snapshot>] [--strict]` | CI gate check against thresholds |
-| `scope diff --branch <ref>` | Changed/affected files relative to branch |
-| `scope snapshot_save --name <name>` | Save current graph state |
-| `scope snapshot_list / snapshot_delete` | Manage snapshots |
-| `scope diff_snapshot` | Compare two snapshots |
-
-**Other:**
-| Command | Purpose |
-|---------|---------|
-| `scope query --expr "<pipe-expr>"` | Ad-hoc query language |
-| `scope simulate extract ...` | Simulate file extraction impact |
-| `scope rename_plan <target> --to <new_name>` | Plan symbol rename with edit steps |
-| `scope test_map_covers <file>` | Which tests cover a source file |
-| `scope serve [--port 7777]` | Local HTTP API + embedded UI |
-
-### MCP Tool Surface (scope-mcp)
-
-The same queries are exposed as stdio MCP tools. Tool names match CLI subcommands:
-
-`index`, `deps`, `symbols`, `calls`, `callers`, `impact`, `explain`, `why`, `context`, `pack`, `arch_check`, `audit`, `stability`, `risk`, `cochange`, `report`, `gate`, `query`, `surface`, `surface_diff`, `test_map_covers`, `rename_plan`, `unused`, `cycles`, `diff`, `tree`, `split`, `mirror`, `entry_list`, `entry_cone`, `entry_reaches`, `entry_unreachable`, `doctor`, `benchmark`, `snapshot_save`, `snapshot_list`, `snapshot_delete`, `diff_snapshot`, `simulate_extract`
-
-All MCP tools accept `repo_root` (optional, defaults to cwd) and return the same JSON envelope as CLI.
-
-### Typical Agent Workflow
-
-1. **Index once per session:**
-   ```bash
-   scope index .
-   ```
-
-2. **Before editing a file — check dependencies:**
-   ```bash
-   scope deps src/parser.rs
-   scope deps src/parser.rs --reverse
-   scope --compact symbols src/parser.rs --public-only
-   ```
-
-3. **Before refactoring — estimate blast radius:**
-   ```bash
-   scope impact src/parser.rs --change-type signature
-   scope --compact callers parser::parse
-   scope context --target parser::parse --change-type body --budget 400
-   ```
-
-4. **Before PR — health check:**
-   ```bash
-   scope report
-   scope gate --strict
-   scope unused
-   scope cycles
-   ```
-
-### Output Format
-
-All commands return a stable JSON envelope:
-
-```json
-{
-  "schema_version": 1,
-  "command": "deps",
-  "status": "ok",
-  "data": { ... },
-  "warnings": []
-}
-```
-
-- `status`: `ok`, `stub`, or `error`
-- Use `--compact` for minified JSON (reduces tokens in agent loops)
-
-### Architecture Config (`.scope/arch.toml`)
-
-```toml
-[[layer]]
-name = "services"
-pattern = "src/services/**"
-
-[[rule]]
-from = "models"
-may_not_import = ["services", "routes"]
-message = "models must not import services or routes"
-
-[[capability]]
-name = "network"
-pattern = "src/http/**"
-expected_callers = ["src/workers/**"]
-
-[[entry_point]]
-pattern = "src/cli/**"
-```
-
-### Supported Languages
-
-- **Full semantic extraction:** Rust (`.rs`), TypeScript (`.ts`, `.tsx`), JavaScript (`.js`)
-- **Scan-only (indexed but not deeply analyzed):** Python (`.py`), Ruby (`.rb`), Go (`.go`)
-
-### Common Pitfalls
-
-- **Stale index:** Run `scope index .` after significant code changes
-- **Missing `.scope/`:** The `.scope/` directory is gitignored by default; each clone needs a fresh `scope index`
-- **Heuristic resolution:** Results are static approximations; treat as evidence, not proof
-- **Dynamic imports:** Computed module paths and reflection are blind spots
-- **TypeScript paths:** `tsconfig` path mapping not yet fully supported
-
-### Rules for Agents
-
-- **Always `scope index .` before querying** if the index might be stale
-- Use `--compact` in automated loops to save tokens
-- Treat results as static evidence with explicit certainty levels (`exact` > `resolved` > `heuristic` > `dynamic`)
-- Use `scope deps --reverse` before deleting files to find dependents
-- Use `scope impact` before signature/rename changes to estimate blast radius
-- Use `scope report` / `scope gate` for pre-PR health validation
-- **Never treat scope output as proof a change is safe** — always verify with tests and builds
-
+### `scope`
+- Use `scope` for dependency/impact analysis before broad refactors.
+- Most useful commands:
+  - `scope index .`
+  - `scope deps <file> --reverse`
+  - `scope impact <target> --change-type signature`
+  - `scope report`
+  - `scope gate --strict`
+- Treat `scope` as static evidence, not proof of safety.
 
 ---
 

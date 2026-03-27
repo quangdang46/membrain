@@ -1195,6 +1195,8 @@ Embedding defaults:
   - encode fast path uses only a local embedder; remote API fallback is not part of the canonical write path
   - authoritative stored embeddings are float32; hot/cold quantized search vectors are derived projections
   - cache keys bind normalized input bytes to embedder generation and embedding purpose (for example content vs context)
+  - daemon mode owns the canonical warm local embedder lifecycle; it starts `not_loaded`, becomes `loaded` on first successful initialization, and becomes `warm` only after repeated encode/recall requests prove cache-backed reuse in the same long-lived process
+  - health/doctor surfaces must report that embedder lifecycle truth explicitly, including degraded or unavailable local-backend states rather than implying that fastembed is active just because it is compiled in
   - caching via LruCache or equivalent, with invalidation on model, dimension, or normalization-generation change
   - batch embedding in consolidation / import flows, not as hidden request-path retry logic
 
@@ -10337,7 +10339,7 @@ store/ — STORAGE LAYER
 
 embed/ — VECTOR OPERATIONS
   cache.rs:    LruCache<u64, Vec<f32>> with xxhash64 keys. Second embed of same content is free.
-  model.rs:    TextEmbedding wrapper (fastembed-rs). Loads model once, shared across threads.
+  model.rs:    TextEmbedding wrapper (fastembed-rs). In daemon mode, the runtime should load it once per long-lived process and reuse it across repeated requests; short-lived CLI/MCP stdio runs may only provide process-local best-effort reuse.
   quantize.rs: f32↔f16↔i8 conversion. Hot uses f16, cold uses i8.
 
 graph/ — ENGRAM SYSTEM

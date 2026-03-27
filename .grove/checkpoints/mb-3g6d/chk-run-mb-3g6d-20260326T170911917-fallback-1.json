@@ -1,0 +1,35 @@
+{
+  "id": "chk-run-mb-3g6d-20260326T170911917-fallback-1",
+  "bead_id": "mb-3g6d",
+  "run_id": "run-mb-3g6d-20260326T170911917",
+  "session_id": "ses-run-mb-3g6d-20260326T170911917",
+  "progress": "Synthetic fallback checkpoint after NoProgress",
+  "next_step": "Resume from the transcript tail, avoid repeating completed setup, and continue with the smallest safe remaining step.",
+  "payload": {
+    "claimed_paths": [],
+    "confidence": 0.25,
+    "context": {
+      "failure_class": "NoProgress",
+      "failure_detail": "session ended with Unknown",
+      "stderr_tail": [],
+      "stdout_tail": [
+        "Read it.",
+        "",
+        "Result:",
+        "- `cargo test -p membrain-daemon runtime_restart_rehydrates_persisted_memory_for_recall_inspect_and_why -- --nocapture`",
+        "- passed",
+        "",
+        "Key lines:",
+        "- `crates/membrain-daemon/src/daemon.rs:1721` still warns that `persisted_memory_count` is unused",
+        "- test outcome: `1 passed, 0 failed`",
+        "- both daemon startup and restarted daemon socket runs completed successfully"
+      ],
+      "synthetic": true
+    },
+    "next_step": "Resume from the transcript tail, avoid repeating completed setup, and continue with the smallest safe remaining step.",
+    "open_questions": [],
+    "progress": "Synthetic fallback checkpoint after NoProgress"
+  },
+  "saved_at": "2026-03-26T17:37:19.524356884Z",
+  "resume_generation": 1
+}

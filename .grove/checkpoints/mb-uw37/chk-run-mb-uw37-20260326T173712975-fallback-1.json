@@ -1,0 +1,34 @@
+{
+  "id": "chk-run-mb-uw37-20260326T173712975-fallback-1",
+  "bead_id": "mb-uw37",
+  "run_id": "run-mb-uw37-20260326T173712975",
+  "session_id": "ses-run-mb-uw37-20260326T173712975",
+  "progress": "Synthetic fallback checkpoint after NoProgress",
+  "next_step": "Resume from the transcript tail, avoid repeating completed setup, and continue with the smallest safe remaining step.",
+  "payload": {
+    "claimed_paths": [],
+    "confidence": 0.25,
+    "context": {
+      "failure_class": "NoProgress",
+      "failure_detail": "session ended with Unknown",
+      "stderr_tail": [],
+      "stdout_tail": [
+        "Read and verified.",
+        "",
+        "",
+        "",
+        "",
+        "",
+        "Next actionable bead:",
+        "- `mb-1ps7` — “Replace planner-only explain with hydrated why evidence”",
+        ""
+      ],
+      "synthetic": true
+    },
+    "next_step": "Resume from the transcript tail, avoid repeating completed setup, and continue with the smallest safe remaining step.",
+    "open_questions": [],
+    "progress": "Synthetic fallback checkpoint after NoProgress"
+  },
+  "saved_at": "2026-03-26T17:43:30.521900195Z",
+  "resume_generation": 1
+}

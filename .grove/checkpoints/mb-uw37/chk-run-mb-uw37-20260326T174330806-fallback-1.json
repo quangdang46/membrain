@@ -1,0 +1,45 @@
+{
+  "id": "chk-run-mb-uw37-20260326T174330806-fallback-1",
+  "bead_id": "mb-uw37",
+  "run_id": "run-mb-uw37-20260326T174330806",
+  "session_id": "ses-run-mb-uw37-20260326T174330806",
+  "progress": "Synthetic fallback checkpoint after NoProgress",
+  "next_step": "Resume from the transcript tail, avoid repeating completed setup, and continue with the smallest safe remaining step.",
+  "payload": {
+    "claimed_paths": [],
+    "confidence": 0.25,
+    "context": {
+      "failure_class": "NoProgress",
+      "failure_detail": "session ended with Unknown",
+      "stderr_tail": [],
+      "stdout_tail": [
+        "- Updated stale audit text in `MISSING.md`.",
+        "- Closed bead `mb-uw37` and synced beads.",
+        "- Ran `cargo check -p membrain-daemon --all-targets` successfully.",
+        "",
+        "Key evidence:",
+        "- `crates/membrain-daemon/src/daemon.rs:8513` — semantic recall returns hydrated `evidence_pack` with `degraded_summary == null`",
+        "- `crates/membrain-daemon/src/daemon.rs:8591` — persisted-state restart hydration for inspect/recall/explain",
+        "- `crates/membrain-daemon/src/daemon.rs:9280` — persisted-state restart parity for recall/inspect/why",
+        "",
+        "What changed:",
+        "- `MISSING.md:125` now says the gap is stale docs/bead state, not live runtime behavior.",
+        "- `MISSING.md:668` now treats `mb-1ps7` as the next essential implementation bead, with `mb-uw37` already landed.",
+        "- `MISSING.md:685` now marks recall hydration completion as implemented in the live daemon/runtime path.",
+        "",
+        "Verification:",
+        "- `cargo check -p membrain-daemon --all-targets` passed, with one existing non-blocking dead-code warning.",
+        "",
+        "Next real implementation target:",
+        "- `mb-1ps7` — replace planner-only explain with hydrated why evidence.",
+        ""
+      ],
+      "synthetic": true
+    },
+    "next_step": "Resume from the transcript tail, avoid repeating completed setup, and continue with the smallest safe remaining step.",
+    "open_questions": [],
+    "progress": "Synthetic fallback checkpoint after NoProgress"
+  },
+  "saved_at": "2026-03-26T17:48:46.936944196Z",
+  "resume_generation": 1
+}

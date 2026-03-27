@@ -32,6 +32,10 @@ use membrain_core::engine::ranking::{
     ranking_profile_name_for_recall, ConfidenceDisplayConfig, ConfidenceExplain, RankingInput,
 };
 use membrain_core::engine::recall::RecallRuntime;
+use membrain_core::engine::semantic_retrieval::{
+    HydratedMemoryRecord, SemanticExecutorConfig, SemanticRetrievalResult,
+    SharedSemanticRetrievalExecutor,
+};
 use membrain_core::engine::repair::{IndexRepairEntrypoint, RepairTarget};
 use membrain_core::engine::result::{
     AnsweredFrom, EntryLane, EvidenceRole, ResultBuilder, RetrievalExplain, RetrievalResultSet,
@@ -70,7 +74,8 @@ use membrain_daemon::preflight::{
     PreflightExplainResponse, PreflightOutcome,
 };
 use membrain_daemon::rpc::{
-    RuntimeAuthorityMode, RuntimeMetrics, RuntimePosture, RuntimeStatus,
+    RuntimeAuthorityMode, RuntimeEmbedderState, RuntimeEmbedderStatus, RuntimeMetrics,
+    RuntimePosture, RuntimeStatus,
 };
 use serde::Serialize;
 use std::collections::{BTreeMap, HashSet};
@@ -298,6 +303,23 @@ fn build_health_report(local_records: &[LocalMemoryRecord]) -> BrainHealthReport
             low_confidence_count: 0,
             decay_rate: 0.0,
             archive_count: 0,
+            lifecycle: membrain_core::health::LifecycleHealthReport {
+                consolidated_to_cold_count: 0,
+                reconsolidation_active_count: local_records
+                    .iter()
+                    .filter(|record| {
+                        matches!(
+                            record.causal_link_type,
+                            Some(CausalLinkType::Reconsolidated)
+                        )
+                    })
+                    .count(),
+                forgetting_archive_count: 0,
+                background_maintenance_runs: 0,
+                background_maintenance_log: vec![
+                    "no_background_lifecycle_activity_recorded".to_string()
+                ],
+            },
             total_engrams: 0,
             avg_cluster_size: 0.0,
             top_engrams: Vec::new(),
@@ -418,11 +440,40 @@ fn doctor_report(local_records: &[LocalMemoryRecord]) -> DoctorReport {
                 })
             },
         },
+        DoctorCheck {
+            name: "embedder_runtime",
+            surface_kind: "embedder",
+            status: if matches!(status.embedder.state, RuntimeEmbedderState::NotLoaded) {
+                "warn"
+            } else {
+                "ok"
+            },
+            severity: if matches!(status.embedder.state, RuntimeEmbedderState::NotLoaded) {
+                "warn"
+            } else {
+                "info"
+            },
+            affected_scope: status.embedder.state.as_str().to_string(),
+            degraded_impact: Some(format!(
+                "backend={} generation={} dimensions={} loads={} requests={} cache_hits={} cache_misses={}",
+                status.embedder.backend_kind,
+                status.embedder.generation,
+                status.embedder.dimensions,
+                status.embedder.loads,
+                status.embedder.requests,
+                status.embedder.cache_hits,
+                status.embedder.cache_misses,
+            )),
+            remediation: Some(DoctorRemediation {
+                summary: "exercise encode or recall to warm the shared local embedder, then re-run doctor".to_string(),
+                next_steps: vec!["run membrain recall or remember", "re-run doctor"],
+            }),
+        },
     ];
     let summary = DoctorSummary {
-        ok_checks: checks.len(),
-        warn_checks: 0,
-        fail_checks: 0,
+        ok_checks: checks.iter().filter(|check| check.status == "ok").count(),
+        warn_checks: checks.iter().filter(|check| check.status == "warn").count(),
+        fail_checks: checks.iter().filter(|check| check.status == "fail").count(),
     };
 
     DoctorReport {
@@ -2104,6 +2155,19 @@ fn build_confidence_inputs(record: &LocalMemoryRecord) -> ConfidenceInputs {
     }
 }
 
+fn as_hydrated_memory_record(record: &LocalMemoryRecord) -> HydratedMemoryRecord {
+    HydratedMemoryRecord {
+        memory_id: record.memory_id,
+        namespace: record.namespace.clone(),
+        session_id: record.session_id,
+        memory_type: record.memory_type,
+        route_family: record.route_family,
+        compact_text: record.compact_text.clone(),
+        raw_text: record.compact_text.clone(),
+        affect: record.affect,
+    }
+}
+
 fn action_uncertainty_markers(
     confidence_output: &membrain_core::engine::confidence::ConfidenceOutput,
 ) -> Vec<String> {
@@ -2704,11 +2768,11 @@ fn build_retrieval_result_set(
                 memory_id: Some(*memory_id),
                 reason_code: "score_kept".to_string(),
                 detail: if example_seeded {
-                    "query-by-example similarity kept this bounded candidate".to_string()
+                    "query-by-example similarity kept this bounded semantic candidate".to_string()
                 } else if matched_empty {
-                    "fallback returned a recent memory from the bounded hot window".to_string()
+                    "semantic retrieval produced no candidates, so the CLI returned the most recent bounded fallback evidence".to_string()
                 } else {
-                    "query matched the compact text inside the bounded hot window".to_string()
+                    "shared semantic retrieval kept this hydrated candidate for final packaging".to_string()
                 },
             })
             .collect(),
@@ -2723,7 +2787,7 @@ fn build_retrieval_result_set(
                     "query-by-example seeds did not produce any visible bounded candidates"
                         .to_string()
                 } else {
-                    "bounded hot-window scan returned no visible evidence".to_string()
+                    "shared semantic retrieval returned no visible evidence".to_string()
                 },
             });
     }
@@ -3188,36 +3252,69 @@ fn recall_memories(
         .recall_engine()
         .plan_recall(recall_request, store.config());
 
-    let query_lower = query_text.to_lowercase();
     let kind_filter = config.kind.as_deref().map(|kind| match kind {
         "semantic" => CanonicalMemoryType::Observation,
         "procedural" => CanonicalMemoryType::ToolOutcome,
         _ => CanonicalMemoryType::Event,
     });
-    let matched_ids = if config.like.is_some() || config.unlike.is_some() {
-        query_by_example_memory_ids(store, local_records, config)
+    let semantic_result = if config.like.is_some() || config.unlike.is_some() {
+        None
     } else {
-        local_records
+        let hydrated_records = local_records
             .iter()
-            .filter(|r| r.namespace == config.namespace)
+            .filter(|record| record.namespace == config.namespace)
             .filter(|record| kind_filter.is_none_or(|kind| record.memory_type == kind))
             .filter(|record| {
-                let text_lower = record.compact_text.to_lowercase();
-                text_lower.contains(&query_lower)
-                    || query_lower.contains(&text_lower)
-                    || record.memory_type.as_str().contains(&query_lower)
+                config
+                    .era
+                    .as_deref()
+                    .is_none_or(|era| record.era_id.as_deref() == Some(era))
             })
-            .map(|record| record.memory_id)
+            .map(as_hydrated_memory_record)
+            .collect::<Vec<_>>();
+        let mut local_config = store.embed().default_local_config();
+        local_config.show_download_progress = false;
+        Some(match store.embed().new_local_text_embedder(&local_config) {
+            Ok(mut embedder) => SharedSemanticRetrievalExecutor.execute(
+                &hydrated_records,
+                &config.namespace,
+                query_text,
+                None,
+                SemanticExecutorConfig::bounded(config.top),
+                &mut embedder,
+            ),
+            Err(error) => SharedSemanticRetrievalExecutor.execute_without_embeddings(
+                &hydrated_records,
+                &config.namespace,
+                query_text,
+                None,
+                SemanticExecutorConfig::bounded(config.top),
+                format!("semantic_embedding_unavailable:{error}"),
+            ),
+        })
+    };
+    let matched_ids = if let Some(semantic_result) = semantic_result.as_ref() {
+        semantic_result
+            .candidates
+            .iter()
+            .map(|candidate| candidate.record.memory_id)
             .collect::<Vec<_>>()
+    } else {
+        query_by_example_memory_ids(store, local_records, config)
     };
 
     let route_reason = if config.like.is_some() || config.unlike.is_some() {
-        "query-by-example seed similarity expanded a bounded hot-window shortlist".to_string()
+        "query-by-example seed similarity expanded a bounded semantic shortlist".to_string()
+    } else if semantic_result
+        .as_ref()
+        .is_some_and(|result| result.trace.degraded_reason.is_some())
+    {
+        "request lacks a direct Tier1 answer and escalates to deeper indexed retrieval".to_string()
     } else {
         recall_plan.route_summary.reason.to_string()
     };
     let current_mood = current_cli_mood_snapshot(store, &config.namespace);
-    let result_set = build_retrieval_result_set(
+    let mut result_set = build_retrieval_result_set(
         local_records,
         config,
         current_mood,
@@ -3227,6 +3324,9 @@ fn recall_memories(
         None,
         store.config().graph_max_nodes,
     );
+    if let Some(semantic_result) = semantic_result.as_ref() {
+        append_semantic_executor_trace(&mut result_set, semantic_result, false);
+    }
 
     let request_id = RequestId::new(format!(
         "recall-{}-{}",
@@ -3594,6 +3694,49 @@ fn invalidate_memory(
     )
 }
 
+fn append_semantic_executor_trace(
+    result_set: &mut RetrievalResultSet,
+    semantic_result: &SemanticRetrievalResult,
+    explain_mode: bool,
+) {
+    let mut details = vec![format!(
+        "semantic executor considered {} namespace candidate(s), lexical prefilter kept {}, semantic ranking returned {}",
+        semantic_result.trace.namespace_candidate_count,
+        semantic_result.trace.lexical_prefilter_count,
+        semantic_result.trace.semantic_candidate_count,
+    )];
+    if let Some(reason) = semantic_result.trace.degraded_reason.as_deref() {
+        details.push(format!("degraded_reason={reason}"));
+    }
+    if let Some(query_trace) = semantic_result.trace.query_trace.as_ref() {
+        details.push(format!(
+            "query_embedding={} generation={} dims={}",
+            query_trace.backend_kind, query_trace.generation, query_trace.dimensions
+        ));
+    }
+    if let Some(batch_trace) = semantic_result.trace.batch_trace.as_ref() {
+        details.push(format!(
+            "batch_embedding={} generation={} count={} dims={}",
+            batch_trace.backend_kind,
+            batch_trace.generation,
+            batch_trace.batch_size,
+            batch_trace.dimensions
+        ));
+    }
+    result_set.explain.result_reasons.push(
+        membrain_core::engine::result::ResultReason {
+            memory_id: None,
+            reason_code: if explain_mode {
+                "semantic_explain_trace"
+            } else {
+                "semantic_recall_trace"
+            }
+            .to_string(),
+            detail: details.join("; "),
+        },
+    );
+}
+
 fn explain_query(
     store: &BrainStore,
     local_records: &[LocalMemoryRecord],
@@ -3633,7 +3776,6 @@ fn explain_query(
         .plan_recall(recall_request, store.config());
 
     let exact_memory_id = query.trim().parse::<u64>().ok().map(MemoryId);
-    let query_lower = query.to_lowercase();
     let causal_trace = exact_memory_id.map(|memory_id| {
         let links = causal_links_for_records(local_records, namespace);
         let requested_depth = depth.unwrap_or(store.config().graph_max_depth as usize);
@@ -3644,6 +3786,35 @@ fn explain_query(
             store.config().graph_max_nodes,
         )
     });
+    let semantic_result = if causal_trace.is_some() {
+        None
+    } else {
+        let hydrated_records = local_records
+            .iter()
+            .filter(|record| record.namespace == *namespace)
+            .map(as_hydrated_memory_record)
+            .collect::<Vec<_>>();
+        let mut local_config = store.embed().default_local_config();
+        local_config.show_download_progress = false;
+        Some(match store.embed().new_local_text_embedder(&local_config) {
+            Ok(mut embedder) => SharedSemanticRetrievalExecutor.execute(
+                &hydrated_records,
+                namespace,
+                query,
+                None,
+                SemanticExecutorConfig::bounded(config.top),
+                &mut embedder,
+            ),
+            Err(error) => SharedSemanticRetrievalExecutor.execute_without_embeddings(
+                &hydrated_records,
+                namespace,
+                query,
+                None,
+                SemanticExecutorConfig::bounded(config.top),
+                format!("semantic_embedding_unavailable:{error}"),
+            ),
+        })
+    };
     let matched_ids = if let Some(trace) = causal_trace.as_ref() {
         trace
             .steps
@@ -3651,26 +3822,35 @@ fn explain_query(
             .map(|step| step.memory_id)
             .collect::<Vec<_>>()
     } else {
-        local_records
-            .iter()
-            .filter(|r| r.namespace == *namespace)
-            .filter(|record| {
-                let text_lower = record.compact_text.to_lowercase();
-                text_lower.contains(&query_lower)
-                    || query_lower.contains(&text_lower)
-                    || record.memory_type.as_str().contains(&query_lower)
+        semantic_result
+            .as_ref()
+            .map(|result| {
+                result
+                    .candidates
+                    .iter()
+                    .map(|candidate| candidate.record.memory_id)
+                    .collect::<Vec<_>>()
             })
-            .map(|record| record.memory_id)
-            .collect::<Vec<_>>()
+            .unwrap_or_default()
     };
 
+    let route_reason = if causal_trace.is_some() {
+        recall_plan.route_summary.reason.to_string()
+    } else if semantic_result
+        .as_ref()
+        .is_some_and(|result| result.trace.degraded_reason.is_some())
+    {
+        "request lacks a direct Tier1 answer and escalates to deeper indexed retrieval".to_string()
+    } else {
+        recall_plan.route_summary.reason.to_string()
+    };
     let current_mood = current_cli_mood_snapshot(store, namespace);
     let mut result_set = build_retrieval_result_set(
         local_records,
         &config,
         current_mood,
         intent_result.route_inputs.ranking_profile.as_str(),
-        recall_plan.route_summary.reason.to_string(),
+        route_reason,
         matched_ids,
         exact_memory_id,
         store.config().graph_max_nodes,
@@ -3696,6 +3876,8 @@ fn explain_query(
         });
     if let Some((memory_id, trace)) = exact_memory_id.zip(causal_trace.as_ref()) {
         apply_causal_trace(&mut result_set, trace, memory_id, depth);
+    } else if let Some(semantic_result) = semantic_result.as_ref() {
+        append_semantic_executor_trace(&mut result_set, semantic_result, true);
     }
 
     let request_id = RequestId::new(format!(
@@ -4196,7 +4378,8 @@ fn sample_runtime_status() -> RuntimeStatus {
         authoritative_runtime: false,
         maintenance_active: false,
         warm_runtime_guarantees: vec![
-            "single_process_request_state".to_string(),
+            "local_process_state".to_string(),
+            "best_effort_same_process_reuse".to_string(),
             "stdio_transport".to_string(),
         ],
         degraded_reasons: Vec::new(),
@@ -4206,6 +4389,17 @@ fn sample_runtime_status() -> RuntimeStatus {
             background_jobs: 0,
             cancelled_requests: 0,
             maintenance_runs: 0,
+        },
+        embedder: RuntimeEmbedderStatus {
+            state: RuntimeEmbedderState::NotLoaded,
+            backend_kind: "local_fastembed".to_string(),
+            generation: "all-minilm-l6-v2@default".to_string(),
+            dimensions: 384,
+            loads: 0,
+            requests: 0,
+            cache_hits: 0,
+            cache_misses: 0,
+            last_error: None,
         },
     }
 }
@@ -4326,6 +4520,17 @@ fn legacy_doctor_report_sample() -> DoctorReport {
             low_confidence_count: 3,
             decay_rate: 0.012,
             archive_count: 5,
+            lifecycle: membrain_core::health::LifecycleHealthReport {
+                consolidated_to_cold_count: 12,
+                reconsolidation_active_count: 2,
+                forgetting_archive_count: 5,
+                background_maintenance_runs: 3,
+                background_maintenance_log: vec![
+                    "maintenance_consolidation_completed:cold_migration=12".to_string(),
+                    "maintenance_reconsolidation_applied:volatile_results=2".to_string(),
+                    "maintenance_forgetting_evaluated:archived=5".to_string(),
+                ],
+            },
             total_engrams: 14,
             avg_cluster_size: 2.5,
             top_engrams: vec![("ops".to_string(), 4)],
@@ -4380,6 +4585,21 @@ fn legacy_doctor_report_sample() -> DoctorReport {
                         status.authoritative_runtime,
                         status.maintenance_active,
                         status.warm_runtime_guarantees.join(",")
+                    )),
+                },
+                FeatureAvailabilityEntry {
+                    feature: "embedder_runtime".to_string(),
+                    posture: membrain_core::api::AvailabilityPosture::Degraded,
+                    note: Some(format!(
+                        "state={} backend={} generation={} dimensions={} loads={} requests={} cache_hits={} cache_misses={}",
+                        status.embedder.state.as_str(),
+                        status.embedder.backend_kind,
+                        status.embedder.generation,
+                        status.embedder.dimensions,
+                        status.embedder.loads,
+                        status.embedder.requests,
+                        status.embedder.cache_hits,
+                        status.embedder.cache_misses,
                     )),
                 },
             ],
@@ -7276,7 +7496,8 @@ async fn main() -> anyhow::Result<()> {
         } => {
             let default_paths = resolve_local_paths(cli.db_path.as_deref())?;
             let effective_socket_path = socket_path.clone().unwrap_or(default_paths.socket_path);
-            let mut config = DaemonRuntimeConfig::new(&effective_socket_path);
+            let mut config = DaemonRuntimeConfig::new(&effective_socket_path)
+                .with_db_paths(&default_paths.hot_db_path, &default_paths.cold_db_path);
             config.request_concurrency = *request_concurrency;
             config.max_queue_depth = *max_queue_depth;
             let runtime = DaemonRuntime::with_config(config);
@@ -8803,9 +9024,9 @@ mod tests {
     }
 
     #[test]
-    fn legacy_encode_and_explain_aliases_still_parse() {
-        let encode = Cli::parse_from(["membrain", "encode", "legacy path"]);
-        let explain = Cli::parse_from(["membrain", "explain", "legacy why"]);
+    fn remember_and_why_commands_parse_canonical_surfaces() {
+        let encode = Cli::parse_from(["membrain", "remember", "canonical path"]);
+        let explain = Cli::parse_from(["membrain", "why", "canonical why"]);
 
         assert!(matches!(encode.command, Commands::Encode { .. }));
         assert!(matches!(explain.command, Commands::Explain { .. }));

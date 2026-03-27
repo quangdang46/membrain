@@ -848,6 +848,17 @@ fn health_report_surfaces_batch1_metrics_and_status_rollups() {
             low_confidence_count: 2,
             decay_rate: 0.02,
             archive_count: 3,
+            lifecycle: membrain_core::health::LifecycleHealthReport {
+                consolidated_to_cold_count: 5,
+                reconsolidation_active_count: 1,
+                forgetting_archive_count: 3,
+                background_maintenance_runs: 3,
+                background_maintenance_log: vec![
+                    "maintenance_consolidation_completed:cold_migration=5".to_string(),
+                    "maintenance_reconsolidation_applied:volatile_results=1".to_string(),
+                    "maintenance_forgetting_evaluated:archived=3".to_string(),
+                ],
+            },
             total_engrams: 4,
             avg_cluster_size: 1.5,
             top_engrams: vec![("ops".to_string(), 2)],

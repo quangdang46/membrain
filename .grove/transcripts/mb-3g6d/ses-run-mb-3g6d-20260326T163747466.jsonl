@@ -1,0 +1,59 @@
+{"ts":"2026-03-26T16:37:47.480804525Z","kind":"session_started","session_id":"ses-run-mb-3g6d-20260326T163747466"}
+{"ts":"2026-03-26T16:55:11.461533692Z","kind":"stdout","line":"GROVE_RESULT"}
+{"ts":"2026-03-26T16:55:11.482049541Z","kind":"stdout","line":"Blocked on repository-wide compile failures outside this bead, but the hydration parity work is partially implemented."}
+{"ts":"2026-03-26T16:55:11.482061676Z","kind":"stdout","line":""}
+{"ts":"2026-03-26T16:55:11.482064429Z","kind":"stdout","line":"GROVE_ARTIFACTS"}
+{"ts":"2026-03-26T16:55:11.482070446Z","kind":"stdout","line":"- Updated `crates/membrain-cli/src/main.rs:7273` so `membrain daemon` now passes the same DB paths as MCP via `with_db_paths(...)`."}
+{"ts":"2026-03-26T16:55:11.482102567Z","kind":"stdout","line":"- Updated `crates/membrain-daemon/src/daemon.rs:357` startup hydration to load persisted runtime records instead of re-encoding CLI rows."}
+{"ts":"2026-03-26T16:55:11.482108686Z","kind":"stdout","line":"- Updated `crates/membrain-daemon/src/daemon.rs:1474` / `1504` to convert between persisted runtime records and in-memory runtime records."}
+{"ts":"2026-03-26T16:55:11.482111643Z","kind":"stdout","line":"- Updated `crates/membrain-daemon/src/daemon.rs:1539` to persist daemon runtime memories back to SQLite on encode/store."}
+{"ts":"2026-03-26T16:55:11.482114498Z","kind":"stdout","line":"- Added daemon restart parity tests in `crates/membrain-daemon/src/daemon.rs:8415`."}
+{"ts":"2026-03-26T16:55:11.482118475Z","kind":"stdout","line":"- Added CLI restart parity test in `crates/membrain-cli/tests/cli_end_to_end.rs:67`."}
+{"ts":"2026-03-26T16:55:11.482121432Z","kind":"stdout","line":""}
+{"ts":"2026-03-26T16:55:11.482123982Z","kind":"stdout","line":"GROVE_LESSONS"}
+{"ts":"2026-03-26T16:55:11.482127551Z","kind":"stdout","line":"- There were two concrete parity gaps:"}
+{"ts":"2026-03-26T16:55:11.482130202Z","kind":"stdout","line":"  1. `membrain daemon` from CLI was not wiring DB paths, while `membrain mcp` was."}
+{"ts":"2026-03-26T16:55:11.482133159Z","kind":"stdout","line":"  2. daemon startup was replaying persisted rows by re-encoding instead of hydrating canonical persisted runtime records."}
+{"ts":"2026-03-26T16:55:11.482135709Z","kind":"stdout","line":"- Validation is currently dominated by unrelated active breakage in `membrain-core`, so local bead progress must be reported separately from repo health."}
+{"ts":"2026-03-26T16:55:11.482138972Z","kind":"stdout","line":""}
+{"ts":"2026-03-26T16:55:11.482141929Z","kind":"stdout","line":"GROVE_DECISIONS"}
+{"ts":"2026-03-26T16:55:11.482144886Z","kind":"stdout","line":"- Kept degraded explain signaling explicit for non-exact query explain paths."}
+{"ts":"2026-03-26T16:55:11.482147741Z","kind":"stdout","line":"- Did not touch unrelated failing `membrain-core` files because they overlap other active work and are outside this bead’s reserved slice."}
+{"ts":"2026-03-26T16:55:11.482150291Z","kind":"stdout","line":"- Coordinated via Agent Mail and acknowledged incoming messages."}
+{"ts":"2026-03-26T16:55:11.482153044Z","kind":"stdout","line":""}
+{"ts":"2026-03-26T16:55:11.482155491Z","kind":"stdout","line":"GROVE_WARNINGS"}
+{"ts":"2026-03-26T16:55:11.482158754Z","kind":"stdout","line":"- `cargo check --all-targets` is currently failing due to unrelated existing errors in:"}
+{"ts":"2026-03-26T16:55:11.482161712Z","kind":"stdout","line":"  - `crates/membrain-core/src/engine/result.rs`"}
+{"ts":"2026-03-26T16:55:11.482164363Z","kind":"stdout","line":"  - `crates/membrain-core/src/health.rs`"}
+{"ts":"2026-03-26T16:55:11.482167218Z","kind":"stdout","line":"- Because of that, targeted test execution could not complete."}
+{"ts":"2026-03-26T16:55:11.482169768Z","kind":"stdout","line":"- `crates/membrain-daemon/src/daemon.rs` was being edited concurrently during this task, so patches were applied incrementally against moving file contents."}
+{"ts":"2026-03-26T16:55:11.482172623Z","kind":"stdout","line":""}
+{"ts":"2026-03-26T16:55:11.482174866Z","kind":"stdout","line":"GROVE_CHECKPOINT"}
+{"ts":"2026-03-26T16:55:11.482178231Z","kind":"stdout","line":"```json"}
+{"ts":"2026-03-26T16:55:11.482189754Z","kind":"stdout","line":"{"}
+{"ts":"2026-03-26T16:55:11.482191896Z","kind":"stdout","line":"  \"bead\": \"mb-3g6d\","}
+{"ts":"2026-03-26T16:55:11.482194649Z","kind":"stdout","line":"  \"status\": \"blocked_by_external_compile_failures\","}
+{"ts":"2026-03-26T16:55:11.482196892Z","kind":"stdout","line":"  \"completed\": ["}
+{"ts":"2026-03-26T16:55:11.482199034Z","kind":"stdout","line":"    \"audited CLI/daemon/MCP hydration paths\","}
+{"ts":"2026-03-26T16:55:11.482201379Z","kind":"stdout","line":"    \"wired CLI daemon subcommand to pass DB paths\","}
+{"ts":"2026-03-26T16:55:11.482203215Z","kind":"stdout","line":"    \"switched daemon startup hydration to persisted runtime-record loading\","}
+{"ts":"2026-03-26T16:55:11.482205152Z","kind":"stdout","line":"    \"added daemon-side persistence on encode/store\","}
+{"ts":"2026-03-26T16:55:11.482207090Z","kind":"stdout","line":"    \"added restart parity tests for CLI and daemon\""}
+{"ts":"2026-03-26T16:55:11.482208925Z","kind":"stdout","line":"  ],"}
+{"ts":"2026-03-26T16:55:11.482210761Z","kind":"stdout","line":"  \"remaining\": ["}
+{"ts":"2026-03-26T16:55:11.482212800Z","kind":"stdout","line":"    \"re-run cargo check after membrain-core is green\","}
+{"ts":"2026-03-26T16:55:11.482214636Z","kind":"stdout","line":"    \"fix any residual compile issues in daemon test/helpers if exposed after repo unblocks\","}
+{"ts":"2026-03-26T16:55:11.482217185Z","kind":"stdout","line":"    \"run targeted daemon and CLI parity tests\","}
+{"ts":"2026-03-26T16:55:11.482219123Z","kind":"stdout","line":"    \"sync beads and close/report bead if validation passes\""}
+{"ts":"2026-03-26T16:55:11.482221060Z","kind":"stdout","line":"  ],"}
+{"ts":"2026-03-26T16:55:11.482222794Z","kind":"stdout","line":"  \"blockers\": ["}
+{"ts":"2026-03-26T16:55:11.482225139Z","kind":"stdout","line":"    \"duplicate explain_result_reasons in crates/membrain-core/src/engine/result.rs\","}
+{"ts":"2026-03-26T16:55:11.482226974Z","kind":"stdout","line":"    \"missing lifecycle field in crates/membrain-core/src/health.rs initializers\","}
+{"ts":"2026-03-26T16:55:11.482229014Z","kind":"stdout","line":"    \"mutable borrow issue in crates/membrain-core/src/engine/result.rs\""}
+{"ts":"2026-03-26T16:55:11.482230747Z","kind":"stdout","line":"  ]"}
+{"ts":"2026-03-26T16:55:11.482232583Z","kind":"stdout","line":"}"}
+{"ts":"2026-03-26T16:55:11.482234316Z","kind":"stdout","line":"```"}
+{"ts":"2026-03-26T16:55:11.482236254Z","kind":"stdout","line":""}
+{"ts":"2026-03-26T16:55:11.482237886Z","kind":"stdout","line":"GROVE_EXIT: false"}
+{"ts":"2026-03-26T16:55:11.482237886Z","kind":"protocol","event":{"type":"exit","value":false}}
+{"ts":"2026-03-26T16:55:12.046352011Z","kind":"session_ended","exit_code":0}

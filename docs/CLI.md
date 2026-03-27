@@ -227,6 +227,8 @@ All CLI recall invocations normalize into the canonical `RecallRequest` describe
 
 The machine-readable result for `recall` is the canonical `RetrievalResult` envelope from `mb-1hw.8`. In practice that means CLI JSON should expose a bounded `evidence_pack`, optional `action_pack`, explicit `output_mode`, `outcome_class`, omission/deferred-payload state, and the same policy/provenance/freshness/conflict/explanation families used by daemon/JSON-RPC and MCP.
 
+On ordinary success paths, that `evidence_pack` is hydrated runtime evidence rather than planner-only route scaffolding. Planner-style degraded summaries are reserved for explicit no-hydrated-evidence, capped, repair-limited, or other degraded cases and should surface as such in packaging and explain fields instead of replacing normal success evidence.
+
 `--confidence fast|normal|high` doubles as the Dual Memory Output packaging mode selector for CLI recall: `fast` keeps derived action guidance permissive, `normal` maps to balanced evidence/action packaging, and `high` maps to strict packaging that suppresses action suggestions when uncertainty, freshness caveats, or policy caveats would make them unsafe to foreground.
 
 ```bash
@@ -342,6 +344,7 @@ Diagnose brain health: orphan edges, missing embeddings, stale indexes, broken l
 Doctor contract:
 - `membrain doctor` is a read-only diagnosis surface; it identifies corruption, stale derived state, and degraded serving posture without implicitly mutating anything. Repair remains an explicit `membrain repair ...` flow.
 - `membrain doctor run --json` should preserve machine-readable per-check results with stable fields for check name, surface kind, status/severity, affected scope, degraded impact, and remediation or repair hints so CLI text, daemon/JSON-RPC, and MCP do not drift.
+- Runtime diagnostics should expose `embedder_runtime` explicitly, reporting `not_loaded`, `loaded`, `warm`, `degraded`, or `unavailable` so operators can tell whether the local fastembed layer is merely compiled in, initialized for this process, or actually being reused across repeated requests.
 - The machine-readable payload includes `summary`, `repair_engine_component`, `checks`, and `runbook_hints` so operators can see which checks passed, which degraded conditions remain, and which documented runbook should be followed next.
 - `runbook_hints[*]` should include a stable `runbook_id`, the source doc path, the exact section heading, and a short reason keyed to the surfaced incident class or degraded-mode condition.
 - When corruption or unreadable authoritative inputs prevent safe serving, `doctor` should surface the same `error_kind`, `availability`, and remediation semantics used by sibling daemon/MCP contracts rather than collapsing everything into prose-only warnings.
@@ -407,6 +410,7 @@ Health contract:
 - `membrain health` is the operator dashboard rendering of the same bounded `BrainHealthReport` exposed through daemon/JSON-RPC and MCP `health()`.
 - `--json`, `--brief`, and `--watch` are presentation variants over one machine-readable report; they must preserve the same tier/capacity, quality/conflict/uncertainty, activity/runtime, repair/backpressure, availability-posture, degraded-status, and feature-availability meaning.
 - The report should make degraded posture, repair-queue growth, backpressure state, surviving query or mutation paths, and the next recommended runbook inspectable enough that operators can tell whether to continue normal work, inspect `doctor`, or switch to a runbook instead of inferring that state from prose.
+- Feature availability should include `embedder_runtime` with stable notes for backend, generation, dimensions, load count, request count, cache hits, and cache misses so warm-runtime truth is inspectable instead of implied.
 - The canonical machine-readable report should also expose `dashboard_views`, `alerts`, and `drill_down_paths` so the overview, alert queue, subsystem cards, and operator follow-up paths stay parity-consistent across CLI, daemon/JSON-RPC, and MCP instead of relying on transport-local heuristics.
 - `dashboard_views` should identify the main operator views (`overview`, `alerts`, `subsystems`, `trends`, `attention`, `affect_trajectory`, and `degraded_mode` when applicable), each with summary text, alert counts, and named drill-down targets.
 - `attention` should surface the ranked attention heatmap and bounded prewarm state: hotspot counts, max score, heat buckets/bands, explicit hotspot-driven prewarm actions, target warm families, and the `/health/attention` drill-down path.
@@ -800,6 +804,7 @@ membrain mcp       # start MCP stdio server
 - Operator and data-mobility surfaces such as `stats`, `health`, `doctor`, `audit`, `export`, and `import` must keep the same underlying counters, warnings, remediation, availability, and outcome semantics across those transports even when one surface renders dashboards, streams files, or returns structured envelopes.
 - If daemon unavailability or missing warm state materially affects service quality, the surface must say so through warnings or the existing `degraded` / `blocked` outcome vocabulary rather than silently pretending the long-lived service guarantees still held.
 - `membrain mcp` is the stdio transport for MCP-capable clients. It should expose the same bounded operations and policy/explain behavior through MCP envelopes rather than inventing alternate command semantics.
+- Runtime-authority reporting must distinguish daemon-owned warm state from standalone stdio execution: the daemon path reports daemon-owned guarantees such as `daemon_owned_runtime_state` and `repeated_request_warmth`, while stdio/standalone reporting is limited to local-process guarantees such as `local_process_state` and `best_effort_same_process_reuse`.
 
 ## Output Modes and Outcome Classes
 

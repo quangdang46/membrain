@@ -1,0 +1,41 @@
+{"ts":"2026-03-26T17:26:57.809777752Z","kind":"session_started","session_id":"ses-run-mb-uw37-20260326T172657744"}
+{"ts":"2026-03-26T17:37:08.526992911Z","kind":"stdout","line":"I resumed `mb-uw37` as `HazyGate`, checked the live implementation, and did the targeted validation pass."}
+{"ts":"2026-03-26T17:37:08.661726661Z","kind":"stdout","line":""}
+{"ts":"2026-03-26T17:37:08.661742217Z","kind":"stdout","line":"Findings:"}
+{"ts":"2026-03-26T17:37:08.661745045Z","kind":"stdout","line":"- The recall path in `crates/membrain-daemon/src/daemon.rs:5470` already returns hydrated `evidence_pack` entries on normal semantic success paths."}
+{"ts":"2026-03-26T17:37:08.661749692Z","kind":"stdout","line":"- Degraded summaries are only attached when no hydrated evidence is found, at `crates/membrain-daemon/src/daemon.rs:5568`."}
+{"ts":"2026-03-26T17:37:08.661754440Z","kind":"stdout","line":"- The stale “planner-only … not implemented” wording is gone from the live daemon path; remaining mentions are in backlog/docs artifacts like `MISSING.md`, not runtime code."}
+{"ts":"2026-03-26T17:37:08.661758581Z","kind":"stdout","line":"- The degraded recall/explain strings still exist, but only for explicit degraded cases at `crates/membrain-daemon/src/daemon.rs:5301` and `crates/membrain-daemon/src/daemon.rs:6081`."}
+{"ts":"2026-03-26T17:37:08.661764137Z","kind":"stdout","line":""}
+{"ts":"2026-03-26T17:37:08.661766561Z","kind":"stdout","line":"Targeted tests passed:"}
+{"ts":"2026-03-26T17:37:08.661785148Z","kind":"stdout","line":"- `cargo test -p membrain-daemon runtime_semantic_recall_hydrates_evidence_and_uses_default_budget_when_limit_is_omitted -- --nocapture`"}
+{"ts":"2026-03-26T17:37:08.661790704Z","kind":"stdout","line":"- `cargo test -p membrain-daemon runtime_restart_hydrates_persisted_memories_for_inspect_recall_and_explain -- --nocapture`"}
+{"ts":"2026-03-26T17:37:08.661793734Z","kind":"stdout","line":"- `cargo test -p membrain-daemon runtime_query_explain_keeps_explicit_degraded_summary_when_no_hydrated_evidence_matches -- --nocapture`"}
+{"ts":"2026-03-26T17:37:08.661796765Z","kind":"stdout","line":"- `cargo test -p membrain-cli cli_restart_rehydrates_persisted_memory_for_inspect_recall_and_explain -- --nocapture`"}
+{"ts":"2026-03-26T17:37:08.661799492Z","kind":"stdout","line":"- `cargo test -p membrain-core empty_result_set_has_correct_outcome_class -- --nocapture`"}
+{"ts":"2026-03-26T17:37:08.661802725Z","kind":"stdout","line":""}
+{"ts":"2026-03-26T17:37:08.661805250Z","kind":"stdout","line":"Relevant existing coverage:"}
+{"ts":"2026-03-26T17:37:08.661807674Z","kind":"stdout","line":"- semantic hydration: `crates/membrain-daemon/src/daemon.rs:8513`"}
+{"ts":"2026-03-26T17:37:08.661811109Z","kind":"stdout","line":"- persisted reload: `crates/membrain-daemon/src/daemon.rs:8591`"}
+{"ts":"2026-03-26T17:37:08.661839393Z","kind":"stdout","line":"- degraded empty-result explain: `crates/membrain-daemon/src/daemon.rs:8709`"}
+{"ts":"2026-03-26T17:37:08.661844545Z","kind":"stdout","line":"- CLI persisted reload: `crates/membrain-cli/tests/cli_end_to_end.rs:97`"}
+{"ts":"2026-03-26T17:37:08.661847575Z","kind":"stdout","line":"- MCP persisted reload: `crates/membrain-cli/tests/cli_end_to_end.rs:167`"}
+{"ts":"2026-03-26T17:37:08.661850505Z","kind":"stdout","line":""}
+{"ts":"2026-03-26T17:37:08.661853131Z","kind":"stdout","line":"Net result:"}
+{"ts":"2026-03-26T17:37:08.661855858Z","kind":"stdout","line":"- I did not redo completed work or make redundant edits."}
+{"ts":"2026-03-26T17:37:08.661858788Z","kind":"stdout","line":"- `mb-uw37` looks functionally satisfied in the current tree."}
+{"ts":"2026-03-26T17:37:08.661861919Z","kind":"stdout","line":"- The remaining mismatch is task/documentation truth, not the live recall implementation."}
+{"ts":"2026-03-26T17:37:08.661864647Z","kind":"stdout","line":""}
+{"ts":"2026-03-26T17:37:08.661866970Z","kind":"stdout","line":"GROVE_RESULT: validated live `mb-uw37` implementation; no new code changes required"}
+{"ts":"2026-03-26T17:37:08.661866970Z","kind":"protocol","event":{"type":"result","summary":"validated live `mb-uw37` implementation; no new code changes required"}}
+{"ts":"2026-03-26T17:37:08.661888385Z","kind":"stdout","line":"GROVE_ARTIFACTS: `crates/membrain-daemon/src/daemon.rs:5470`, `crates/membrain-daemon/src/daemon.rs:8513`, `crates/membrain-daemon/src/daemon.rs:8591`, `crates/membrain-daemon/src/daemon.rs:8709`, `crates/membrain-cli/tests/cli_end_to_end.rs:97`, `crates/membrain-cli/tests/cli_end_to_end.rs:167`"}
+{"ts":"2026-03-26T17:37:08.661888385Z","kind":"protocol","event":{"type":"artifacts","items":["`crates/membrain-daemon/src/daemon.rs:5470`","`crates/membrain-daemon/src/daemon.rs:8513`","`crates/membrain-daemon/src/daemon.rs:8591`","`crates/membrain-daemon/src/daemon.rs:8709`","`crates/membrain-cli/tests/cli_end_to_end.rs:97`","`crates/membrain-cli/tests/cli_end_to_end.rs:167`"]}}
+{"ts":"2026-03-26T17:37:08.661903739Z","kind":"stdout","line":"GROVE_LESSONS: the main contradiction was already narrowed earlier; runtime recall was hydrated, while stale docs/backlog language still implied planner-only behavior"}
+{"ts":"2026-03-26T17:37:08.661903739Z","kind":"protocol","event":{"type":"lessons","items":["the main contradiction was already narrowed earlier; runtime recall was hydrated","while stale docs/backlog language still implied planner-only behavior"]}}
+{"ts":"2026-03-26T17:37:08.661912932Z","kind":"stdout","line":"GROVE_DECISIONS: treat `mb-uw37` as implemented/validated and avoid reopening adjacent explain/docs lanes from this bead"}
+{"ts":"2026-03-26T17:37:08.661912932Z","kind":"protocol","event":{"type":"decision","items":["treat `mb-uw37` as implemented/validated and avoid reopening adjacent explain/docs lanes from this bead"]}}
+{"ts":"2026-03-26T17:37:08.661919700Z","kind":"stdout","line":"GROVE_WARNINGS: `MISSING.md` still contains stale planner-only claims; daemon warning about unused `persisted_memory_count` remains out of scope"}
+{"ts":"2026-03-26T17:37:08.661919700Z","kind":"protocol","event":{"type":"warning","items":["`MISSING.md` still contains stale planner-only claims; daemon warning about unused `persisted_memory_count` remains out of scope"]}}
+{"ts":"2026-03-26T17:37:08.661927882Z","kind":"stdout","line":"GROVE_EXIT: false"}
+{"ts":"2026-03-26T17:37:08.661927882Z","kind":"protocol","event":{"type":"exit","value":false}}
+{"ts":"2026-03-26T17:37:10.875555134Z","kind":"session_ended","exit_code":0}

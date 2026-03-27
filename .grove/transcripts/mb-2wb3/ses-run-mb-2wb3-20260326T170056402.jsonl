@@ -1,0 +1,78 @@
+{"ts":"2026-03-26T17:00:56.445497281Z","kind":"session_started","session_id":"ses-run-mb-2wb3-20260326T170056402"}
+{"ts":"2026-03-26T17:32:14.681468021Z","kind":"stdout","line":"Done."}
+{"ts":"2026-03-26T17:32:14.797835590Z","kind":"stdout","line":""}
+{"ts":"2026-03-26T17:32:14.798293390Z","kind":"stdout","line":"Completed:"}
+{"ts":"2026-03-26T17:32:14.798322392Z","kind":"stdout","line":"- Read `AGENTS.md` and `docs/README.md`"}
+{"ts":"2026-03-26T17:32:14.798334646Z","kind":"stdout","line":"- Registered with Agent Mail as `IvoryCave`"}
+{"ts":"2026-03-26T17:32:14.798348943Z","kind":"stdout","line":"- Resumed `mb-2wb3` from the checkpoint"}
+{"ts":"2026-03-26T17:32:14.798362116Z","kind":"stdout","line":"- Closed `mb-2wb3` and synced beads"}
+{"ts":"2026-03-26T17:32:14.798390301Z","kind":"stdout","line":""}
+{"ts":"2026-03-26T17:32:14.798405721Z","kind":"stdout","line":"What I changed:"}
+{"ts":"2026-03-26T17:32:14.798420630Z","kind":"stdout","line":"- `crates/membrain-daemon/src/rpc.rs`"}
+{"ts":"2026-03-26T17:32:14.798427676Z","kind":"stdout","line":"  - `RuntimeEmbedderStatus.backend_kind` now owns a `String`"}
+{"ts":"2026-03-26T17:32:14.798441054Z","kind":"stdout","line":"- `crates/membrain-daemon/src/daemon.rs`"}
+{"ts":"2026-03-26T17:32:14.798450040Z","kind":"stdout","line":"  - removed `Debug` derive pressure from runtime structs holding the embedder"}
+{"ts":"2026-03-26T17:32:14.798473834Z","kind":"stdout","line":"  - updated embedder status call sites to use owned backend strings"}
+{"ts":"2026-03-26T17:32:14.798493135Z","kind":"stdout","line":"  - removed one unused `degraded_summary` local"}
+{"ts":"2026-03-26T17:32:14.798506921Z","kind":"stdout","line":"- `crates/membrain-cli/src/main.rs`"}
+{"ts":"2026-03-26T17:32:14.798516724Z","kind":"stdout","line":"  - aligned sample runtime status with owned backend strings"}
+{"ts":"2026-03-26T17:32:14.798526426Z","kind":"stdout","line":"- `crates/membrain-cli/tests/cli_end_to_end.rs`"}
+{"ts":"2026-03-26T17:32:14.798535718Z","kind":"stdout","line":"  - refreshed stale doctor assertions to match the current sampled contract"}
+{"ts":"2026-03-26T17:32:14.798546441Z","kind":"stdout","line":""}
+{"ts":"2026-03-26T17:32:14.798555529Z","kind":"stdout","line":"Verified:"}
+{"ts":"2026-03-26T17:32:14.798564210Z","kind":"stdout","line":"- `cargo test -p membrain-daemon runtime_serves_status_and_shutdown_over_unix_socket -- --nocapture`"}
+{"ts":"2026-03-26T17:32:14.798574217Z","kind":"stdout","line":"- `cargo test -p membrain-daemon runtime_serves_doctor_report_over_unix_socket -- --nocapture`"}
+{"ts":"2026-03-26T17:32:14.798583816Z","kind":"stdout","line":"- `cargo test -p membrain-daemon runtime_recall_records_attention_signals_for_hot_paths_and_dead_zones -- --nocapture`"}
+{"ts":"2026-03-26T17:32:14.798594335Z","kind":"stdout","line":"- `cargo test -p membrain-cli cli_doctor_json_reports_health_and_repair_state -- --nocapture`"}
+{"ts":"2026-03-26T17:32:14.798604955Z","kind":"stdout","line":"- `cargo test -p membrain-cli cli_health_json_reports_dashboard_contract_fields -- --nocapture`"}
+{"ts":"2026-03-26T17:32:14.798615473Z","kind":"stdout","line":"- `cargo test -p membrain-cli cli_health_human_output_renders_operator_dashboard_sections -- --nocapture`"}
+{"ts":"2026-03-26T17:32:14.798627217Z","kind":"stdout","line":"- `cargo check -p membrain-daemon -p membrain-cli`"}
+{"ts":"2026-03-26T17:32:14.798634774Z","kind":"stdout","line":""}
+{"ts":"2026-03-26T17:32:14.798644782Z","kind":"stdout","line":"Key proof:"}
+{"ts":"2026-03-26T17:32:14.798656219Z","kind":"stdout","line":"- daemon health now asserts warm embedder truth with:"}
+{"ts":"2026-03-26T17:32:14.798667452Z","kind":"stdout","line":"  - `state=warm`"}
+{"ts":"2026-03-26T17:32:14.798677255Z","kind":"stdout","line":"  - `loads=1`"}
+{"ts":"2026-03-26T17:32:14.798688182Z","kind":"stdout","line":"  - `requests=3`"}
+{"ts":"2026-03-26T17:32:14.798696862Z","kind":"stdout","line":"  - `cache_hits=1`"}
+{"ts":"2026-03-26T17:32:14.798706155Z","kind":"stdout","line":"  - `cache_misses=2`"}
+{"ts":"2026-03-26T17:32:14.798716061Z","kind":"stdout","line":"- repeated recall proves warm reuse via cache trace `warm_reuse=true`"}
+{"ts":"2026-03-26T17:32:14.799068474Z","kind":"stdout","line":""}
+{"ts":"2026-03-26T17:32:14.799077052Z","kind":"stdout","line":"Remaining note:"}
+{"ts":"2026-03-26T17:32:14.799082770Z","kind":"stdout","line":"- `cargo check -p membrain-daemon -p membrain-cli` is clean"}
+{"ts":"2026-03-26T17:32:14.799085834Z","kind":"stdout","line":"- there is still one non-failing warning in `crates/membrain-daemon/src/daemon.rs:1750` for `persisted_memory_count`"}
+{"ts":"2026-03-26T17:32:14.799088591Z","kind":"stdout","line":""}
+{"ts":"2026-03-26T17:32:14.799093186Z","kind":"stdout","line":"GROVE_RESULT: success  "}
+{"ts":"2026-03-26T17:32:14.799093186Z","kind":"protocol","event":{"type":"result","summary":"success"}}
+{"ts":"2026-03-26T17:32:14.807409868Z","kind":"stdout","line":"GROVE_ARTIFACTS:"}
+{"ts":"2026-03-26T17:32:14.807409868Z","kind":"protocol","event":{"type":"artifacts","items":[]}}
+{"ts":"2026-03-26T17:32:14.808003384Z","kind":"stdout","line":"- Updated `crates/membrain-daemon/src/rpc.rs`"}
+{"ts":"2026-03-26T17:32:14.808003384Z","kind":"protocol","event":{"type":"artifacts","items":["Updated `crates/membrain-daemon/src/rpc.rs`"]}}
+{"ts":"2026-03-26T17:32:14.808017374Z","kind":"stdout","line":"- Updated `crates/membrain-daemon/src/daemon.rs`"}
+{"ts":"2026-03-26T17:32:14.808017374Z","kind":"protocol","event":{"type":"artifacts","items":["Updated `crates/membrain-daemon/src/daemon.rs`"]}}
+{"ts":"2026-03-26T17:32:14.808022378Z","kind":"stdout","line":"- Updated `crates/membrain-cli/src/main.rs`"}
+{"ts":"2026-03-26T17:32:14.808022378Z","kind":"protocol","event":{"type":"artifacts","items":["Updated `crates/membrain-cli/src/main.rs`"]}}
+{"ts":"2026-03-26T17:32:14.808032590Z","kind":"stdout","line":"- Updated `crates/membrain-cli/tests/cli_end_to_end.rs`"}
+{"ts":"2026-03-26T17:32:14.808032590Z","kind":"protocol","event":{"type":"artifacts","items":["Updated `crates/membrain-cli/tests/cli_end_to_end.rs`"]}}
+{"ts":"2026-03-26T17:32:14.808040862Z","kind":"stdout","line":"- Closed bead `mb-2wb3`"}
+{"ts":"2026-03-26T17:32:14.808040862Z","kind":"protocol","event":{"type":"artifacts","items":["Closed bead `mb-2wb3`"]}}
+{"ts":"2026-03-26T17:32:14.808050359Z","kind":"stdout","line":"GROVE_LESSONS:"}
+{"ts":"2026-03-26T17:32:14.808050359Z","kind":"protocol","event":{"type":"lessons","items":[]}}
+{"ts":"2026-03-26T17:32:14.808058426Z","kind":"stdout","line":"- The remaining blockers were compile/test fallout, not missing embedder lifecycle wiring."}
+{"ts":"2026-03-26T17:32:14.808058426Z","kind":"protocol","event":{"type":"lessons","items":["The remaining blockers were compile/test fallout, not missing embedder lifecycle wiring."]}}
+{"ts":"2026-03-26T17:32:14.808069353Z","kind":"stdout","line":"- The decisive proof path is the daemon recall/health test around `health-after-recall`."}
+{"ts":"2026-03-26T17:32:14.808069353Z","kind":"protocol","event":{"type":"lessons","items":["The decisive proof path is the daemon recall/health test around `health-after-recall`."]}}
+{"ts":"2026-03-26T17:32:14.808078237Z","kind":"stdout","line":"GROVE_DECISIONS:"}
+{"ts":"2026-03-26T17:32:14.808078237Z","kind":"protocol","event":{"type":"decision","items":[]}}
+{"ts":"2026-03-26T17:32:14.808082526Z","kind":"stdout","line":"- Kept runtime truth in daemon mode authoritative."}
+{"ts":"2026-03-26T17:32:14.808082526Z","kind":"protocol","event":{"type":"decision","items":["Kept runtime truth in daemon mode authoritative."]}}
+{"ts":"2026-03-26T17:32:14.808091411Z","kind":"stdout","line":"- Fixed serialization/derive issues with the smallest possible surface change."}
+{"ts":"2026-03-26T17:32:14.808091411Z","kind":"protocol","event":{"type":"decision","items":["Fixed serialization/derive issues with the smallest possible surface change."]}}
+{"ts":"2026-03-26T17:32:14.808099887Z","kind":"stdout","line":"- Updated only stale CLI assertions instead of broadening fixture behavior."}
+{"ts":"2026-03-26T17:32:14.808099887Z","kind":"protocol","event":{"type":"decision","items":["Updated only stale CLI assertions instead of broadening fixture behavior."]}}
+{"ts":"2026-03-26T17:32:14.808139611Z","kind":"stdout","line":"GROVE_WARNINGS:"}
+{"ts":"2026-03-26T17:32:14.808139611Z","kind":"protocol","event":{"type":"warning","items":[]}}
+{"ts":"2026-03-26T17:32:14.808151355Z","kind":"stdout","line":"- One warning remains: unused `persisted_memory_count` in `crates/membrain-daemon/src/daemon.rs:1750`"}
+{"ts":"2026-03-26T17:32:14.808151355Z","kind":"protocol","event":{"type":"warning","items":["One warning remains: unused `persisted_memory_count` in `crates/membrain-daemon/src/daemon.rs:1750`"]}}
+{"ts":"2026-03-26T17:32:14.808160035Z","kind":"stdout","line":"GROVE_EXIT: true"}
+{"ts":"2026-03-26T17:32:14.808160035Z","kind":"protocol","event":{"type":"exit","value":true}}
+{"ts":"2026-03-26T17:32:16.649485282Z","kind":"session_ended","exit_code":0}

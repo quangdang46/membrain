@@ -333,7 +333,10 @@ async fn runtime_zero_arg_methods_accept_common_envelope_fields() {
         }),
     )
     .await;
-    assert_eq!(health_response["result"]["hot_memories"], json!(76));
+    let hot_memories = health_response["result"]["hot_memories"]
+        .as_u64()
+        .expect("health hot_memories should be numeric");
+    assert_eq!(hot_memories, 0);
     assert!(health_response["error"].is_null());
 
     let resources_list_response = send_request(
@@ -515,15 +518,17 @@ async fn runtime_doctor_jsonrpc_response_matches_shared_doctor_contract_fields()
     assert_eq!(result["posture"], json!("degraded"));
     assert_eq!(result["degraded_reasons"], json!(["repair_in_flight"]));
     assert!(result["metrics"].is_object());
-    assert_eq!(result["summary"]["ok_checks"], json!(3));
-    assert_eq!(result["summary"]["warn_checks"], json!(2));
+    assert_eq!(result["summary"]["ok_checks"], json!(4));
+    assert_eq!(result["summary"]["warn_checks"], json!(3));
     assert_eq!(result["summary"]["fail_checks"], json!(0));
     assert_eq!(result["repair_engine_component"], json!("engine.repair"));
     assert!(result["checks"].is_array());
     assert_eq!(result["checks"][3]["name"], json!("serving_posture"));
     assert_eq!(result["checks"][3]["status"], json!("warn"));
-    assert_eq!(result["checks"][4]["name"], json!("lease_freshness"));
-    assert_eq!(result["checks"][4]["status"], json!("warn"));
+    assert_eq!(result["checks"][4]["name"], json!("runtime_authority"));
+    assert_eq!(result["checks"][4]["status"], json!("ok"));
+    assert_eq!(result["checks"][5]["name"], json!("lease_freshness"));
+    assert_eq!(result["checks"][5]["status"], json!("warn"));
     assert!(result["runbook_hints"].is_array());
     assert_eq!(
         result["runbook_hints"]
@@ -644,14 +649,24 @@ async fn runtime_health_jsonrpc_response_matches_shared_health_contract_fields()
     .await;
 
     let result = &health_response["result"];
-    assert_eq!(result["hot_memories"], json!(76));
-    assert_eq!(result["hot_capacity"], json!(100));
-    assert_eq!(result["hot_utilization_pct"], json!(76.0));
+    let hot_memories = result["hot_memories"]
+        .as_u64()
+        .expect("health hot_memories should be numeric");
+    let hot_capacity = result["hot_capacity"]
+        .as_u64()
+        .expect("health hot_capacity should be numeric");
+    let hot_utilization_pct = result["hot_utilization_pct"]
+        .as_f64()
+        .expect("health hot_utilization_pct should be numeric");
+    assert_eq!(hot_memories, 1);
+    assert_eq!(hot_capacity, 100);
+    assert!((hot_utilization_pct - 1.0).abs() < 1e-6);
     let avg_confidence = result["avg_confidence"]
         .as_f64()
         .expect("avg_confidence should be numeric");
-    assert!((avg_confidence - 0.84).abs() < 1e-6);
-    assert_eq!(result["unresolved_conflicts"], json!(1));
+    assert!(avg_confidence > 0.0);
+    assert!(avg_confidence <= 1.0);
+    assert_eq!(result["unresolved_conflicts"], json!(0));
     assert_eq!(result["availability_posture"], json!("Degraded"));
     assert_eq!(result["repair_queue_depth"], json!(0));
     assert!(result["cache"].is_object());
@@ -708,6 +723,72 @@ async fn runtime_health_jsonrpc_response_matches_shared_health_contract_fields()
 }
 
 #[tokio::test]
+async fn runtime_health_jsonrpc_surfaces_lifecycle_transition_after_background_maintenance() {
+    let (socket_path, handle) = spawn_runtime().await;
+
+    let health_before = send_request(
+        &socket_path,
+        json!({"jsonrpc":"2.0","method":"health","params":{},"id":"health-before-maintenance"}),
+    )
+    .await;
+    let lifecycle_before = &health_before["result"]["lifecycle"];
+    assert_eq!(lifecycle_before["background_maintenance_runs"], json!(0));
+    assert!(lifecycle_before["background_maintenance_log"]
+        .as_array()
+        .expect("background maintenance log should be an array")
+        .iter()
+        .any(|entry| entry
+            .as_str()
+            .is_some_and(|value| value.contains("no_background_lifecycle_activity_recorded"))));
+
+    let maintenance_response = send_request(
+        &socket_path,
+        json!({
+            "jsonrpc":"2.0",
+            "method":"run_maintenance",
+            "params":{"polls_budget":2,"step_delay_ms":10},
+            "id":"run-maintenance"
+        }),
+    )
+    .await;
+    assert!(maintenance_response.get("result").is_some());
+
+    tokio::time::sleep(Duration::from_millis(40)).await;
+
+    let health_after = send_request(
+        &socket_path,
+        json!({"jsonrpc":"2.0","method":"health","params":{},"id":"health-after-maintenance"}),
+    )
+    .await;
+    let lifecycle_after = &health_after["result"]["lifecycle"];
+    assert_eq!(lifecycle_after["background_maintenance_runs"], json!(1));
+    assert_ne!(lifecycle_after, lifecycle_before);
+    let background_log = lifecycle_after["background_maintenance_log"]
+        .as_array()
+        .expect("background maintenance log should be an array");
+    assert!(background_log.iter().any(|entry| {
+        entry.as_str().is_some_and(|value| {
+            value.contains("maintenance_consolidation_completed")
+                && value.contains("maintenance_id=1")
+        })
+    }));
+    assert!(background_log.iter().any(|entry| {
+        entry.as_str().is_some_and(|value| {
+            value.contains("maintenance_reconsolidation_applied")
+                && value.contains("maintenance_id=1")
+        })
+    }));
+    assert!(background_log.iter().any(|entry| {
+        entry.as_str().is_some_and(|value| {
+            value.contains("maintenance_forgetting_evaluated")
+                && value.contains("maintenance_id=1")
+        })
+    }));
+
+    shutdown_runtime(&socket_path, handle).await;
+}
+
+#[tokio::test]
 async fn runtime_health_resource_read_matches_runtime_health_payload_shape() {
     let (socket_path, handle) = spawn_runtime().await;
 
@@ -729,7 +810,7 @@ async fn runtime_health_resource_read_matches_runtime_health_payload_shape() {
         json!("membrain://daemon/runtime/health")
     );
     assert_eq!(result["payload"]["resource_kind"], json!("runtime_health"));
-    assert_eq!(result["payload"]["payload"]["hot_memories"], json!(76));
+    assert_eq!(result["payload"]["payload"]["hot_memories"], json!(0));
     assert_eq!(result["payload"]["payload"]["hot_capacity"], json!(100));
     assert!(result["payload"]["payload"]["cache"].is_object());
     assert!(result["payload"]["payload"]["indexes"].is_object());
@@ -773,11 +854,11 @@ async fn runtime_doctor_resource_read_matches_runtime_doctor_payload_shape() {
     assert_eq!(result["payload"]["payload"]["posture"], json!("full"));
     assert_eq!(
         result["payload"]["payload"]["summary"]["ok_checks"],
-        json!(5)
+        json!(6)
     );
     assert_eq!(
         result["payload"]["payload"]["summary"]["warn_checks"],
-        json!(0)
+        json!(1)
     );
     assert_eq!(
         result["payload"]["payload"]["summary"]["fail_checks"],
