@@ -2868,6 +2868,8 @@ mod tests {
                     lease_sensitive: false,
                     recheck_required: false,
                     as_of_tick: Some(77),
+                    durable_lifecycle_state: None,
+                    routing_lifecycle_state: None,
                 },
                 omitted_fields: Vec::new(),
             }],
@@ -2944,6 +2946,8 @@ mod tests {
                 lease_sensitive: false,
                 recheck_required: false,
                 as_of_tick: Some(77),
+                durable_lifecycle_state: None,
+                routing_lifecycle_state: None,
             },
             packaging_metadata: PackagingMetadata {
                 result_budget: 3,

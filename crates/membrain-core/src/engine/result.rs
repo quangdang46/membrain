@@ -232,7 +232,7 @@ pub struct PolicySummary {
 }
 
 /// Freshness markers for the result set.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
 pub struct FreshnessMarkers {
     pub oldest_item_days: u32,
     pub newest_item_days: u32,
@@ -241,6 +241,12 @@ pub struct FreshnessMarkers {
     pub lease_sensitive: bool,
     pub recheck_required: bool,
     pub as_of_tick: Option<u64>,
+    /// Durable lifecycle truth relevant to the packaged result set when known.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub durable_lifecycle_state: Option<String>,
+    /// Serving/routing lifecycle projection relevant to the packaged result set when known.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub routing_lifecycle_state: Option<String>,
 }
 
 impl FreshnessMarkers {
@@ -254,6 +260,8 @@ impl FreshnessMarkers {
             lease_sensitive: false,
             recheck_required: false,
             as_of_tick,
+            durable_lifecycle_state: None,
+            routing_lifecycle_state: None,
         }
     }
 
@@ -267,6 +275,8 @@ impl FreshnessMarkers {
             lease_sensitive: false,
             recheck_required: false,
             as_of_tick: Some(as_of_tick),
+            durable_lifecycle_state: None,
+            routing_lifecycle_state: None,
         }
     }
 
@@ -284,6 +294,8 @@ impl FreshnessMarkers {
             lease_sensitive: true,
             recheck_required,
             as_of_tick,
+            durable_lifecycle_state: None,
+            routing_lifecycle_state: None,
         }
     }
 }
@@ -647,6 +659,8 @@ fn apply_lifecycle_observability(
             ),
         );
         freshness_markers.stale_warning = true;
+        freshness_markers.durable_lifecycle_state = Some("consolidated".to_string());
+        freshness_markers.routing_lifecycle_state = Some("dormant".to_string());
     }
 
     let reconsolidating_count = evidence_pack
@@ -668,6 +682,8 @@ fn apply_lifecycle_observability(
             ),
         );
         freshness_markers.volatile_items_included = true;
+        freshness_markers.durable_lifecycle_state = Some("labile".to_string());
+        freshness_markers.routing_lifecycle_state = Some("fresh".to_string());
     }
 }
 

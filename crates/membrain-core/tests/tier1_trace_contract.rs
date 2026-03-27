@@ -120,6 +120,8 @@ fn recent_tier1_result_set() -> RetrievalResultSet {
             lease_sensitive: false,
             recheck_required: false,
             as_of_tick: Some(42),
+            durable_lifecycle_state: None,
+            routing_lifecycle_state: None,
         },
         packaging_metadata: PackagingMetadata {
             result_budget: 5,

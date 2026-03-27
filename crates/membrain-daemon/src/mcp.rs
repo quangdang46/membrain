@@ -1352,6 +1352,8 @@ mod tests {
                 lease_sensitive: false,
                 recheck_required: false,
                 as_of_tick: None,
+                durable_lifecycle_state: None,
+                routing_lifecycle_state: None,
             },
             packaging_metadata: PackagingMetadata {
                 result_budget: 8,

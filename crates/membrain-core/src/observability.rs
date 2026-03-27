@@ -1375,6 +1375,8 @@ mod tests {
             lease_sensitive: true,
             recheck_required: true,
             as_of_tick: Some(21),
+            durable_lifecycle_state: None,
+            routing_lifecycle_state: None,
         });
         assert_eq!(freshness_marker.code, "lease_sensitive");
         assert!(freshness_marker.detail.contains("re-check or withholding"));
@@ -1607,6 +1609,8 @@ mod tests {
                 lease_sensitive: false,
                 recheck_required: false,
                 as_of_tick: Some(42),
+                durable_lifecycle_state: None,
+                routing_lifecycle_state: None,
             },
             packaging_metadata: PackagingMetadata {
                 result_budget: 5,
@@ -1767,6 +1771,8 @@ mod tests {
                     lease_sensitive: false,
                     recheck_required: false,
                     as_of_tick: Some(7),
+                    durable_lifecycle_state: None,
+                    routing_lifecycle_state: None,
                 },
                 packaging_metadata: PackagingMetadata {
                     result_budget: 1,
@@ -1848,6 +1854,8 @@ mod tests {
                 lease_sensitive: false,
                 recheck_required: false,
                 as_of_tick: Some(7),
+                durable_lifecycle_state: None,
+                routing_lifecycle_state: None,
             },
             packaging_metadata: PackagingMetadata {
                 result_budget: 1,
@@ -1937,6 +1945,8 @@ mod tests {
                 lease_sensitive: false,
                 recheck_required: false,
                 as_of_tick: Some(7),
+                durable_lifecycle_state: None,
+                routing_lifecycle_state: None,
             },
             packaging_metadata: PackagingMetadata {
                 result_budget: 1,
@@ -2084,6 +2094,8 @@ mod tests {
                 lease_sensitive: false,
                 recheck_required: false,
                 as_of_tick: Some(7),
+                durable_lifecycle_state: None,
+                routing_lifecycle_state: None,
             },
             packaging_metadata: PackagingMetadata {
                 result_budget: 1,
@@ -2179,6 +2191,8 @@ mod tests {
                 lease_sensitive: false,
                 recheck_required: false,
                 as_of_tick: Some(9),
+                durable_lifecycle_state: None,
+                routing_lifecycle_state: None,
             },
             packaging_metadata: PackagingMetadata {
                 result_budget: 1,
@@ -2265,6 +2279,8 @@ mod tests {
                 lease_sensitive: false,
                 recheck_required: false,
                 as_of_tick: Some(7),
+                durable_lifecycle_state: None,
+                routing_lifecycle_state: None,
             },
             packaging_metadata: PackagingMetadata {
                 result_budget: 1,

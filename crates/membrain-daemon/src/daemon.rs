@@ -4957,6 +4957,8 @@ impl DaemonRuntime {
             "degraded_summary": null,
             "visibility": layout.metadata.visibility.as_str(),
             "memory_type": layout.metadata.memory_type.as_str(),
+            "durable_lifecycle_state": "synaptic_done",
+            "routing_lifecycle_state": "active"
         });
         payload.index_presence = json!({
             "tiers_consulted": [layout.metadata.route_family.as_str()],
