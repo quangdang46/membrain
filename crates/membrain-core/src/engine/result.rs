@@ -3056,7 +3056,9 @@ mod tests {
             .iter()
             .any(|reason| reason.reason_code == "reconsolidation_window_open"));
         let (freshness_markers, _, uncertainty_markers) = result_set.explain_markers();
-        assert!(freshness_markers.iter().any(|marker| marker.code == "stale_warning"));
+        assert!(freshness_markers
+            .iter()
+            .any(|marker| marker.code == "lifecycle_projection"));
         assert!(uncertainty_markers
             .iter()
             .any(|marker| marker.code == "reconsolidation_churn"));

@@ -834,7 +834,20 @@ fn reason_code_label(reason_code: &str) -> &'static str {
 }
 
 fn freshness_marker(markers: &crate::engine::result::FreshnessMarkers) -> FreshnessMarker {
-    if markers.recheck_required {
+    if let (Some(durable), Some(routing)) = (
+        markers.durable_lifecycle_state.as_deref(),
+        markers.routing_lifecycle_state.as_deref(),
+    ) {
+        FreshnessMarker {
+            code: "lifecycle_projection",
+            detail: Box::leak(
+                format!(
+                    "result set reflects durable_lifecycle_state={durable} projected into routing_lifecycle_state={routing}"
+                )
+                .into_boxed_str(),
+            ),
+        }
+    } else if markers.recheck_required {
         FreshnessMarker {
             code: "lease_sensitive",
             detail: "result set contains stale action-critical evidence that now requires re-check or withholding",
