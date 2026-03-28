@@ -119,6 +119,11 @@ pub struct SemanticRetrievalResult {
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
 pub struct SharedSemanticRetrievalExecutor;
 
+struct SemanticExecutionMode<'a, E: LocalTextEmbedder> {
+    embedder: Option<&'a mut CachedTextEmbedder<E>>,
+    forced_degraded_reason: Option<String>,
+}
+
 impl SharedSemanticRetrievalExecutor {
     pub fn execute_without_embeddings(
         &self,
@@ -135,8 +140,10 @@ impl SharedSemanticRetrievalExecutor {
             query,
             exact_memory_id,
             config,
-            None,
-            Some(degraded_reason.into()),
+            SemanticExecutionMode {
+                embedder: None,
+                forced_degraded_reason: Some(degraded_reason.into()),
+            },
         )
     }
 
@@ -155,8 +162,10 @@ impl SharedSemanticRetrievalExecutor {
             query,
             exact_memory_id,
             config,
-            Some(embedder),
-            None,
+            SemanticExecutionMode {
+                embedder: Some(embedder),
+                forced_degraded_reason: None,
+            },
         )
     }
 
@@ -167,8 +176,7 @@ impl SharedSemanticRetrievalExecutor {
         query: &str,
         exact_memory_id: Option<MemoryId>,
         config: SemanticExecutorConfig,
-        embedder: Option<&mut CachedTextEmbedder<E>>,
-        forced_degraded_reason: Option<String>,
+        mode: SemanticExecutionMode<'_, E>,
     ) -> SemanticRetrievalResult {
         let namespace_records = records
             .iter()
@@ -249,7 +257,7 @@ impl SharedSemanticRetrievalExecutor {
             };
         }
 
-        let Some(embedder) = embedder else {
+        let Some(embedder) = mode.embedder else {
             let candidates = lexical_prefilter
                 .into_iter()
                 .take(config.result_limit)
@@ -273,7 +281,7 @@ impl SharedSemanticRetrievalExecutor {
                     semantic_candidate_count: 0,
                     result_limit: config.result_limit,
                     bounded_shortlist_truncated: lexical_prefilter_count > config.result_limit,
-                    degraded_reason: forced_degraded_reason,
+                    degraded_reason: mode.forced_degraded_reason,
                     query_trace: None,
                     batch_trace: None,
                 },

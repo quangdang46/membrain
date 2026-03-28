@@ -697,17 +697,33 @@ Useful installer flags:
 
 ```bash
 curl -fsSL "https://raw.githubusercontent.com/quangdang46/membrain/main/install.sh?$(date +%s)" | bash -s -- --verify --easy-mode
-curl -fsSL "https://raw.githubusercontent.com/quangdang46/membrain/main/install.sh?$(date +%s)" | bash -s -- --with-codex-mcp --with-claude-mcp
-curl -fsSL "https://raw.githubusercontent.com/quangdang46/membrain/main/install.sh?$(date +%s)" | bash -s -- --auto-start-daemon
+curl -fsSL "https://raw.githubusercontent.com/quangdang46/membrain/main/install.sh?$(date +%s)" | bash -s -- --db-path /path/to/state-root
 ```
 
-What the installer can do:
+What the installer now does by default:
 
 - install both `membrain` and `membrain-daemon`
-- optionally register Membrain MCP with Codex
-- optionally register Membrain MCP with Claude Code
-- optionally configure a user-level daemon auto-start service on supported platforms
+- configure Membrain MCP for Claude Code in `~/.claude/settings.json`
+- configure Membrain MCP for Codex in `~/.codex/config.toml`
+- install or update Membrain-owned Claude and Codex hook entries without replacing unrelated existing hook config
+- enable Codex hooks through `[features].codex_hooks = true`
+- configure a user-level daemon auto-start service on supported platforms
+- create a real-time daemon log file so users can tail daemon activity directly
 - optionally verify the installed binaries
+
+Default installer paths:
+
+- Claude settings: `~/.claude/settings.json`
+- Codex config: `~/.codex/config.toml`
+- Codex hooks: `~/.codex/hooks.json`
+- installed Membrain hook helper: `~/.local/share/membrain/hooks/membrain_agent_hook.py`
+- daemon log: `~/.local/state/membrain/membrain-daemon.log`
+
+After install, follow the daemon log with:
+
+```bash
+tail -f ~/.local/state/membrain/membrain-daemon.log
+```
 
 ---
 

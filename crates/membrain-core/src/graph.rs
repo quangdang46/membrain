@@ -1232,9 +1232,9 @@ impl GraphModule {
                     if depths.len() >= max_nodes.max(1) {
                         break;
                     }
-                    if !depths.contains_key(&child) {
+                    if let std::collections::hash_map::Entry::Vacant(entry) = depths.entry(child) {
                         let next_depth = parent_depth + 1;
-                        depths.insert(child, next_depth);
+                        entry.insert(next_depth);
                         queue.push_back(child);
                     }
                 }
@@ -1352,9 +1352,9 @@ impl GraphModule {
                     if depths.len() >= max_nodes.max(1) {
                         break;
                     }
-                    if !depths.contains_key(&parent) {
+                    if let std::collections::hash_map::Entry::Vacant(entry) = depths.entry(parent) {
                         let next_depth = child_depth + 1;
-                        depths.insert(parent, next_depth);
+                        entry.insert(next_depth);
                         queue.push_back(parent);
                     }
                 }

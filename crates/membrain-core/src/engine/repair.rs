@@ -23,6 +23,19 @@ use crate::store::cache::{
 use crate::types::MemoryId;
 use std::collections::HashMap;
 
+struct OperatorLogContext<'a> {
+    durable_sources: &'a [&'static str],
+    affected_item_count: u32,
+    error_count: u32,
+    rebuild_duration_ms: u64,
+    rollback_state: Option<&'static str>,
+    queue_depth_before: u32,
+    queue_depth_after: u32,
+    graph_rebuild_report: Option<&'a GraphRebuildReport>,
+    cache_invalidation: Option<&'a InvalidationOutcome>,
+    cache_warmup: Option<&'a [CacheMaintenanceEvent]>,
+}
+
 // ── Repair targets ───────────────────────────────────────────────────────────
 
 /// Repair target families that can be verified and rebuilt.
@@ -451,16 +464,7 @@ impl RepairRun {
         &self,
         result: &RepairCheckResult,
         artifact: &VerificationArtifact,
-        durable_sources: &[&'static str],
-        affected_item_count: u32,
-        error_count: u32,
-        rebuild_duration_ms: u64,
-        rollback_state: Option<&'static str>,
-        queue_depth_before: u32,
-        queue_depth_after: u32,
-        graph_rebuild_report: Option<&GraphRebuildReport>,
-        cache_invalidation: Option<&InvalidationOutcome>,
-        cache_warmup: Option<&[CacheMaintenanceEvent]>,
+        context: OperatorLogContext<'_>,
     ) -> String {
         let entrypoint = result
             .rebuild_entrypoint
@@ -471,17 +475,18 @@ impl RepairRun {
         } else {
             result.rebuilt_outputs.join(",")
         };
-        let durable_sources = if durable_sources.is_empty() {
+        let durable_sources = if context.durable_sources.is_empty() {
             "none".to_string()
         } else {
-            durable_sources.join(",")
+            context.durable_sources.join(",")
         };
         let repair_hooks = if result.repair_hooks.is_empty() {
             "none".to_string()
         } else {
             result.repair_hooks.join(",")
         };
-        let graph_hooks = graph_rebuild_report
+        let graph_hooks = context
+            .graph_rebuild_report
             .map(|report| {
                 let names = report.hook_names();
                 if names.is_empty() {
@@ -491,7 +496,8 @@ impl RepairRun {
                 }
             })
             .unwrap_or_else(|| "none".to_string());
-        let cache_invalidation = cache_invalidation
+        let cache_invalidation = context
+            .cache_invalidation
             .map(|report| {
                 format!(
                     "{}:{}:{}",
@@ -517,7 +523,8 @@ impl RepairRun {
                 )
             })
             .unwrap_or_else(|| "none".to_string());
-        let cache_warmup = cache_warmup
+        let cache_warmup = context
+            .cache_warmup
             .map(|events| {
                 if events.is_empty() {
                     "none".to_string()
@@ -560,10 +567,10 @@ impl RepairRun {
             artifact.derived_rows,
             artifact.authoritative_generation,
             artifact.derived_generation,
-            affected_item_count,
-            error_count,
-            rebuild_duration_ms,
-            rollback_state.unwrap_or("none"),
+            context.affected_item_count,
+            context.error_count,
+            context.rebuild_duration_ms,
+            context.rollback_state.unwrap_or("none"),
             self.degraded_mode_for(result.target, result.status)
                 .map(RepairDegradedMode::as_str)
                 .unwrap_or("none"),
@@ -578,8 +585,8 @@ impl RepairRun {
             .map(|step| step.as_str())
             .collect::<Vec<_>>()
             .join(","),
-            queue_depth_before,
-            queue_depth_after,
+            context.queue_depth_before,
+            context.queue_depth_after,
             cache_invalidation,
             cache_warmup,
             result.detail,
@@ -745,16 +752,18 @@ impl RepairRun {
                     operator_log: self.operator_log_for_result(
                         result,
                         artifact,
-                        &durable_sources,
-                        affected_item_count,
-                        error_count,
-                        rebuild_duration_ms,
-                        rollback_state,
-                        queue_depth_before,
-                        queue_depth_after,
-                        graph_rebuild_report,
-                        cache_invalidation,
-                        cache_warmup,
+                        OperatorLogContext {
+                            durable_sources: &durable_sources,
+                            affected_item_count,
+                            error_count,
+                            rebuild_duration_ms,
+                            rollback_state,
+                            queue_depth_before,
+                            queue_depth_after,
+                            graph_rebuild_report,
+                            cache_invalidation,
+                            cache_warmup,
+                        },
                     ),
                 }
             })

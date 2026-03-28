@@ -128,6 +128,29 @@ impl ReconsolidationAuditKind {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct RecallReopenInput<'a> {
+    pub memory_id: MemoryId,
+    pub stable_state: ReopenStableState,
+    pub current_tick: u64,
+    pub age_ticks: u64,
+    pub effective_strength: f32,
+    pub stability: f32,
+    pub access_count: u32,
+    pub policy: &'a ReconsolidationPolicy,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct ReconsolidationAuditInput<'a> {
+    pub memory_id: MemoryId,
+    pub tick: u64,
+    pub result: &'a ReconsolidationTickResult,
+    pub strength_before: Option<f32>,
+    pub preserved_strength: Option<f32>,
+    pub preserved_state: Option<ReopenStableState>,
+    pub applied_source: Option<UpdateSource>,
+}
+
 /// Concrete in-memory mutation proposed by a successful reconsolidation apply.
 #[derive(Debug, Clone, PartialEq)]
 pub struct AppliedUpdateState {
@@ -387,6 +410,7 @@ impl ReconsolidationEngine {
     }
 
     /// Reopens a stable memory into a bounded labile window after successful recall.
+    #[allow(clippy::too_many_arguments)]
     pub fn reopen_after_recall(
         &self,
         memory_id: MemoryId,
@@ -398,24 +422,44 @@ impl ReconsolidationEngine {
         access_count: u32,
         policy: &ReconsolidationPolicy,
     ) -> Option<RecallReopenWindow> {
-        if !self.should_enter_labile(effective_strength, access_count, policy) {
-            return None;
-        }
-
-        let labile_state =
-            self.enter_labile(current_tick, age_ticks, effective_strength, policy)?;
-        let pre_reopen_state = self.capture_pre_reopen_state(
+        self.reopen_after_recall_with_input(RecallReopenInput {
             memory_id,
+            stable_state,
             current_tick,
+            age_ticks,
             effective_strength,
             stability,
             access_count,
+            policy,
+        })
+    }
+
+    pub fn reopen_after_recall_with_input(
+        &self,
+        input: RecallReopenInput<'_>,
+    ) -> Option<RecallReopenWindow> {
+        if !self.should_enter_labile(input.effective_strength, input.access_count, input.policy) {
+            return None;
+        }
+
+        let labile_state = self.enter_labile(
+            input.current_tick,
+            input.age_ticks,
+            input.effective_strength,
+            input.policy,
+        )?;
+        let pre_reopen_state = self.capture_pre_reopen_state(
+            input.memory_id,
+            input.current_tick,
+            input.effective_strength,
+            input.stability,
+            input.access_count,
         );
 
         Some(RecallReopenWindow {
             labile_state,
             pre_reopen_state,
-            restabilize_to: stable_state,
+            restabilize_to: input.stable_state,
         })
     }
 
@@ -647,6 +691,7 @@ impl ReconsolidationEngine {
     }
 
     /// Builds an audit record for one tick evaluation.
+    #[allow(clippy::too_many_arguments)]
     pub fn audit_tick(
         &self,
         memory_id: MemoryId,
@@ -657,23 +702,38 @@ impl ReconsolidationEngine {
         preserved_state: Option<ReopenStableState>,
         applied_source: Option<UpdateSource>,
     ) -> ReconsolidationAuditRecord {
-        ReconsolidationAuditRecord {
+        self.audit_tick_with_input(ReconsolidationAuditInput {
             memory_id,
             tick,
-            outcome: result.outcome,
-            audit_kind: result.audit_kind,
+            result,
             strength_before,
-            strength_after: result.new_strength,
             preserved_strength,
             preserved_state,
-            applied_update_state: result.applied_update_state.clone(),
-            refresh_triggers: result.refresh_triggers.clone(),
-            executed_refresh_triggers: result.executed_refresh_triggers.clone(),
-            deferred_refresh_triggers: result.deferred_refresh_triggers.clone(),
-            update_source: applied_source,
-            pending_update_cleared: result.pending_update_cleared,
-            authoritative_state_mutated: result.authoritative_state_mutated,
-            restabilized: result.restabilized,
+            applied_source,
+        })
+    }
+
+    pub fn audit_tick_with_input(
+        &self,
+        input: ReconsolidationAuditInput<'_>,
+    ) -> ReconsolidationAuditRecord {
+        ReconsolidationAuditRecord {
+            memory_id: input.memory_id,
+            tick: input.tick,
+            outcome: input.result.outcome,
+            audit_kind: input.result.audit_kind,
+            strength_before: input.strength_before,
+            strength_after: input.result.new_strength,
+            preserved_strength: input.preserved_strength,
+            preserved_state: input.preserved_state,
+            applied_update_state: input.result.applied_update_state.clone(),
+            refresh_triggers: input.result.refresh_triggers.clone(),
+            executed_refresh_triggers: input.result.executed_refresh_triggers.clone(),
+            deferred_refresh_triggers: input.result.deferred_refresh_triggers.clone(),
+            update_source: input.applied_source,
+            pending_update_cleared: input.result.pending_update_cleared,
+            authoritative_state_mutated: input.result.authoritative_state_mutated,
+            restabilized: input.result.restabilized,
         }
     }
 }
@@ -941,15 +1001,15 @@ impl MaintenanceOperation for ReconsolidationRun {
             ReconsolidationOutcome::BlockedRefreshFailure => self.blocked_refresh_failure += 1,
         }
 
-        let audit = engine.audit_tick(
-            mem.memory_id,
-            self.current_tick,
-            &result,
-            Some(mem.current_strength),
-            Some(mem.pre_reopen_state.strength_at_reopen),
-            Some(mem.restabilize_to),
-            mem.pending_update.as_ref().map(|p| p.submitter),
-        );
+        let audit = engine.audit_tick_with_input(ReconsolidationAuditInput {
+            memory_id: mem.memory_id,
+            tick: self.current_tick,
+            result: &result,
+            strength_before: Some(mem.current_strength),
+            preserved_strength: Some(mem.pre_reopen_state.strength_at_reopen),
+            preserved_state: Some(mem.restabilize_to),
+            applied_source: mem.pending_update.as_ref().map(|p| p.submitter),
+        });
         self.audit_records.push(audit);
 
         self.processed += 1;
@@ -1123,16 +1183,16 @@ mod tests {
         let engine = ReconsolidationEngine::new();
         let policy = policy();
         let reopened = engine
-            .reopen_after_recall(
-                MemoryId(7),
-                ReopenStableState::Consolidated,
-                120,
-                20,
-                0.6,
-                3.5,
-                4,
-                &policy,
-            )
+            .reopen_after_recall_with_input(RecallReopenInput {
+                memory_id: MemoryId(7),
+                stable_state: ReopenStableState::Consolidated,
+                current_tick: 120,
+                age_ticks: 20,
+                effective_strength: 0.6,
+                stability: 3.5,
+                access_count: 4,
+                policy: &policy,
+            })
             .unwrap_or_else(|| {
                 std::process::abort();
             });
@@ -1152,28 +1212,28 @@ mod tests {
         let engine = ReconsolidationEngine::new();
         let policy = policy();
         assert!(engine
-            .reopen_after_recall(
-                MemoryId(8),
-                ReopenStableState::SynapticDone,
-                120,
-                20,
-                0.1,
-                2.0,
-                4,
-                &policy,
-            )
+            .reopen_after_recall_with_input(RecallReopenInput {
+                memory_id: MemoryId(8),
+                stable_state: ReopenStableState::SynapticDone,
+                current_tick: 120,
+                age_ticks: 20,
+                effective_strength: 0.1,
+                stability: 2.0,
+                access_count: 4,
+                policy: &policy,
+            })
             .is_none());
         assert!(engine
-            .reopen_after_recall(
-                MemoryId(9),
-                ReopenStableState::Consolidated,
-                120,
-                20,
-                0.6,
-                2.0,
-                0,
-                &policy,
-            )
+            .reopen_after_recall_with_input(RecallReopenInput {
+                memory_id: MemoryId(9),
+                stable_state: ReopenStableState::Consolidated,
+                current_tick: 120,
+                age_ticks: 20,
+                effective_strength: 0.6,
+                stability: 2.0,
+                access_count: 0,
+                policy: &policy,
+            })
             .is_none());
     }
 
@@ -1523,15 +1583,15 @@ mod tests {
             authoritative_state_mutated: true,
             restabilized: true,
         };
-        let audit = engine.audit_tick(
-            MemoryId(42),
-            120,
-            &result,
-            Some(0.5),
-            Some(0.45),
-            Some(ReopenStableState::Consolidated),
-            Some(UpdateSource::User),
-        );
+        let audit = engine.audit_tick_with_input(ReconsolidationAuditInput {
+            memory_id: MemoryId(42),
+            tick: 120,
+            result: &result,
+            strength_before: Some(0.5),
+            preserved_strength: Some(0.45),
+            preserved_state: Some(ReopenStableState::Consolidated),
+            applied_source: Some(UpdateSource::User),
+        });
         assert_eq!(audit.memory_id, MemoryId(42));
         assert_eq!(audit.tick, 120);
         assert_eq!(audit.outcome, ReconsolidationOutcome::Applied);

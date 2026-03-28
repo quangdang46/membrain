@@ -2955,7 +2955,7 @@ mod tests {
         match inspect.parse_method().unwrap() {
             RuntimeRequest::Inspect { common, .. } => {
                 assert_eq!(common.request_id.as_deref(), Some("req-common"));
-                assert_eq!(common.policy_context.unwrap().include_public, false);
+                assert!(!common.policy_context.unwrap().include_public);
             }
             _ => std::process::abort(),
         }

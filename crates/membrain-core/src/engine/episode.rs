@@ -9,6 +9,9 @@ use crate::graph::EntityId;
 use crate::types::{MemoryId, SessionId};
 use std::collections::{BTreeMap, HashMap};
 
+type SkillCandidateBucketKey = (&'static str, Option<&'static str>, Option<&'static str>);
+type SkillCandidateBuckets<'a> = BTreeMap<SkillCandidateBucketKey, Vec<&'a SourceGroup>>;
+
 /// Stable identifier for a grouped source set or episode.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct EpisodeId(pub u64);
@@ -282,10 +285,7 @@ impl EpisodeGroupingModule {
         groups: &[SourceGroup],
         heuristics: &SkillCandidateHeuristics,
     ) -> SkillCandidateReport {
-        let mut candidate_buckets: BTreeMap<
-            (&'static str, Option<&'static str>, Option<&'static str>),
-            Vec<&SourceGroup>,
-        > = BTreeMap::new();
+        let mut candidate_buckets: SkillCandidateBuckets<'_> = BTreeMap::new();
         let mut rejections = Vec::new();
 
         for group in groups {

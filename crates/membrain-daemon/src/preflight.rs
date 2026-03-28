@@ -176,6 +176,7 @@ pub fn preflight_request(
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 pub fn evaluate_preflight(
     namespace: &str,
     original_query: &str,
@@ -468,6 +469,7 @@ pub fn to_preflight_explain_response(
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 pub fn preflight_allow(
     namespace: &str,
     original_query: &str,

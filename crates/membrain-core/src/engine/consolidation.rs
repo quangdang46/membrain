@@ -63,7 +63,7 @@ pub enum ConsolidationAction {
     DeriveArtifacts {
         fixture_name: String,
         artifacts: Vec<DerivedArtifact>,
-        partial_failure: Option<DerivationFailure>,
+        partial_failure: Box<Option<DerivationFailure>>,
     },
     /// Merge multiple memories into one consolidated summary.
     Merge {
@@ -77,6 +77,26 @@ pub enum ConsolidationAction {
     },
     /// Skip — memories are too dissimilar to consolidate.
     Skip { reason: &'static str },
+}
+
+#[derive(Debug, Clone, Copy)]
+struct RepairBoundaryInput {
+    artifact_name: &'static str,
+    attempted_edge: &'static str,
+    affected_item_count: u32,
+    pending_item_count: u32,
+    failure_family: ErrorKind,
+    retryable: bool,
+    escalation_boundary: &'static str,
+}
+
+struct SkillArtifactInput<'a> {
+    source_ids: &'a [MemoryId],
+    continuity_keys: &'a [String],
+    source_citations: &'a [DerivedSourceCitation],
+    source_time_range_ms: (u64, u64),
+    contradiction_semantics: &'static str,
+    graph_seed: Option<EntityId>,
 }
 
 /// Stable bounded derivation kinds produced during consolidation.
@@ -358,15 +378,15 @@ impl ConsolidationRun {
         let degraded_mode = queue_budget_exhausted.then_some("continue_degraded_reads");
         let rollback_trigger = queue_budget_exhausted.then_some("verification_mismatch");
         if queue_budget_exhausted {
-            failure_artifacts.push(self.repair_boundary_artifact(
-                "consolidation_queue_budget_boundary",
-                "scheduler_drain",
-                self.processed,
-                pending_units,
-                ErrorKind::TimeoutFailure,
-                true,
-                "queue_budget_exhausted",
-            ));
+            failure_artifacts.push(self.repair_boundary_artifact(RepairBoundaryInput {
+                artifact_name: "consolidation_queue_budget_boundary",
+                attempted_edge: "scheduler_drain",
+                affected_item_count: self.processed,
+                pending_item_count: pending_units,
+                failure_family: ErrorKind::TimeoutFailure,
+                retryable: true,
+                escalation_boundary: "queue_budget_exhausted",
+            }));
         }
         let remediation_steps = if queue_budget_exhausted {
             vec![
@@ -469,26 +489,17 @@ impl ConsolidationRun {
         format!("consolidation://{}", self.namespace.as_str())
     }
 
-    fn repair_boundary_artifact(
-        &self,
-        artifact_name: &'static str,
-        attempted_edge: &'static str,
-        affected_item_count: u32,
-        pending_item_count: u32,
-        failure_family: ErrorKind,
-        retryable: bool,
-        escalation_boundary: &'static str,
-    ) -> MaintenanceFailureArtifact {
+    fn repair_boundary_artifact(&self, input: RepairBoundaryInput) -> MaintenanceFailureArtifact {
         MaintenanceFailureArtifact {
-            artifact_name,
+            artifact_name: input.artifact_name,
             object_handle: self.run_handle(),
             scope: self.namespace.as_str().to_string(),
-            attempted_edge,
-            affected_item_count,
-            pending_item_count,
-            failure_family: failure_family.as_str(),
-            retryable,
-            escalation_boundary,
+            attempted_edge: input.attempted_edge,
+            affected_item_count: input.affected_item_count,
+            pending_item_count: input.pending_item_count,
+            failure_family: input.failure_family.as_str(),
+            retryable: input.retryable,
+            escalation_boundary: input.escalation_boundary,
         }
     }
 
@@ -566,12 +577,7 @@ impl ConsolidationRun {
     fn derive_skill_artifact(
         &self,
         group: &crate::engine::episode::SourceGroup,
-        source_ids: &[MemoryId],
-        continuity_keys: &[String],
-        source_citations: &[DerivedSourceCitation],
-        source_time_range_ms: (u64, u64),
-        contradiction_semantics: &'static str,
-        graph_seed: Option<EntityId>,
+        input: SkillArtifactInput<'_>,
     ) -> Option<DerivedArtifact> {
         if group.members.len() < self.policy.min_skill_members {
             return None;
@@ -639,7 +645,10 @@ impl ConsolidationRun {
         let checklist_items = vec![
             format!("confirm goal context: {context_hint}"),
             format!("review action trace: {action_hint}"),
-            format!("inspect supporting evidence count: {}", source_ids.len()),
+            format!(
+                "inspect supporting evidence count: {}",
+                input.source_ids.len()
+            ),
             format!("verify advisory status before reuse: {outcome_label}"),
         ];
         let checklist_rendered = checklist_items.join("|");
@@ -653,11 +662,11 @@ impl ConsolidationRun {
             kind: DerivedArtifactKind::Skill,
             fixture_name: group.fixture_name.clone(),
             namespace: self.namespace.clone(),
-            source_ids: source_ids.to_vec(),
-            continuity_keys: continuity_keys.to_vec(),
-            source_citations: source_citations.to_vec(),
-            source_time_range_ms,
-            contradiction_semantics,
+            source_ids: input.source_ids.to_vec(),
+            continuity_keys: input.continuity_keys.to_vec(),
+            source_citations: input.source_citations.to_vec(),
+            source_time_range_ms: input.source_time_range_ms,
+            contradiction_semantics: input.contradiction_semantics,
             provenance: DerivationProvenance {
                 source_kind: "consolidation",
                 source_ref: format!(
@@ -665,17 +674,17 @@ impl ConsolidationRun {
                     self.namespace.as_str(),
                     group.fixture_name
                 ),
-                derived_from: source_ids.to_vec(),
-                lineage_ancestors: source_ids.to_vec(),
+                derived_from: input.source_ids.to_vec(),
+                lineage_ancestors: input.source_ids.to_vec(),
                 relation_to_seed: Some(RelationKind::DerivedFrom),
-                graph_seed,
+                graph_seed: input.graph_seed,
             },
             explain: Self::explain_for_group(group, DerivedArtifactKind::Skill, "tentative"),
             content: format!(
                 "skill({}): namespace={} source_engram_id={} confidence={} member_count={} tentative=true accepted=false guidance={} source_outcome={} advisory=true trusted_by_default=false release_rule=explicit_acceptance_or_repeated_use_with_lineage action_pattern={} checklist={} keywords={} citations={}",
                 group.source_set_kind.as_str(),
                 self.namespace.as_str(),
-                graph_seed.map_or(0, |seed| seed.0),
+                input.graph_seed.map_or(0, |seed| seed.0),
                 quality_score,
                 group.members.len(),
                 primary_guidance,
@@ -683,7 +692,7 @@ impl ConsolidationRun {
                 action_hint,
                 checklist_rendered,
                 keywords_rendered,
-                source_citations
+                input.source_citations
                     .iter()
                     .map(|citation| format!("{}:{}", citation.evidence_kind, citation.source_ref))
                     .collect::<Vec<_>>()
@@ -931,12 +940,14 @@ impl ConsolidationRun {
                 });
                 if let Some(skill) = self.derive_skill_artifact(
                     group,
-                    &source_ids,
-                    &continuity_keys,
-                    &source_citations,
-                    source_time_range_ms,
-                    contradiction_semantics,
-                    graph_seed,
+                    SkillArtifactInput {
+                        source_ids: &source_ids,
+                        continuity_keys: &continuity_keys,
+                        source_citations: &source_citations,
+                        source_time_range_ms,
+                        contradiction_semantics,
+                        graph_seed,
+                    },
                 ) {
                     artifacts.push(skill);
                 }
@@ -977,7 +988,7 @@ impl ConsolidationRun {
         ConsolidationAction::DeriveArtifacts {
             fixture_name: group.fixture_name.clone(),
             artifacts,
-            partial_failure,
+            partial_failure: Box::new(partial_failure),
         }
     }
 
@@ -993,7 +1004,7 @@ impl ConsolidationRun {
             } => {
                 self.derivations_emitted += artifacts.len() as u32;
                 self.derived_artifacts.extend(artifacts);
-                if let Some(failure) = partial_failure {
+                if let Some(failure) = *partial_failure {
                     self.derivation_partial_failures += 1;
                     self.derivation_failures.push(failure);
                 }
@@ -1086,31 +1097,34 @@ impl MaintenanceOperation for ConsolidationRun {
         for group in &grouping.groups {
             let action = self.action_for_group(group);
             if let ConsolidationAction::DeriveArtifacts {
-                partial_failure: Some(failure),
-                ..
+                partial_failure, ..
             } = &action
             {
-                batch_partial_failures += 1;
-                let retryable = retry_budget_available;
-                let failure_family = if retryable {
-                    ErrorKind::TransientFailure
-                } else {
-                    ErrorKind::InternalFailure
-                };
-                let escalation_boundary = if retryable {
-                    "retry_budget_remaining"
-                } else {
-                    "retry_budget_exhausted"
-                };
-                self.failure_artifacts.push(self.repair_boundary_artifact(
-                    "consolidation_partial_derivation",
-                    failure.stage,
-                    group.members.len() as u32,
-                    self.total.saturating_sub(batch_end),
-                    failure_family,
-                    retryable,
-                    escalation_boundary,
-                ));
+                if let Some(failure) = partial_failure.as_ref() {
+                    batch_partial_failures += 1;
+                    let retryable = retry_budget_available;
+                    let failure_family = if retryable {
+                        ErrorKind::TransientFailure
+                    } else {
+                        ErrorKind::InternalFailure
+                    };
+                    let escalation_boundary = if retryable {
+                        "retry_budget_remaining"
+                    } else {
+                        "retry_budget_exhausted"
+                    };
+                    self.failure_artifacts.push(self.repair_boundary_artifact(
+                        RepairBoundaryInput {
+                            artifact_name: "consolidation_partial_derivation",
+                            attempted_edge: failure.stage,
+                            affected_item_count: group.members.len() as u32,
+                            pending_item_count: self.total.saturating_sub(batch_end),
+                            failure_family,
+                            retryable,
+                            escalation_boundary,
+                        },
+                    ));
+                }
             }
             self.record_action(action);
         }
@@ -1138,22 +1152,22 @@ impl MaintenanceOperation for ConsolidationRun {
         InterruptedMaintenance {
             reason,
             preserved_durable_state: self.durable_token,
-            artifact: Some(self.repair_boundary_artifact(
-                "consolidation_interruption",
-                "scheduler_drain",
-                self.processed,
-                self.total.saturating_sub(self.processed),
-                match reason {
+            artifact: Some(self.repair_boundary_artifact(RepairBoundaryInput {
+                artifact_name: "consolidation_interruption",
+                attempted_edge: "scheduler_drain",
+                affected_item_count: self.processed,
+                pending_item_count: self.total.saturating_sub(self.processed),
+                failure_family: match reason {
                     InterruptionReason::Cancelled => ErrorKind::TransientFailure,
                     InterruptionReason::TimedOut => ErrorKind::TimeoutFailure,
                 },
-                self.processed < self.total,
-                if self.retry_attempts < self.policy.max_retry_attempts {
+                retryable: self.processed < self.total,
+                escalation_boundary: if self.retry_attempts < self.policy.max_retry_attempts {
                     "resume_from_durable_checkpoint"
                 } else {
                     "operator_repair_required"
                 },
-            )),
+            })),
         }
     }
 }
@@ -1500,7 +1514,10 @@ mod tests {
             .iter()
             .all(|artifact| artifact.kind != DerivedArtifactKind::Relation));
 
-        let failure = partial_failure.expect("expected relation reinforcement partial failure");
+        let failure = partial_failure
+            .as_ref()
+            .as_ref()
+            .expect("expected relation reinforcement partial failure");
         assert_eq!(failure.stage, "relation_reinforcement");
         assert_eq!(failure.reason, "unresolved_relation_signal_requires_review");
         assert_eq!(failure.explain.derivation_rule, "relation_reinforcement");

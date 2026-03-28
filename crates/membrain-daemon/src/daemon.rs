@@ -1307,7 +1307,6 @@ impl RuntimeState {
             .filter(|report| report.status != "healthy")
             .count();
         let stale_action_critical = lease_report.recheck_required_items > 0;
-        let mut warnings = warnings;
         if stale_action_critical {
             warnings.push("stale_action_critical_recheck_required");
         }
@@ -1864,8 +1863,8 @@ impl RuntimeState {
         ConfidenceInputs {
             corroboration_count: u32::from((provisional_salience / 250).min(4)),
             reconsolidation_count,
-            ticks_since_last_access: u64::from(memory_id.0.saturating_mul(17)),
-            age_ticks: u64::from(memory_id.0.saturating_mul(23)),
+            ticks_since_last_access: memory_id.0.saturating_mul(17),
+            age_ticks: memory_id.0.saturating_mul(23),
             resolution_state: membrain_core::engine::contradiction::ResolutionState::None,
             conflict_score: 0,
             causal_parent_count,
@@ -2704,7 +2703,7 @@ impl DaemonRuntime {
                     .map(|record| record.layout.metadata.fingerprint)
                     .collect::<std::collections::HashSet<_>>();
                 let report = ObserveEngine::observe_content(
-                    &membrain_core::BrainStore::new(RuntimeConfig::default()).encode_engine(),
+                    membrain_core::BrainStore::new(RuntimeConfig::default()).encode_engine(),
                     &content,
                     &config,
                     true,
@@ -4430,6 +4429,7 @@ impl DaemonRuntime {
         )
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn handle_context_budget(
         token_budget: usize,
         namespace: &str,
@@ -5420,11 +5420,11 @@ impl DaemonRuntime {
                     record.layout.metadata.memory_type,
                     record.layout.metadata.compact_text.clone(),
                     &ranking,
-                    RuntimeState::answered_from_for_record(&record),
+                    RuntimeState::answered_from_for_record(record),
                     &record.confidence_inputs,
                     &ConfidencePolicy::default(),
                 );
-                apply_projected_freshness_markers(&mut builder, &record);
+                apply_projected_freshness_markers(&mut builder, record);
                 let _ = entry_lane;
             }
             let mut built = builder.build(result.explain.clone());
@@ -5752,6 +5752,7 @@ impl DaemonRuntime {
         result
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn handle_retrieval_method(
         request: RecallRequest,
         retrieval_request: &RetrievalRequest,
@@ -6295,10 +6296,10 @@ impl DaemonRuntime {
                     .parse::<u64>()
                     .map_err(|_| format!("invalid memory query '{query}'"))?;
                 RetrievalRequest::exact_id(namespace.clone(), MemoryId(memory_id))
-            } else if like_id.is_some() && query.trim().is_empty() {
+            } else if let Some(like_id) = like_id.filter(|_| query.trim().is_empty()) {
                 RetrievalRequest::query_by_example(
                     namespace.clone(),
-                    MemoryId(like_id.unwrap()),
+                    MemoryId(like_id),
                     result_budget,
                 )
             } else {

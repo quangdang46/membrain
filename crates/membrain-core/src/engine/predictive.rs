@@ -162,7 +162,7 @@ impl PredictiveRecallEngine {
         let scoped = self
             .config
             .prefer_session_local
-            .then(|| TransitionKey {
+            .then_some(TransitionKey {
                 session_id,
                 from_memory_id: previous_memory_id,
             })

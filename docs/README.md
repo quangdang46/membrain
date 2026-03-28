@@ -58,6 +58,10 @@ For Claude Code MCP details, scopes, and hooks, see the official docs:
 - https://code.claude.com/docs/en/mcp
 - https://code.claude.com/docs/en/hooks
 
+If you install Membrain through the published `install.sh`, the installer now attempts this user-scoped Claude setup automatically:
+- adds or updates the Membrain MCP entry in `~/.claude/settings.json`
+- merges Membrain-owned hook entries into the existing Claude `hooks` object instead of replacing unrelated hook config wholesale
+
 This repo also ships a project-local Claude hook sink:
 - [`.claude/settings.json`](/home/quangdang/projects/tools/membrain/.claude/settings.json)
 - [`.claude/hooks/membrain_hook.py`](/home/quangdang/projects/tools/membrain/.claude/hooks/membrain_hook.py)
@@ -95,8 +99,9 @@ args = ["mcp"]
 Codex shares MCP configuration between the CLI and the IDE extension, so you only need to set it up once.
 
 Current Codex note:
-- the documented Codex integration path here is MCP configuration
-- this repo does not claim a Claude-style Codex hook event system today
+- the documented Codex integration path here is MCP configuration plus user-level `hooks.json` hook wiring
+- the published installer enables Codex hooks by setting `[features].codex_hooks = true` in `~/.codex/config.toml`
+- the published installer also merges Membrain-owned hook groups into `~/.codex/hooks.json` without replacing unrelated existing hook groups
 
 ### MCP client / subprocess mode
 
@@ -130,7 +135,7 @@ Default daemon socket:
 ```
 
 Important:
-- installing `membrain` does **not** auto-register the MCP server with Claude Code or Codex
-- installing `membrain` does **not** auto-start `membrain-daemon`
+- installing `membrain` through the published `install.sh` now attempts to auto-register MCP for Claude Code and Codex, merge Membrain-owned hook entries for both, and auto-start `membrain-daemon` where the local platform supports a user service
 - `membrain mcp` is enough for Claude Code and Codex MCP integration
 - only `membrain daemon` / `membrain-daemon` provides the authoritative warm background runtime
+- the installer-managed real-time daemon log is `~/.local/state/membrain/membrain-daemon.log`

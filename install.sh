@@ -14,13 +14,21 @@ EASY=0
 VERIFY=0
 FROM_SOURCE=0
 UNINSTALL=0
-WITH_CODEX_MCP=0
-WITH_CLAUDE_MCP=0
-AUTO_START_DAEMON=0
 MAX_RETRIES=3
 DOWNLOAD_TIMEOUT=120
 LOCK_DIR="/tmp/${BINARY_NAME}-install.lock.d"
 TMP=""
+DATA_HOME="${XDG_DATA_HOME:-$HOME/.local/share}"
+STATE_HOME="${XDG_STATE_HOME:-$HOME/.local/state}"
+SUPPORT_DIR="$DATA_HOME/$BINARY_NAME"
+HOOKS_DIR="$SUPPORT_DIR/hooks"
+HOOK_SCRIPT_PATH="$HOOKS_DIR/membrain_agent_hook.py"
+DAEMON_RUNNER_PATH="$SUPPORT_DIR/${DAEMON_BINARY_NAME}-run.sh"
+DAEMON_LOG_DIR="$STATE_HOME/$BINARY_NAME"
+DAEMON_LOG_PATH="$DAEMON_LOG_DIR/${DAEMON_BINARY_NAME}.log"
+CLAUDE_SETTINGS_PATH="$HOME/.claude/settings.json"
+CODEX_CONFIG_PATH="$HOME/.codex/config.toml"
+CODEX_HOOKS_PATH="$HOME/.codex/hooks.json"
 
 log_info() { [ "$QUIET" -eq 1 ] && return; echo "[${BINARY_NAME}] $*" >&2; }
 log_warn() { echo "[${BINARY_NAME}] WARN: $*" >&2; }
@@ -42,9 +50,6 @@ Options:
   --easy-mode               Add install dir to PATH in writable shell rc files
   --verify                  Run post-install verification commands
   --from-source             Build from source instead of downloading a release archive
-  --with-codex-mcp          Register Membrain MCP with Codex
-  --with-claude-mcp         Register Membrain MCP with Claude Code (user scope)
-  --auto-start-daemon       Configure a user service and start membrain-daemon automatically where supported
   --uninstall               Remove installed binaries and local service artifacts
   --quiet, -q              Reduce installer output
   -h, --help               Show this help
@@ -72,9 +77,6 @@ while [ $# -gt 0 ]; do
     --easy-mode) EASY=1; shift ;;
     --verify) VERIFY=1; shift ;;
     --from-source) FROM_SOURCE=1; shift ;;
-    --with-codex-mcp) WITH_CODEX_MCP=1; shift ;;
-    --with-claude-mcp) WITH_CLAUDE_MCP=1; shift ;;
-    --auto-start-daemon) AUTO_START_DAEMON=1; shift ;;
     --quiet|-q) QUIET=1; shift ;;
     --uninstall) UNINSTALL=1; shift ;;
     -h|--help) usage ;;
@@ -219,26 +221,510 @@ install_from_archive() {
   install_binary_atomic "$daemon_bin" "$DEST/$DAEMON_BINARY_NAME"
 }
 
-codex_mcp_install() {
-  command -v codex >/dev/null 2>&1 || { log_warn "codex not found; skipping Codex MCP registration"; return 0; }
-  local cmd=(codex mcp add membrain -- "$DEST/$BINARY_NAME" mcp)
-  [ -n "$DB_PATH" ] && cmd+=("--db-path" "$DB_PATH")
-  if codex mcp get membrain >/dev/null 2>&1; then
-    log_warn "Codex MCP server 'membrain' already exists; skipping"
-    return 0
-  fi
-  "${cmd[@]}" >/dev/null 2>&1 || log_warn "Failed to register Membrain MCP with Codex"
+ensure_python3() {
+  command -v python3 >/dev/null 2>&1 || { log_warn "python3 not found; skipping hook/config merge helpers"; return 1; }
 }
 
-claude_mcp_install() {
-  command -v claude >/dev/null 2>&1 || { log_warn "claude not found; skipping Claude MCP registration"; return 0; }
-  local cmd=(claude mcp add --transport stdio --scope user membrain -- "$DEST/$BINARY_NAME" mcp)
-  [ -n "$DB_PATH" ] && cmd+=("--db-path" "$DB_PATH")
-  if claude mcp get membrain >/dev/null 2>&1; then
-    log_warn "Claude MCP server 'membrain' already exists; skipping"
+write_hook_script() {
+  ensure_python3 || return 1
+  mkdir -p "$HOOKS_DIR"
+  cat > "$HOOK_SCRIPT_PATH" <<'PY'
+#!/usr/bin/env python3
+"""Persist Claude Code and Codex hook events into Membrain without breaking the session."""
+
+from __future__ import annotations
+
+import argparse
+import json
+import os
+import subprocess
+import sys
+from typing import Any
+
+
+SENSITIVE_KEY_PARTS = (
+    "token",
+    "secret",
+    "password",
+    "passwd",
+    "authorization",
+    "api_key",
+    "apikey",
+    "cookie",
+    "session_token",
+    "bearer",
+    "private_key",
+)
+
+MAX_VALUE_LEN = 240
+MAX_CONTENT_LEN = 900
+
+
+def truncate(value: str, limit: int = MAX_VALUE_LEN) -> str:
+    compact = " ".join(value.split())
+    if len(compact) <= limit:
+        return compact
+    return compact[: limit - 3] + "..."
+
+
+def is_sensitive_key(key: str) -> bool:
+    lowered = key.lower()
+    return any(part in lowered for part in SENSITIVE_KEY_PARTS)
+
+
+def sanitize(value: Any, depth: int = 0) -> Any:
+    if depth > 3:
+        return "<depth-limited>"
+    if isinstance(value, dict):
+        sanitized: dict[str, Any] = {}
+        for key, nested in value.items():
+            sanitized[key] = "<redacted>" if is_sensitive_key(key) else sanitize(nested, depth + 1)
+        return sanitized
+    if isinstance(value, list):
+        return [sanitize(item, depth + 1) for item in value[:8]]
+    if isinstance(value, str):
+        return truncate(value)
+    return value
+
+
+def payload_text(payload: dict[str, Any], *keys: str) -> str | None:
+    for key in keys:
+        value = payload.get(key)
+        if isinstance(value, str) and value.strip():
+            return truncate(value)
+    return None
+
+
+def detect_event(provider: str, payload: dict[str, Any], cli_event: str | None) -> str:
+    if cli_event:
+        return cli_event
+    if provider == "codex":
+        return payload_text(payload, "hook_event_name", "hookEventName") or "Unknown"
+    return "Unknown"
+
+
+def summarize_payload(provider: str, event: str, payload: dict[str, Any]) -> tuple[str, str]:
+    session_id = payload_text(payload, "session_id", "sessionId")
+    transcript_path = payload_text(payload, "transcript_path", "transcriptPath")
+    cwd = payload_text(payload, "cwd")
+    tool_name = payload_text(payload, "tool_name", "toolName")
+    reason = payload_text(payload, "reason", "stop_hook_active", "stopHookActive")
+    matcher = payload_text(payload, "matcher")
+    prompt = payload_text(payload, "prompt", "user_prompt", "userPrompt")
+    notification = payload_text(payload, "message", "notification")
+    provider_tag = f"{provider}_hook"
+
+    sanitized_input = sanitize(payload.get("tool_input"))
+    sanitized_response = sanitize(payload.get("tool_response"))
+    sanitized_payload = sanitize(payload)
+
+    parts = [f"{provider_tag} event={event}"]
+    context_parts = [f"{provider_tag} event={event}"]
+
+    if tool_name:
+        parts.append(f"tool={tool_name}")
+        context_parts.append(f"tool={tool_name}")
+    if reason:
+        parts.append(f"reason={reason}")
+        context_parts.append(f"reason={reason}")
+    if matcher:
+        parts.append(f"matcher={matcher}")
+    if session_id:
+        parts.append(f"session_id={session_id}")
+    if cwd:
+        parts.append(f"cwd={cwd}")
+        context_parts.append(f"cwd={cwd}")
+    if transcript_path:
+        parts.append(f"transcript_path={transcript_path}")
+
+    if prompt:
+        parts.append(f'prompt="{prompt}"')
+    elif notification:
+        parts.append(f'notification="{notification}"')
+
+    if sanitized_input not in (None, {}, []):
+        parts.append("tool_input=" + truncate(json.dumps(sanitized_input, sort_keys=True), 280))
+    if sanitized_response not in (None, {}, []):
+        parts.append("tool_response=" + truncate(json.dumps(sanitized_response, sort_keys=True), 280))
+
+    if len(parts) <= 2:
+        parts.append("payload=" + truncate(json.dumps(sanitized_payload, sort_keys=True), 320))
+
+    content = truncate("; ".join(parts), MAX_CONTENT_LEN)
+    context = truncate(" ".join(context_parts), 240)
+    return content, context
+
+
+def attention_for_event(event: str) -> str:
+    return {
+        "UserPromptSubmit": "0.95",
+        "PostToolUseFailure": "0.85",
+        "StopFailure": "0.85",
+        "PermissionRequest": "0.75",
+        "PostToolUse": "0.55",
+        "PreToolUse": "0.35",
+        "SessionStart": "0.4",
+        "SessionEnd": "0.45",
+        "Stop": "0.45",
+        "SubagentStop": "0.5",
+        "TaskCompleted": "0.6",
+    }.get(event, "0.45")
+
+
+def remember_event(
+    membrain_bin: str,
+    namespace: str,
+    db_path: str | None,
+    provider: str,
+    event: str,
+    content: str,
+    context: str,
+) -> None:
+    command = [
+        membrain_bin,
+        "remember",
+        "--namespace",
+        namespace,
+        "--source",
+        f"{provider}_hook",
+        "--attention",
+        attention_for_event(event),
+        "--context",
+        context,
+        "--quiet",
+        content,
+    ]
+    if db_path:
+        command[2:2] = ["--db-path", db_path]
+    subprocess.run(
+        command,
+        check=False,
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+        timeout=20,
+    )
+
+
+def maybe_emit_hook_output(provider: str, event: str) -> None:
+    # Codex Stop hooks expect JSON stdout on success.
+    if provider == "codex" and event == "Stop":
+        print("{}")
+
+
+def main() -> int:
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--provider", required=True, choices=("claude", "codex"))
+    parser.add_argument("--event")
+    parser.add_argument("--namespace", default=os.environ.get("MEMBRAIN_NAMESPACE", "default"))
+    parser.add_argument("--db-path", default=os.environ.get("MEMBRAIN_DB_PATH"))
+    parser.add_argument("--membrain-bin", default=os.environ.get("MEMBRAIN_BIN", "membrain"))
+    args = parser.parse_args()
+
+    try:
+        raw = sys.stdin.read()
+        payload = json.loads(raw) if raw.strip() else {}
+        if not isinstance(payload, dict):
+            payload = {"payload": sanitize(payload)}
+    except Exception:
+        payload = {}
+
+    event = detect_event(args.provider, payload, args.event)
+
+    try:
+        content, context = summarize_payload(args.provider, event, payload)
+        remember_event(
+            membrain_bin=args.membrain_bin,
+            namespace=args.namespace,
+            db_path=args.db_path,
+            provider=args.provider,
+            event=event,
+            content=content,
+            context=context,
+        )
+        maybe_emit_hook_output(args.provider, event)
+    except Exception:
+        if args.provider == "codex" and event == "Stop":
+            print("{}")
+        return 0
+
     return 0
-  fi
-  "${cmd[@]}" >/dev/null 2>&1 || log_warn "Failed to register Membrain MCP with Claude Code"
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())
+PY
+  chmod 0755 "$HOOK_SCRIPT_PATH"
+}
+
+write_daemon_runner() {
+  mkdir -p "$SUPPORT_DIR" "$DAEMON_LOG_DIR"
+  cat > "$DAEMON_RUNNER_PATH" <<EOF
+#!/usr/bin/env bash
+set -euo pipefail
+mkdir -p "$(dirname "$DAEMON_LOG_PATH")"
+exec "$DEST/$DAEMON_BINARY_NAME"$( [ -n "$DB_PATH" ] && printf ' --db-path %q' "$DB_PATH" ) >>"$DAEMON_LOG_PATH" 2>&1
+EOF
+  chmod 0755 "$DAEMON_RUNNER_PATH"
+}
+
+claude_integration_install() {
+  ensure_python3 || return 0
+  write_hook_script || return 0
+  mkdir -p "$(dirname "$CLAUDE_SETTINGS_PATH")"
+  python3 - "$CLAUDE_SETTINGS_PATH" "$DEST/$BINARY_NAME" "$HOOK_SCRIPT_PATH" "$DB_PATH" <<'PY'
+import json
+import pathlib
+import sys
+
+settings_path = pathlib.Path(sys.argv[1]).expanduser()
+binary_path = sys.argv[2]
+hook_script = sys.argv[3]
+db_path = sys.argv[4]
+
+if settings_path.exists():
+    try:
+        data = json.loads(settings_path.read_text(encoding="utf-8"))
+    except Exception:
+        data = {}
+else:
+    data = {}
+
+if not isinstance(data, dict):
+    data = {}
+
+args = ["mcp"]
+if db_path:
+    args += ["--db-path", db_path]
+
+data.setdefault("mcpServers", {})
+data["mcpServers"]["membrain"] = {
+    "command": binary_path,
+    "args": args,
+}
+
+hook_events = {
+    "SessionStart": "startup|resume|clear|compact",
+    "UserPromptSubmit": None,
+    "PreToolUse": "Read|Grep|Glob|WebFetch|WebSearch|Bash|Edit|Write|MultiEdit|Task",
+    "PostToolUse": "Read|Grep|Glob|Edit|Write|MultiEdit|Bash|Task|WebFetch|WebSearch",
+    "PostToolUseFailure": "Bash|Read|Edit|Write|MultiEdit|Task|WebFetch|WebSearch|Grep|Glob|mcp__.*",
+    "Stop": None,
+    "SubagentStart": None,
+    "SubagentStop": None,
+    "TaskCompleted": None,
+    "TeammateIdle": None,
+    "InstructionsLoaded": "session_start|nested_traversal|path_glob_match|include|compact",
+    "ConfigChange": None,
+    "CwdChanged": None,
+    "FileChanged": "CLAUDE.md|AGENTS.md|README.md|settings.json|settings.local.json",
+    "PreCompact": None,
+    "PostCompact": None,
+    "SessionEnd": None,
+    "Notification": None,
+    "PermissionRequest": "Bash|Write|Edit|MultiEdit|Task|mcp__.*",
+    "StopFailure": None,
+    "Elicitation": None,
+    "ElicitationResult": None,
+    "WorktreeCreate": None,
+    "WorktreeRemove": None,
+}
+
+hooks = data.setdefault("hooks", {})
+
+def membrain_group(event_name: str, matcher: str | None):
+    command = f'python3 "{hook_script}" --provider claude --event {event_name} --membrain-bin "{binary_path}"'
+    if db_path:
+        command += f' --db-path "{db_path}"'
+    group = {
+        "hooks": [
+            {
+                "type": "command",
+                "command": command,
+            }
+        ]
+    }
+    if matcher:
+        group["matcher"] = matcher
+    return group
+
+for event_name, matcher in hook_events.items():
+    groups = hooks.get(event_name, [])
+    if not isinstance(groups, list):
+        groups = []
+    cleaned = []
+    for group in groups:
+        if not isinstance(group, dict):
+            cleaned.append(group)
+            continue
+        hook_defs = group.get("hooks")
+        if isinstance(hook_defs, list) and any(
+            isinstance(hook, dict)
+            and hook.get("type") == "command"
+            and hook_script in str(hook.get("command", ""))
+            and "--provider claude" in str(hook.get("command", ""))
+            for hook in hook_defs
+        ):
+            continue
+        cleaned.append(group)
+    cleaned.append(membrain_group(event_name, matcher))
+    hooks[event_name] = cleaned
+
+settings_path.write_text(json.dumps(data, indent=2) + "\n", encoding="utf-8")
+PY
+}
+
+codex_hooks_install() {
+  ensure_python3 || return 0
+  write_hook_script || return 0
+  mkdir -p "$(dirname "$CODEX_HOOKS_PATH")"
+  python3 - "$CODEX_HOOKS_PATH" "$DEST/$BINARY_NAME" "$HOOK_SCRIPT_PATH" "$DB_PATH" <<'PY'
+import json
+import pathlib
+import sys
+
+hooks_path = pathlib.Path(sys.argv[1]).expanduser()
+binary_path = sys.argv[2]
+hook_script = sys.argv[3]
+db_path = sys.argv[4]
+
+if hooks_path.exists():
+    try:
+        data = json.loads(hooks_path.read_text(encoding="utf-8"))
+    except Exception:
+        data = {}
+else:
+    data = {}
+
+if not isinstance(data, dict):
+    data = {}
+
+hook_events = {
+    "SessionStart": "startup|resume",
+    "UserPromptSubmit": None,
+    "PreToolUse": "Bash",
+    "PostToolUse": "Bash",
+    "Stop": None,
+}
+
+hooks = data.setdefault("hooks", {})
+
+def membrain_group(event_name: str, matcher: str | None):
+    command = f'python3 "{hook_script}" --provider codex --event {event_name} --membrain-bin "{binary_path}"'
+    if db_path:
+        command += f' --db-path "{db_path}"'
+    group = {
+        "hooks": [
+            {
+                "type": "command",
+                "command": command,
+            }
+        ]
+    }
+    if matcher:
+        group["matcher"] = matcher
+    return group
+
+for event_name, matcher in hook_events.items():
+    groups = hooks.get(event_name, [])
+    if not isinstance(groups, list):
+        groups = []
+    cleaned = []
+    for group in groups:
+        if not isinstance(group, dict):
+            cleaned.append(group)
+            continue
+        hook_defs = group.get("hooks")
+        if isinstance(hook_defs, list) and any(
+            isinstance(hook, dict)
+            and hook.get("type") == "command"
+            and hook_script in str(hook.get("command", ""))
+            and "--provider codex" in str(hook.get("command", ""))
+            for hook in hook_defs
+        ):
+            continue
+        cleaned.append(group)
+    cleaned.append(membrain_group(event_name, matcher))
+    hooks[event_name] = cleaned
+
+hooks_path.write_text(json.dumps(data, indent=2) + "\n", encoding="utf-8")
+PY
+}
+
+codex_config_install() {
+  ensure_python3 || return 0
+  mkdir -p "$(dirname "$CODEX_CONFIG_PATH")"
+  python3 - "$CODEX_CONFIG_PATH" "$DEST/$BINARY_NAME" "$DB_PATH" <<'PY'
+import json
+import pathlib
+import re
+import sys
+
+config_path = pathlib.Path(sys.argv[1]).expanduser()
+binary_path = sys.argv[2]
+db_path = sys.argv[3]
+
+text = config_path.read_text(encoding="utf-8") if config_path.exists() else ""
+
+def strip_table(text: str, table: str) -> str:
+    pattern = re.compile(
+        rf'(?ms)^\[{re.escape(table)}\]\n(?:^(?!\[).*(?:\n|$))*'
+    )
+    return re.sub(pattern, "", text).rstrip()
+
+def upsert_key_in_table(text: str, table: str, key: str, value_line: str) -> str:
+    header = f"[{table}]"
+    lines = text.splitlines()
+    start = None
+    end = None
+    for idx, line in enumerate(lines):
+        if line.strip() == header:
+            start = idx
+            end = len(lines)
+            for j in range(idx + 1, len(lines)):
+                if lines[j].startswith("[") and lines[j].endswith("]"):
+                    end = j
+                    break
+            break
+    if start is None:
+        text = text.rstrip()
+        if text:
+            text += "\n\n"
+        return text + f"{header}\n{value_line}\n"
+    key_pattern = re.compile(rf"^\s*{re.escape(key)}\s*=")
+    for idx in range(start + 1, end):
+        if key_pattern.match(lines[idx]):
+            lines[idx] = value_line
+            return "\n".join(lines).rstrip() + "\n"
+    lines.insert(end, value_line)
+    return "\n".join(lines).rstrip() + "\n"
+
+args = ["mcp"]
+if db_path:
+    args += ["--db-path", db_path]
+
+text = strip_table(text, "mcp_servers.membrain")
+text = upsert_key_in_table(text, "features", "codex_hooks", "codex_hooks = true")
+text = text.rstrip()
+if text:
+    text += "\n\n"
+text += "[mcp_servers.membrain]\n"
+text += f"command = {json.dumps(binary_path)}\n"
+text += f"args = {json.dumps(args)}\n"
+
+config_path.write_text(text.rstrip() + "\n", encoding="utf-8")
+PY
+}
+
+install_support_files() {
+  write_hook_script || true
+  write_daemon_runner
+}
+
+install_editor_integrations() {
+  install_support_files
+  claude_integration_install
+  codex_config_install
+  codex_hooks_install
 }
 
 configure_systemd_user_service() {
@@ -251,7 +737,7 @@ Description=Membrain user daemon
 After=default.target
 
 [Service]
-ExecStart=$DEST/$DAEMON_BINARY_NAME$( [ -n "$DB_PATH" ] && printf ' --db-path %q' "$DB_PATH" )
+ExecStart=$DAEMON_RUNNER_PATH
 Restart=on-failure
 RestartSec=3
 
@@ -275,17 +761,16 @@ configure_launch_agent() {
     <string>com.${OWNER}.${REPO}.daemon</string>
     <key>ProgramArguments</key>
     <array>
-      <string>$DEST/$DAEMON_BINARY_NAME</string>
-$( [ -n "$DB_PATH" ] && printf '      <string>--db-path</string>\n      <string>%s</string>\n' "$DB_PATH" )
+      <string>$DAEMON_RUNNER_PATH</string>
     </array>
     <key>RunAtLoad</key>
     <true/>
     <key>KeepAlive</key>
     <true/>
     <key>StandardOutPath</key>
-    <string>$HOME/Library/Logs/membrain-daemon.log</string>
+    <string>$DAEMON_LOG_PATH</string>
     <key>StandardErrorPath</key>
-    <string>$HOME/Library/Logs/membrain-daemon.log</string>
+    <string>$DAEMON_LOG_PATH</string>
   </dict>
 </plist>
 EOF
@@ -294,6 +779,7 @@ EOF
 }
 
 auto_start_daemon_install() {
+  install_support_files
   case "$(uname -s)" in
     Linux*)
       if configure_systemd_user_service; then
@@ -325,6 +811,151 @@ PY
   done
 }
 
+claude_integration_uninstall() {
+  ensure_python3 || return 0
+  [ -f "$CLAUDE_SETTINGS_PATH" ] || return 0
+  python3 - "$CLAUDE_SETTINGS_PATH" "$HOOK_SCRIPT_PATH" <<'PY'
+import json
+import pathlib
+import sys
+
+settings_path = pathlib.Path(sys.argv[1]).expanduser()
+hook_script = sys.argv[2]
+
+try:
+    data = json.loads(settings_path.read_text(encoding="utf-8"))
+except Exception:
+    sys.exit(0)
+
+if not isinstance(data, dict):
+    sys.exit(0)
+
+mcp_servers = data.get("mcpServers")
+if isinstance(mcp_servers, dict):
+    mcp_servers.pop("membrain", None)
+    if not mcp_servers:
+        data.pop("mcpServers", None)
+
+hooks = data.get("hooks")
+if isinstance(hooks, dict):
+    for event_name in list(hooks.keys()):
+        groups = hooks.get(event_name)
+        if not isinstance(groups, list):
+            continue
+        cleaned = []
+        for group in groups:
+            hook_defs = group.get("hooks") if isinstance(group, dict) else None
+            if isinstance(hook_defs, list) and any(
+                isinstance(hook, dict)
+                and hook.get("type") == "command"
+                and hook_script in str(hook.get("command", ""))
+                and "--provider claude" in str(hook.get("command", ""))
+                for hook in hook_defs
+            ):
+                continue
+            cleaned.append(group)
+        if cleaned:
+            hooks[event_name] = cleaned
+        else:
+            hooks.pop(event_name, None)
+    if not hooks:
+        data.pop("hooks", None)
+
+settings_path.write_text(json.dumps(data, indent=2) + "\n", encoding="utf-8")
+PY
+}
+
+codex_hooks_uninstall() {
+  ensure_python3 || return 0
+  [ -f "$CODEX_HOOKS_PATH" ] || return 0
+  python3 - "$CODEX_HOOKS_PATH" "$HOOK_SCRIPT_PATH" <<'PY'
+import json
+import pathlib
+import sys
+
+hooks_path = pathlib.Path(sys.argv[1]).expanduser()
+hook_script = sys.argv[2]
+
+try:
+    data = json.loads(hooks_path.read_text(encoding="utf-8"))
+except Exception:
+    sys.exit(0)
+
+if not isinstance(data, dict):
+    sys.exit(0)
+
+hooks = data.get("hooks")
+if isinstance(hooks, dict):
+    for event_name in list(hooks.keys()):
+        groups = hooks.get(event_name)
+        if not isinstance(groups, list):
+            continue
+        cleaned = []
+        for group in groups:
+            hook_defs = group.get("hooks") if isinstance(group, dict) else None
+            if isinstance(hook_defs, list) and any(
+                isinstance(hook, dict)
+                and hook.get("type") == "command"
+                and hook_script in str(hook.get("command", ""))
+                and "--provider codex" in str(hook.get("command", ""))
+                for hook in hook_defs
+            ):
+                continue
+            cleaned.append(group)
+        if cleaned:
+            hooks[event_name] = cleaned
+        else:
+            hooks.pop(event_name, None)
+    if not hooks:
+        hooks_path.unlink(missing_ok=True)
+        sys.exit(0)
+
+hooks_path.write_text(json.dumps(data, indent=2) + "\n", encoding="utf-8")
+PY
+}
+
+codex_config_uninstall() {
+  ensure_python3 || return 0
+  [ -f "$CODEX_CONFIG_PATH" ] || return 0
+  python3 - "$CODEX_CONFIG_PATH" <<'PY'
+import pathlib
+import re
+import sys
+
+config_path = pathlib.Path(sys.argv[1]).expanduser()
+text = config_path.read_text(encoding="utf-8")
+
+text = re.sub(
+    r'(?ms)^\[mcp_servers\.membrain\]\n(?:^(?!\[).*(?:\n|$))*',
+    "",
+    text,
+).rstrip()
+
+lines = text.splitlines()
+for idx, line in enumerate(lines):
+    if line.strip() == "[features]":
+        end = len(lines)
+        for j in range(idx + 1, len(lines)):
+            if lines[j].startswith("[") and lines[j].endswith("]"):
+                end = j
+                break
+        lines = [
+            line
+            for offset, line in enumerate(lines)
+            if not (idx < offset < end and re.match(r"^\s*codex_hooks\s*=", line))
+        ]
+        break
+
+config_path.write_text("\n".join(lines).rstrip() + "\n", encoding="utf-8")
+PY
+}
+
+remove_support_files() {
+  rm -f "$HOOK_SCRIPT_PATH" "$DAEMON_RUNNER_PATH"
+  rmdir "$HOOKS_DIR" 2>/dev/null || true
+  rmdir "$SUPPORT_DIR" 2>/dev/null || true
+}
+
 do_uninstall() {
   rm -f "$DEST/$BINARY_NAME" "$DEST/$DAEMON_BINARY_NAME"
   rm -f "$HOME/.config/systemd/user/membrain-daemon.service"
@@ -337,6 +968,10 @@ do_uninstall() {
     command -v launchctl >/dev/null 2>&1 && launchctl unload "$plist" >/dev/null 2>&1 || true
     rm -f "$plist"
   fi
+  claude_integration_uninstall
+  codex_hooks_uninstall
+  codex_config_uninstall
+  remove_support_files
   remove_path_lines
   log_success "Uninstalled $BINARY_NAME and $DAEMON_BINARY_NAME"
   exit 0
@@ -353,18 +988,16 @@ print_summary() {
   echo "✓ $DAEMON_BINARY_NAME installed → $DEST/$DAEMON_BINARY_NAME"
   echo "  Version: $("$DEST/$BINARY_NAME" --version 2>/dev/null || echo 'unknown')"
   echo ""
+  echo "  Installed defaults:"
+  echo "    Claude MCP + hook config updated at $CLAUDE_SETTINGS_PATH"
+  echo "    Codex MCP config + hooks updated at $CODEX_CONFIG_PATH and $CODEX_HOOKS_PATH"
+  echo "    Daemon auto-start attempted where supported"
+  echo "    Real-time daemon log: $DAEMON_LOG_PATH"
+  echo ""
   echo "  Quick start:"
   echo "    $BINARY_NAME --help"
   echo "    $DAEMON_BINARY_NAME --help"
-  if [ "$WITH_CODEX_MCP" -eq 1 ]; then
-    echo "    Codex MCP registration requested"
-  fi
-  if [ "$WITH_CLAUDE_MCP" -eq 1 ]; then
-    echo "    Claude MCP registration requested"
-  fi
-  if [ "$AUTO_START_DAEMON" -eq 1 ]; then
-    echo "    Daemon auto-start requested"
-  fi
+  echo "    tail -f \"$DAEMON_LOG_PATH\""
 }
 
 main() {
@@ -389,10 +1022,8 @@ main() {
   fi
 
   maybe_add_path
-
-  [ "$WITH_CODEX_MCP" -eq 1 ] && codex_mcp_install
-  [ "$WITH_CLAUDE_MCP" -eq 1 ] && claude_mcp_install
-  [ "$AUTO_START_DAEMON" -eq 1 ] && auto_start_daemon_install
+  install_editor_integrations
+  auto_start_daemon_install
   [ "$VERIFY" -eq 1 ] && verify_install
 
   print_summary

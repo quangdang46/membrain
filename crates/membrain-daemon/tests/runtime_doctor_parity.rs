@@ -843,13 +843,10 @@ async fn runtime_health_jsonrpc_response_matches_shared_health_contract_fields()
         result["attention"]["hotspots"][0]["contributing_signals"]["recall_count"],
         json!(0)
     );
-    assert_eq!(
-        result["attention"]["hotspots"][0]["sample_log"]
-            .as_str()
-            .unwrap()
-            .contains("namespace=team.alpha"),
-        true
-    );
+    assert!(result["attention"]["hotspots"][0]["sample_log"]
+        .as_str()
+        .unwrap()
+        .contains("namespace=team.alpha"));
     assert_eq!(result["cache"]["hints_submitted"], json!(0));
     assert_eq!(result["cache"]["prefetch_queue_depth"], json!(0));
 

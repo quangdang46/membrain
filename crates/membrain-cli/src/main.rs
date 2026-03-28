@@ -1842,6 +1842,7 @@ struct RecallCommandConfig {
     cold_tier: String,
 }
 
+#[allow(clippy::too_many_arguments)]
 fn validate_recall_command(
     namespace: Option<&str>,
     query: Option<&str>,
@@ -2140,8 +2141,8 @@ fn build_confidence_inputs(record: &LocalMemoryRecord) -> ConfidenceInputs {
     ConfidenceInputs {
         corroboration_count: u32::from((record.provisional_salience / 250).min(4)),
         reconsolidation_count,
-        ticks_since_last_access: u64::from(record.memory_id.0.saturating_mul(17)),
-        age_ticks: u64::from(record.memory_id.0.saturating_mul(23)),
+        ticks_since_last_access: record.memory_id.0.saturating_mul(17),
+        age_ticks: record.memory_id.0.saturating_mul(23),
         resolution_state: membrain_core::engine::contradiction::ResolutionState::None,
         conflict_score: 0,
         causal_parent_count,
@@ -2612,6 +2613,7 @@ fn query_by_example_memory_ids(
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 fn build_retrieval_result_set(
     local_records: &[LocalMemoryRecord],
     config: &RecallCommandConfig,
@@ -2970,14 +2972,16 @@ fn build_retrieval_result_set(
                     CanonicalMemoryType::Event => Some("inspect_event_context"),
                     _ => None,
                 }?;
-                let freshness_caveats = config
-                    .show_decaying
-                    .then(|| vec!["decay_sensitive_context".to_string()])
-                    .unwrap_or_default();
-                let policy_caveats = config
-                    .include_public
-                    .then(|| vec!["include_public_scope".to_string()])
-                    .unwrap_or_default();
+                let freshness_caveats = if config.show_decaying {
+                    vec!["decay_sensitive_context".to_string()]
+                } else {
+                    Vec::new()
+                };
+                let policy_caveats = if config.include_public {
+                    vec!["include_public_scope".to_string()]
+                } else {
+                    Vec::new()
+                };
                 Some(membrain_core::engine::result::ActionArtifact {
                     action_type: action_type.to_string(),
                     suggestion: format!(
@@ -3122,6 +3126,7 @@ fn encode_memory(
 
 // ── Recall ───────────────────────────────────────────────────────────────────
 
+#[allow(clippy::too_many_arguments)]
 fn budget_memories(
     store: &BrainStore,
     local_records: &[LocalMemoryRecord],
@@ -3401,6 +3406,7 @@ fn inspect_memory(
 
 // ── Explain ──────────────────────────────────────────────────────────────────
 
+#[allow(clippy::too_many_arguments)]
 fn observe_memories(
     store: &BrainStore,
     hot: &mut Tier1HotMetadataStore,
@@ -4056,6 +4062,7 @@ fn sharing_trace_policy_summary(
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 fn sharing_audit_view(
     namespace: &NamespaceId,
     target_namespace: Option<&NamespaceId>,
@@ -6613,7 +6620,7 @@ async fn main() -> anyhow::Result<()> {
                 let state = engine
                     .goal_state(&TaskId::new(task.as_deref().unwrap_or("active-goal")))
                     .expect("seeded goal state should exist");
-                let log = vec![goal_log_event(
+                let log = [goal_log_event(
                     "goal_get",
                     task.as_deref(),
                     &namespace,
@@ -6652,7 +6659,7 @@ async fn main() -> anyhow::Result<()> {
                 let state = engine
                     .pin_evidence(&task_id, MemoryId(*memory_id))
                     .expect("seeded goal state should exist");
-                let log = vec![goal_log_event(
+                let log = [goal_log_event(
                     "goal_pin",
                     Some(task.as_str()),
                     &namespace,
@@ -6686,7 +6693,7 @@ async fn main() -> anyhow::Result<()> {
                 let state = engine
                     .dismiss_evidence(&task_id, MemoryId(*memory_id))
                     .expect("seeded goal state should exist");
-                let log = vec![goal_log_event(
+                let log = [goal_log_event(
                     "goal_dismiss",
                     Some(task.as_str()),
                     &namespace,
@@ -6721,7 +6728,7 @@ async fn main() -> anyhow::Result<()> {
                     namespace: namespace.as_str().to_string(),
                     authoritative_truth: "durable_memory",
                 };
-                let log = vec![goal_log_event(
+                let log = [goal_log_event(
                     "goal_snapshot",
                     Some(task.as_str()),
                     &namespace,
@@ -6755,7 +6762,7 @@ async fn main() -> anyhow::Result<()> {
                         next_goal_tick(),
                     )
                     .expect("seeded goal state should exist");
-                let log = vec![goal_log_event(
+                let log = [goal_log_event(
                     "goal_pause",
                     task_ref,
                     &namespace,
@@ -6824,7 +6831,7 @@ async fn main() -> anyhow::Result<()> {
                         namespace: namespace.as_str().to_string(),
                         authoritative_truth: "durable_memory",
                     });
-                let log = vec![goal_log_event(
+                let log = [goal_log_event(
                     "goal_resume",
                     task_ref,
                     &namespace,
@@ -6864,7 +6871,7 @@ async fn main() -> anyhow::Result<()> {
                 let output_result = engine
                     .abandon_goal(&task_id, reason.clone(), next_goal_tick())
                     .expect("seeded goal state should exist");
-                let log = vec![goal_log_event(
+                let log = [goal_log_event(
                     "goal_abandon",
                     task_ref,
                     &namespace,
@@ -7172,10 +7179,8 @@ async fn main() -> anyhow::Result<()> {
                 let response = cli_preflight_run(namespace, original_query, proposed_action)?;
                 if output.json {
                     println!("{}", serde_json::to_string_pretty(&response)?);
-                } else {
-                    if !output.quiet {
-                        print_preflight_run_human(&response);
-                    }
+                } else if !output.quiet {
+                    print_preflight_run_human(&response);
                 }
                 let exit_code = preflight_exit_code(&response);
                 if exit_code != 0 {
@@ -7191,10 +7196,8 @@ async fn main() -> anyhow::Result<()> {
                 let response = cli_preflight_explain(namespace, original_query, proposed_action)?;
                 if output.json {
                     println!("{}", serde_json::to_string_pretty(&response)?);
-                } else {
-                    if !output.quiet {
-                        print_preflight_explain_human(&response);
-                    }
+                } else if !output.quiet {
+                    print_preflight_explain_human(&response);
                 }
                 let exit_code = explain_exit_code(&response);
                 if exit_code != 0 {
@@ -7218,10 +7221,8 @@ async fn main() -> anyhow::Result<()> {
                 )?;
                 if output.json {
                     println!("{}", serde_json::to_string_pretty(&response)?);
-                } else {
-                    if !output.quiet {
-                        print_preflight_allow_human(&response);
-                    }
+                } else if !output.quiet {
+                    print_preflight_allow_human(&response);
                 }
                 let exit_code = preflight_exit_code(&response);
                 if exit_code != 0 {
@@ -8212,7 +8213,7 @@ mod tests {
         assert_eq!(allow.preflight_state, "ready");
         assert_eq!(allow.preflight_outcome, "force_confirmed");
         assert_eq!(allow.outcome_class, "accepted");
-        assert_eq!(allow.confirmation.confirmed, true);
+        assert!(allow.confirmation.confirmed);
         assert_eq!(
             allow.confirmation_reason.as_deref(),
             Some("operator confirmed exact previewed scope")

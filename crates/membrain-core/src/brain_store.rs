@@ -53,7 +53,7 @@ use crate::store::procedural::{
     ProceduralEntryState, ProceduralMemoryRecord, ProceduralStore, ProceduralStoreError,
     ProceduralStoreErrorReason,
 };
-use crate::store::tier2::{Tier2DurableItemLayout, Tier2Store};
+use crate::store::tier2::{Tier2DurableItemLayout, Tier2LayoutInput, Tier2Store};
 use crate::store::tier_router::{TierRouter, TierRoutingInput, TierRoutingTrace};
 use crate::store::{AuditLogStoreApi, HotStoreApi, ProceduralStoreApi, Tier2StoreApi};
 use crate::types::{
@@ -2227,15 +2227,15 @@ impl BrainStore {
             },
             sharing: SharingMetadata::default(),
         };
-        let schema_layout = self.tier2_store.layout_item(
-            namespace.clone(),
-            artifact.schema_memory_id,
-            SessionId(0),
-            artifact.schema_memory_id.0,
-            &schema_envelope,
-            None,
-            None,
-        );
+        let schema_layout = self.tier2_store.layout_item_with_input(Tier2LayoutInput {
+            namespace: namespace.clone(),
+            memory_id: artifact.schema_memory_id,
+            session_id: SessionId(0),
+            fingerprint: artifact.schema_memory_id.0,
+            envelope: &schema_envelope,
+            confidence_inputs: None,
+            confidence_output: None,
+        });
         self.compression_memories
             .insert(artifact.schema_memory_id, schema_layout);
 
@@ -2264,15 +2264,15 @@ impl BrainStore {
                 },
                 sharing: SharingMetadata::default(),
             };
-            let source_layout = self.tier2_store.layout_item(
-                namespace.clone(),
-                *source_memory_id,
-                SessionId(0),
-                source_memory_id.0,
-                &source_envelope,
-                None,
-                None,
-            );
+            let source_layout = self.tier2_store.layout_item_with_input(Tier2LayoutInput {
+                namespace: namespace.clone(),
+                memory_id: *source_memory_id,
+                session_id: SessionId(0),
+                fingerprint: source_memory_id.0,
+                envelope: &source_envelope,
+                confidence_inputs: None,
+                confidence_output: None,
+            });
             self.compression_memories
                 .insert(*source_memory_id, source_layout);
         }
@@ -3099,15 +3099,15 @@ impl BrainStore {
             &confidence_inputs,
             &crate::engine::confidence::ConfidencePolicy::default(),
         );
-        self.tier2_store.layout_item(
+        self.tier2_store.layout_item_with_input(Tier2LayoutInput {
             namespace,
             memory_id,
             session_id,
-            prepared.fingerprint,
-            &prepared.normalized,
-            Some(confidence_inputs),
-            Some(confidence_output),
-        )
+            fingerprint: prepared.fingerprint,
+            envelope: &prepared.normalized,
+            confidence_inputs: Some(confidence_inputs),
+            confidence_output: Some(confidence_output),
+        })
     }
 
     /// Runs the encode fast path, materializes a durable Tier2 layout, and preserves the

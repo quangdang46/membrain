@@ -13,9 +13,20 @@ use crate::types::{
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
 pub struct Tier2Store;
 
+pub struct Tier2LayoutInput<'a> {
+    pub namespace: NamespaceId,
+    pub memory_id: MemoryId,
+    pub session_id: SessionId,
+    pub fingerprint: u64,
+    pub envelope: &'a NormalizedMemoryEnvelope,
+    pub confidence_inputs: Option<ConfidenceInputs>,
+    pub confidence_output: Option<ConfidenceOutput>,
+}
+
 impl Tier2Store {
     /// Builds a durable Tier2 item layout that keeps prefilter-safe metadata separate from the
     /// heavyweight payload body.
+    #[allow(clippy::too_many_arguments)]
     pub fn layout_item(
         &self,
         namespace: NamespaceId,
@@ -26,43 +37,55 @@ impl Tier2Store {
         confidence_inputs: Option<ConfidenceInputs>,
         confidence_output: Option<ConfidenceOutput>,
     ) -> Tier2DurableItemLayout {
-        let payload_locator = Tier2PayloadLocator::for_memory(&namespace, memory_id);
+        self.layout_item_with_input(Tier2LayoutInput {
+            namespace,
+            memory_id,
+            session_id,
+            fingerprint,
+            envelope,
+            confidence_inputs,
+            confidence_output,
+        })
+    }
+
+    pub fn layout_item_with_input(&self, input: Tier2LayoutInput<'_>) -> Tier2DurableItemLayout {
+        let payload_locator = Tier2PayloadLocator::for_memory(&input.namespace, input.memory_id);
 
         Tier2DurableItemLayout {
             metadata: Tier2MetadataRecord {
-                namespace: namespace.clone(),
-                memory_id,
-                session_id,
-                memory_type: envelope.memory_type,
-                route_family: FastPathRouteFamily::from_memory_type(envelope.memory_type),
-                compact_text: envelope.compact_text.clone(),
-                fingerprint,
-                normalization_generation: envelope.normalization_generation,
-                payload_size_bytes: envelope.payload_size_bytes,
-                affect: envelope.affect,
-                landmark: envelope.landmark.clone(),
-                visibility: envelope.sharing.visibility,
-                workspace_id: envelope.sharing.workspace_id.clone(),
-                agent_id: envelope.sharing.agent_id.clone(),
-                observation_source: envelope.observation_source.clone(),
-                observation_chunk_id: envelope.observation_chunk_id.clone(),
+                namespace: input.namespace.clone(),
+                memory_id: input.memory_id,
+                session_id: input.session_id,
+                memory_type: input.envelope.memory_type,
+                route_family: FastPathRouteFamily::from_memory_type(input.envelope.memory_type),
+                compact_text: input.envelope.compact_text.clone(),
+                fingerprint: input.fingerprint,
+                normalization_generation: input.envelope.normalization_generation,
+                payload_size_bytes: input.envelope.payload_size_bytes,
+                affect: input.envelope.affect,
+                landmark: input.envelope.landmark.clone(),
+                visibility: input.envelope.sharing.visibility,
+                workspace_id: input.envelope.sharing.workspace_id.clone(),
+                agent_id: input.envelope.sharing.agent_id.clone(),
+                observation_source: input.envelope.observation_source.clone(),
+                observation_chunk_id: input.envelope.observation_chunk_id.clone(),
                 lease: LeaseMetadata::recommended(
-                    envelope.memory_type,
-                    envelope.observation_source.is_some(),
+                    input.envelope.memory_type,
+                    input.envelope.observation_source.is_some(),
                 ),
-                has_causal_parents: envelope.has_causal_parents,
-                has_causal_children: envelope.has_causal_children,
-                compression: envelope.compression.clone(),
-                confidence_inputs,
-                confidence_output,
+                has_causal_parents: input.envelope.has_causal_parents,
+                has_causal_children: input.envelope.has_causal_children,
+                compression: input.envelope.compression.clone(),
+                confidence_inputs: input.confidence_inputs,
+                confidence_output: input.confidence_output,
                 payload_locator: payload_locator.clone(),
             },
             payload: Tier2PayloadRecord {
-                namespace,
-                memory_id,
+                namespace: input.namespace,
+                memory_id: input.memory_id,
                 payload_locator,
-                raw_text: envelope.raw_text.clone(),
-                raw_size_bytes: envelope.raw_text.len(),
+                raw_text: input.envelope.raw_text.clone(),
+                raw_size_bytes: input.envelope.raw_text.len(),
             },
         }
     }

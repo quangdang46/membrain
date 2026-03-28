@@ -166,6 +166,10 @@ args = ["mcp"]
 
 If you want a custom Membrain state root in either client, append `--db-path /path/to/state-root` after `membrain mcp`.
 
+Installer note:
+- the published `install.sh` now attempts to configure both of those MCP entries automatically, merges Membrain-owned Claude and Codex hook config into the standard user config files, and auto-starts `membrain-daemon` where the platform supports a user service
+- the installer-managed real-time daemon log lives at `~/.local/state/membrain/membrain-daemon.log`
+
 This repo also includes a working Claude hook sink at [`.claude/hooks/membrain_hook.py`](/home/quangdang/projects/tools/membrain/.claude/hooks/membrain_hook.py), wired from [`.claude/settings.json`](/home/quangdang/projects/tools/membrain/.claude/settings.json).
 
 Current hook behavior in this repo:

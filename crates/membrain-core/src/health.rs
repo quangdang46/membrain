@@ -82,6 +82,18 @@ pub struct FeatureAvailabilityEntry {
     pub note: Option<String>,
 }
 
+struct DashboardViewInputs<'a> {
+    subsystem_status: &'a [SubsystemStatus],
+    alerts: &'a [HealthAlert],
+    trends: &'a [HealthTrend],
+    attention: &'a AttentionAggregateReport,
+    cache: &'a CacheHealthReport,
+    affect_history_rows: usize,
+    latest_affect_snapshot: Option<(f32, f32)>,
+    latest_affect_tick: Option<u64>,
+    degraded_status: Option<&'a DegradedStatusSurface>,
+}
+
 /// Stable alert severity for operator-facing health alerts.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
 pub enum HealthAlertSeverity {
@@ -618,9 +630,9 @@ impl BrainHealthReport {
         }];
         subsystem_status.push(SubsystemStatus {
             subsystem: "lifecycle",
-            state: if inputs.lifecycle.background_maintenance_runs == 0 {
-                SubsystemHealthState::Degraded
-            } else if inputs.lifecycle.reconsolidation_active_count > 0 {
+            state: if inputs.lifecycle.background_maintenance_runs == 0
+                || inputs.lifecycle.reconsolidation_active_count > 0
+            {
                 SubsystemHealthState::Degraded
             } else {
                 SubsystemHealthState::Healthy
@@ -970,17 +982,17 @@ impl BrainHealthReport {
             lower_is_better,
         );
         let alerts = derive_health_alerts(&subsystem_status, degraded_status.as_ref());
-        let dashboard_views = derive_dashboard_views(
-            &subsystem_status,
-            &alerts,
-            &trends,
-            &attention,
-            &cache,
-            inputs.affect_history_rows,
-            inputs.latest_affect_snapshot,
-            inputs.latest_affect_tick,
-            degraded_status.as_ref(),
-        );
+        let dashboard_views = derive_dashboard_views(DashboardViewInputs {
+            subsystem_status: &subsystem_status,
+            alerts: &alerts,
+            trends: &trends,
+            attention: &attention,
+            cache: &cache,
+            affect_history_rows: inputs.affect_history_rows,
+            latest_affect_snapshot: inputs.latest_affect_snapshot,
+            latest_affect_tick: inputs.latest_affect_tick,
+            degraded_status: degraded_status.as_ref(),
+        });
         let drill_down_paths =
             derive_drill_down_paths(&subsystem_status, &alerts, degraded_status.as_ref());
         let trend_summary = summarize_trends(&trends, &subsystem_status);
@@ -1482,22 +1494,14 @@ fn derive_health_alerts(
     alerts
 }
 
-fn derive_dashboard_views(
-    subsystem_status: &[SubsystemStatus],
-    alerts: &[HealthAlert],
-    trends: &[HealthTrend],
-    attention: &AttentionAggregateReport,
-    cache: &CacheHealthReport,
-    affect_history_rows: usize,
-    latest_affect_snapshot: Option<(f32, f32)>,
-    latest_affect_tick: Option<u64>,
-    degraded_status: Option<&DegradedStatusSurface>,
-) -> Vec<DashboardView> {
-    let degraded_count = subsystem_status
+fn derive_dashboard_views(inputs: DashboardViewInputs<'_>) -> Vec<DashboardView> {
+    let degraded_count = inputs
+        .subsystem_status
         .iter()
         .filter(|status| status.state != SubsystemHealthState::Healthy)
         .count();
-    let worsening_trends = trends
+    let worsening_trends = inputs
+        .trends
         .iter()
         .filter(|trend| trend.direction == TrendDirection::Worsening)
         .count();
@@ -1507,11 +1511,11 @@ fn derive_dashboard_views(
             title: "Overview",
             summary: format!(
                 "subsystems={} non_healthy={} alerts={}",
-                subsystem_status.len(),
+                inputs.subsystem_status.len(),
                 degraded_count,
-                alerts.len()
+                inputs.alerts.len()
             ),
-            alert_count: alerts.len(),
+            alert_count: inputs.alerts.len(),
             drill_down_targets: vec!["/health/subsystems", "/health/alerts"],
         },
         DashboardView {
@@ -1519,13 +1523,14 @@ fn derive_dashboard_views(
             title: "Alerts",
             summary: format!(
                 "active_alerts={} critical_alerts={}",
-                alerts.len(),
-                alerts
+                inputs.alerts.len(),
+                inputs
+                    .alerts
                     .iter()
                     .filter(|alert| alert.severity == HealthAlertSeverity::Critical)
                     .count()
             ),
-            alert_count: alerts.len(),
+            alert_count: inputs.alerts.len(),
             drill_down_targets: vec!["/health/alerts", "/doctor", "/audit"],
         },
         DashboardView {
@@ -1533,10 +1538,10 @@ fn derive_dashboard_views(
             title: "Subsystems",
             summary: format!(
                 "tracked_subsystems={} non_healthy={}",
-                subsystem_status.len(),
+                inputs.subsystem_status.len(),
                 degraded_count
             ),
-            alert_count: alerts.len(),
+            alert_count: inputs.alerts.len(),
             drill_down_targets: vec!["/health/subsystems", "/inspect"],
         },
         DashboardView {
@@ -1544,7 +1549,7 @@ fn derive_dashboard_views(
             title: "Trends",
             summary: format!(
                 "tracked_trends={} worsening={}",
-                trends.len(),
+                inputs.trends.len(),
                 worsening_trends
             ),
             alert_count: worsening_trends,
@@ -1555,44 +1560,44 @@ fn derive_dashboard_views(
             title: "Attention heatmap",
             summary: format!(
                 "hotspots={} hot={} warming={} max_score={} prewarm={} queue={}/{}",
-                attention.hotspot_count,
-                attention.hot_candidate_count,
-                attention.warming_candidate_count,
-                attention.max_attention_score,
-                cache.adaptive_prewarm_state,
-                cache.prefetch_queue_depth,
-                cache.prefetch_capacity,
+                inputs.attention.hotspot_count,
+                inputs.attention.hot_candidate_count,
+                inputs.attention.warming_candidate_count,
+                inputs.attention.max_attention_score,
+                inputs.cache.adaptive_prewarm_state,
+                inputs.cache.prefetch_queue_depth,
+                inputs.cache.prefetch_capacity,
             ),
-            alert_count: attention.hot_candidate_count,
+            alert_count: inputs.attention.hot_candidate_count,
             drill_down_targets: vec!["/health/attention", "/health/subsystems/cache"],
         },
         DashboardView {
             view: DashboardViewId::AffectTrajectory,
             title: "Affect trajectory",
-            summary: match latest_affect_snapshot {
+            summary: match inputs.latest_affect_snapshot {
                 Some((valence, arousal)) => format!(
                     "rows={} latest_tick={} current_mood=({:.2},{:.2}) history=/mood_history",
-                    affect_history_rows,
-                    latest_affect_tick.unwrap_or(0),
+                    inputs.affect_history_rows,
+                    inputs.latest_affect_tick.unwrap_or(0),
                     valence,
                     arousal,
                 ),
                 None => format!(
                     "rows={} latest_tick={} current_mood=unavailable history=/mood_history",
-                    affect_history_rows,
-                    latest_affect_tick.unwrap_or(0),
+                    inputs.affect_history_rows,
+                    inputs.latest_affect_tick.unwrap_or(0),
                 ),
             },
             alert_count: 0,
             drill_down_targets: vec!["/mood_history", "/health/subsystems/memory"],
         },
     ];
-    if let Some(degraded) = degraded_status {
+    if let Some(degraded) = inputs.degraded_status {
         views.push(DashboardView {
             view: DashboardViewId::DegradedMode,
             title: "Degraded mode",
             summary: degraded.summary.clone(),
-            alert_count: alerts.len(),
+            alert_count: inputs.alerts.len(),
             drill_down_targets: vec!["/health/degraded", "/doctor", "/audit"],
         });
     }
@@ -1912,10 +1917,7 @@ fn recommended_runbooks(
     {
         runbooks.push("index_rebuild_operations");
     }
-    if degraded_reasons
-        .iter()
-        .any(|reason| *reason == "index_bypassed")
-    {
+    if degraded_reasons.contains(&"index_bypassed") {
         runbooks.push("tier2_index_drift");
     }
     if degraded_reasons.iter().any(|reason| {
