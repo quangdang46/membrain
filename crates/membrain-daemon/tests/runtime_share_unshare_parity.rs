@@ -1,20 +1,43 @@
+#![cfg(unix)]
+
 use membrain_daemon::daemon::{DaemonRuntime, DaemonRuntimeConfig};
 use serde_json::{json, Value};
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::net::UnixStream;
 use tokio::time::timeout;
 
 fn unique_socket_path(label: &str) -> PathBuf {
+    static NEXT_SOCKET_ID: AtomicU64 = AtomicU64::new(1);
+
     let nanos = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .expect("clock should be after epoch")
         .as_nanos();
+    let unique_id = NEXT_SOCKET_ID.fetch_add(1, Ordering::Relaxed);
+    let short_label: String = label
+        .chars()
+        .filter(|ch| ch.is_ascii_alphanumeric())
+        .take(8)
+        .collect();
     std::env::temp_dir().join(format!(
-        "membrain-daemon-{label}-{}-{nanos}.sock",
-        std::process::id()
+        "mbd-{short_label}-{}-{nanos}-{unique_id}.sock",
+        std::process::id(),
     ))
+}
+
+fn scaled_timeout(duration: Duration) -> Duration {
+    #[cfg(target_os = "macos")]
+    {
+        duration.checked_mul(10).unwrap_or(duration)
+    }
+
+    #[cfg(not(target_os = "macos"))]
+    {
+        duration
+    }
 }
 
 async fn send_request(socket_path: &Path, request: Value) -> Value {
@@ -45,7 +68,7 @@ async fn spawn_runtime(label: &str) -> (PathBuf, tokio::task::JoinHandle<anyhow:
     let runtime = DaemonRuntime::with_config(config);
     let handle = tokio::spawn(async move { runtime.run_until_stopped().await });
 
-    timeout(Duration::from_secs(2), async {
+    timeout(scaled_timeout(Duration::from_secs(2)), async {
         while tokio::fs::metadata(&socket_path).await.is_err() {
             tokio::task::yield_now().await;
         }
@@ -63,7 +86,7 @@ async fn shutdown_runtime(socket_path: &Path, handle: tokio::task::JoinHandle<an
     )
     .await;
     assert_eq!(shutdown_response["result"]["shutting_down"], json!(true));
-    timeout(Duration::from_secs(2), handle)
+    timeout(scaled_timeout(Duration::from_secs(2)), handle)
         .await
         .expect("daemon task should finish")
         .expect("join should succeed")

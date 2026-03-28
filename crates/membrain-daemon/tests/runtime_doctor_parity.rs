@@ -1,3 +1,5 @@
+#![cfg(unix)]
+
 use membrain_core::engine::confidence::{ConfidenceInputs, ConfidenceOutput};
 use membrain_core::engine::contradiction::ResolutionState;
 use membrain_core::engine::lease::LeaseMetadata;
@@ -24,9 +26,14 @@ fn unique_socket_path(label: &str) -> PathBuf {
         .expect("clock should be after epoch")
         .as_nanos();
     let unique_id = NEXT_SOCKET_ID.fetch_add(1, Ordering::Relaxed);
+    let short_label: String = label
+        .chars()
+        .filter(|ch| ch.is_ascii_alphanumeric())
+        .take(8)
+        .collect();
     std::env::temp_dir().join(format!(
-        "membrain-daemon-{label}-{}-{nanos}-{unique_id}.sock",
-        std::process::id()
+        "mbd-{short_label}-{}-{nanos}-{unique_id}.sock",
+        std::process::id(),
     ))
 }
 
@@ -65,6 +72,18 @@ async fn send_request(socket_path: &std::path::Path, request: Value) -> Value {
     serde_json::from_str(&line).expect("daemon response should be valid json")
 }
 
+fn scaled_timeout(duration: Duration) -> Duration {
+    #[cfg(target_os = "macos")]
+    {
+        duration.checked_mul(10).unwrap_or(duration)
+    }
+
+    #[cfg(not(target_os = "macos"))]
+    {
+        duration
+    }
+}
+
 async fn spawn_runtime() -> (PathBuf, tokio::task::JoinHandle<anyhow::Result<()>>) {
     let socket_path = unique_socket_path("doctor-parity");
     let mut config = DaemonRuntimeConfig::new(&socket_path);
@@ -72,7 +91,7 @@ async fn spawn_runtime() -> (PathBuf, tokio::task::JoinHandle<anyhow::Result<()>
     let runtime = DaemonRuntime::with_config(config);
     let handle = tokio::spawn(async move { runtime.run_until_stopped().await });
 
-    timeout(Duration::from_secs(2), async {
+    timeout(scaled_timeout(Duration::from_secs(2)), async {
         while tokio::fs::metadata(&socket_path).await.is_err() {
             tokio::task::yield_now().await;
         }
@@ -100,7 +119,7 @@ async fn spawn_runtime_with_db(
     let runtime = DaemonRuntime::with_config(config);
     let handle = tokio::spawn(async move { runtime.run_until_stopped().await });
 
-    timeout(Duration::from_secs(2), async {
+    timeout(scaled_timeout(Duration::from_secs(2)), async {
         while tokio::fs::metadata(&socket_path).await.is_err() {
             tokio::task::yield_now().await;
         }
@@ -132,7 +151,7 @@ async fn spawn_runtime_with_seeded_db(
     let runtime = DaemonRuntime::with_config(config);
     let handle = tokio::spawn(async move { runtime.run_until_stopped().await });
 
-    timeout(Duration::from_secs(2), async {
+    timeout(scaled_timeout(Duration::from_secs(2)), async {
         while tokio::fs::metadata(&socket_path).await.is_err() {
             tokio::task::yield_now().await;
         }
@@ -205,7 +224,7 @@ async fn shutdown_runtime(
     )
     .await;
     assert_eq!(shutdown_response["result"]["shutting_down"], json!(true));
-    timeout(Duration::from_secs(2), handle)
+    timeout(scaled_timeout(Duration::from_secs(2)), handle)
         .await
         .expect("daemon task should finish")
         .expect("join should succeed")

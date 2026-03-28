@@ -6743,6 +6743,7 @@ mod tests {
     use serde_json::{json, Value};
     use std::future::Future;
     use std::path::PathBuf;
+    use std::sync::atomic::{AtomicU64, Ordering};
     use std::sync::Arc;
     use std::time::{SystemTime, UNIX_EPOCH};
     use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
@@ -6751,7 +6752,7 @@ mod tests {
 
     fn scaled_timeout(duration: Duration) -> Duration {
         if cfg!(target_os = "macos") {
-            duration.saturating_mul(5)
+            duration.saturating_mul(10)
         } else {
             duration
         }
@@ -6768,11 +6769,19 @@ mod tests {
     }
 
     fn unique_path(name: &str) -> PathBuf {
+        static NEXT_SOCKET_ID: AtomicU64 = AtomicU64::new(1);
+
         let nanos = SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .unwrap()
             .as_nanos();
-        std::env::temp_dir().join(format!("membrain-daemon-{name}-{nanos}.sock"))
+        let unique_id = NEXT_SOCKET_ID.fetch_add(1, Ordering::Relaxed);
+        let short_name: String = name
+            .chars()
+            .filter(|ch| ch.is_ascii_alphanumeric())
+            .take(8)
+            .collect();
+        std::env::temp_dir().join(format!("mbd-{short_name}-{unique_id:x}-{nanos:x}.sock"))
     }
 
     async fn send_request(socket_path: &std::path::Path, request: Value) -> Value {
