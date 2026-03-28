@@ -245,11 +245,13 @@ fn cache_metrics_json(
     summary.prefetch_dropped_count = prefetch_dropped_count;
     serde_json::to_value(summary)
 }
+#[cfg(unix)]
 use std::os::unix::fs::FileTypeExt;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex as StdMutex};
 use tokio::io::BufReader;
+#[cfg(unix)]
 use tokio::net::{UnixListener, UnixStream};
 use tokio::sync::{Mutex, Notify, Semaphore};
 use tokio::task::JoinSet;
@@ -2344,6 +2346,7 @@ impl DaemonRuntime {
         Ok(())
     }
 
+    #[cfg(unix)]
     pub async fn run_until_stopped(&self) -> anyhow::Result<()> {
         self.state
             .set_authority_mode(RuntimeAuthorityMode::UnixSocketDaemon)
@@ -2389,6 +2392,12 @@ impl DaemonRuntime {
         Ok(())
     }
 
+    #[cfg(not(unix))]
+    pub async fn run_until_stopped(&self) -> anyhow::Result<()> {
+        anyhow::bail!("unix socket daemon mode is not supported on this platform");
+    }
+
+    #[cfg(unix)]
     async fn accept_loop(
         listener: UnixListener,
         state: Arc<RuntimeState>,
@@ -2450,6 +2459,7 @@ impl DaemonRuntime {
         }
     }
 
+    #[cfg(unix)]
     async fn handle_connection(stream: UnixStream, state: Arc<RuntimeState>) {
         let queued_guard = QueueGuard::new(Arc::clone(&state));
         let request_correlation_id = state.next_request_id();
@@ -2545,6 +2555,7 @@ impl DaemonRuntime {
         let _ = writer_half.write_all(b"\n").await;
     }
 
+    #[cfg(unix)]
     async fn write_serialized_response(
         writer_half: &mut tokio::net::unix::OwnedWriteHalf,
         response: &JsonRpcResponse,
@@ -6604,6 +6615,7 @@ impl DaemonRuntime {
         }
     }
 
+    #[cfg(unix)]
     async fn write_response(
         mut stream: UnixStream,
         response: &JsonRpcResponse,
@@ -6614,6 +6626,7 @@ impl DaemonRuntime {
         Ok(())
     }
 
+    #[cfg(unix)]
     async fn remove_stale_socket(&self) -> anyhow::Result<()> {
         match tokio::fs::symlink_metadata(&self.config.socket_path).await {
             Ok(metadata) if metadata.file_type().is_socket() => {
@@ -6700,7 +6713,7 @@ impl Drop for BackgroundJobGuard {
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, unix))]
 mod tests {
     use super::{DaemonRuntime, DaemonRuntimeConfig};
     use crate::mcp::{McpError, McpResponse};

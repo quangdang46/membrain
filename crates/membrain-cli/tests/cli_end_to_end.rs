@@ -135,14 +135,16 @@ fn unique_socket_path(label: &str) -> std::path::PathBuf {
         .duration_since(UNIX_EPOCH)
         .expect("system time should be after unix epoch")
         .as_nanos();
+    let compact_label = label.chars().take(8).collect::<String>();
     std::env::temp_dir().join(format!(
-        "membrain-cli-{label}-{}-{unique}.sock",
-        std::process::id()
+        "mb-{compact_label}-{}-{:x}.sock",
+        std::process::id(),
+        unique & 0xffff_ffff
     ))
 }
 
 fn wait_for_socket(socket_path: &std::path::Path) -> bool {
-    for _ in 0..200 {
+    for _ in 0..500 {
         if socket_path.exists() && UnixStream::connect(socket_path).is_ok() {
             return true;
         }
