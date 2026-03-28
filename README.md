@@ -687,6 +687,28 @@ cargo install --path crates/membrain-cli
 cargo install --path crates/membrain-daemon
 ```
 
+Install from the published release with the curl-pipe installer:
+
+```bash
+curl -fsSL "https://raw.githubusercontent.com/quangdang46/membrain/main/install.sh?$(date +%s)" | bash
+```
+
+Useful installer flags:
+
+```bash
+curl -fsSL "https://raw.githubusercontent.com/quangdang46/membrain/main/install.sh?$(date +%s)" | bash -s -- --verify --easy-mode
+curl -fsSL "https://raw.githubusercontent.com/quangdang46/membrain/main/install.sh?$(date +%s)" | bash -s -- --with-codex-mcp --with-claude-mcp
+curl -fsSL "https://raw.githubusercontent.com/quangdang46/membrain/main/install.sh?$(date +%s)" | bash -s -- --auto-start-daemon
+```
+
+What the installer can do:
+
+- install both `membrain` and `membrain-daemon`
+- optionally register Membrain MCP with Codex
+- optionally register Membrain MCP with Claude Code
+- optionally configure a user-level daemon auto-start service on supported platforms
+- optionally verify the installed binaries
+
 ---
 
 ## A simple first workflow
