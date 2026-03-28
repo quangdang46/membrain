@@ -23,7 +23,7 @@ However, the current implementation still falls short of the target architecture
 2. **The embedding runtime is now operationally proven on the main daemon path: health/doctor/runtime surfaces expose warm embedder reuse with load/request/cache counters after real recall traffic.**
 3. **CLI / daemon / MCP semantics are now materially closer, and the main semantic-recall contract is backed by explicit parity artifacts rather than only architectural intent.**
 4. **The runtime now shows bounded cognitive behavior on real surfaces instead of only persistence/query: maintenance can project retained evidence onto cold and reconsolidating wrapper paths, and recall/why expose those lifecycle consequences explicitly.**
-5. **The remaining docs/parity gap is narrower: transport-level proof for restore-oriented markers such as `archival_recovery_partial` still needs to stay crisp, but the broader cognitive-runtime complaint is no longer the main unresolved row.**
+5. **The earlier restore-oriented parity gap is now closed: transport-level proof now shows `archival_recovery_partial` surviving daemon and stdio MCP retrieval envelopes only when partial restore state truly shaped the result, while ordinary cold recall remains `cold_consolidated` instead of inventing that marker.**
 
 This gap matters because the docs explicitly promise a stronger model:
 
@@ -44,7 +44,7 @@ This gap matters because the docs explicitly promise a stronger model:
 | `gap.cross_surface_semantic_parity` | Core, daemon, and CLI proof coverage now all show the same realistic semantic query preferring the semantically right record over a lexical distractor while keeping hydrated evidence and non-degraded packaging on normal success paths. | Same durable visibility and explain contract across all surfaces unless policy explicitly differs. | done |
 | `gap.cognitive_runtime_vs_db_query` | Runtime now shows bounded retrieval, rerank, maintenance-driven hot/cold lifecycle projection, reconsolidation, deterministic forgetting policy proofs, and hydrated evidence on real daemon and CLI proof surfaces rather than only persistence/query behavior. | Runtime behavior visibly reflects bounded hot/cold memory, rerank, reconsolidation, forgetting, and evidence hydration. | done |
 | `gap.daemon_authoritative_runtime_posture` | Runtime status/doctor/health now distinguish `unix_socket_daemon` authority from stdio facade mode, and parity proof covers machine-readable unix-socket status/health/doctor operator artifacts plus stdio degradation semantics. | Operator surfaces truthfully distinguish stdio MCP vs long-lived daemon and expose meaningful warm-runtime authority. | done |
-| `gap.restore_archival_recovery_projection` | Shared core freshness/explain packaging now emits `archival_recovery_partial` when a partial archival recovery path actually shapes the returned envelope, with explicit regression proof in `crates/membrain-core/src/engine/result.rs:3201` and `crates/membrain-core/src/observability.rs:1502`. Docs keep that marker scoped away from ordinary recall/why success paths. The remaining gap is transport-level parity proof that CLI/daemon/MCP preserve that marker unchanged when the degraded restore state is surfaced. | Shared surfaces expose archival recovery loss states like `archival_recovery_partial` when they materially affect results. | partial |
+| `gap.restore_archival_recovery_projection` | Shared core freshness/explain packaging emits `archival_recovery_partial` when a partial archival recovery path actually shapes the returned envelope, daemon/runtime records can now persist and replay that projected freshness state, and regression proof covers unix-socket plus stdio MCP transport preserving the marker while ordinary cold recall stays `cold_consolidated`. | Shared surfaces expose archival recovery loss states like `archival_recovery_partial` when they materially affect results. | done |
 | `gap.freshness_marker_contract_completion` | Shared recall/why freshness markers now consistently emit the applicable retrieval-time contract (`lifecycle_projection`, `snapshot_scoped`, `as_of_scoped`, `lease_sensitive`, `recheck_required`, `stale_derived`) without over-claiming inspect/restore-only archival recovery states. | Shared freshness markers cover the full applicable documented contract across recall/why wrappers. | done |
 | `gap.docs_truth_and_parity_artifacts` | MISSING/docs/tests now align on hydrated success paths, bounded live MCP tools, stdio-vs-daemon runtime authority, semantic parity proof artifacts for the main recall path, and the narrowed remaining archival-recovery parity gap. | MISSING/docs/tests all consistently reflect the real contract with regression proof for unresolved runtime claims. | done |
 
@@ -323,9 +323,10 @@ This gap is now closed:
 
 MCP tooling now advertises useful tools, and the normal recall/why paths are no longer planner-only on success. The remaining mismatch is smaller now:
 
-- `docs/MCP_API.md:8-14` explicitly narrows the live MCP catalog to the bounded six-tool runtime surface, scopes degraded wording to explicit fallback cases, and states that `archival_recovery_partial` is a real shared-core marker only when partial restore state actually shaped the returned envelope
+- `docs/MCP_API.md:8-18` now distinguishes the bounded six callable MCP tools, slash-style MCP discovery methods, placeholder prompt surfaces, stdio direct JSON-RPC compatibility methods, and daemon-only dotted discovery helpers
 - `docs/MCP_API.md:667-670` distinguishes stdio MCP process-local reuse from daemon-owned repeated-request warmth
-- `docs/CLI.md:228-234` and `docs/CLI.md:328-334` now keep ordinary hydrated recall separate from inspect/degraded-fidelity archival recovery markers
+- `docs/CLI.md:167-181` now states the live stdio MCP contract in bounded terms instead of treating every transport helper as part of the callable tool catalog
+- transport regression proof now covers both the positive and negative archival-recovery marker cases on daemon and stdio MCP paths
 
 ### Why this matters
 

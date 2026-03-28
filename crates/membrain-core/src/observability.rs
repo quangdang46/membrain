@@ -826,6 +826,7 @@ fn reason_code_label(reason_code: &str) -> &'static str {
         "below_min_strength" => "below_min_strength",
         "cold_consolidated" => "cold_consolidated",
         "reconsolidation_window_open" => "reconsolidation_window_open",
+        "semantic_executor_trace" => "semantic_executor_trace",
         "intent_classification" => "intent_classification",
         "route_override_applied" => "route_override_applied",
         "route_override_not_applied" => "route_override_not_applied",

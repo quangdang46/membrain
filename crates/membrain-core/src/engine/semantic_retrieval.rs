@@ -1,6 +1,7 @@
 use crate::api::NamespaceId;
 use crate::embed::{
-    BatchEmbedTrace, CachedTextEmbedder, EmbedError, EmbedTrace, EmbeddingPurpose, LocalTextEmbedder,
+    BatchEmbedTrace, CachedTextEmbedder, EmbedError, EmbedTrace, EmbeddingPurpose,
+    LocalTextEmbedder,
 };
 use crate::engine::ranking::{fuse_scores, RankingInput, RankingProfile};
 use crate::persistence::{PersistedDaemonMemoryRecord, PersistedLocalMemoryRecord};
@@ -148,7 +149,15 @@ impl SharedSemanticRetrievalExecutor {
         config: SemanticExecutorConfig,
         embedder: &mut CachedTextEmbedder<E>,
     ) -> SemanticRetrievalResult {
-        self.execute_internal(records, namespace, query, exact_memory_id, config, Some(embedder), None)
+        self.execute_internal(
+            records,
+            namespace,
+            query,
+            exact_memory_id,
+            config,
+            Some(embedder),
+            None,
+        )
     }
 
     fn execute_internal<E: LocalTextEmbedder>(
@@ -217,7 +226,9 @@ impl SharedSemanticRetrievalExecutor {
         let lexical_prefilter = lexical_prefilter(
             &namespace_records,
             &normalized_query,
-            config.lexical_prefilter_limit.max(config.result_limit.max(1)),
+            config
+                .lexical_prefilter_limit
+                .max(config.result_limit.max(1)),
         );
         let lexical_prefilter_count = lexical_prefilter.len();
 
@@ -269,7 +280,8 @@ impl SharedSemanticRetrievalExecutor {
             };
         };
 
-        let query_embedding = match embedder.get_or_embed(EmbeddingPurpose::Content, &normalized_query)
+        let query_embedding = match embedder
+            .get_or_embed(EmbeddingPurpose::Content, &normalized_query)
         {
             Ok(embedding) => embedding,
             Err(error) => {
@@ -308,7 +320,9 @@ impl SharedSemanticRetrievalExecutor {
             .iter()
             .map(|(record, _)| normalize_text(record.retrieval_text()))
             .collect::<Vec<_>>();
-        let batch_embeddings = match embedder.get_or_embed_batch(EmbeddingPurpose::Content, &candidate_texts) {
+        let batch_embeddings = match embedder
+            .get_or_embed_batch(EmbeddingPurpose::Content, &candidate_texts)
+        {
             Ok(batch_embeddings) => batch_embeddings,
             Err(error) => {
                 let candidates = lexical_prefilter
@@ -404,7 +418,8 @@ fn lexical_prefilter(
         .iter()
         .cloned()
         .map(|record| {
-            let lexical_score = lexical_score(normalized_query, &normalize_text(record.retrieval_text()));
+            let lexical_score =
+                lexical_score(normalized_query, &normalize_text(record.retrieval_text()));
             (record, lexical_score)
         })
         .collect::<Vec<_>>();
@@ -594,7 +609,9 @@ mod tests {
             normalized_text: &str,
         ) -> Result<Vec<f32>, EmbedError> {
             if self.fail_single {
-                return Err(EmbedError::LocalBackendUnavailable("single failed".to_string()));
+                return Err(EmbedError::LocalBackendUnavailable(
+                    "single failed".to_string(),
+                ));
             }
             Ok(self
                 .vectors
@@ -609,7 +626,9 @@ mod tests {
             normalized_texts: &[String],
         ) -> Result<Vec<Vec<f32>>, EmbedError> {
             if self.fail_batch {
-                return Err(EmbedError::LocalBackendUnavailable("batch failed".to_string()));
+                return Err(EmbedError::LocalBackendUnavailable(
+                    "batch failed".to_string(),
+                ));
             }
             Ok(normalized_texts
                 .iter()
@@ -704,7 +723,11 @@ mod tests {
     #[test]
     fn embedding_failures_degrade_to_lexical_only_results() {
         let executor = SharedSemanticRetrievalExecutor;
-        let records = vec![record(1, "deploy pipeline rollback", "deploy pipeline rollback")];
+        let records = vec![record(
+            1,
+            "deploy pipeline rollback",
+            "deploy pipeline rollback",
+        )];
         let mut embedder = CachedTextEmbedder::new(FakeEmbedder::failing_single(), 8);
 
         let result = executor.execute(
@@ -764,9 +787,18 @@ mod tests {
         );
 
         assert_eq!(result.candidates.len(), 2);
-        assert_eq!(result.candidates[0].ranking_score, result.candidates[1].ranking_score);
-        assert_eq!(result.candidates[0].semantic_score, result.candidates[1].semantic_score);
-        assert_eq!(result.candidates[0].lexical_score, result.candidates[1].lexical_score);
+        assert_eq!(
+            result.candidates[0].ranking_score,
+            result.candidates[1].ranking_score
+        );
+        assert_eq!(
+            result.candidates[0].semantic_score,
+            result.candidates[1].semantic_score
+        );
+        assert_eq!(
+            result.candidates[0].lexical_score,
+            result.candidates[1].lexical_score
+        );
         assert_eq!(result.candidates[0].record.memory_id, MemoryId(3));
         assert_eq!(result.candidates[1].record.memory_id, MemoryId(9));
     }
@@ -794,9 +826,21 @@ mod tests {
     fn trace_reports_when_bounded_shortlist_truncates_lower_ranked_candidates() {
         let executor = SharedSemanticRetrievalExecutor;
         let records = vec![
-            record(1, "deploy pipeline rollback after outage", "deploy pipeline rollback after outage"),
-            record(2, "deploy pipeline canary validation checklist", "deploy pipeline canary validation checklist"),
-            record(3, "deploy pipeline smoke test notes", "deploy pipeline smoke test notes"),
+            record(
+                1,
+                "deploy pipeline rollback after outage",
+                "deploy pipeline rollback after outage",
+            ),
+            record(
+                2,
+                "deploy pipeline canary validation checklist",
+                "deploy pipeline canary validation checklist",
+            ),
+            record(
+                3,
+                "deploy pipeline smoke test notes",
+                "deploy pipeline smoke test notes",
+            ),
         ];
 
         let result = executor.execute_without_embeddings(

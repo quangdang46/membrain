@@ -164,6 +164,8 @@ When lease-sensitive evidence is action-critical, the packaged result must discl
 
 Markers such as `archival_recovery_partial` belong to inspect or restore-oriented degraded-fidelity surfaces when archival recovery is incomplete, not to ordinary recall/why freshness packaging unless that degraded restore state actually participates in the returned retrieval envelope.
 
+Current proof is intentionally split: shared core packaging tests prove that ordinary snapshot- or lifecycle-scoped retrieval does not over-claim `archival_recovery_partial`, while a separate partial-restore regression proves the marker appears when a Tier3 partial archival recovery path actually shaped the returned envelope. Transport-level parity coverage should preserve that same distinction without inventing wrapper-local freshness semantics.
+
 ### `conflict_markers` contract
 
 `conflict_markers` must preserve relevant markers such as:

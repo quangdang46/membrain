@@ -36,8 +36,6 @@ pub mod observe;
 pub mod predictive;
 /// Ranking and score-fusion surfaces.
 pub mod ranking;
-/// Shared bounded lexical+semantic retrieval executor over hydrated records.
-pub mod semantic_retrieval;
 /// Recall-path orchestration surfaces.
 pub mod recall;
 /// Reconsolidation, labile-window, and pending-update surfaces.
@@ -48,6 +46,8 @@ pub mod repair;
 pub mod result;
 /// Bounded Tier2/Tier3 retrieval planners with escalation logic.
 pub mod retrieval_planner;
+/// Shared bounded lexical+semantic retrieval executor over hydrated records.
+pub mod semantic_retrieval;
 /// LTP/LTD strength update and lazy Ebbinghaus decay surfaces.
 pub mod strength;
 /// Cognitive blackboard and resumable goal-stack working-state surfaces.

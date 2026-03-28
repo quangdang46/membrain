@@ -1,11 +1,13 @@
 use membrain_core::api::{FieldPresence, NamespaceId, PolicyContext, RequestContext, RequestId};
+use membrain_core::embed::{CachedTextEmbedder, EmbedError, EmbeddingPurpose, LocalTextEmbedder};
 use membrain_core::engine::contradiction::{
     ContradictionCandidate, ContradictionExplain, ContradictionKind, PreferredAnswerState,
     ResolutionState,
 };
-use membrain_core::embed::{CachedTextEmbedder, EmbedError, EmbeddingPurpose, LocalTextEmbedder};
 use membrain_core::engine::ranking::{fuse_scores, RankingInput, RankingProfile};
-use membrain_core::engine::recall::{RecallPlanKind, RecallRequest, RecallRuntime, RecallTraceStage};
+use membrain_core::engine::recall::{
+    RecallPlanKind, RecallRequest, RecallRuntime, RecallTraceStage,
+};
 use membrain_core::engine::result::{
     AnsweredFrom, EvidenceRole, PayloadState, ResultBuilder, ResultReason, RetrievalExplain,
     RetrievalResultSet,
@@ -919,12 +921,20 @@ fn realistic_semantic_query_beats_lexical_distractor_on_normal_tier2_path() {
         contradictions_found: 0,
         historical_context: None,
         query_by_example: None,
-        result_reasons: vec![ResultReason {
-            memory_id: Some(MemoryId(20)),
-            reason_code: "semantic_path_won".to_string(),
-            detail: "bounded semantic scoring promoted the deployment remediation memory over the lexical distractor"
-                .to_string(),
-        }],
+        result_reasons: vec![
+            ResultReason {
+                memory_id: None,
+                reason_code: "semantic_executor_trace".to_string(),
+                detail: "shared semantic executor used lexical prefilter over 2 namespace candidate(s), produced 2 prefilter candidate(s), returned 2 semantic candidate(s), and enforced bounded result_limit=2"
+                    .to_string(),
+            },
+            ResultReason {
+                memory_id: Some(MemoryId(20)),
+                reason_code: "semantic_path_won".to_string(),
+                detail: "bounded semantic scoring promoted the deployment remediation memory over the lexical distractor"
+                    .to_string(),
+            },
+        ],
     });
 
     let top = result_set.top().expect("top result");
@@ -932,8 +942,19 @@ fn realistic_semantic_query_beats_lexical_distractor_on_normal_tier2_path() {
     assert_eq!(top.result.answered_from, AnsweredFrom::Tier2Indexed);
     assert_eq!(top.result.entry_lane.as_str(), "semantic");
     assert!(result_set.explain.result_reasons.iter().any(|reason| {
-        reason.reason_code == "semantic_path_won"
-            && reason.detail.contains("lexical distractor")
+        reason.reason_code == "semantic_path_won" && reason.detail.contains("lexical distractor")
+    }));
+
+    let explain_reasons = result_set.explain_result_reasons();
+    assert!(explain_reasons.iter().any(|reason| {
+        reason.reason_code == "semantic_executor_trace"
+            && reason.reason_family == "selection"
+            && reason.route_stage == membrain_core::observability::TraceStage::Tier2Exact
+            && reason
+                .detail
+                .contains("lexical prefilter over 2 namespace candidate(s)")
+            && reason.detail.contains("returned 2 semantic candidate(s)")
+            && reason.detail.contains("bounded result_limit=2")
     }));
 }
 

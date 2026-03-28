@@ -8,15 +8,16 @@ set -euo pipefail
 # the major workflow families exposed through the runtime surface.
 #
 # It covers these workflow families explicitly:
-# 1. retrieval-envelope parity
-# 2. contradiction-adjacent safeguard classification / blocked-envelope behavior
-# 3. policy denial / preflight safeguard behavior
-# 4. share / unshare visibility + redaction parity
-# 5. consolidation request-envelope parity
-# 6. forgetting archive / restore / policy-delete runtime parity
-# 7. schema compression inspectability and lineage parity
-# 8. repair / doctor operator-visible runtime parity
-# 9. observe / inspect provenance payload parity
+# 1. MCP initialize / discovery / placeholder prompt truth
+# 2. retrieval-envelope parity
+# 3. contradiction-adjacent safeguard classification / blocked-envelope behavior
+# 4. policy denial / preflight safeguard behavior
+# 5. share / unshare visibility + redaction parity
+# 6. consolidation request-envelope parity
+# 7. forgetting archive / restore / policy-delete runtime parity
+# 8. schema compression inspectability and lineage parity
+# 9. repair / doctor operator-visible runtime parity
+# 10. observe / inspect provenance payload parity
 #
 # Usage:
 #   bash crates/membrain-daemon/tests/e2e_mcp.sh
@@ -147,6 +148,16 @@ run_check "Runtime health JSON-RPC parity test" \
 run_check "Runtime health resource parity test" \
   cargo test -p membrain-daemon --test runtime_doctor_parity runtime_health_resource_read_matches_runtime_health_payload_shape -- --nocapture
 
+section "Workflow proof: MCP initialize / discovery / bounded catalog"
+run_check "CLI stdio MCP discovery parity test" \
+  cargo test -p membrain-cli --test cli_end_to_end mcp_protocol_discovers_bounded_live_tools_and_placeholder_prompts -- --nocapture
+run_check "Unix-socket partial archival recovery marker parity test" \
+  cargo test -p membrain-daemon --test runtime_doctor_parity runtime_partial_archival_recovery_marker_survives_unix_socket_recall_and_why -- --nocapture
+run_check "Unix-socket cold consolidated negative parity test" \
+  cargo test -p membrain-daemon --test runtime_doctor_parity runtime_cold_recall_without_partial_restore_marker_stays_cold_consolidated -- --nocapture
+run_check "CLI/daemon/stdio MCP partial archival recovery parity test" \
+  cargo test -p membrain-cli --test cli_end_to_end partial_archival_recovery_marker_survives_daemon_and_stdio_mcp_transport -- --nocapture
+
 section "Workflow proof: contradiction / safeguards"
 run_check "Preflight blocked-envelope serialization tests" \
   cargo test -p membrain-daemon force_confirm_blockers_preserve_blocked_serialization_contract -- --nocapture
@@ -203,7 +214,9 @@ section "Workflow proof summary"
 cat <<'EOF'
 Validated runtime surfaces:
 - daemon CLI flag parity for runtime and maintenance knobs
+- MCP initialize/discovery parity for the bounded six callable tools, placeholder prompt surfaces, and stdio transport behavior
 - retrieval: MCP retrieval and inspect payload families preserving canonical envelope structure, explicit output_mode, and evidence/action separation
+- archival recovery parity: degraded `archival_recovery_partial` survives unix-socket and stdio MCP transport when the shared retrieval envelope actually carries it, and cold consolidated recall does not invent that marker
 - contradiction: preflight blocked-envelope serialization and runtime safeguard parity for contradiction-adjacent destructive requests
 - policy denial: preflight blocked, degraded, and force-confirmed safeguard flows
 - share/unshare: visibility handling, redaction semantics, and audit-field parity

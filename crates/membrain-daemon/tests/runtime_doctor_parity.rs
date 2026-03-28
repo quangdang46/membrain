@@ -1,3 +1,11 @@
+use membrain_core::engine::confidence::{ConfidenceInputs, ConfidenceOutput};
+use membrain_core::engine::contradiction::ResolutionState;
+use membrain_core::engine::lease::LeaseMetadata;
+use membrain_core::engine::result::FreshnessMarkers;
+use membrain_core::persistence::{
+    open_hot_db, save_runtime_records, PersistedDaemonMemoryRecord, PersistedTier2Layout,
+};
+use membrain_core::types::{CanonicalMemoryType, FastPathRouteFamily};
 use membrain_daemon::daemon::{DaemonRuntime, DaemonRuntimeConfig};
 use membrain_daemon::rpc::{RuntimeMetrics, RuntimePosture};
 use serde_json::{json, Value};
@@ -101,6 +109,90 @@ async fn spawn_runtime_with_db(
     .expect("daemon socket should appear");
 
     (socket_path, handle)
+}
+
+async fn spawn_runtime_with_seeded_db(
+    label: &str,
+    records: &[PersistedDaemonMemoryRecord],
+) -> (PathBuf, tokio::task::JoinHandle<anyhow::Result<()>>) {
+    let socket_path = unique_socket_path(label);
+    let db_root = unique_db_root(label);
+    let hot_db_path = db_root.join("hot.db");
+    let cold_db_path = db_root.join("cold.db");
+    tokio::fs::create_dir_all(&db_root)
+        .await
+        .expect("db root should exist");
+
+    let mut conn = open_hot_db(&hot_db_path).expect("hot db should open");
+    save_runtime_records(&mut conn, records).expect("runtime records should save");
+
+    let mut config =
+        DaemonRuntimeConfig::new(&socket_path).with_db_paths(&hot_db_path, &cold_db_path);
+    config.maintenance_interval = Duration::from_secs(3600);
+    let runtime = DaemonRuntime::with_config(config);
+    let handle = tokio::spawn(async move { runtime.run_until_stopped().await });
+
+    timeout(Duration::from_secs(2), async {
+        while tokio::fs::metadata(&socket_path).await.is_err() {
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("daemon socket should appear");
+
+    (socket_path, handle)
+}
+
+fn seeded_runtime_record(
+    memory_id: u64,
+    namespace: &str,
+    compact_text: &str,
+    projected_freshness_markers: Option<FreshnessMarkers>,
+) -> PersistedDaemonMemoryRecord {
+    PersistedDaemonMemoryRecord {
+        layout: PersistedTier2Layout {
+            namespace: namespace.to_string(),
+            memory_id,
+            session_id: 1,
+            memory_type: CanonicalMemoryType::Event,
+            route_family: FastPathRouteFamily::Event,
+            compact_text: compact_text.to_string(),
+            fingerprint: memory_id.saturating_mul(97),
+            payload_size_bytes: compact_text.len(),
+            affect: None,
+            is_landmark: false,
+            landmark_label: None,
+            era_id: None,
+            visibility: "private".to_string(),
+            lease: LeaseMetadata::new(membrain_core::engine::lease::LeasePolicy::Durable, 0),
+            raw_text: compact_text.to_string(),
+        },
+        passive_observation: None,
+        causal_parents: Vec::new(),
+        causal_link_type: None,
+        confidence_inputs: ConfidenceInputs {
+            corroboration_count: 1,
+            reconsolidation_count: 0,
+            ticks_since_last_access: 0,
+            age_ticks: 0,
+            resolution_state: ResolutionState::None,
+            conflict_score: 0,
+            causal_parent_count: 0,
+            authoritativeness: 900,
+            recall_count: 1,
+        },
+        confidence_output: ConfidenceOutput {
+            uncertainty_score: 50,
+            corroboration_uncertainty: 50,
+            reconsolidation_uncertainty: 50,
+            freshness_uncertainty: 50,
+            contradiction_uncertainty: 0,
+            missing_evidence_uncertainty: 25,
+            confidence: 950,
+            confidence_interval: None,
+        },
+        projected_freshness_markers,
+    }
 }
 
 async fn shutdown_runtime(
@@ -1438,6 +1530,124 @@ async fn runtime_resource_and_stream_listings_match_shared_mcp_payload_shape() {
         streams_list["result"]["payload"]["streams"][0]["example_subscriptions"][0],
         json!("maintenance.status")
     );
+
+    shutdown_runtime(&socket_path, handle).await;
+}
+
+#[tokio::test]
+async fn runtime_partial_archival_recovery_marker_survives_unix_socket_recall_and_why() {
+    let namespace = "team.alpha";
+    let memory_id = 41;
+    let record = seeded_runtime_record(
+        memory_id,
+        namespace,
+        "partial archival recovery for rollout remediation proof",
+        Some(FreshnessMarkers::archival_recovery_partial(None)),
+    );
+    let (socket_path, handle) =
+        spawn_runtime_with_seeded_db("partial-archival-recovery", &[record]).await;
+
+    let recall_response = send_request(
+        &socket_path,
+        json!({
+            "jsonrpc":"2.0",
+            "method":"recall",
+            "params":{"query_text":"partial archival recovery rollout remediation","namespace":namespace},
+            "id":"recall-partial-archival"
+        }),
+    )
+    .await;
+    assert_eq!(recall_response["result"]["status"], json!("ok"));
+    assert_eq!(
+        recall_response["result"]["retrieval"]["result"]["evidence_pack"][0]["result"]["memory_id"],
+        json!(memory_id)
+    );
+    let recall_markers = recall_response["result"]["retrieval"]["explain_trace"]
+        ["freshness_markers"]
+        .as_array()
+        .expect("recall freshness markers should be an array");
+    assert!(recall_markers
+        .iter()
+        .any(|marker| marker["code"] == json!("archival_recovery_partial")));
+    assert_eq!(
+        recall_response["result"]["retrieval"]["result"]["evidence_pack"][0]["freshness_markers"]
+            ["durable_lifecycle_state"],
+        json!("partially_restored")
+    );
+    assert_eq!(
+        recall_response["result"]["retrieval"]["result"]["evidence_pack"][0]["freshness_markers"]
+            ["routing_lifecycle_state"],
+        json!("archival_recovery_partial")
+    );
+
+    let why_response = send_request(
+        &socket_path,
+        json!({
+            "jsonrpc":"2.0",
+            "method":"why",
+            "params":{"id":memory_id,"namespace":namespace},
+            "id":"why-partial-archival"
+        }),
+    )
+    .await;
+    assert_eq!(why_response["result"]["status"], json!("ok"));
+    let why_markers = why_response["result"]["retrieval"]["explain_trace"]["freshness_markers"]
+        .as_array()
+        .expect("why freshness markers should be an array");
+    assert!(why_markers
+        .iter()
+        .any(|marker| marker["code"] == json!("archival_recovery_partial")));
+    assert_eq!(
+        why_response["result"]["retrieval"]["result"]["evidence_pack"][0]["freshness_markers"]
+            ["durable_lifecycle_state"],
+        json!("partially_restored")
+    );
+    assert_eq!(
+        why_response["result"]["retrieval"]["result"]["evidence_pack"][0]["freshness_markers"]
+            ["routing_lifecycle_state"],
+        json!("archival_recovery_partial")
+    );
+
+    shutdown_runtime(&socket_path, handle).await;
+}
+
+#[tokio::test]
+async fn runtime_cold_recall_without_partial_restore_marker_stays_cold_consolidated() {
+    let namespace = "team.alpha";
+    let memory_id = 42;
+    let record = seeded_runtime_record(
+        memory_id,
+        namespace,
+        "cold retained evidence without partial archival recovery marker",
+        None,
+    );
+    let (socket_path, handle) =
+        spawn_runtime_with_seeded_db("cold-without-partial-restore", &[record]).await;
+
+    let recall_response = send_request(
+        &socket_path,
+        json!({
+            "jsonrpc":"2.0",
+            "method":"recall",
+            "params":{"query_text":"cold retained evidence partial archival","namespace":namespace},
+            "id":"recall-cold-consolidated"
+        }),
+    )
+    .await;
+    assert_eq!(recall_response["result"]["status"], json!("ok"));
+    let recall_markers = recall_response["result"]["retrieval"]["explain_trace"]
+        ["freshness_markers"]
+        .as_array()
+        .expect("recall freshness markers should be an array");
+    assert!(!recall_markers
+        .iter()
+        .any(|marker| marker["code"] == json!("archival_recovery_partial")));
+    let recall_reasons = recall_response["result"]["retrieval"]["explain_trace"]["result_reasons"]
+        .as_array()
+        .expect("recall result reasons should be an array");
+    assert!(recall_reasons
+        .iter()
+        .any(|reason| reason["reason_code"] == json!("cold_consolidated")));
 
     shutdown_runtime(&socket_path, handle).await;
 }

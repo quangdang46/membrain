@@ -32,16 +32,16 @@ use membrain_core::engine::ranking::{
     ranking_profile_name_for_recall, ConfidenceDisplayConfig, ConfidenceExplain, RankingInput,
 };
 use membrain_core::engine::recall::RecallRuntime;
-use membrain_core::engine::semantic_retrieval::{
-    HydratedMemoryRecord, SemanticExecutorConfig, SemanticRetrievalResult,
-    SharedSemanticRetrievalExecutor,
-};
 use membrain_core::engine::repair::{IndexRepairEntrypoint, RepairTarget};
 use membrain_core::engine::result::{
     AnsweredFrom, EntryLane, EvidenceRole, ResultBuilder, RetrievalExplain, RetrievalResultSet,
 };
 use membrain_core::engine::retrieval_planner::{
     RetrievalPlanTrace, RetrievalRequest, RetrievalRequestValidationError,
+};
+use membrain_core::engine::semantic_retrieval::{
+    HydratedMemoryRecord, SemanticExecutorConfig, SemanticRetrievalResult,
+    SharedSemanticRetrievalExecutor,
 };
 use membrain_core::graph::{
     CausalEvidenceAttribution, CausalEvidenceKind, CausalLink, CausalLinkType, EntityId,
@@ -421,18 +421,13 @@ fn doctor_report(local_records: &[LocalMemoryRecord]) -> DoctorReport {
             degraded_impact: if status.authoritative_runtime {
                 None
             } else {
-                Some(format!(
-                    "authoritative_runtime={} maintenance_active={} warm_runtime_guarantees={}",
-                    status.authoritative_runtime,
-                    status.maintenance_active,
-                    status.warm_runtime_guarantees.join(",")
-                ))
+                Some(status.authority_operator_note())
             },
             remediation: if status.authoritative_runtime {
                 None
             } else {
                 Some(DoctorRemediation {
-                    summary: "run membrain daemon to obtain daemon-owned warm-runtime guarantees".to_string(),
+                    summary: "run membrain daemon to obtain daemon-owned runtime state and background maintenance".to_string(),
                     next_steps: vec![
                         "start membrain daemon or membrain-daemon",
                         "re-run doctor after the daemon is serving the unix socket",
@@ -3727,8 +3722,10 @@ fn append_semantic_executor_trace(
             batch_trace.dimensions
         ));
     }
-    result_set.explain.result_reasons.push(
-        membrain_core::engine::result::ResultReason {
+    result_set
+        .explain
+        .result_reasons
+        .push(membrain_core::engine::result::ResultReason {
             memory_id: None,
             reason_code: if explain_mode {
                 "semantic_explain_trace"
@@ -3737,8 +3734,7 @@ fn append_semantic_executor_trace(
             }
             .to_string(),
             detail: details.join("; "),
-        },
-    );
+        });
 }
 
 fn explain_query(
@@ -4583,13 +4579,7 @@ fn legacy_doctor_report_sample() -> DoctorReport {
                     } else {
                         membrain_core::api::AvailabilityPosture::Degraded
                     },
-                    note: Some(format!(
-                        "mode={} authoritative_runtime={} maintenance_active={} warm_runtime_guarantees={}",
-                        status.authority_mode.as_str(),
-                        status.authoritative_runtime,
-                        status.maintenance_active,
-                        status.warm_runtime_guarantees.join(",")
-                    )),
+                    note: Some(status.authority_operator_note()),
                 },
                 FeatureAvailabilityEntry {
                     feature: "embedder_runtime".to_string(),

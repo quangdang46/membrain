@@ -61,8 +61,8 @@ use membrain_core::engine::ranking::{
 };
 use membrain_core::engine::recall::{RecallEngine, RecallRequest, RecallRuntime};
 use membrain_core::engine::result::{
-    AnsweredFrom, EntryLane, EvidenceRole, QueryByExampleExplain, ResultBuilder, ResultReason,
-    RetrievalExplain, RetrievalResultSet,
+    AnsweredFrom, EntryLane, EvidenceRole, FreshnessMarkers, QueryByExampleExplain, ResultBuilder,
+    ResultReason, RetrievalExplain, RetrievalResultSet,
 };
 use membrain_core::engine::retrieval_planner::{
     PrimaryCue, QueryByExampleNormalization, RetrievalPlanTrace, RetrievalRequest,
@@ -270,6 +270,7 @@ struct RuntimeMemoryRecord {
     layout: Tier2DurableItemLayout,
     confidence_inputs: ConfidenceInputs,
     confidence_output: ConfidenceOutput,
+    projected_freshness_markers: Option<FreshnessMarkers>,
     passive_observation: Option<PassiveObservationInspectSummary>,
     causal_parents: Vec<MemoryId>,
     causal_link_type: Option<CausalLinkType>,
@@ -285,6 +286,12 @@ fn hydrated_memory_record(record: &RuntimeMemoryRecord) -> HydratedMemoryRecord 
         compact_text: record.layout.metadata.compact_text.clone(),
         raw_text: record.layout.payload.raw_text.clone(),
         affect: record.layout.metadata.affect,
+    }
+}
+
+fn apply_projected_freshness_markers(builder: &mut ResultBuilder, record: &RuntimeMemoryRecord) {
+    if let Some(freshness_markers) = record.projected_freshness_markers.clone() {
+        builder.set_last_freshness_markers(freshness_markers);
     }
 }
 
@@ -1672,6 +1679,7 @@ impl RuntimeState {
             layout,
             confidence_inputs,
             confidence_output,
+            projected_freshness_markers: None,
             passive_observation: None,
             causal_parents: Vec::new(),
             causal_link_type: None,
@@ -1691,6 +1699,7 @@ impl RuntimeState {
                 .expect("persisted runtime layout should deserialize"),
             confidence_inputs: record.confidence_inputs,
             confidence_output: record.confidence_output,
+            projected_freshness_markers: record.projected_freshness_markers,
             passive_observation: record.passive_observation.map(|passive| {
                 PassiveObservationInspectSummary {
                     source_kind: Box::leak(passive.source_kind.into_boxed_str()),
@@ -1736,6 +1745,7 @@ impl RuntimeState {
                 landmark_label: record.layout.metadata.landmark.landmark_label.clone(),
                 era_id: record.layout.metadata.landmark.era_id.clone(),
                 visibility: record.layout.metadata.visibility.as_str().to_string(),
+                lease: record.layout.metadata.lease,
                 raw_text: record.layout.payload.raw_text.clone(),
             },
             passive_observation: record.passive_observation.clone().map(|passive| {
@@ -1761,6 +1771,7 @@ impl RuntimeState {
             causal_link_type: record.causal_link_type,
             confidence_inputs: record.confidence_inputs.clone(),
             confidence_output: record.confidence_output.clone(),
+            projected_freshness_markers: record.projected_freshness_markers.clone(),
         }
     }
 
@@ -2739,6 +2750,7 @@ impl DaemonRuntime {
                             layout,
                             confidence_inputs,
                             confidence_output,
+                            projected_freshness_markers: None,
                             passive_observation: Some(passive_observation),
                             causal_parents: Vec::new(),
                             causal_link_type: None,
@@ -5412,6 +5424,7 @@ impl DaemonRuntime {
                     &record.confidence_inputs,
                     &ConfidencePolicy::default(),
                 );
+                apply_projected_freshness_markers(&mut builder, &record);
                 let _ = entry_lane;
             }
             let mut built = builder.build(result.explain.clone());
@@ -5654,6 +5667,7 @@ impl DaemonRuntime {
                 &record.confidence_inputs,
                 &ConfidencePolicy::default(),
             );
+            apply_projected_freshness_markers(&mut builder, &record);
             explain.result_reasons.push(ResultReason {
                 memory_id: Some(layout.metadata.memory_id),
                 reason_code: "score_kept".to_string(),
@@ -6027,6 +6041,7 @@ impl DaemonRuntime {
             confidence_inputs,
             &ConfidencePolicy::default(),
         );
+        apply_projected_freshness_markers(&mut builder, &record);
         builder.action_pack = Some(vec![membrain_core::engine::result::ActionArtifact {
             action_type: "inspect_runtime_evidence".to_string(),
             suggestion: format!(

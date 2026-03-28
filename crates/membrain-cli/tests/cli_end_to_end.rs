@@ -1,3 +1,11 @@
+use membrain_core::engine::confidence::{ConfidenceInputs, ConfidenceOutput};
+use membrain_core::engine::contradiction::ResolutionState;
+use membrain_core::engine::lease::LeaseMetadata;
+use membrain_core::engine::result::FreshnessMarkers;
+use membrain_core::persistence::{
+    open_hot_db, save_runtime_records, PersistedDaemonMemoryRecord, PersistedTier2Layout,
+};
+use membrain_core::types::{CanonicalMemoryType, FastPathRouteFamily};
 use serde_json::{json, Value};
 use std::io::{BufRead, BufReader, Write};
 use std::os::unix::net::UnixStream;
@@ -35,6 +43,65 @@ fn run_membrain_with_db(db_root: &std::path::Path, args: &[&str]) -> (bool, Stri
 
 fn parse_json(stdout: &str) -> Value {
     serde_json::from_str(stdout).expect("command should emit valid json")
+}
+
+fn seed_runtime_records(db_root: &std::path::Path, records: &[PersistedDaemonMemoryRecord]) {
+    std::fs::create_dir_all(db_root).expect("db root should exist");
+    let hot_db_path = db_root.join("hot.db");
+    let mut conn = open_hot_db(&hot_db_path).expect("hot db should open");
+    save_runtime_records(&mut conn, records).expect("runtime records should save");
+}
+
+fn seeded_runtime_record(
+    memory_id: u64,
+    namespace: &str,
+    compact_text: &str,
+    projected_freshness_markers: Option<FreshnessMarkers>,
+) -> PersistedDaemonMemoryRecord {
+    PersistedDaemonMemoryRecord {
+        layout: PersistedTier2Layout {
+            namespace: namespace.to_string(),
+            memory_id,
+            session_id: 1,
+            memory_type: CanonicalMemoryType::Event,
+            route_family: FastPathRouteFamily::Event,
+            compact_text: compact_text.to_string(),
+            fingerprint: memory_id.saturating_mul(97),
+            payload_size_bytes: compact_text.len(),
+            affect: None,
+            is_landmark: false,
+            landmark_label: None,
+            era_id: None,
+            visibility: "private".to_string(),
+            lease: LeaseMetadata::new(membrain_core::engine::lease::LeasePolicy::Durable, 0),
+            raw_text: compact_text.to_string(),
+        },
+        passive_observation: None,
+        causal_parents: Vec::new(),
+        causal_link_type: None,
+        confidence_inputs: ConfidenceInputs {
+            corroboration_count: 1,
+            reconsolidation_count: 0,
+            ticks_since_last_access: 0,
+            age_ticks: 0,
+            resolution_state: ResolutionState::None,
+            conflict_score: 0,
+            causal_parent_count: 0,
+            authoritativeness: 900,
+            recall_count: 1,
+        },
+        confidence_output: ConfidenceOutput {
+            uncertainty_score: 50,
+            corroboration_uncertainty: 50,
+            reconsolidation_uncertainty: 50,
+            freshness_uncertainty: 50,
+            contradiction_uncertainty: 0,
+            missing_evidence_uncertainty: 25,
+            confidence: 950,
+            confidence_interval: None,
+        },
+        projected_freshness_markers,
+    }
 }
 
 fn spawn_membrain_mcp(db_root: &std::path::Path) -> Child {
@@ -516,6 +583,273 @@ fn cross_surface_restart_rehydrates_persisted_memory_for_cli_daemon_and_mcp() {
             "method": "shutdown",
             "params": {},
             "id": "mcp-shutdown"
+        }),
+    );
+    assert_eq!(shutdown_json["result"]["shutting_down"], json!(true));
+    let status = mcp.wait().expect("mcp process should exit");
+    assert!(status.success(), "mcp exit status: {status}");
+}
+
+#[test]
+fn mcp_protocol_discovers_bounded_live_tools_and_placeholder_prompts() {
+    let db_root = test_db_root();
+    let mut mcp = spawn_membrain_mcp(&db_root);
+
+    let initialize = send_mcp_request(
+        &mut mcp,
+        json!({
+            "jsonrpc":"2.0",
+            "method":"initialize",
+            "params":{
+                "protocolVersion":"2024-11-05",
+                "capabilities":{"tools":{}},
+                "clientInfo":{"name":"cli-e2e","version":"1.0"}
+            },
+            "id":"mcp-initialize"
+        }),
+    );
+    assert_eq!(initialize["result"]["protocolVersion"], json!("2024-11-05"));
+    assert_eq!(
+        initialize["result"]["serverInfo"]["name"],
+        json!("membrain")
+    );
+    assert_eq!(
+        initialize["result"]["capabilities"]["tools"]["listChanged"],
+        json!(false)
+    );
+    assert_eq!(
+        initialize["result"]["capabilities"]["prompts"]["listChanged"],
+        json!(false)
+    );
+
+    let initialized = send_mcp_request(
+        &mut mcp,
+        json!({
+            "jsonrpc":"2.0",
+            "method":"notifications/initialized",
+            "params":{},
+            "id":"mcp-initialized"
+        }),
+    );
+    assert_eq!(initialized["result"], json!({}));
+
+    let tools = send_mcp_request(
+        &mut mcp,
+        json!({
+            "jsonrpc":"2.0",
+            "method":"tools/list",
+            "params":{},
+            "id":"mcp-tools-list"
+        }),
+    );
+    let tool_names = tools["result"]["tools"]
+        .as_array()
+        .expect("tools array")
+        .iter()
+        .map(|tool| tool["name"].as_str().expect("tool name"))
+        .collect::<Vec<_>>();
+    assert_eq!(
+        tool_names,
+        vec!["encode", "recall", "inspect", "why", "health", "doctor"]
+    );
+    assert!(tools["result"]["tools"]
+        .as_array()
+        .expect("tools array")
+        .iter()
+        .any(|tool| {
+            tool["name"] == json!("recall")
+                && tool["description"]
+                    .as_str()
+                    .expect("recall description")
+                    .contains("hydrated evidence")
+        }));
+
+    let tool_call = send_mcp_request(
+        &mut mcp,
+        json!({
+            "jsonrpc":"2.0",
+            "method":"tools/call",
+            "params":{"name":"health","arguments":{}},
+            "id":"mcp-tool-call-health"
+        }),
+    );
+    assert!(tool_call["result"]["feature_availability"].is_array());
+    assert_eq!(
+        tool_call["result"]["feature_availability"][0]["feature"],
+        json!("health")
+    );
+
+    let prompts = send_mcp_request(
+        &mut mcp,
+        json!({
+            "jsonrpc":"2.0",
+            "method":"prompts/list",
+            "params":{},
+            "id":"mcp-prompts-list"
+        }),
+    );
+    assert_eq!(prompts["result"]["prompts"], json!([]));
+
+    let prompt_get = send_mcp_request(
+        &mut mcp,
+        json!({
+            "jsonrpc":"2.0",
+            "method":"prompts/get",
+            "params":{"name":"missing","arguments":{}},
+            "id":"mcp-prompts-get"
+        }),
+    );
+    assert_eq!(prompt_get["error"]["code"], json!(-32601));
+    assert_eq!(
+        prompt_get["error"]["message"],
+        json!("unknown prompt: missing")
+    );
+
+    let shutdown_json = send_mcp_request(
+        &mut mcp,
+        json!({
+            "jsonrpc":"2.0",
+            "method":"shutdown",
+            "params":{},
+            "id":"mcp-shutdown"
+        }),
+    );
+    assert_eq!(shutdown_json["result"]["shutting_down"], json!(true));
+    let status = mcp.wait().expect("mcp process should exit");
+    assert!(status.success(), "mcp exit status: {status}");
+}
+
+#[test]
+fn partial_archival_recovery_marker_survives_daemon_and_stdio_mcp_transport() {
+    let db_root = test_db_root();
+    let namespace = "test_ns";
+    let memory_id = 41;
+    seed_runtime_records(
+        &db_root,
+        &[seeded_runtime_record(
+            memory_id,
+            namespace,
+            "partial archival recovery for rollout remediation proof",
+            Some(FreshnessMarkers::archival_recovery_partial(None)),
+        )],
+    );
+
+    let socket_path = unique_socket_path("partial-archival-marker");
+    let mut daemon = spawn_membrain_daemon(&db_root, &socket_path);
+    assert!(
+        wait_for_socket(&socket_path),
+        "daemon socket did not become ready: {}",
+        socket_path.display()
+    );
+
+    let daemon_recall = send_daemon_request(
+        &socket_path,
+        json!({
+            "jsonrpc":"2.0",
+            "method":"recall",
+            "params":{"query_text":"partial archival recovery rollout remediation","namespace":namespace},
+            "id":"daemon-partial-archival-recall"
+        }),
+    );
+    let daemon_markers = daemon_recall["result"]["retrieval"]["explain_trace"]["freshness_markers"]
+        .as_array()
+        .expect("daemon freshness markers array");
+    assert!(daemon_markers
+        .iter()
+        .any(|marker| marker["code"] == json!("archival_recovery_partial")));
+    assert_eq!(
+        daemon_recall["result"]["retrieval"]["result"]["evidence_pack"][0]["freshness_markers"]
+            ["durable_lifecycle_state"],
+        json!("partially_restored")
+    );
+    assert_eq!(
+        daemon_recall["result"]["retrieval"]["result"]["evidence_pack"][0]["freshness_markers"]
+            ["routing_lifecycle_state"],
+        json!("archival_recovery_partial")
+    );
+
+    shutdown_membrain_daemon(&mut daemon, &socket_path);
+
+    let mut mcp = spawn_membrain_mcp(&db_root);
+    let _ = send_mcp_request(
+        &mut mcp,
+        json!({
+            "jsonrpc":"2.0",
+            "method":"initialize",
+            "params":{
+                "protocolVersion":"2024-11-05",
+                "capabilities":{"tools":{}},
+                "clientInfo":{"name":"cli-e2e","version":"1.0"}
+            },
+            "id":"mcp-initialize"
+        }),
+    );
+
+    let mcp_recall = send_mcp_request(
+        &mut mcp,
+        json!({
+            "jsonrpc":"2.0",
+            "method":"tools/call",
+            "params":{
+                "name":"recall",
+                "arguments":{"query_text":"partial archival recovery rollout remediation","namespace":namespace}
+            },
+            "id":"mcp-partial-archival-recall"
+        }),
+    );
+    let mcp_markers = mcp_recall["result"]["retrieval"]["explain_trace"]["freshness_markers"]
+        .as_array()
+        .expect("mcp freshness markers array");
+    assert!(mcp_markers
+        .iter()
+        .any(|marker| marker["code"] == json!("archival_recovery_partial")));
+    assert_eq!(
+        mcp_recall["result"]["retrieval"]["result"]["evidence_pack"][0]["freshness_markers"]
+            ["durable_lifecycle_state"],
+        json!("partially_restored")
+    );
+    assert_eq!(
+        mcp_recall["result"]["retrieval"]["result"]["evidence_pack"][0]["freshness_markers"]
+            ["routing_lifecycle_state"],
+        json!("archival_recovery_partial")
+    );
+
+    let mcp_why = send_mcp_request(
+        &mut mcp,
+        json!({
+            "jsonrpc":"2.0",
+            "method":"tools/call",
+            "params":{
+                "name":"why",
+                "arguments":{"query":"partial archival recovery rollout remediation","namespace":namespace}
+            },
+            "id":"mcp-partial-archival-why"
+        }),
+    );
+    let mcp_why_markers = mcp_why["result"]["retrieval"]["explain_trace"]["freshness_markers"]
+        .as_array()
+        .expect("mcp why freshness markers array");
+    assert!(mcp_why_markers
+        .iter()
+        .any(|marker| marker["code"] == json!("archival_recovery_partial")));
+    assert_eq!(
+        mcp_why["result"]["retrieval"]["result"]["evidence_pack"][0]["freshness_markers"]
+            ["durable_lifecycle_state"],
+        json!("partially_restored")
+    );
+    assert_eq!(
+        mcp_why["result"]["retrieval"]["result"]["evidence_pack"][0]["freshness_markers"]
+            ["routing_lifecycle_state"],
+        json!("archival_recovery_partial")
+    );
+
+    let shutdown_json = send_mcp_request(
+        &mut mcp,
+        json!({
+            "jsonrpc":"2.0",
+            "method":"shutdown",
+            "params":{},
+            "id":"mcp-shutdown"
         }),
     );
     assert_eq!(shutdown_json["result"]["shutting_down"], json!(true));

@@ -666,16 +666,36 @@ fn apply_lifecycle_observability(
         .filter(|item| item.result.answered_from == AnsweredFrom::Tier3Cold)
         .count();
     if cold_count > 0 {
-        append_lifecycle_reason(
-            explain,
-            "cold_consolidated",
-            format!(
-                "{cold_count} retained evidence item(s) were served from tier3_cold after lifecycle consolidation moved them out of the bounded hot path; durable_lifecycle_state=consolidated routing_lifecycle_state=dormant"
+        let archival_recovery_partial = matches!(
+            (
+                freshness_markers.durable_lifecycle_state.as_deref(),
+                freshness_markers.routing_lifecycle_state.as_deref(),
             ),
+            (
+                Some("partially_restored"),
+                Some("archival_recovery_partial")
+            )
         );
-        freshness_markers.stale_warning = true;
-        freshness_markers.durable_lifecycle_state = Some("consolidated".to_string());
-        freshness_markers.routing_lifecycle_state = Some("dormant".to_string());
+        if archival_recovery_partial {
+            append_lifecycle_reason(
+                explain,
+                "archival_recovery_partial",
+                format!(
+                    "{cold_count} retained evidence item(s) were served from tier3_cold through a partial archival recovery path; durable_lifecycle_state=partially_restored routing_lifecycle_state=archival_recovery_partial"
+                ),
+            );
+        } else {
+            append_lifecycle_reason(
+                explain,
+                "cold_consolidated",
+                format!(
+                    "{cold_count} retained evidence item(s) were served from tier3_cold after lifecycle consolidation moved them out of the bounded hot path; durable_lifecycle_state=consolidated routing_lifecycle_state=dormant"
+                ),
+            );
+            freshness_markers.stale_warning = true;
+            freshness_markers.durable_lifecycle_state = Some("consolidated".to_string());
+            freshness_markers.routing_lifecycle_state = Some("dormant".to_string());
+        }
     }
 
     let reconsolidating_count = evidence_pack
@@ -1214,6 +1234,13 @@ impl ResultBuilder {
     pub fn apply_as_of_tick(&mut self, as_of_tick: u64) {
         for item in &mut self.evidence_pack {
             item.freshness_markers = FreshnessMarkers::fresh(Some(as_of_tick));
+        }
+    }
+
+    /// Overrides the freshness markers for the most recently added evidence item.
+    pub fn set_last_freshness_markers(&mut self, freshness_markers: FreshnessMarkers) {
+        if let Some(item) = self.evidence_pack.last_mut() {
+            item.freshness_markers = freshness_markers;
         }
     }
 
@@ -3052,7 +3079,10 @@ mod tests {
             recall_plan: RecallPlanKind::Tier2ExactThenTier3Fallback,
             route_reason: "lifecycle test".to_string(),
             tiers_consulted: vec!["tier2_exact".to_string(), "tier3_fallback".to_string()],
-            trace_stages: vec![RecallTraceStage::Tier2Exact, RecallTraceStage::Tier3Fallback],
+            trace_stages: vec![
+                RecallTraceStage::Tier2Exact,
+                RecallTraceStage::Tier3Fallback,
+            ],
             tier1_answered_directly: false,
             candidate_budget: 2,
             time_consumed_ms: Some(4),
@@ -3066,7 +3096,9 @@ mod tests {
         let reasons = result_set.explain_result_reasons();
         assert!(result_set.has_cold_consolidated_evidence());
         assert!(result_set.has_reconsolidation_window());
-        assert!(reasons.iter().any(|reason| reason.reason_code == "cold_consolidated"));
+        assert!(reasons
+            .iter()
+            .any(|reason| reason.reason_code == "cold_consolidated"));
         assert!(reasons
             .iter()
             .any(|reason| reason.reason_code == "reconsolidation_window_open"));
@@ -3166,7 +3198,9 @@ mod tests {
         let (freshness_markers, conflict_markers, uncertainty_markers) =
             result_set.explain_markers();
 
-        assert!(freshness_markers.iter().any(|marker| marker.code == "fresh"));
+        assert!(freshness_markers
+            .iter()
+            .any(|marker| marker.code == "fresh"));
         assert!(!freshness_markers
             .iter()
             .any(|marker| marker.code == "snapshot_scoped"));
@@ -3231,11 +3265,17 @@ mod tests {
             .iter()
             .any(|marker| marker.code == "archival_recovery_partial"));
         assert_eq!(
-            result_set.freshness_markers.durable_lifecycle_state.as_deref(),
+            result_set
+                .freshness_markers
+                .durable_lifecycle_state
+                .as_deref(),
             Some("partially_restored")
         );
         assert_eq!(
-            result_set.freshness_markers.routing_lifecycle_state.as_deref(),
+            result_set
+                .freshness_markers
+                .routing_lifecycle_state
+                .as_deref(),
             Some("archival_recovery_partial")
         );
     }

@@ -176,7 +176,11 @@ Current behavior:
 - reads newline-delimited JSON-RPC requests from stdin
 - writes newline-delimited responses to stdout
 - logs a startup message to stderr
-- exposes the current live MCP tool catalog of `encode`, `recall`, `inspect`, `why`, `health`, and `doctor`, plus transport-side `resources.list`, `resource.read`, `streams.list`, and `shutdown`
+- exposes the bounded six callable MCP tools through `tools/list` / `tools/call`: `encode`, `recall`, `inspect`, `why`, `health`, and `doctor`
+- recognizes slash-style MCP protocol methods `initialize`, `notifications/initialized`, `tools/list`, `tools/call`, `resources/list`, `resources/read`, `prompts/list`, and `prompts/get`
+- keeps `prompts/list` / `prompts/get` as intentionally minimal placeholder surfaces today: empty prompt list and `unknown prompt` on named lookup
+- also accepts direct JSON-RPC compatibility methods such as `encode`, `recall`, `inspect`, `why`, `health`, `doctor`, and `shutdown` on the stdio adapter for bounded manual integration flows
+- does not make stdio MCP the authoritative warm runtime; daemon-owned repeated-request warmth still belongs to `membrain daemon`
 
 Typical usage:
 
@@ -187,7 +191,7 @@ membrain mcp
 For a quick manual smoke test:
 
 ```bash
-printf '%s\n' '{"jsonrpc":"2.0","id":"1","method":"resources.list","params":{}}' | membrain mcp
+printf '%s\n' '{"jsonrpc":"2.0","id":"1","method":"tools/list","params":{}}' | membrain mcp
 ```
 
 High-level guidance:

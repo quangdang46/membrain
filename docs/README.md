@@ -40,6 +40,13 @@ If you want Membrain to use a custom local state root:
 
 `membrain mcp` uses stdio, so it does **not** listen on a TCP port or Unix socket. Claude Code launches it directly as a subprocess and talks over stdin/stdout.
 
+Current bounded MCP truth:
+- `tools/list` advertises six callable tools today: `encode`, `recall`, `inspect`, `why`, `health`, and `doctor`
+- slash-style MCP protocol methods such as `initialize`, `tools/list`, `tools/call`, `resources/list`, `resources/read`, `prompts/list`, and `prompts/get` are recognized on the stdio path
+- `prompts/list` / `prompts/get` are intentionally placeholder surfaces for now: empty prompt list and `unknown prompt` on named prompt lookup
+- the stdio adapter also accepts direct JSON-RPC compatibility methods like `encode`, `recall`, `inspect`, `why`, `health`, `doctor`, and `shutdown`
+- long-lived warm-runtime guarantees still belong to `membrain daemon`, not the stdio adapter
+
 For Claude Code hooks guidance, see the official hooks docs:
 - https://code.claude.com/docs/en/hooks
 

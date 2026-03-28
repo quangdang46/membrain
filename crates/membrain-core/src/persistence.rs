@@ -1,6 +1,7 @@
 use crate::api::NamespaceId;
 use crate::engine::confidence::{ConfidenceInputs, ConfidenceOutput};
 use crate::engine::lease::LeaseMetadata;
+use crate::engine::result::FreshnessMarkers;
 use crate::graph::CausalLinkType;
 use crate::store::audit::AuditLogEntry;
 use crate::store::tier2::{
@@ -56,6 +57,8 @@ pub struct PersistedDaemonMemoryRecord {
     pub causal_link_type: Option<CausalLinkType>,
     pub confidence_inputs: ConfidenceInputs,
     pub confidence_output: ConfidenceOutput,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub projected_freshness_markers: Option<FreshnessMarkers>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -83,7 +86,13 @@ pub struct PersistedTier2Layout {
     pub landmark_label: Option<String>,
     pub era_id: Option<String>,
     pub visibility: String,
+    #[serde(default = "default_persisted_lease")]
+    pub lease: LeaseMetadata,
     pub raw_text: String,
+}
+
+fn default_persisted_lease() -> LeaseMetadata {
+    LeaseMetadata::recommended(CanonicalMemoryType::Event, false)
 }
 
 pub fn default_local_paths() -> std::io::Result<LocalPaths> {
@@ -448,6 +457,7 @@ pub fn load_runtime_records(
                     landmark_label: row.landmark_label,
                     era_id: row.era_id,
                     visibility: "private".to_string(),
+                    lease: LeaseMetadata::recommended(row.memory_type, false),
                     raw_text: row.raw_text,
                 },
                 passive_observation: None,
@@ -474,6 +484,7 @@ pub fn load_runtime_records(
                     confidence: 0,
                     confidence_interval: None,
                 },
+                projected_freshness_markers: None,
             })
             .collect()
     })
@@ -513,7 +524,7 @@ pub fn to_tier2_layout(
             agent_id: None,
             observation_source: None,
             observation_chunk_id: None,
-            lease: LeaseMetadata::recommended(record.memory_type, false),
+            lease: record.lease,
             has_causal_parents: false,
             has_causal_children: false,
             compression: CompressionMetadata::default(),
@@ -640,6 +651,7 @@ mod tests {
                 landmark_label: Some("preference".to_string()),
                 era_id: Some("era-1".to_string()),
                 visibility: "shared".to_string(),
+                lease: LeaseMetadata::recommended(CanonicalMemoryType::UserPreference, false),
                 raw_text: "Dang prefers concise answers".to_string(),
             },
             passive_observation: Some(PersistedPassiveObservationSummary {
@@ -673,6 +685,7 @@ mod tests {
                 confidence: 910,
                 confidence_interval: None,
             },
+            projected_freshness_markers: Some(FreshnessMarkers::archival_recovery_partial(None)),
         }
     }
 
@@ -719,8 +732,13 @@ mod tests {
         assert_eq!(restored.len(), 1);
         assert_eq!(restored[0].layout.memory_id, 9);
         assert_eq!(restored[0].layout.visibility, "private");
+        assert_eq!(
+            restored[0].layout.lease,
+            LeaseMetadata::recommended(restored[0].layout.memory_type, false)
+        );
         assert!(restored[0].passive_observation.is_none());
         assert!(restored[0].causal_parents.is_empty());
         assert_eq!(restored[0].confidence_output.confidence, 0);
+        assert!(restored[0].projected_freshness_markers.is_none());
     }
 }

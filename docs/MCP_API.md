@@ -7,10 +7,15 @@
 
 Status note:
 - This document mixes the long-term MCP contract with the currently implemented runtime surfaces.
-- The live daemon/MCP tool catalog is presently the bounded six-tool surface (`encode`, `recall`, `inspect`, `why`, `health`, `doctor`) plus `resources.list`, `resource.read`, `streams.list`, and `shutdown` on the transport side.
+- The current live bounded MCP contract is the one tracked in `docs/mcp_completion_plan.md`, not the broader aspirational `memory_*` catalog from `docs/PLAN.md`.
+- On the stdio MCP path, the callable tool catalog exposed by `tools/list` is presently the bounded six-tool surface: `encode`, `recall`, `inspect`, `why`, `health`, and `doctor`.
+- The standard slash-style MCP protocol methods currently recognized on the stdio path are `initialize`, `notifications/initialized`, `tools/list`, `tools/call`, `resources/list`, `resources/read`, `prompts/list`, and `prompts/get`.
+- `prompts/list` / `prompts/get` are currently placeholder compatibility surfaces: `prompts/list` returns an empty list and `prompts/get` returns `unknown prompt` for named prompts.
+- The stdio transport also accepts direct JSON-RPC compatibility methods such as `encode`, `recall`, `inspect`, `why`, `health`, `doctor`, and `shutdown` for bounded manual or legacy integration flows.
+- On the Unix-socket daemon JSON-RPC path, transport-side discovery helpers such as `resources.list`, `resource.read`, `streams.list`, and `shutdown` remain available as daemon runtime helpers rather than callable MCP tools.
 - The broader `memory_*`, feature-specific, and later-stage operator tools described below remain the canonical target contract unless a section explicitly says they are live today.
 - Normal daemon/MCP recall now returns hydrated evidence on success; explicit degraded/fallback language below should be read as applying to no-hydrated-evidence, capped, or repair/degraded cases rather than the default success path.
-- Current proof coverage includes daemon-path regression assertions that the semantic winner stays hydrated with `entry_lane=semantic`, and that daemon status/doctor surface a warm embedder with load/request/cache counters after real recall traffic.
+- Current proof coverage includes bounded-tool discovery over stdio MCP, daemon status/doctor embedder counters after real recall traffic, and transport-level regression proof that `archival_recovery_partial` survives daemon and stdio MCP retrieval envelopes only when partial restore state actually shaped the returned result.
 - `membrain mcp` is a stdio transport adapter with process-local reuse only; daemon-owned repeated-request warm-runtime guarantees belong to the long-lived Unix-socket daemon.
 
 1. Every MCP tool preserves namespace and policy context
@@ -226,6 +231,16 @@ This launches Membrain as a stdio MCP-style server so clients can spawn it direc
 
 This stdio path is a transport adapter, not the authoritative warm-runtime service. It may reuse state within the current process, but runtime-authority reporting must keep that scoped to local-process guarantees like `local_process_state` and `best_effort_same_process_reuse`; daemon-owned guarantees like `daemon_owned_runtime_state` and `repeated_request_warmth` belong to the long-lived Unix-socket daemon. The same rule applies to `embedder_runtime`: stdio may report process-local `not_loaded` → `loaded` or `warm` transitions, but only the daemon can claim long-lived repeated-request warm reuse as the authoritative runtime.
 
+Live bounded stdio MCP surface today:
+
+| Surface family | Live methods | Notes |
+|---|---|---|
+| callable MCP tools | `encode`, `recall`, `inspect`, `why`, `health`, `doctor` | advertised by `tools/list`; callable through `tools/call` |
+| slash-style MCP discovery | `initialize`, `notifications/initialized`, `tools/list`, `tools/call`, `resources/list`, `resources/read`, `prompts/list`, `prompts/get` | protocol-facing transport methods |
+| prompt compatibility placeholders | `prompts/list`, `prompts/get` | intentionally minimal today: empty prompt list and `unknown prompt` for named prompts |
+| direct JSON-RPC compatibility on stdio | `encode`, `recall`, `inspect`, `why`, `health`, `doctor`, `shutdown` | convenience/manual compatibility path; not a broader MCP tool catalog |
+| daemon JSON-RPC discovery helpers | `resources.list`, `resource.read`, `streams.list`, `shutdown` | unix-socket runtime helpers, distinct from slash-style MCP discovery |
+
 ### Claude Code integration
 
 For Claude Code, configure Membrain in the `mcpServers` section like this:
@@ -300,7 +315,7 @@ Manual smoke test before wiring a client:
 python3 - <<'PY'
 import json, subprocess
 p = subprocess.Popen(['membrain', 'mcp'], stdin=subprocess.PIPE, stdout=subprocess.PIPE, text=True)
-p.stdin.write(json.dumps({"jsonrpc":"2.0","id":"1","method":"resources.list","params":{}}) + "\n")
+p.stdin.write(json.dumps({"jsonrpc":"2.0","id":"1","method":"tools/list","params":{}}) + "\n")
 p.stdin.flush()
 print(p.stdout.readline().strip())
 p.stdin.write(json.dumps({"jsonrpc":"2.0","id":"2","method":"shutdown","params":{}}) + "\n")

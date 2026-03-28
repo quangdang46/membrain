@@ -1818,6 +1818,7 @@ fn adaptive_prewarm_summary(
 fn drill_down_path_for_subsystem(subsystem: &'static str) -> &'static str {
     match subsystem {
         "memory" => "/health/subsystems/memory",
+        "lifecycle" => "/health/subsystems/lifecycle",
         "cache" => "/health/subsystems/cache",
         "index" => "/health/subsystems/index",
         "repair" => "/health/subsystems/repair",
@@ -1830,6 +1831,7 @@ fn drill_down_path_for_subsystem(subsystem: &'static str) -> &'static str {
 fn drill_down_label_for_subsystem(subsystem: &'static str) -> &'static str {
     match subsystem {
         "memory" => "Memory quality",
+        "lifecycle" => "Lifecycle activity",
         "cache" => "Cache health",
         "index" => "Index health",
         "repair" => "Repair backlog",
@@ -1842,7 +1844,7 @@ fn drill_down_label_for_subsystem(subsystem: &'static str) -> &'static str {
 fn drill_down_surface_for_subsystem(subsystem: &'static str) -> &'static str {
     match subsystem {
         "memory" => "inspect",
-        "affect_trajectory" => "health",
+        "lifecycle" | "affect_trajectory" => "health",
         "cache" | "index" | "repair" | "availability" => "doctor",
         _ => "health",
     }
@@ -2434,6 +2436,16 @@ mod tests {
             .drill_down_paths
             .iter()
             .any(|path| path.path == "/health/alerts" && path.target_surface == "doctor"));
+        assert!(report.drill_down_paths.iter().any(|path| path.path
+            == "/health/subsystems/lifecycle"
+            && path.label == "Lifecycle activity"
+            && path.target_surface == "health"
+            && path.target_ref == "lifecycle"
+            && path.summary.contains("consolidated_to_cold=12")
+            && path.summary.contains("reconsolidation_active=2")
+            && path.summary.contains("forgetting_archived=5")
+            && path.summary.contains("maintenance_runs=3")
+            && path.related_subsystems == vec!["lifecycle"]));
         assert!(report
             .drill_down_paths
             .iter()

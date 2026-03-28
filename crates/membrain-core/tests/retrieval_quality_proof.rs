@@ -1,7 +1,5 @@
 use membrain_core::api::NamespaceId;
-use membrain_core::embed::{
-    CachedTextEmbedder, EmbedError, EmbeddingPurpose, LocalTextEmbedder,
-};
+use membrain_core::embed::{CachedTextEmbedder, EmbedError, EmbeddingPurpose, LocalTextEmbedder};
 use membrain_core::engine::ranking::{
     fuse_scores, RankingInput, RankingProfile, RankingResult, RerankMetadata,
 };
@@ -104,13 +102,19 @@ fn lexical_overlap(query: &str, candidate: &str) -> usize {
     let query_terms: HashSet<String> = query
         .to_ascii_lowercase()
         .split_whitespace()
-        .map(|term| term.trim_matches(|c: char| !c.is_alphanumeric()).to_string())
+        .map(|term| {
+            term.trim_matches(|c: char| !c.is_alphanumeric())
+                .to_string()
+        })
         .filter(|term| !term.is_empty())
         .collect();
     let candidate_terms: HashSet<String> = candidate
         .to_ascii_lowercase()
         .split_whitespace()
-        .map(|term| term.trim_matches(|c: char| !c.is_alphanumeric()).to_string())
+        .map(|term| {
+            term.trim_matches(|c: char| !c.is_alphanumeric())
+                .to_string()
+        })
         .filter(|term| !term.is_empty())
         .collect();
     query_terms.intersection(&candidate_terms).count()
@@ -151,7 +155,10 @@ fn semantic_embeddings_beat_naive_compact_text_overlap_for_realistic_release_que
         "embedding-backed retrieval should prefer the deploy/remediation memory"
     );
 
-    assert_eq!(query_embedding.trace.cache_event, membrain_core::embed::EmbedCacheEvent::Miss);
+    assert_eq!(
+        query_embedding.trace.cache_event,
+        membrain_core::embed::EmbedCacheEvent::Miss
+    );
     assert_eq!(lexical_candidate.trace.generation, "fixture-v1");
     assert_eq!(semantic_candidate.trace.backend_kind, "semantic_fixture");
     assert!(query_embedding.trace.local_only);
@@ -217,7 +224,10 @@ fn reranking_changes_final_order_and_keeps_semantic_path_metadata_inspectable() 
         recall_plan: RecallPlanKind::Tier2ExactThenTier3Fallback,
         route_reason: "semantic shortlist required rerank to surface the safer release fix".into(),
         tiers_consulted: vec!["tier2_semantic".into(), "tier2_rerank".into()],
-        trace_stages: vec![RecallTraceStage::Tier2Exact, RecallTraceStage::Tier3Fallback],
+        trace_stages: vec![
+            RecallTraceStage::Tier2Exact,
+            RecallTraceStage::Tier3Fallback,
+        ],
         tier1_answered_directly: false,
         candidate_budget: 12,
         time_consumed_ms: Some(9),
@@ -252,8 +262,7 @@ fn reranking_changes_final_order_and_keeps_semantic_path_metadata_inspectable() 
             && item.result.rerank_metadata.candidate_cut_limit == 4
     }));
     assert!(result_set.explain.result_reasons.iter().any(|reason| {
-        reason.reason_code == "rerank_promoted"
-            && reason.detail.contains("bounded local reranker")
+        reason.reason_code == "rerank_promoted" && reason.detail.contains("bounded local reranker")
     }));
 }
 
@@ -330,9 +339,13 @@ fn result_set_lifecycle_markers_show_cold_and_reconsolidating_runtime_effects() 
 
     let result_set = builder.build(RetrievalExplain {
         recall_plan: RecallPlanKind::Tier2ExactThenTier3Fallback,
-        route_reason: "bounded runtime mixed hot semantic evidence with cold consolidated evidence".into(),
+        route_reason: "bounded runtime mixed hot semantic evidence with cold consolidated evidence"
+            .into(),
         tiers_consulted: vec!["tier2_exact".into(), "tier3_cold".into()],
-        trace_stages: vec![RecallTraceStage::Tier2Exact, RecallTraceStage::Tier3Fallback],
+        trace_stages: vec![
+            RecallTraceStage::Tier2Exact,
+            RecallTraceStage::Tier3Fallback,
+        ],
         tier1_answered_directly: false,
         candidate_budget: 2,
         time_consumed_ms: Some(11),
@@ -344,7 +357,9 @@ fn result_set_lifecycle_markers_show_cold_and_reconsolidating_runtime_effects() 
     });
 
     let reasons = result_set.explain_result_reasons();
-    assert!(reasons.iter().any(|reason| reason.reason_code == "cold_consolidated"));
+    assert!(reasons
+        .iter()
+        .any(|reason| reason.reason_code == "cold_consolidated"));
     assert!(reasons
         .iter()
         .any(|reason| reason.reason_code == "reconsolidation_window_open"));
@@ -360,17 +375,20 @@ fn result_set_lifecycle_markers_show_cold_and_reconsolidating_runtime_effects() 
         .iter()
         .any(|marker| marker.code == "reconsolidation_churn"));
     assert!(result_set.has_cold_consolidated_evidence());
-    assert_eq!(result_set.freshness_markers, FreshnessMarkers {
-        oldest_item_days: 0,
-        newest_item_days: 0,
-        volatile_items_included: true,
-        stale_warning: true,
-        lease_sensitive: false,
-        recheck_required: false,
-        as_of_tick: None,
-        durable_lifecycle_state: Some("labile".to_string()),
-        routing_lifecycle_state: Some("fresh".to_string()),
-    });
+    assert_eq!(
+        result_set.freshness_markers,
+        FreshnessMarkers {
+            oldest_item_days: 0,
+            newest_item_days: 0,
+            volatile_items_included: true,
+            stale_warning: true,
+            lease_sensitive: false,
+            recheck_required: false,
+            as_of_tick: None,
+            durable_lifecycle_state: Some("labile".to_string()),
+            routing_lifecycle_state: Some("fresh".to_string()),
+        }
+    );
 }
 
 #[test]
@@ -398,17 +416,15 @@ fn planner_and_cache_diagnostics_distinguish_semantic_path_from_persistence_only
         item_key: 7,
         generations: CacheGenerationAnchors::default(),
     };
-    let admission = cache
-        .ann_probe
-        .admit(
-            key.clone(),
-            vec![MemoryId(101), MemoryId(202)],
-            membrain_core::store::cache::CacheAdmissionRequest {
-                policy_allowed: true,
-                allow_capacity_eviction: true,
-                request_shape_hash: Some(44),
-            },
-        );
+    let admission = cache.ann_probe.admit(
+        key.clone(),
+        vec![MemoryId(101), MemoryId(202)],
+        membrain_core::store::cache::CacheAdmissionRequest {
+            policy_allowed: true,
+            allow_capacity_eviction: true,
+            request_shape_hash: Some(44),
+        },
+    );
     assert_eq!(admission.reason.as_str(), "accepted");
 
     let warm_lookup = cache
@@ -425,12 +441,11 @@ fn planner_and_cache_diagnostics_distinguish_semantic_path_from_persistence_only
     assert!(warm_trace.warm_reuse);
 
     let invalidation = cache.handle_invalidation(InvalidationTrigger::EmbeddingChange, &namespace);
-    assert!(
-        invalidation
-            .maintenance_events
-            .iter()
-            .any(|event| event.reason == Some(membrain_core::store::cache::CacheReason::EmbeddingChanged))
-    );
+    assert!(invalidation
+        .maintenance_events
+        .iter()
+        .any(|event| event.reason
+            == Some(membrain_core::store::cache::CacheReason::EmbeddingChanged)));
 
     cache.result.disable();
     let degraded_trace = CacheEvalTrace {

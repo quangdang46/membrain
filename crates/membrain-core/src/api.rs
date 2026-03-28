@@ -1429,10 +1429,13 @@ impl ResultReason {
             "intent_classification" => "intent_classification",
             "route_override_applied" => "route_override_applied",
             "route_override_not_applied" => "route_override_not_applied",
+            "semantic_executor_trace" => "semantic_executor_trace",
             _ => "custom_reason_code",
         };
         let reason_family = match reason_code {
-            "score_kept" | "no_match" | "tier2_exact_match" => "selection",
+            "score_kept" | "no_match" | "tier2_exact_match" | "semantic_executor_trace" => {
+                "selection"
+            }
             "query_by_example_seed_materialized"
             | "query_by_example_seed_missing"
             | "query_by_example_candidate_expansion"
@@ -1465,6 +1468,7 @@ impl ResultReason {
             "score_kept"
             | "no_match"
             | "tier2_exact_match"
+            | "semantic_executor_trace"
             | "query_by_example_seed_materialized"
             | "query_by_example_seed_missing"
             | "query_by_example_candidate_expansion"

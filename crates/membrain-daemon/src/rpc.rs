@@ -201,6 +201,29 @@ pub struct RuntimeStatus {
     pub embedder: RuntimeEmbedderStatus,
 }
 
+impl RuntimeStatus {
+    pub fn authority_summary(&self) -> String {
+        format!(
+            "mode={} authoritative_runtime={} maintenance_active={} warm_runtime_guarantees={}",
+            self.authority_mode.as_str(),
+            self.authoritative_runtime,
+            self.maintenance_active,
+            self.warm_runtime_guarantees.join(",")
+        )
+    }
+
+    pub fn authority_operator_note(&self) -> String {
+        match self.authority_mode {
+            RuntimeAuthorityMode::UnixSocketDaemon => {
+                format!("daemon_authority:{}", self.authority_summary())
+            }
+            RuntimeAuthorityMode::StdioFacade => {
+                format!("stdio_adapter_process_local:{}", self.authority_summary())
+            }
+        }
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct RuntimeDoctorIndex {
     pub family: &'static str,
