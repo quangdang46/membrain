@@ -57,6 +57,14 @@ fn parse_json(stdout: &str) -> Value {
     serde_json::from_str(stdout).expect("command should emit valid json")
 }
 
+const RELEASE_RECALL_QUERY: &str =
+    "Which release deploy fix should we roll out after the pipeline outage?";
+const RELEASE_RECALL_TARGET: &str =
+    "production deploy pipeline remediation rollout for incident fix";
+const RELEASE_RECALL_LEXICAL_DISTRACTOR: &str = "release rollback checklist after outage";
+const RELEASE_RECALL_UNRELATED_DISTRACTOR: &str =
+    "checkout payment capture retry fix for shopping cart failure";
+
 #[cfg(unix)]
 fn seed_runtime_records(db_root: &std::path::Path, records: &[PersistedDaemonMemoryRecord]) {
     std::fs::create_dir_all(db_root).expect("db root should exist");
@@ -278,9 +286,11 @@ fn cli_restart_rehydrates_persisted_memory_for_inspect_recall_and_explain() {
         &db_root,
         &[
             "remember",
-            "Dang prefers concise answers",
+            RELEASE_RECALL_TARGET,
             "--namespace",
             "test_ns",
+            "--kind",
+            "semantic",
             "--json",
         ],
     );
@@ -289,6 +299,25 @@ fn cli_restart_rehydrates_persisted_memory_for_inspect_recall_and_explain() {
     let memory_id = encode_json["result"]["memory_id"]
         .as_u64()
         .expect("encode should return memory id");
+
+    for distractor in [
+        RELEASE_RECALL_LEXICAL_DISTRACTOR,
+        RELEASE_RECALL_UNRELATED_DISTRACTOR,
+    ] {
+        let (distractor_ok, _distractor_stdout, distractor_stderr) = run_membrain_with_db(
+            &db_root,
+            &[
+                "remember",
+                distractor,
+                "--namespace",
+                "test_ns",
+                "--kind",
+                "semantic",
+                "--json",
+            ],
+        );
+        assert!(distractor_ok, "stderr: {distractor_stderr}");
+    }
 
     let (inspect_ok, inspect_stdout, inspect_stderr) = run_membrain_with_db(
         &db_root,
@@ -309,9 +338,13 @@ fn cli_restart_rehydrates_persisted_memory_for_inspect_recall_and_explain() {
         &db_root,
         &[
             "recall",
-            &format!("memory:{memory_id}"),
+            RELEASE_RECALL_QUERY,
             "--namespace",
             "test_ns",
+            "--top",
+            "2",
+            "--explain",
+            "full",
             "--json",
         ],
     );
@@ -321,6 +354,15 @@ fn cli_restart_rehydrates_persisted_memory_for_inspect_recall_and_explain() {
         recall_json["result"]["evidence_pack"][0]["result"]["memory_id"],
         json!(memory_id)
     );
+    assert_eq!(
+        recall_json["result"]["evidence_pack"][0]["result"]["compact_text"],
+        json!(RELEASE_RECALL_TARGET)
+    );
+    assert!(recall_json["result"]["explain"]["result_reasons"]
+        .as_array()
+        .expect("recall result_reasons should be an array")
+        .iter()
+        .any(|reason| reason["reason_code"] == json!("semantic_recall_trace")));
 
     let (explain_ok, explain_stdout, explain_stderr) = run_membrain_with_db(
         &db_root,
@@ -338,6 +380,11 @@ fn cli_restart_rehydrates_persisted_memory_for_inspect_recall_and_explain() {
         explain_json["result"]["evidence_pack"][0]["result"]["memory_id"],
         json!(memory_id)
     );
+    assert!(explain_json["result"]["explain"]["result_reasons"]
+        .as_array()
+        .expect("why result_reasons should be an array")
+        .iter()
+        .any(|reason| reason["reason_code"] == json!("query_by_example_seed_materialized")));
 }
 
 #[test]
@@ -350,9 +397,11 @@ fn cross_surface_restart_rehydrates_persisted_memory_for_cli_daemon_and_mcp() {
         &db_root,
         &[
             "remember",
-            "Dang prefers concise answers",
+            RELEASE_RECALL_TARGET,
             "--namespace",
             namespace,
+            "--kind",
+            "semantic",
             "--json",
         ],
     );
@@ -361,6 +410,25 @@ fn cross_surface_restart_rehydrates_persisted_memory_for_cli_daemon_and_mcp() {
     let memory_id = encode_json["result"]["memory_id"]
         .as_u64()
         .expect("remember should return persisted memory id");
+
+    for distractor in [
+        RELEASE_RECALL_LEXICAL_DISTRACTOR,
+        RELEASE_RECALL_UNRELATED_DISTRACTOR,
+    ] {
+        let (distractor_ok, _distractor_stdout, distractor_stderr) = run_membrain_with_db(
+            &db_root,
+            &[
+                "remember",
+                distractor,
+                "--namespace",
+                namespace,
+                "--kind",
+                "semantic",
+                "--json",
+            ],
+        );
+        assert!(distractor_ok, "stderr: {distractor_stderr}");
+    }
 
     let (inspect_ok, inspect_stdout, inspect_stderr) = run_membrain_with_db(
         &db_root,
@@ -377,26 +445,39 @@ fn cross_surface_restart_rehydrates_persisted_memory_for_cli_daemon_and_mcp() {
     let inspect_json = parse_json(&inspect_stdout);
     assert_eq!(inspect_json["result"]["memory_id"], json!(memory_id));
 
-    let (exact_recall_ok, exact_recall_stdout, exact_recall_stderr) = run_membrain_with_db(
+    let (semantic_recall_ok, semantic_recall_stdout, semantic_recall_stderr) = run_membrain_with_db(
         &db_root,
         &[
             "recall",
-            &format!("memory:{memory_id}"),
+            RELEASE_RECALL_QUERY,
             "--namespace",
             namespace,
+            "--top",
+            "2",
+            "--explain",
+            "full",
             "--json",
         ],
     );
-    assert!(exact_recall_ok, "stderr: {exact_recall_stderr}");
-    let exact_recall_json = parse_json(&exact_recall_stdout);
+    assert!(semantic_recall_ok, "stderr: {semantic_recall_stderr}");
+    let semantic_recall_json = parse_json(&semantic_recall_stdout);
     assert_eq!(
-        exact_recall_json["result"]["evidence_pack"][0]["result"]["memory_id"],
+        semantic_recall_json["result"]["evidence_pack"][0]["result"]["memory_id"],
         json!(memory_id)
     );
     assert_eq!(
-        exact_recall_json["result"]["packaging_metadata"]["degraded_summary"],
+        semantic_recall_json["result"]["evidence_pack"][0]["result"]["compact_text"],
+        json!(RELEASE_RECALL_TARGET)
+    );
+    assert_eq!(
+        semantic_recall_json["result"]["packaging_metadata"]["degraded_summary"],
         json!(null)
     );
+    assert!(semantic_recall_json["result"]["explain"]["result_reasons"]
+        .as_array()
+        .expect("recall result_reasons should be an array")
+        .iter()
+        .any(|reason| reason["reason_code"] == json!("semantic_recall_trace")));
 
     let (why_ok, why_stdout, why_stderr) = run_membrain_with_db(
         &db_root,
@@ -424,9 +505,9 @@ fn cross_surface_restart_rehydrates_persisted_memory_for_cli_daemon_and_mcp() {
         run_membrain_with_db(&db_root, &["health", "--json"]);
     assert!(health_ok, "stderr: {health_stderr}");
     let health_json = parse_json(&health_stdout);
-    assert_eq!(health_json["hot_memories"], json!(1));
-    assert_eq!(health_json["total_encodes"], json!(1));
-    assert_eq!(health_json["attention"]["total_encode_count"], json!(1));
+    assert_eq!(health_json["hot_memories"], json!(3));
+    assert_eq!(health_json["total_encodes"], json!(3));
+    assert_eq!(health_json["attention"]["total_encode_count"], json!(3));
     assert_eq!(
         health_json["attention"]["hotspots"][0]["namespace"],
         json!(namespace)
@@ -442,11 +523,11 @@ fn cross_surface_restart_rehydrates_persisted_memory_for_cli_daemon_and_mcp() {
     let doctor_json = parse_json(&doctor_stdout);
     assert_eq!(doctor_json["action"], json!("doctor"));
     assert_eq!(doctor_json["error_kind"], json!(null));
-    assert_eq!(doctor_json["health"]["hot_memories"], json!(1));
-    assert_eq!(doctor_json["health"]["total_encodes"], json!(1));
+    assert_eq!(doctor_json["health"]["hot_memories"], json!(3));
+    assert_eq!(doctor_json["health"]["total_encodes"], json!(3));
     assert_eq!(
         doctor_json["health"]["attention"]["total_encode_count"],
-        json!(1)
+        json!(3)
     );
 
     let socket_path = unique_socket_path("cross-surface-parity");
@@ -477,13 +558,18 @@ fn cross_surface_restart_rehydrates_persisted_memory_for_cli_daemon_and_mcp() {
         json!({
             "jsonrpc":"2.0",
             "method":"recall",
-            "params":{"query_text":format!("memory:{memory_id}"),"namespace":namespace},
+            "params":{"query_text":RELEASE_RECALL_QUERY,"namespace":namespace,"result_budget":2},
             "id":"daemon-recall"
         }),
     );
     assert_eq!(
         daemon_recall["result"]["retrieval"]["result"]["evidence_pack"][0]["result"]["memory_id"],
         json!(memory_id)
+    );
+    assert_eq!(
+        daemon_recall["result"]["retrieval"]["result"]["evidence_pack"][0]["result"]
+            ["compact_text"],
+        json!(RELEASE_RECALL_TARGET)
     );
     assert_eq!(
         daemon_recall["result"]["retrieval"]["result"]["packaging_metadata"]["degraded_summary"],
@@ -501,6 +587,10 @@ fn cross_surface_restart_rehydrates_persisted_memory_for_cli_daemon_and_mcp() {
     );
     assert_eq!(daemon_why["result"]["status"], json!("ok"));
     assert_eq!(
+        daemon_why["result"]["retrieval"]["result"]["evidence_pack"][0]["result"]["memory_id"],
+        json!(memory_id)
+    );
+    assert_eq!(
         daemon_why["result"]["retrieval"]["result"]["explain"]["query_by_example"]
             ["materialized_seed_descriptors"][0],
         json!(format!("memory:{memory_id}"))
@@ -510,11 +600,11 @@ fn cross_surface_restart_rehydrates_persisted_memory_for_cli_daemon_and_mcp() {
         &socket_path,
         json!({"jsonrpc":"2.0","method":"health","params":{},"id":"daemon-health"}),
     );
-    assert_eq!(daemon_health["result"]["hot_memories"], json!(1));
-    assert_eq!(daemon_health["result"]["total_encodes"], json!(1));
+    assert_eq!(daemon_health["result"]["hot_memories"], json!(3));
+    assert_eq!(daemon_health["result"]["total_encodes"], json!(3));
     assert_eq!(
         daemon_health["result"]["attention"]["total_encode_count"],
-        json!(1)
+        json!(3)
     );
     assert_eq!(
         daemon_health["result"]["attention"]["hotspots"][0]["namespace"],
@@ -531,11 +621,11 @@ fn cross_surface_restart_rehydrates_persisted_memory_for_cli_daemon_and_mcp() {
     );
     assert_eq!(daemon_doctor["result"]["action"], json!("doctor"));
     assert_eq!(daemon_doctor["result"]["error_kind"], json!(null));
-    assert_eq!(daemon_doctor["result"]["health"]["hot_memories"], json!(1));
-    assert_eq!(daemon_doctor["result"]["health"]["total_encodes"], json!(1));
+    assert_eq!(daemon_doctor["result"]["health"]["hot_memories"], json!(3));
+    assert_eq!(daemon_doctor["result"]["health"]["total_encodes"], json!(3));
     assert_eq!(
         daemon_doctor["result"]["health"]["attention"]["total_encode_count"],
-        json!(1)
+        json!(3)
     );
 
     shutdown_membrain_daemon(&mut daemon, &socket_path);
@@ -547,7 +637,7 @@ fn cross_surface_restart_rehydrates_persisted_memory_for_cli_daemon_and_mcp() {
         json!({
             "jsonrpc": "2.0",
             "method": "recall",
-            "params": {"query_text": format!("memory:{memory_id}"), "namespace": namespace},
+            "params": {"query_text": RELEASE_RECALL_QUERY, "namespace": namespace, "result_budget": 2},
             "id": "mcp-recall"
         }),
     );
@@ -555,6 +645,10 @@ fn cross_surface_restart_rehydrates_persisted_memory_for_cli_daemon_and_mcp() {
     assert_eq!(
         mcp_recall["result"]["retrieval"]["result"]["evidence_pack"][0]["result"]["memory_id"],
         json!(memory_id)
+    );
+    assert_eq!(
+        mcp_recall["result"]["retrieval"]["result"]["evidence_pack"][0]["result"]["compact_text"],
+        json!(RELEASE_RECALL_TARGET)
     );
     assert_eq!(
         mcp_recall["result"]["retrieval"]["result"]["packaging_metadata"]["degraded_summary"],
@@ -587,6 +681,10 @@ fn cross_surface_restart_rehydrates_persisted_memory_for_cli_daemon_and_mcp() {
     );
     assert_eq!(mcp_why["result"]["status"], json!("ok"));
     assert_eq!(
+        mcp_why["result"]["retrieval"]["result"]["evidence_pack"][0]["result"]["memory_id"],
+        json!(memory_id)
+    );
+    assert_eq!(
         mcp_why["result"]["retrieval"]["result"]["explain"]["query_by_example"]
             ["materialized_seed_descriptors"][0],
         json!(format!("memory:{memory_id}"))
@@ -596,11 +694,11 @@ fn cross_surface_restart_rehydrates_persisted_memory_for_cli_daemon_and_mcp() {
         &mut mcp,
         json!({"jsonrpc":"2.0","method":"health","params":{},"id":"mcp-health"}),
     );
-    assert_eq!(mcp_health["result"]["hot_memories"], json!(1));
-    assert_eq!(mcp_health["result"]["total_encodes"], json!(1));
+    assert_eq!(mcp_health["result"]["hot_memories"], json!(3));
+    assert_eq!(mcp_health["result"]["total_encodes"], json!(3));
     assert_eq!(
         mcp_health["result"]["attention"]["total_encode_count"],
-        json!(1)
+        json!(3)
     );
     assert_eq!(
         mcp_health["result"]["attention"]["hotspots"][0]["namespace"],
@@ -617,11 +715,11 @@ fn cross_surface_restart_rehydrates_persisted_memory_for_cli_daemon_and_mcp() {
     );
     assert_eq!(mcp_doctor["result"]["action"], json!("doctor"));
     assert_eq!(mcp_doctor["result"]["error_kind"], json!(null));
-    assert_eq!(mcp_doctor["result"]["health"]["hot_memories"], json!(1));
-    assert_eq!(mcp_doctor["result"]["health"]["total_encodes"], json!(1));
+    assert_eq!(mcp_doctor["result"]["health"]["hot_memories"], json!(3));
+    assert_eq!(mcp_doctor["result"]["health"]["total_encodes"], json!(3));
     assert_eq!(
         mcp_doctor["result"]["health"]["attention"]["total_encode_count"],
-        json!(1)
+        json!(3)
     );
 
     let shutdown_json = send_mcp_request(
