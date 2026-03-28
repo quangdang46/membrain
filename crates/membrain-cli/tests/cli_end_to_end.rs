@@ -224,6 +224,32 @@ fn cli_encode_json_emits_expected_machine_readable_fields() {
 }
 
 #[test]
+fn cli_remember_accepts_space_separated_negative_valence() {
+    let db_root = test_db_root();
+    let (ok, stdout, stderr) = run_membrain_with_db(
+        &db_root,
+        &[
+            "remember",
+            "Deploy caused 30-min downtime",
+            "--namespace",
+            "test_ns",
+            "--valence",
+            "-0.8",
+            "--arousal",
+            "0.8",
+            "--json",
+        ],
+    );
+
+    assert!(ok, "stderr: {stderr}");
+    let json = parse_json(&stdout);
+    assert_eq!(json["ok"], true);
+    assert_eq!(json["namespace"], "test_ns");
+    assert_eq!(json["result"]["outcome"], "accepted");
+    assert_eq!(json["result"]["memory_id"], 1);
+}
+
+#[test]
 fn cli_restart_rehydrates_persisted_memory_for_inspect_recall_and_explain() {
     let db_root = test_db_root();
 
@@ -677,6 +703,58 @@ fn mcp_protocol_discovers_bounded_live_tools_and_placeholder_prompts() {
     assert_eq!(
         tool_call["result"]["feature_availability"][0]["feature"],
         json!("health")
+    );
+
+    let resources = send_mcp_request(
+        &mut mcp,
+        json!({
+            "jsonrpc":"2.0",
+            "method":"resources/list",
+            "params":{},
+            "id":"mcp-resources-list"
+        }),
+    );
+    let resources = resources["result"]["resources"]
+        .as_array()
+        .expect("resources array");
+    assert_eq!(resources.len(), 1);
+    assert_eq!(resources[0]["uri"], json!("membrain://default/status"));
+
+    let resource_read = send_mcp_request(
+        &mut mcp,
+        json!({
+            "jsonrpc":"2.0",
+            "method":"resources/read",
+            "params":{"uri":"membrain://default/status"},
+            "id":"mcp-resources-read"
+        }),
+    );
+    assert_eq!(
+        resource_read["result"]["contents"][0]["uri"],
+        json!("membrain://default/status")
+    );
+    let status_payload = serde_json::from_str::<Value>(
+        resource_read["result"]["contents"][0]["text"]
+            .as_str()
+            .expect("status payload text"),
+    )
+    .expect("status payload json");
+    assert_eq!(status_payload["authority_mode"], json!("stdio_facade"));
+    assert_eq!(status_payload["authoritative_runtime"], json!(false));
+
+    let streams = send_mcp_request(
+        &mut mcp,
+        json!({
+            "jsonrpc":"2.0",
+            "method":"streams/list",
+            "params":{},
+            "id":"mcp-streams-list"
+        }),
+    );
+    assert_eq!(streams["error"]["code"], json!(-32601));
+    assert_eq!(
+        streams["error"]["message"],
+        json!("unknown method 'streams/list'")
     );
 
     let prompts = send_mcp_request(

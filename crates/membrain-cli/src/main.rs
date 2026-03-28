@@ -657,7 +657,7 @@ enum Commands {
         #[arg(long, short = 'a', default_value_t = 0.7)]
         attention: f32,
         /// Emotional valence -1.0 to +1.0
-        #[arg(long, default_value_t = 0.0)]
+        #[arg(long, default_value_t = 0.0, allow_negative_numbers = true)]
         valence: f32,
         /// Emotional arousal 0.0–1.0
         #[arg(long, default_value_t = 0.0)]

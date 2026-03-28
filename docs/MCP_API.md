@@ -10,9 +10,12 @@ Status note:
 - The current live bounded MCP contract is the one tracked in `docs/mcp_completion_plan.md`, not the broader aspirational `memory_*` catalog from `docs/PLAN.md`.
 - On the stdio MCP path, the callable tool catalog exposed by `tools/list` is presently the bounded six-tool surface: `encode`, `recall`, `inspect`, `why`, `health`, and `doctor`.
 - The standard slash-style MCP protocol methods currently recognized on the stdio path are `initialize`, `notifications/initialized`, `tools/list`, `tools/call`, `resources/list`, `resources/read`, `prompts/list`, and `prompts/get`.
+- Live stdio `resources/list` currently returns only the bounded status resource `membrain://default/status`.
+- Live stdio MCP does not currently implement `streams/list`.
 - `prompts/list` / `prompts/get` are currently placeholder compatibility surfaces: `prompts/list` returns an empty list and `prompts/get` returns `unknown prompt` for named prompts.
 - The stdio transport also accepts direct JSON-RPC compatibility methods such as `encode`, `recall`, `inspect`, `why`, `health`, `doctor`, and `shutdown` for bounded manual or legacy integration flows.
 - On the Unix-socket daemon JSON-RPC path, transport-side discovery helpers such as `resources.list`, `resource.read`, `streams.list`, and `shutdown` remain available as daemon runtime helpers rather than callable MCP tools.
+- The daemon JSON-RPC runtime is not method-identical to MCP stdio: for example, live daemon retrieval uses `recall` with `query_text` and the explanation method is `explain` rather than MCP/CLI `why`.
 - The broader `memory_*`, feature-specific, and later-stage operator tools described below remain the canonical target contract unless a section explicitly says they are live today.
 - Normal daemon/MCP recall now returns hydrated evidence on success; explicit degraded/fallback language below should be read as applying to no-hydrated-evidence, capped, or repair/degraded cases rather than the default success path.
 - Current proof coverage includes bounded-tool discovery over stdio MCP, daemon status/doctor embedder counters after real recall traffic, and transport-level regression proof that `archival_recovery_partial` survives daemon and stdio MCP retrieval envelopes only when partial restore state actually shaped the returned result.
@@ -236,10 +239,16 @@ Live bounded stdio MCP surface today:
 | Surface family | Live methods | Notes |
 |---|---|---|
 | callable MCP tools | `encode`, `recall`, `inspect`, `why`, `health`, `doctor` | advertised by `tools/list`; callable through `tools/call` |
-| slash-style MCP discovery | `initialize`, `notifications/initialized`, `tools/list`, `tools/call`, `resources/list`, `resources/read`, `prompts/list`, `prompts/get` | protocol-facing transport methods |
+| slash-style MCP discovery | `initialize`, `notifications/initialized`, `tools/list`, `tools/call`, `resources/list`, `resources/read`, `prompts/list`, `prompts/get` | protocol-facing transport methods; live `resources/list` currently returns `membrain://default/status` only |
 | prompt compatibility placeholders | `prompts/list`, `prompts/get` | intentionally minimal today: empty prompt list and `unknown prompt` for named prompts |
 | direct JSON-RPC compatibility on stdio | `encode`, `recall`, `inspect`, `why`, `health`, `doctor`, `shutdown` | convenience/manual compatibility path; not a broader MCP tool catalog |
-| daemon JSON-RPC discovery helpers | `resources.list`, `resource.read`, `streams.list`, `shutdown` | unix-socket runtime helpers, distinct from slash-style MCP discovery |
+| daemon JSON-RPC discovery helpers | `resources.list`, `resource.read`, `streams.list`, `shutdown` | unix-socket runtime helpers, distinct from slash-style MCP discovery and not available through stdio `tools/list` |
+
+Live daemon JSON-RPC distinctions today:
+- socket runtime helpers expose six runtime resources through `resources.list`, including `membrain://daemon/runtime/status`, `membrain://daemon/runtime/health`, `membrain://daemon/runtime/doctor`, and the daemon stream listing resource
+- `streams.list` is daemon-only discovery for runtime notifications such as `maintenance.status`
+- `tools.list` is not a daemon JSON-RPC method
+- daemon requests use daemon request structs and validation, so CLI/MCP spellings like free-form `context` on `encode` are not interchangeable with daemon params
 
 ### Claude Code integration
 

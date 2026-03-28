@@ -199,10 +199,17 @@ Current behavior:
 - logs a startup message to stderr
 - exposes the bounded six callable MCP tools through `tools/list` / `tools/call`: `encode`, `recall`, `inspect`, `why`, `health`, and `doctor`
 - recognizes slash-style MCP protocol methods `initialize`, `notifications/initialized`, `tools/list`, `tools/call`, `resources/list`, `resources/read`, `prompts/list`, and `prompts/get`
+- currently returns one bounded stdio resource from `resources/list`: `membrain://default/status`
+- does not implement `streams/list` on the stdio MCP path today
 - keeps `prompts/list` / `prompts/get` as intentionally minimal placeholder surfaces today: empty prompt list and `unknown prompt` on named lookup
 - also accepts direct JSON-RPC compatibility methods such as `encode`, `recall`, `inspect`, `why`, `health`, `doctor`, and `shutdown` on the stdio adapter for bounded manual integration flows
 - does not make stdio MCP the authoritative warm runtime; daemon-owned repeated-request warmth still belongs to `membrain daemon`
 - does not auto-start a daemon just because the binary is installed or the MCP server is configured in a client
+
+Transport distinctions that matter in practice:
+- CLI one-shot commands and `membrain mcp` report process-local runtime authority such as `stdio_facade`; they do not become authoritative warm runtime just because a daemon also happens to be running
+- Unix-socket daemon JSON-RPC is a related but not argument-identical transport: live socket methods use daemon spellings such as `recall` with `query_text`, `inspect` with `id`, and `explain` rather than MCP/CLI `why`
+- daemon JSON-RPC exposes runtime helpers like `resources.list`, `resource.read`, and `streams.list`; it does not expose MCP discovery like `tools.list`
 
 Typical usage:
 
@@ -246,6 +253,9 @@ echo "content" | membrain remember --context "recent commits" --kind semantic
 | `--source` | cli | Source tag: cli, mcp, api |
 | `--share` | — | Mark as shared within the target namespace (cross-agent) |
 | `--namespace` | default | Target namespace |
+
+Note:
+- negative emotional values are accepted directly as ordinary space-separated numeric args, for example `--valence -0.8`
 
 ### `membrain recall <QUERY> [OPTIONS]`
 

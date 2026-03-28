@@ -1531,6 +1531,22 @@ async fn runtime_resource_and_stream_listings_match_shared_mcp_payload_shape() {
         json!("maintenance.status")
     );
 
+    let tools_list = send_request(
+        &socket_path,
+        json!({
+            "jsonrpc":"2.0",
+            "method":"tools.list",
+            "params":{},
+            "id":"tools-list"
+        }),
+    )
+    .await;
+    assert_eq!(tools_list["error"]["code"], json!(-32601));
+    assert_eq!(
+        tools_list["error"]["message"],
+        json!("unknown method 'tools.list'")
+    );
+
     shutdown_runtime(&socket_path, handle).await;
 }
 
