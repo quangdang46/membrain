@@ -11,6 +11,28 @@ const RUNTIME_DOCTOR_URI: &str = "membrain://daemon/runtime/doctor";
 const RUNTIME_STREAMS_URI: &str = "membrain://daemon/runtime/streams";
 const INSPECT_RESOURCE_URI_TEMPLATE: &str = "membrain://{namespace}/memories/{memory_id}";
 
+fn daemon_log(marker: &str, message: &str) {
+    eprintln!("[membrain-daemon] {marker} {message}");
+}
+
+fn summarize_memory_ids(memory_ids: &[u64]) -> String {
+    if memory_ids.is_empty() {
+        return "none".to_string();
+    }
+
+    let preview = memory_ids
+        .iter()
+        .take(8)
+        .map(|memory_id| memory_id.to_string())
+        .collect::<Vec<_>>()
+        .join(",");
+    if memory_ids.len() > 8 {
+        format!("{preview},+{}more", memory_ids.len() - 8)
+    } else {
+        preview
+    }
+}
+
 fn parse_inspect_resource_uri(uri: &str) -> Option<(String, u64)> {
     let prefix = "membrain://";
     let rest = uri.strip_prefix(prefix)?;
@@ -285,6 +307,18 @@ struct RuntimeMemoryRecord {
     causal_link_type: Option<CausalLinkType>,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct MaintenanceEmbeddingSummary {
+    maintenance_id: u64,
+    warmed_memory_ids: Vec<u64>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct MaintenanceRunOutcome {
+    completed: bool,
+    warmed_memory_ids: Vec<u64>,
+}
+
 fn hydrated_memory_record(record: &RuntimeMemoryRecord) -> HydratedMemoryRecord {
     HydratedMemoryRecord {
         memory_id: record.layout.metadata.memory_id,
@@ -367,6 +401,8 @@ struct RuntimeState {
     #[cfg(unix)]
     request_slots: Semaphore,
     maintenance_history: Mutex<VecDeque<u64>>,
+    maintenance_embedding_history: Mutex<VecDeque<MaintenanceEmbeddingSummary>>,
+    maintenance_embedding_cursor: AtomicUsize,
     memories: StdMutex<HashMap<u64, RuntimeMemoryRecord>>,
     audit: StdMutex<RuntimeAuditState>,
     cache: StdMutex<CacheManager>,
@@ -414,6 +450,8 @@ impl RuntimeState {
             #[cfg(unix)]
             request_slots: Semaphore::new(config.request_concurrency),
             maintenance_history: Mutex::new(VecDeque::new()),
+            maintenance_embedding_history: Mutex::new(VecDeque::new()),
+            maintenance_embedding_cursor: AtomicUsize::new(0),
             memories: StdMutex::new(HashMap::new()),
             audit: StdMutex::new(RuntimeAuditState {
                 store: membrain_core::BrainStore::new(RuntimeConfig::default()),
@@ -639,9 +677,9 @@ impl RuntimeState {
         }
     }
 
-    fn ensure_embedder_warm_for(&self, purpose: EmbeddingPurpose, normalized_text: &str) {
+    fn ensure_embedder_warm_for(&self, purpose: EmbeddingPurpose, normalized_text: &str) -> bool {
         if normalized_text.trim().is_empty() {
-            return;
+            return false;
         }
 
         let mut embedder_guard = self
@@ -659,7 +697,7 @@ impl RuntimeState {
                         .lock()
                         .expect("embedder error lock should be available") =
                         Some(error.to_string());
-                    return;
+                    return false;
                 }
             };
             *embedder_guard = Some(CachedTextEmbedder::new(backend, local_config.cache_entries));
@@ -671,7 +709,7 @@ impl RuntimeState {
         }
 
         let Some(embedder) = embedder_guard.as_mut() else {
-            return;
+            return false;
         };
         self.embedder_requests.fetch_add(1, Ordering::SeqCst);
         match embedder.get_or_embed(purpose, normalized_text) {
@@ -688,14 +726,47 @@ impl RuntimeState {
                         self.embedder_cache_misses.fetch_add(1, Ordering::SeqCst);
                     }
                 }
+                true
             }
             Err(error) => {
                 *self
                     .embedder_last_error
                     .lock()
                     .expect("embedder error lock should be available") = Some(error.to_string());
+                false
             }
         }
+    }
+
+    fn background_embedding_targets(&self, limit: usize) -> Vec<(u64, String)> {
+        let limit = limit.max(1);
+        let memories = self
+            .memories
+            .lock()
+            .expect("runtime memory registry lock should be available");
+        if memories.is_empty() {
+            return Vec::new();
+        }
+
+        let mut memory_ids = memories.keys().copied().collect::<Vec<_>>();
+        memory_ids.sort_unstable();
+
+        let start = self
+            .maintenance_embedding_cursor
+            .fetch_add(limit, Ordering::SeqCst);
+        let target_count = limit.min(memory_ids.len());
+        let mut selected = Vec::with_capacity(target_count);
+        for offset in 0..target_count {
+            let memory_id = memory_ids[(start + offset) % memory_ids.len()];
+            if let Some(record) = memories.get(&memory_id) {
+                let compact_text = record.layout.metadata.compact_text.clone();
+                if !compact_text.trim().is_empty() {
+                    selected.push((memory_id, compact_text));
+                }
+            }
+        }
+
+        selected
     }
 
     async fn doctor_report(&self) -> RuntimeDoctorReport {
@@ -721,6 +792,7 @@ impl RuntimeState {
         let metrics = status.metrics.clone();
         let maintenance_runs = metrics.maintenance_runs as usize;
         let maintenance_history = self.maintenance_history.lock().await.clone();
+        let maintenance_embedding_history = self.maintenance_embedding_history.lock().await.clone();
         let embedder = status.embedder.clone();
         let posture_status = match posture {
             RuntimePosture::Full => "ok",
@@ -1043,6 +1115,26 @@ impl RuntimeState {
                             maintenance_history
                                 .iter()
                                 .flat_map(|maintenance_id| {
+                                    let embedding_summary = maintenance_embedding_history
+                                        .iter()
+                                        .find(|summary| summary.maintenance_id == *maintenance_id);
+                                    let embedding_log = embedding_summary.map(|summary| {
+                                        let warmed_memory_ids = if summary.warmed_memory_ids.is_empty() {
+                                            "none".to_string()
+                                        } else {
+                                            summary
+                                                .warmed_memory_ids
+                                                .iter()
+                                                .map(|memory_id| memory_id.to_string())
+                                                .collect::<Vec<_>>()
+                                                .join(",")
+                                        };
+                                        format!(
+                                            "maintenance_background_embed_warmed:warmed={} memory_ids={} maintenance_id={maintenance_id}",
+                                            summary.warmed_memory_ids.len(),
+                                            warmed_memory_ids
+                                        )
+                                    });
                                     [
                                         format!(
                                             "maintenance_consolidation_completed:cold_migration={} maintenance_id={maintenance_id}",
@@ -1061,6 +1153,11 @@ impl RuntimeState {
                                         format!(
                                             "maintenance_forgetting_evaluated:archived=0 maintenance_id={maintenance_id}"
                                         ),
+                                        embedding_log.unwrap_or_else(|| {
+                                            format!(
+                                                "maintenance_background_embed_warmed:warmed=0 memory_ids=none maintenance_id={maintenance_id}"
+                                            )
+                                        }),
                                     ]
                                 })
                                 .collect()
@@ -1572,15 +1669,20 @@ impl RuntimeState {
     }
 
     fn request_shutdown(&self) {
-        self.shutdown_requested.store(true, Ordering::SeqCst);
-        self.shutdown_notify.notify_waiters();
+        let already_requested = self.shutdown_requested.swap(true, Ordering::SeqCst);
+        if !already_requested {
+            daemon_log("❌", "shutdown requested");
+            self.shutdown_notify.notify_waiters();
+        }
     }
 
     fn is_shutdown(&self) -> bool {
         self.shutdown_requested.load(Ordering::SeqCst)
     }
 
-    async fn record_maintenance_run(&self, maintenance_id: u64) {
+    async fn record_maintenance_run(&self, maintenance_id: u64, warmed_memory_ids: Vec<u64>) {
+        let warmed_count = warmed_memory_ids.len();
+        let warmed_summary = summarize_memory_ids(&warmed_memory_ids);
         self.apply_maintenance_projection();
         self.maintenance_runs.fetch_add(1, Ordering::SeqCst);
         let mut history = self.maintenance_history.lock().await;
@@ -1588,6 +1690,23 @@ impl RuntimeState {
         if history.len() > 16 {
             history.pop_front();
         }
+        drop(history);
+
+        let mut embedding_history = self.maintenance_embedding_history.lock().await;
+        embedding_history.push_back(MaintenanceEmbeddingSummary {
+            maintenance_id,
+            warmed_memory_ids,
+        });
+        if embedding_history.len() > 16 {
+            embedding_history.pop_front();
+        }
+        daemon_log(
+            "☑️",
+            &format!(
+                "maintenance completed maintenance_id={} warmed={} memory_ids={}",
+                maintenance_id, warmed_count, warmed_summary
+            ),
+        );
     }
 
     fn apply_maintenance_projection(&self) {
@@ -2292,7 +2411,7 @@ impl DaemonRuntime {
         self.state
             .set_authority_mode(RuntimeAuthorityMode::StdioFacade)
             .await;
-        eprintln!("membrain mcp server listening on stdio");
+        daemon_log("▶️", "mcp stdio server listening");
         let stdin = io::stdin();
         let stdout = io::stdout();
         let mut reader = io::BufReader::new(stdin);
@@ -2352,6 +2471,7 @@ impl DaemonRuntime {
             }
         }
 
+        daemon_log("❌", "mcp stdio server exiting");
         Ok(())
     }
 
@@ -2367,10 +2487,15 @@ impl DaemonRuntime {
         self.remove_stale_socket().await?;
 
         let listener = UnixListener::bind(&self.config.socket_path)?;
-        eprintln!(
-            "membrain daemon listening on unix socket {}",
-            self.config.socket_path.display()
-        );
+        daemon_log("▶️", &format!(
+            "daemon listening socket={} request_concurrency={} max_queue_depth={} maintenance_interval_secs={} maintenance_poll_budget={} maintenance_step_delay_ms={}",
+            self.config.socket_path.display(),
+            self.config.request_concurrency,
+            self.config.max_queue_depth,
+            self.config.maintenance_interval.as_secs(),
+            self.config.maintenance_poll_budget,
+            self.config.maintenance_step_delay.as_millis()
+        ));
         let state = Arc::clone(&self.state);
         let config = self.config.clone();
         let accept_state = Arc::clone(&self.state);
@@ -2398,6 +2523,7 @@ impl DaemonRuntime {
         }
 
         self.remove_stale_socket().await?;
+        daemon_log("❌", "daemon stopped and socket removed");
         Ok(())
     }
 
@@ -2425,6 +2551,11 @@ impl DaemonRuntime {
                             let queued = state.queued_requests.fetch_add(1, Ordering::SeqCst) + 1;
                             if queued > config.max_queue_depth {
                                 state.queued_requests.fetch_sub(1, Ordering::SeqCst);
+                                daemon_log("⚠️", &format!(
+                                    "queue full queued={} max_queue_depth={} request rejected",
+                                    queued - 1,
+                                    config.max_queue_depth
+                                ));
                                 let response = JsonRpcResponse::error(
                                     None,
                                     -32001,
@@ -3503,10 +3634,25 @@ impl DaemonRuntime {
                 let state_clone = Arc::clone(&state);
                 let polls_budget = polls_budget.unwrap_or(4);
                 let step_delay = Duration::from_millis(step_delay_ms.unwrap_or(25));
+                daemon_log("▶️", &format!(
+                    "maintenance accepted source=jsonrpc maintenance_id={} polls_budget={} step_delay_ms={}",
+                    maintenance_id,
+                    polls_budget,
+                    step_delay.as_millis()
+                ));
                 tokio::spawn(async move {
                     let _guard = BackgroundJobGuard::new(Arc::clone(&state_clone));
-                    if Self::run_maintenance_budget(&state_clone, polls_budget, step_delay).await {
-                        state_clone.record_maintenance_run(maintenance_id).await;
+                    let outcome =
+                        Self::run_maintenance_budget(&state_clone, polls_budget, step_delay).await;
+                    if outcome.completed {
+                        state_clone
+                            .record_maintenance_run(maintenance_id, outcome.warmed_memory_ids)
+                            .await;
+                    } else {
+                        daemon_log("⚠️", &format!(
+                            "maintenance cancelled maintenance_id={} before completion",
+                            maintenance_id
+                        ));
                     }
                 });
                 JsonRpcResponse::success(
@@ -6520,14 +6666,33 @@ impl DaemonRuntime {
         state: &RuntimeState,
         polls_budget: u32,
         step_delay: Duration,
-    ) -> bool {
-        for _ in 0..polls_budget {
+    ) -> MaintenanceRunOutcome {
+        let targets = state.background_embedding_targets(polls_budget as usize);
+        let mut warmed_memory_ids = Vec::with_capacity(targets.len());
+        for (index, (memory_id, compact_text)) in targets.into_iter().enumerate() {
             if state.is_shutdown() {
-                return false;
+                return MaintenanceRunOutcome {
+                    completed: false,
+                    warmed_memory_ids,
+                };
             }
-            sleep(step_delay).await;
+            if state.ensure_embedder_warm_for(EmbeddingPurpose::Content, &compact_text) {
+                warmed_memory_ids.push(memory_id);
+            }
+            if index + 1 < polls_budget as usize {
+                sleep(step_delay).await;
+            }
         }
-        !state.is_shutdown()
+        if state.is_shutdown() {
+            return MaintenanceRunOutcome {
+                completed: false,
+                warmed_memory_ids,
+            };
+        }
+        MaintenanceRunOutcome {
+            completed: true,
+            warmed_memory_ids,
+        }
     }
 
     fn handle_preflight_run(
@@ -6592,6 +6757,15 @@ impl DaemonRuntime {
     async fn maintenance_loop(state: Arc<RuntimeState>, config: DaemonRuntimeConfig) {
         let mut ticker = tokio::time::interval(config.maintenance_interval);
         ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+        daemon_log(
+            "▶️",
+            &format!(
+                "maintenance loop armed interval_secs={} polls_budget={} step_delay_ms={}",
+                config.maintenance_interval.as_secs(),
+                config.maintenance_poll_budget,
+                config.maintenance_step_delay.as_millis()
+            ),
+        );
         ticker.tick().await;
 
         loop {
@@ -6607,17 +6781,43 @@ impl DaemonRuntime {
                     if state.is_shutdown() {
                         break;
                     }
-                    if state.background_jobs.load(Ordering::SeqCst) > 0 {
+                    let active_background_jobs = state.background_jobs.load(Ordering::SeqCst);
+                    daemon_log("🔄", &format!(
+                        "maintenance tick active_background_jobs={} total_runs={}",
+                        active_background_jobs,
+                        state.maintenance_runs.load(Ordering::SeqCst)
+                    ));
+                    if active_background_jobs > 0 {
+                        daemon_log("⚠️", &format!(
+                            "maintenance skipped reason=background_job_active active_background_jobs={}",
+                            active_background_jobs
+                        ));
                         continue;
                     }
                     let maintenance_id = state.next_maintenance_id();
                     let state_clone = Arc::clone(&state);
                     let step_delay = config.maintenance_step_delay;
                     let polls_budget = config.maintenance_poll_budget;
+                    daemon_log("▶️", &format!(
+                        "maintenance scheduled source=background maintenance_id={} polls_budget={} step_delay_ms={}",
+                        maintenance_id,
+                        polls_budget,
+                        step_delay.as_millis()
+                    ));
                     tokio::spawn(async move {
                         let _guard = BackgroundJobGuard::new(Arc::clone(&state_clone));
-                        if Self::run_maintenance_budget(&state_clone, polls_budget, step_delay).await {
-                            state_clone.record_maintenance_run(maintenance_id).await;
+                        let outcome =
+                            Self::run_maintenance_budget(&state_clone, polls_budget, step_delay)
+                                .await;
+                        if outcome.completed {
+                            state_clone
+                                .record_maintenance_run(maintenance_id, outcome.warmed_memory_ids)
+                                .await;
+                        } else {
+                            daemon_log("⚠️", &format!(
+                                "maintenance cancelled maintenance_id={} before completion",
+                                maintenance_id
+                            ));
                         }
                     });
                 }
@@ -6733,13 +6933,16 @@ impl Drop for BackgroundJobGuard {
 mod tests {
     use super::{DaemonRuntime, DaemonRuntimeConfig};
     use crate::mcp::{McpError, McpResponse};
-    use crate::rpc::RuntimeStatus;
+    use crate::rpc::{RuntimeEmbedderState, RuntimeStatus};
     use membrain_core::api::NamespaceId;
-    use membrain_core::engine::confidence::{ConfidenceEngine, ConfidencePolicy};
-    use membrain_core::engine::lease::LeasePolicy;
+    use membrain_core::engine::confidence::{ConfidenceEngine, ConfidenceInputs, ConfidencePolicy};
+    use membrain_core::engine::lease::{LeaseMetadata, LeasePolicy};
     use membrain_core::engine::recall::RecallRequest;
+    use membrain_core::persistence::{
+        open_hot_db, save_runtime_records, PersistedDaemonMemoryRecord, PersistedTier2Layout,
+    };
     use membrain_core::policy::SharingVisibility;
-    use membrain_core::types::MemoryId;
+    use membrain_core::types::{CanonicalMemoryType, FastPathRouteFamily, MemoryId};
     use serde_json::{json, Value};
     use std::future::Future;
     use std::path::PathBuf;
@@ -7587,6 +7790,21 @@ mod tests {
         })
         .await
         .unwrap();
+
+        let encode_response = send_request(
+            &socket_path,
+            json!({
+                "jsonrpc":"2.0",
+                "method":"encode",
+                "params":{
+                    "content":"background maintenance should warm this persisted memory",
+                    "namespace":"default"
+                },
+                "id":"seed-memory"
+            }),
+        )
+        .await;
+        assert_eq!(encode_response["result"]["status"], json!("accepted"));
 
         let maintenance = send_request(
             &socket_path,
@@ -11496,6 +11714,136 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn maintenance_notification_warms_embedder_for_persisted_memories() {
+        let socket_path = unique_path("maintenance-embedder");
+        let db_root = unique_db_root("maintenance-embedder");
+        let hot_db_path = db_root.join("hot.db");
+        let cold_db_path = db_root.join("cold.db");
+        tokio::fs::create_dir_all(&db_root).await.unwrap();
+
+        let confidence_inputs = ConfidenceInputs::fresh();
+        let confidence_output =
+            ConfidenceEngine.compute(&confidence_inputs, &ConfidencePolicy::default());
+        let persisted_record = PersistedDaemonMemoryRecord {
+            layout: PersistedTier2Layout {
+                namespace: "team.alpha".to_string(),
+                memory_id: 41,
+                session_id: 1,
+                memory_type: CanonicalMemoryType::Event,
+                route_family: FastPathRouteFamily::Event,
+                compact_text: "background embed warm candidate".to_string(),
+                fingerprint: 41 * 97,
+                payload_size_bytes: "background embed warm candidate".len(),
+                affect: None,
+                is_landmark: false,
+                landmark_label: None,
+                era_id: None,
+                visibility: "private".to_string(),
+                lease: LeaseMetadata::new(LeasePolicy::Durable, 0),
+                raw_text: "background embed warm candidate".to_string(),
+            },
+            passive_observation: None,
+            causal_parents: Vec::new(),
+            causal_link_type: None,
+            confidence_inputs,
+            confidence_output,
+            projected_freshness_markers: None,
+        };
+        let mut conn = open_hot_db(&hot_db_path).unwrap();
+        save_runtime_records(&mut conn, &[persisted_record]).unwrap();
+        drop(conn);
+
+        let mut config =
+            DaemonRuntimeConfig::new(&socket_path).with_db_paths(&hot_db_path, &cold_db_path);
+        config.maintenance_interval = Duration::from_secs(3600);
+        let handle = spawn_runtime(config).await;
+
+        timeout(Duration::from_secs(2), async {
+            while tokio::fs::metadata(&socket_path).await.is_err() {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .unwrap();
+
+        let initial_status = send_request(
+            &socket_path,
+            json!({"jsonrpc":"2.0","method":"status","params":{},"id":"status-before-maintenance"}),
+        )
+        .await;
+        assert_eq!(
+            initial_status["result"]["embedder"]["state"],
+            json!("not_loaded")
+        );
+
+        send_notification(
+            &socket_path,
+            json!({
+                "jsonrpc":"2.0",
+                "method":"run_maintenance",
+                "params":{"polls_budget":1,"step_delay_ms":10}
+            }),
+        )
+        .await;
+
+        let status = timeout(Duration::from_secs(30), async {
+            loop {
+                let status_response = send_request(
+                    &socket_path,
+                    json!({"jsonrpc":"2.0","method":"status","params":{},"id":"status-after-maintenance"}),
+                )
+                .await;
+                let status: RuntimeStatus =
+                    serde_json::from_value(status_response["result"].clone()).unwrap();
+                if status.metrics.maintenance_runs == 1 {
+                    break status;
+                }
+                tokio::time::sleep(Duration::from_millis(25)).await;
+            }
+        })
+        .await
+        .unwrap();
+        assert!(matches!(
+            status.embedder.state,
+            RuntimeEmbedderState::Loaded | RuntimeEmbedderState::Warm
+        ));
+        assert_eq!(status.embedder.loads, 1);
+        assert!(status.embedder.requests >= 1);
+        assert!(status.embedder.cache_misses >= 1);
+
+        let doctor_response = send_request(
+            &socket_path,
+            json!({"jsonrpc":"2.0","method":"doctor","params":{},"id":"doctor-after-background-embed"}),
+        )
+        .await;
+        assert!(
+            doctor_response["result"]["health"]["lifecycle"]["background_maintenance_log"]
+                .as_array()
+                .expect("background maintenance log should be an array")
+                .iter()
+                .any(|entry| {
+                    entry.as_str().is_some_and(|value| {
+                        value.contains("maintenance_background_embed_warmed:warmed=1")
+                            && value.contains("memory_ids=41")
+                            && value.contains("maintenance_id=1")
+                    })
+                })
+        );
+
+        let shutdown_response = send_request(
+            &socket_path,
+            json!({"jsonrpc":"2.0","method":"shutdown","params":{},"id":"done"}),
+        )
+        .await;
+        assert_eq!(shutdown_response["result"]["shutting_down"], json!(true));
+        timeout(Duration::from_secs(2), handle)
+            .await
+            .unwrap()
+            .unwrap()
+            .unwrap();
+    }
+
+    #[tokio::test]
     async fn shutdown_skips_manual_run_maintenance_accounting_when_cancelled_before_first_step() {
         let config =
             DaemonRuntimeConfig::new(unique_path("maintenance-budget-cancelled").as_path());
@@ -11511,7 +11859,7 @@ mod tests {
         tokio::task::yield_now().await;
         state.request_shutdown();
 
-        assert!(!maintenance_finished.await);
+        assert!(!maintenance_finished.await.completed);
         assert_eq!(state.status().await.metrics.maintenance_runs, 0);
     }
 
