@@ -8,6 +8,7 @@ use membrain_core::persistence::{
 use membrain_core::types::{CanonicalMemoryType, FastPathRouteFamily};
 use serde_json::{json, Value};
 use std::io::{BufRead, BufReader, Write};
+#[cfg(unix)]
 use std::os::unix::net::UnixStream;
 use std::process::{Child, Command, Stdio};
 use std::thread::sleep;
@@ -116,6 +117,7 @@ fn spawn_membrain_mcp(db_root: &std::path::Path) -> Child {
         .expect("membrain mcp should spawn")
 }
 
+#[cfg(unix)]
 fn spawn_membrain_daemon(db_root: &std::path::Path, socket_path: &std::path::Path) -> Child {
     Command::new(env!("CARGO_BIN_EXE_membrain"))
         .arg("--db-path")
@@ -130,6 +132,7 @@ fn spawn_membrain_daemon(db_root: &std::path::Path, socket_path: &std::path::Pat
         .expect("membrain daemon should spawn")
 }
 
+#[cfg(unix)]
 fn unique_socket_path(label: &str) -> std::path::PathBuf {
     let unique = SystemTime::now()
         .duration_since(UNIX_EPOCH)
@@ -143,6 +146,7 @@ fn unique_socket_path(label: &str) -> std::path::PathBuf {
     ))
 }
 
+#[cfg(unix)]
 fn wait_for_socket(socket_path: &std::path::Path) -> bool {
     for _ in 0..500 {
         if socket_path.exists() && UnixStream::connect(socket_path).is_ok() {
@@ -153,6 +157,7 @@ fn wait_for_socket(socket_path: &std::path::Path) -> bool {
     false
 }
 
+#[cfg(unix)]
 fn send_daemon_request(socket_path: &std::path::Path, request: Value) -> Value {
     let mut stream =
         UnixStream::connect(socket_path).expect("daemon socket should accept connections");
@@ -169,6 +174,7 @@ fn send_daemon_request(socket_path: &std::path::Path, request: Value) -> Value {
     serde_json::from_str(&line).expect("daemon response should be valid json")
 }
 
+#[cfg(unix)]
 fn shutdown_membrain_daemon(child: &mut Child, socket_path: &std::path::Path) {
     let shutdown = send_daemon_request(
         socket_path,
@@ -322,6 +328,7 @@ fn cli_restart_rehydrates_persisted_memory_for_inspect_recall_and_explain() {
 }
 
 #[test]
+#[cfg(unix)]
 fn cross_surface_restart_rehydrates_persisted_memory_for_cli_daemon_and_mcp() {
     let db_root = test_db_root();
     let namespace = "test_ns";
@@ -800,6 +807,7 @@ fn mcp_protocol_discovers_bounded_live_tools_and_placeholder_prompts() {
 }
 
 #[test]
+#[cfg(unix)]
 fn partial_archival_recovery_marker_survives_daemon_and_stdio_mcp_transport() {
     let db_root = test_db_root();
     let namespace = "test_ns";
