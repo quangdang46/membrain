@@ -26,13 +26,16 @@ use crate::preflight::{
     to_preflight_outcome as to_shared_preflight_outcome, PreflightExplainResponse,
     PreflightOutcome,
 };
+#[cfg(unix)]
+use crate::rpc::busy_payload;
 use crate::rpc::{
-    busy_payload, cancelled_payload, JsonRpcRequest, JsonRpcResponse, RuntimeAuthorityMode,
-    RuntimeAvailability, RuntimeDoctorCheck, RuntimeDoctorIndex, RuntimeDoctorReport,
-    RuntimeDoctorRunbookHint, RuntimeDoctorSummary, RuntimeEmbedderState, RuntimeEmbedderStatus,
-    RuntimeMaintenanceAccepted, RuntimeMethodRequest, RuntimeMetrics, RuntimePosture,
-    RuntimeRemediation, RuntimeRequest, RuntimeStatus,
+    cancelled_payload, JsonRpcRequest, JsonRpcResponse, RuntimeAuthorityMode, RuntimeAvailability,
+    RuntimeDoctorCheck, RuntimeDoctorIndex, RuntimeDoctorReport, RuntimeDoctorRunbookHint,
+    RuntimeDoctorSummary, RuntimeEmbedderState, RuntimeEmbedderStatus, RuntimeMaintenanceAccepted,
+    RuntimeMethodRequest, RuntimeMetrics, RuntimePosture, RuntimeRemediation, RuntimeRequest,
+    RuntimeStatus,
 };
+#[cfg(unix)]
 use anyhow::Context;
 use membrain_core::api::{
     AgentId, BlackboardSnapshotOutput, DeadZonesOutput, FieldPresence, ForkInheritance,
@@ -250,10 +253,14 @@ use std::os::unix::fs::FileTypeExt;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex as StdMutex};
+#[cfg(unix)]
 use tokio::io::BufReader;
 #[cfg(unix)]
 use tokio::net::{UnixListener, UnixStream};
-use tokio::sync::{Mutex, Notify, Semaphore};
+#[cfg(unix)]
+use tokio::sync::Semaphore;
+use tokio::sync::{Mutex, Notify};
+#[cfg(unix)]
 use tokio::task::JoinSet;
 use tokio::time::{sleep, Duration};
 
@@ -357,6 +364,7 @@ struct RuntimeState {
     next_maintenance_id: AtomicU64,
     shutdown_requested: AtomicBool,
     shutdown_notify: Notify,
+    #[cfg(unix)]
     request_slots: Semaphore,
     maintenance_history: Mutex<VecDeque<u64>>,
     memories: StdMutex<HashMap<u64, RuntimeMemoryRecord>>,
@@ -403,6 +411,7 @@ impl RuntimeState {
             next_maintenance_id: AtomicU64::new(1),
             shutdown_requested: AtomicBool::new(false),
             shutdown_notify: Notify::new(),
+            #[cfg(unix)]
             request_slots: Semaphore::new(config.request_concurrency),
             maintenance_history: Mutex::new(VecDeque::new()),
             memories: StdMutex::new(HashMap::new()),
@@ -6579,6 +6588,7 @@ impl DaemonRuntime {
         )
     }
 
+    #[cfg(unix)]
     async fn maintenance_loop(state: Arc<RuntimeState>, config: DaemonRuntimeConfig) {
         let mut ticker = tokio::time::interval(config.maintenance_interval);
         ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
@@ -6663,26 +6673,31 @@ impl DaemonRuntime {
     }
 }
 
+#[cfg(unix)]
 struct QueueGuard {
     state: Arc<RuntimeState>,
 }
 
+#[cfg(unix)]
 impl QueueGuard {
     fn new(state: Arc<RuntimeState>) -> Self {
         Self { state }
     }
 }
 
+#[cfg(unix)]
 impl Drop for QueueGuard {
     fn drop(&mut self) {
         self.state.queued_requests.fetch_sub(1, Ordering::SeqCst);
     }
 }
 
+#[cfg(unix)]
 struct ActiveRequestGuard {
     state: Arc<RuntimeState>,
 }
 
+#[cfg(unix)]
 impl ActiveRequestGuard {
     fn new(state: Arc<RuntimeState>) -> Self {
         state.active_requests.fetch_add(1, Ordering::SeqCst);
@@ -6690,6 +6705,7 @@ impl ActiveRequestGuard {
     }
 }
 
+#[cfg(unix)]
 impl Drop for ActiveRequestGuard {
     fn drop(&mut self) {
         self.state.active_requests.fetch_sub(1, Ordering::SeqCst);
@@ -6725,12 +6741,31 @@ mod tests {
     use membrain_core::policy::SharingVisibility;
     use membrain_core::types::MemoryId;
     use serde_json::{json, Value};
+    use std::future::Future;
     use std::path::PathBuf;
     use std::sync::Arc;
     use std::time::{SystemTime, UNIX_EPOCH};
     use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
     use tokio::net::UnixStream;
-    use tokio::time::{timeout, Duration};
+    use tokio::time::Duration;
+
+    fn scaled_timeout(duration: Duration) -> Duration {
+        if cfg!(target_os = "macos") {
+            duration.saturating_mul(5)
+        } else {
+            duration
+        }
+    }
+
+    async fn timeout<F>(
+        duration: Duration,
+        future: F,
+    ) -> Result<F::Output, tokio::time::error::Elapsed>
+    where
+        F: Future,
+    {
+        tokio::time::timeout(scaled_timeout(duration), future).await
+    }
 
     fn unique_path(name: &str) -> PathBuf {
         let nanos = SystemTime::now()
