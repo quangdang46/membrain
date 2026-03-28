@@ -60,7 +60,8 @@ use membrain_core::engine::ranking::{
 };
 use membrain_core::engine::recall::{RecallEngine, RecallRequest, RecallRuntime};
 use membrain_core::engine::semantic_retrieval::{
-    HydratedMemoryRecord, SemanticExecutorConfig, SharedSemanticRetrievalExecutor,
+    HydratedMemoryRecord, SemanticExecutorConfig, SemanticRetrievalTrace,
+    SharedSemanticRetrievalExecutor,
 };
 use membrain_core::engine::result::{
     AnsweredFrom, EntryLane, EvidenceRole, QueryByExampleExplain, ResultBuilder, ResultReason,
@@ -356,6 +357,10 @@ struct RuntimeState {
     embedder_requests: AtomicU64,
     embedder_cache_hits: AtomicU64,
     embedder_cache_misses: AtomicU64,
+    embedder_semantic_query_hits: AtomicU64,
+    embedder_semantic_query_misses: AtomicU64,
+    embedder_semantic_batch_hits: AtomicU64,
+    embedder_semantic_batch_misses: AtomicU64,
     embedder_last_error: StdMutex<Option<String>>,
     hot_db_path: Option<PathBuf>,
 }
@@ -394,6 +399,10 @@ impl RuntimeState {
             embedder_requests: AtomicU64::new(0),
             embedder_cache_hits: AtomicU64::new(0),
             embedder_cache_misses: AtomicU64::new(0),
+            embedder_semantic_query_hits: AtomicU64::new(0),
+            embedder_semantic_query_misses: AtomicU64::new(0),
+            embedder_semantic_batch_hits: AtomicU64::new(0),
+            embedder_semantic_batch_misses: AtomicU64::new(0),
             embedder_last_error: StdMutex::new(None),
             hot_db_path: config.hot_db_path.clone(),
         };
@@ -547,6 +556,58 @@ impl RuntimeState {
                 .expect("embedder error lock should be available") = None;
         }
         Ok(embedder_guard)
+    }
+
+    fn observe_semantic_trace(&self, trace: &SemanticRetrievalTrace) {
+        if let Some(query_trace) = &trace.query_trace {
+            self.embedder_requests.fetch_add(1, Ordering::SeqCst);
+            match query_trace.cache_event {
+                EmbedCacheEvent::Hit => {
+                    self.embedder_cache_hits.fetch_add(1, Ordering::SeqCst);
+                    self.embedder_semantic_query_hits
+                        .fetch_add(1, Ordering::SeqCst);
+                }
+                EmbedCacheEvent::Miss => {
+                    self.embedder_cache_misses.fetch_add(1, Ordering::SeqCst);
+                    self.embedder_semantic_query_misses
+                        .fetch_add(1, Ordering::SeqCst);
+                }
+            }
+        }
+
+        if let Some(batch_trace) = &trace.batch_trace {
+            let hit_count = u64::try_from(batch_trace.cache_hit_count)
+                .expect("semantic batch hit count should fit in u64");
+            let miss_count = u64::try_from(batch_trace.cache_miss_count)
+                .expect("semantic batch miss count should fit in u64");
+            let request_count = u64::try_from(batch_trace.batch_size)
+                .expect("semantic batch size should fit in u64");
+            self.embedder_requests
+                .fetch_add(request_count, Ordering::SeqCst);
+            self.embedder_cache_hits.fetch_add(hit_count, Ordering::SeqCst);
+            self.embedder_cache_misses
+                .fetch_add(miss_count, Ordering::SeqCst);
+            self.embedder_semantic_batch_hits
+                .fetch_add(hit_count, Ordering::SeqCst);
+            self.embedder_semantic_batch_misses
+                .fetch_add(miss_count, Ordering::SeqCst);
+        }
+
+        if let Some(error) = trace.degraded_reason.as_deref().filter(|reason| {
+            reason.starts_with("semantic_embedding_unavailable:")
+                || reason.starts_with("query_embedding_failed:")
+                || reason.starts_with("candidate_embedding_failed:")
+        }) {
+            *self
+                .embedder_last_error
+                .lock()
+                .expect("embedder error lock should be available") = Some(error.to_string());
+        } else if trace.query_trace.is_some() || trace.batch_trace.is_some() {
+            *self
+                .embedder_last_error
+                .lock()
+                .expect("embedder error lock should be available") = None;
+        }
     }
 
     fn ensure_embedder_warm_for(&self, purpose: EmbeddingPurpose, normalized_text: &str) {
@@ -1029,7 +1090,7 @@ impl RuntimeState {
                                 }
                             },
                             note: Some(format!(
-                                "state={} backend={} generation={} dimensions={} loads={} requests={} cache_hits={} cache_misses={}",
+                                "state={} backend={} generation={} dimensions={} loads={} requests={} cache_hits={} cache_misses={} semantic_query_hits={} semantic_query_misses={} semantic_batch_hits={} semantic_batch_misses={}",
                                 embedder.state.as_str(),
                                 embedder.backend_kind,
                                 embedder.generation,
@@ -1038,6 +1099,10 @@ impl RuntimeState {
                                 embedder.requests,
                                 embedder.cache_hits,
                                 embedder.cache_misses,
+                                self.embedder_semantic_query_hits.load(Ordering::SeqCst),
+                                self.embedder_semantic_query_misses.load(Ordering::SeqCst),
+                                self.embedder_semantic_batch_hits.load(Ordering::SeqCst),
+                                self.embedder_semantic_batch_misses.load(Ordering::SeqCst),
                             )),
                         },
                     ],
@@ -1371,7 +1436,7 @@ impl RuntimeState {
                 severity: embedder_severity,
                 affected_scope: embedder.state.as_str().to_string(),
                 degraded_impact: Some(format!(
-                    "backend={} generation={} dimensions={} loads={} requests={} cache_hits={} cache_misses={}",
+                    "backend={} generation={} dimensions={} loads={} requests={} cache_hits={} cache_misses={} semantic_query_hits={} semantic_query_misses={} semantic_batch_hits={} semantic_batch_misses={}",
                     embedder.backend_kind,
                     embedder.generation,
                     embedder.dimensions,
@@ -1379,6 +1444,10 @@ impl RuntimeState {
                     embedder.requests,
                     embedder.cache_hits,
                     embedder.cache_misses,
+                    self.embedder_semantic_query_hits.load(Ordering::SeqCst),
+                    self.embedder_semantic_query_misses.load(Ordering::SeqCst),
+                    self.embedder_semantic_batch_hits.load(Ordering::SeqCst),
+                    self.embedder_semantic_batch_misses.load(Ordering::SeqCst),
                 )),
                 remediation: matches!(embedder.state, RuntimeEmbedderState::NotLoaded | RuntimeEmbedderState::Degraded | RuntimeEmbedderState::Unavailable)
                     .then(|| RuntimeRemediation {
@@ -5419,20 +5488,30 @@ impl DaemonRuntime {
                     "semantic_executor_trace"
                 }
                 .to_string(),
-                detail: if let Some(reason) = trace.degraded_reason.as_deref() {
-                    format!(
-                        "shared semantic executor used lexical prefilter over {} namespace candidate(s), produced {} prefilter candidate(s), and returned {} semantic candidate(s); degraded_reason={reason}",
-                        trace.namespace_candidate_count,
-                        trace.lexical_prefilter_count,
-                        trace.semantic_candidate_count,
-                    )
-                } else {
-                    format!(
-                        "shared semantic executor used lexical prefilter over {} namespace candidate(s), produced {} prefilter candidate(s), and returned {} semantic candidate(s)",
-                        trace.namespace_candidate_count,
-                        trace.lexical_prefilter_count,
-                        trace.semantic_candidate_count,
-                    )
+                detail: {
+                    let mut detail = if let Some(reason) = trace.degraded_reason.as_deref() {
+                        format!(
+                            "shared semantic executor used lexical prefilter over {} namespace candidate(s), produced {} prefilter candidate(s), returned {} semantic candidate(s), and enforced bounded result_limit={}; degraded_reason={reason}",
+                            trace.namespace_candidate_count,
+                            trace.lexical_prefilter_count,
+                            trace.semantic_candidate_count,
+                            trace.result_limit,
+                        )
+                    } else {
+                        format!(
+                            "shared semantic executor used lexical prefilter over {} namespace candidate(s), produced {} prefilter candidate(s), returned {} semantic candidate(s), and enforced bounded result_limit={}",
+                            trace.namespace_candidate_count,
+                            trace.lexical_prefilter_count,
+                            trace.semantic_candidate_count,
+                            trace.result_limit,
+                        )
+                    };
+                    if trace.bounded_shortlist_truncated {
+                        detail.push_str(
+                            "; bounded shortlist truncated lower-ranked candidates before hydration to preserve the declared runtime budget",
+                        );
+                    }
+                    detail
                 },
             });
         }
@@ -5697,7 +5776,7 @@ impl DaemonRuntime {
                 let query_text = query_by_example
                     .and_then(|normalized| normalized.normalized_query_text.as_deref())
                     .unwrap_or_default();
-                match state.local_text_embedder() {
+                let semantic_result = match state.local_text_embedder() {
                     Ok(mut embedder) => Some(if let Some(embedder) = embedder.as_mut() {
                         SharedSemanticRetrievalExecutor.execute(
                             &hydrated_records,
@@ -5725,7 +5804,11 @@ impl DaemonRuntime {
                         SemanticExecutorConfig::bounded(result_budget),
                         format!("semantic_embedding_unavailable:{error}"),
                     )),
+                };
+                if let Some(trace) = semantic_result.as_ref().map(|result| &result.trace) {
+                    state.observe_semantic_trace(trace);
                 }
+                semantic_result
             } else {
                 None
             };
@@ -6722,6 +6805,78 @@ mod tests {
             .unwrap()
             .unwrap();
         assert!(tokio::fs::metadata(&socket_path).await.is_err());
+    }
+
+    #[tokio::test]
+    async fn stdio_facade_status_and_operator_surfaces_do_not_claim_daemon_authority() {
+        let runtime = DaemonRuntime::new(unique_path("stdio-authority"));
+        runtime
+            .state
+            .set_authority_mode(crate::rpc::RuntimeAuthorityMode::StdioFacade)
+            .await;
+
+        let status = runtime.state.status().await;
+        assert_eq!(status.posture.as_str(), "full");
+        assert_eq!(status.authority_mode.as_str(), "stdio_facade");
+        assert!(!status.authoritative_runtime);
+        assert!(!status.maintenance_active);
+        assert!(status
+            .warm_runtime_guarantees
+            .contains(&"local_process_state".to_string()));
+        assert!(status
+            .warm_runtime_guarantees
+            .contains(&"best_effort_same_process_reuse".to_string()));
+        assert!(status
+            .warm_runtime_guarantees
+            .contains(&"stdio_transport".to_string()));
+        assert!(!status
+            .warm_runtime_guarantees
+            .contains(&"daemon_owned_runtime_state".to_string()));
+        assert!(!status
+            .warm_runtime_guarantees
+            .contains(&"repeated_request_warmth".to_string()));
+        assert!(!status
+            .warm_runtime_guarantees
+            .contains(&"background_maintenance_loop".to_string()));
+
+        let health = runtime.state.health_report().await;
+        assert_eq!(
+            health["feature_availability"][1]["feature"],
+            json!("runtime_authority")
+        );
+        assert_eq!(
+            health["feature_availability"][1]["posture"],
+            json!("Degraded")
+        );
+        assert!(health["feature_availability"][1]["note"]
+            .as_str()
+            .is_some_and(|note| {
+                note.contains("mode=stdio_facade")
+                    && note.contains("authoritative_runtime=false")
+                    && note.contains("maintenance_active=false")
+                    && note.contains("best_effort_same_process_reuse")
+            }));
+
+        let doctor = runtime.state.doctor_report().await;
+        assert_eq!(doctor.status, "ok");
+        assert!(doctor
+            .warnings
+            .contains(&"stdio_mode_has_no_background_maintenance_loop"));
+        assert!(doctor.checks.iter().any(|check| {
+            check.name == "runtime_authority"
+                && check.status == "warn"
+                && check.affected_scope == "stdio_facade"
+                && check.degraded_impact.as_ref().is_some_and(|impact| {
+                    impact.contains("authoritative_runtime=false")
+                        && impact.contains("maintenance_active=false")
+                        && impact.contains("best_effort_same_process_reuse")
+                })
+                && check.remediation.as_ref().is_some_and(|remediation| {
+                    remediation
+                        .summary
+                        .contains("authoritative warm-runtime guarantees")
+                })
+        }));
     }
 
     #[tokio::test]
@@ -8144,7 +8299,10 @@ mod tests {
         );
         assert!(health["result"]["feature_availability"][2]["note"]
             .as_str()
-            .is_some_and(|note| note.contains("backend=local_fastembed") && note.contains("generation=all-minilm-l6-v2@default")));
+            .is_some_and(|note| note.contains("backend=local_fastembed")
+                && note.contains("generation=all-minilm-l6-v2@default")
+                && note.contains("semantic_query_hits=")
+                && note.contains("semantic_batch_hits=")));
 
         let dead_zones = send_request(
             &socket_path,
@@ -8792,6 +8950,65 @@ mod tests {
                         && detail.contains("semantic_score=")
                 })
         }));
+
+        let status_after_recall = send_request(
+            &socket_path,
+            json!({"jsonrpc":"2.0","method":"status","params":{},"id":"status-after-recall"}),
+        )
+        .await;
+        assert_eq!(status_after_recall["result"]["embedder"]["state"], json!("warm"));
+        assert_eq!(status_after_recall["result"]["embedder"]["loads"], json!(1));
+        assert_eq!(
+            status_after_recall["result"]["embedder"]["cache_hits"],
+            json!(2)
+        );
+        assert_eq!(
+            status_after_recall["result"]["embedder"]["cache_misses"],
+            json!(2)
+        );
+
+        let doctor_after_recall = send_request(
+            &socket_path,
+            json!({"jsonrpc":"2.0","method":"doctor","params":{},"id":"doctor-after-recall"}),
+        )
+        .await;
+        assert!(doctor_after_recall["result"]["checks"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|check| {
+                check["name"] == json!("embedder_runtime")
+                    && check["status"] == json!("ok")
+                    && check["affected_scope"] == json!("warm")
+                    && check["degraded_impact"].as_str().is_some_and(|detail| {
+                        detail.contains("loads=1")
+                            && detail.contains("cache_hits=2")
+                            && detail.contains("cache_misses=2")
+                            && detail.contains("semantic_query_hits=1")
+                            && detail.contains("semantic_batch_hits=0")
+                    })
+            }));
+        assert_eq!(
+            doctor_after_recall["result"]["health"]["feature_availability"][2]["feature"],
+            json!("embedder_runtime")
+        );
+        assert_eq!(
+            doctor_after_recall["result"]["health"]["feature_availability"][2]["posture"],
+            json!("Full")
+        );
+        assert!(doctor_after_recall["result"]["health"]["feature_availability"][2]["note"]
+            .as_str()
+            .is_some_and(|note| {
+                note.contains("state=warm")
+                    && note.contains("loads=1")
+                    && note.contains("requests=4")
+                    && note.contains("cache_hits=2")
+                    && note.contains("cache_misses=2")
+                    && note.contains("semantic_query_hits=1")
+                    && note.contains("semantic_query_misses=0")
+                    && note.contains("semantic_batch_hits=0")
+                    && note.contains("semantic_batch_misses=1")
+            }));
 
         let shutdown_response = send_request(
             &socket_path,

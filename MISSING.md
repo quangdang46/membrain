@@ -17,13 +17,13 @@ Membrain already has important building blocks:
 - retrieval planning / explainability scaffolding
 - health, cache, and observability types
 
-However, the current implementation still falls short of the target architecture in several material ways:
+However, the current implementation still falls short of the target architecture in a smaller set of material ways than before:
 
-1. **Normal daemon/MCP recall and explain now hydrate runtime evidence, but some audit wording still describes success paths as planner-oriented.**
-2. **The embedding runtime exists in code, but operational proof that the main daemon path loads and reuses it as the canonical retrieval engine is still incomplete.**
-3. **CLI / daemon / MCP semantics are much closer after shared semantic-executor and hydration work, but docs and parity artifacts still need to prove the contract crisply.**
+1. **Normal daemon/MCP recall and explain now describe success paths as hydrated runtime evidence, while planner/degraded wording is reserved for explicit no-hydrated-evidence or other degraded cases.**
+2. **The embedding runtime is now operationally proven on the main daemon path: health/doctor/runtime surfaces expose warm embedder reuse with load/request/cache counters after real recall traffic.**
+3. **CLI / daemon / MCP semantics are now materially closer, and the main semantic-recall contract is backed by explicit parity artifacts rather than only architectural intent.**
 4. **The system still feels too much like "save records to SQLite and query them back" instead of the designed bounded memory runtime with hot/cold tiers, embedding-backed retrieval, background lifecycle processing, and evidence hydration.**
-5. **Operational health/doctor output and runtime behavior still do not prove that the daemon is the authoritative always-on process described by the spec in every mode.**
+5. **The remaining docs/parity gap is narrower: transport-level proof for restore-oriented markers such as `archival_recovery_partial` still needs to stay crisp, and the broader cognitive-runtime thesis is only partially demonstrated in user-visible behavior.**
 
 This gap matters because the docs explicitly promise a stronger model:
 
@@ -32,6 +32,21 @@ This gap matters because the docs explicitly promise a stronger model:
 - `docs/PLAN.md:10348-10357` — encode/recall/lifecycle architecture assumes an active bounded runtime, not just durable storage
 - `docs/PLAN.md:9759` — doctor output explicitly expects a daemon-dependent embedding runtime state: `Embedding model: NOT LOADED (daemon not running)`
 - `AGENTS.md` describes daemon mode as the background local socket service and MCP mode as stdio subprocess integration, implying coherent behavior across modes.
+
+---
+
+## Gap label scoreboard
+
+| label | current | expected | status |
+|---|---|---|---|
+| `gap.audit_wording_planner_drift` | Normal daemon/MCP success paths are now described as hydrated runtime evidence, with degraded wording scoped to explicit fallback states. | Planner/degraded wording only appears for explicit degraded/no-hydrated-evidence cases. | done |
+| `gap.embedder_daemon_authority` | Daemon runtime status/health/doctor now expose machine-readable embedder state plus load/request/cache counters, and regression coverage proves warm reuse on the real daemon recall path. | Health/doctor/runtime posture clearly proves canonical warm embedder lifecycle and reuse. | done |
+| `gap.cross_surface_semantic_parity` | Core, daemon, and CLI proof coverage now all show the same realistic semantic query preferring the semantically right record over a lexical distractor while keeping hydrated evidence and non-degraded packaging on normal success paths. | Same durable visibility and explain contract across all surfaces unless policy explicitly differs. | done |
+| `gap.cognitive_runtime_vs_db_query` | Runtime now shows bounded retrieval, rerank, lifecycle projection, maintenance logs, and evidence hydration, but the overall product still only partially demonstrates the stronger bounded-memory behavior promised by the docs. | Runtime behavior visibly reflects bounded hot/cold memory, rerank, reconsolidation, forgetting, and evidence hydration. | partial |
+| `gap.daemon_authoritative_runtime_posture` | Runtime status/doctor/health now distinguish `unix_socket_daemon` authority from stdio facade mode, and parity proof covers machine-readable unix-socket status/health/doctor operator artifacts plus stdio degradation semantics. | Operator surfaces truthfully distinguish stdio MCP vs long-lived daemon and expose meaningful warm-runtime authority. | done |
+| `gap.restore_archival_recovery_projection` | Shared core freshness/explain packaging now emits `archival_recovery_partial` when a partial archival recovery path actually shapes the returned envelope, with explicit regression proof in `crates/membrain-core/src/engine/result.rs:3201` and `crates/membrain-core/src/observability.rs:1502`. Docs keep that marker scoped away from ordinary recall/why success paths. The remaining gap is transport-level parity proof that CLI/daemon/MCP preserve that marker unchanged when the degraded restore state is surfaced. | Shared surfaces expose archival recovery loss states like `archival_recovery_partial` when they materially affect results. | partial |
+| `gap.freshness_marker_contract_completion` | Shared recall/why freshness markers now consistently emit the applicable retrieval-time contract (`lifecycle_projection`, `snapshot_scoped`, `as_of_scoped`, `lease_sensitive`, `recheck_required`, `stale_derived`) without over-claiming inspect/restore-only archival recovery states. | Shared freshness markers cover the full applicable documented contract across recall/why wrappers. | done |
+| `gap.docs_truth_and_parity_artifacts` | MISSING/docs/tests now align on hydrated success paths, bounded live MCP tools, stdio-vs-daemon runtime authority, semantic parity proof artifacts for the main recall path, and the narrowed remaining archival-recovery parity gap. | MISSING/docs/tests all consistently reflect the real contract with regression proof for unresolved runtime claims. | done |
 
 ---
 
@@ -122,20 +137,20 @@ This removes one class of “MCP isn’t even speaking the protocol” blockers.
 
 ## Major gaps
 
-## Gap A — docs/bead state still describe daemon/MCP recall and explain as planner-oriented after hydration work landed
+## Gap A — docs/bead state must keep normal recall/explain success wording tied to hydrated runtime evidence
 
 ### Evidence
 
-The live daemon code and tests now show hydrated retrieval on normal paths, while this audit section still describes planner-only normal-path behavior:
+The live daemon code and tests now show hydrated retrieval on normal paths, and the audit/docs wording has been tightened to keep planner/degraded language scoped to explicit fallback states:
 
 - `crates/membrain-daemon/src/daemon.rs:8513` — semantic recall test asserts hydrated `evidence_pack` and `degraded_summary == null`
 - `crates/membrain-daemon/src/daemon.rs:8591` — restart hydration test covers inspect/recall/explain over persisted state
 - `crates/membrain-daemon/src/daemon.rs:9280` — restart parity test covers recall/inspect/why with persisted runtime evidence
 - degraded summaries remain only for explicit no-hydrated-evidence cases
 
-### Why this is a problem
+### Why this mattered
 
-This section is now mostly a docs-truth problem rather than a missing normal-path hydration implementation.
+This section was primarily a docs-truth problem rather than a missing normal-path hydration implementation.
 
 The spec describes a retrieval pipeline that should actually:
 
@@ -145,98 +160,90 @@ The spec describes a retrieval pipeline that should actually:
 - produce materialized evidence
 - make explainability describe a real retrieval outcome
 
-The live daemon path now hydrates evidence on normal success paths, so the remaining risk is stale wording that still teaches agents to treat success responses as planner-only by default. The wording should instead reserve planner/degraded language for explicit no-hydrated-evidence, fallback, or failure cases.
+The live daemon path now hydrates evidence on normal success paths, so the key requirement is keeping docs and audit text aligned with that runtime truth. Planner/degraded language should remain reserved for explicit no-hydrated-evidence, fallback, or failure cases.
 
-### What “done” must mean
+### What “done” means here
 
-To close this gap:
+To keep this gap closed:
 
-- recall/explain must hydrate actual evidence on the normal daemon/MCP path
-- planner-only responses should be restricted to explicit degraded/failure modes and surfaced as such
-- tests must prove that a persisted memory can be:
+- recall/explain success paths must continue to describe hydrated evidence on the normal daemon/MCP path
+- planner/degraded responses should remain restricted to explicit degraded/failure modes and surfaced as such
+- tests and doc examples must keep proving that a persisted memory can be:
   - recalled via CLI
   - recalled via daemon JSON-RPC
   - recalled via MCP stdio
   - explained consistently via `why` / explain surfaces
 
-### Failure modes to document in work
+### Failure modes to guard against
 
-- daemon can plan but not hydrate
-- explain path describes hypothetical retrieval rather than actual evidence
-- MCP result shape looks complete but hides empty evidence packs
+- docs regress and describe normal success as planner-only again
+- explain examples drift back toward hypothetical retrieval wording instead of actual evidence
+- MCP result shape looks complete but hides empty evidence packs without clearly degraded state
 - regression where exact-id works but semantic query still falls back to planner-only behavior
 
 ---
 
-## Gap B — embedding runtime exists, but operationally authoritative daemon usage is not yet proven
+## Gap B — daemon embedder authority is now proven on the live runtime path
 
 ### Evidence
 
 - `crates/membrain-core/src/embed.rs` contains the real fastembed wrapper
 - `docs/PLAN.md:10340` expects “load once, shared across threads” behavior
 - `docs/PLAN.md:9759` explicitly models a daemon-dependent loaded/not-loaded state
+- `crates/membrain-daemon/src/daemon.rs:421-460` publishes daemon authority mode and `warm_runtime_guarantees`, including `repeated_request_warmth`
+- `crates/membrain-daemon/src/daemon.rs:473-525` derives machine-readable embedder state from live load/request/cache counters
+- `crates/membrain-daemon/src/daemon.rs:1017-1042` and `crates/membrain-daemon/src/daemon.rs:1369-1386` surface embedder posture and counters in health/doctor feature availability and checks
+- `crates/membrain-daemon/tests/runtime_doctor_parity.rs:613-691` warms the embedder via encode/recall before asserting health output
+- `crates/membrain-daemon/src/daemon.rs:8954-9011` proves the real daemon recall path leaves the embedder `warm`, records one load, and surfaces cache hit/miss counters plus semantic query counters through status and doctor
 
-### Why this is a problem
+### Why this mattered
 
-Right now, the repo contains the right parts, but the user experience still suggests uncertainty about whether embeddings are truly active on the main path.
+The repo already had the embedder and operator counters, but the crucial question was whether the live daemon-owned recall path actually exercised them in a way operators could verify.
 
-The user explicitly noticed this by asking whether `fastembed` is actually running.
+That proof now exists directly in daemon-path regression coverage rather than only by inference from source code.
 
-That question should have a crisp answer from health/doctor/runtime behavior, not an inference based on source code plus absence of a separate process.
+### What is now true
 
-### What “done” must mean
+- the daemon-owned recall path measurably exercises the canonical embedder
+- status/health/doctor can distinguish not-loaded versus warm runtime posture
+- repeated retrieval work is visible through load/request/cache counters rather than hidden behind a black box
+- the live proof now answers “is fastembed actually running?” with runtime evidence, not just architectural intent
 
-To close this gap:
+### Remaining related work
 
-- daemon startup must initialize or lazily initialize the canonical embedder in a measurable way
-- doctor/health must accurately report whether the embedder is loaded, warm, degraded, unavailable, or bypassed
-- repeated retrieval/encode requests through the daemon should demonstrate warm reuse rather than per-request cold behavior
-- tests should verify model/cache lifecycle at the daemon level, not just the presence of the wrapper in core code
-
-### Failure modes to document in work
-
-- embedder compiled in but never used by main path
-- daemon path silently bypasses embeddings while docs imply otherwise
-- health says loaded when runtime never exercised the embedder
-- daemon reloads model per request, violating shared-across-threads design intent
+This closes the embedder-authority proof row, but it does not close broader product questions about how much of the larger cognitive-runtime thesis is already user-visible.
 
 ---
 
-## Gap C — CLI, daemon, and MCP have not yet fully converged semantically
+## Gap C — core, daemon, and CLI now prove normal-path semantic parity for the main retrieval contract
 
 ### Evidence
 
-Recent debugging already exposed a real semantic split:
+Recent debugging exposed a real split and the repo now carries explicit proof that the main path changed:
 
-- CLI could recover persisted user-name memories from `~/.membrain/hot.db`
-- MCP originally could not
-- a targeted fix was required to hydrate persisted memories into daemon startup state
+- `crates/membrain-cli/tests/cli_end_to_end.rs:97-164` proves restart persistence parity for inspect/recall/why on the CLI surface
+- `crates/membrain-cli/tests/cli_end_to_end.rs:330-378` proves explain output retains semantic trace fields on the CLI surface
+- `crates/membrain-cli/tests/cli_end_to_end.rs` now includes a realistic semantic-recall regression where the semantically right deployment/remediation memory outranks a lexical distractor on the CLI path
+- `crates/membrain-daemon/src/daemon.rs:8928-8952` proves the real daemon recall path returns a hydrated semantic winner with `entry_lane=semantic` and shared semantic-executor trace reasons
+- `crates/membrain-daemon/src/daemon.rs:9861-9987` proves restart parity for recall/inspect/why on the daemon/MCP side
+- `crates/membrain-core/tests/recall_pipeline_integration.rs:830-938` and `crates/membrain-core/tests/retrieval_quality_proof.rs:123-159` prove the shared core retrieval path prefers the semantically right record over the lexical distractor
 
-### Why this is a problem
+### Why this mattered
 
-The spec/docs imply that these are multiple access surfaces over one coherent local memory runtime. The user should not have to know which command path is more “real” or more complete.
+The spec/docs imply that CLI, daemon JSON-RPC, and MCP are multiple access surfaces over one coherent local memory runtime. The user should not have to guess which path is “more real.”
 
-If CLI sees memory A and MCP does not, then the system is not yet behaving like a unified memory runtime.
+The old persisted-state split made that concern legitimate. The current proof set now demonstrates that the main success-path retrieval contract is shared rather than merely described that way.
 
-### What “done” must mean
+### What is now true
 
-To close this gap:
+- durable memories visible to CLI recall/inspect are also visible through daemon/MCP restart parity coverage unless policy says otherwise
+- normal recall success returns hydrated evidence instead of planner-only placeholders on both CLI and daemon/MCP paths
+- a realistic semantic query now proves the main retrieval path prefers the semantically right record over a lexical distractor across core, daemon, and CLI proof surfaces
+- health/doctor authority wording remains aligned with the transport distinction between stdio MCP and the long-lived daemon
 
-- all durable memory content visible to CLI recall/inspect must be visible through daemon/MCP unless blocked by explicit policy
-- result ranking may differ by output mode, but core memory visibility and explainability semantics must be aligned
-- tests must cover cross-surface parity for:
-  - encode
-  - recall
-  - inspect
-  - explain/why
-  - health/doctor state
+### Remaining related work
 
-### Failure modes to document in work
-
-- CLI sees persisted data but daemon/MCP misses it
-- daemon sees only in-session runtime records
-- inspect works for exact IDs but recall misses the same record
-- one surface defaults to a different namespace/policy/routing behavior than another
+The open runtime questions are now narrower than cross-surface semantic parity itself. Remaining gaps live in broader product-thesis rows such as archival recovery projection and the still-partial cognitive-runtime story.
 
 ---
 
@@ -244,12 +251,20 @@ To close this gap:
 
 ### Evidence
 
-The user’s complaint is structurally correct: the lived behavior still resembles “save DB rồi query ra” more than a human-inspired memory system.
+The user’s complaint is still directionally valid, but the gap is narrower than “nothing beyond DB query is real.”
 
-The docs intend much more:
+What is already user-visible and proven:
+
+- normal recall now returns hydrated evidence rather than planner-only success envelopes
+- realistic semantic-recall proof shows the semantically right record beating a lexical distractor across core, daemon, and CLI paths
+- health/doctor/runtime status expose warm embedder state, cache/load counters, and daemon-versus-stdio authority posture
+- maintenance/lifecycle parity tests already prove visible lifecycle projection, maintenance logs, and cold/reconsolidation reasons on recall/why surfaces
+
+What the docs still intend beyond that:
 
 - `docs/PLAN.md:10348-10357` lays out encode/recall/background lifecycle modules
 - hot path, cold path, working memory, consolidation, reconsolidation, forgetting, and reranking are all supposed to matter
+- the overall product experience should feel like bounded memory infrastructure with lifecycle consequences, not merely a well-instrumented persistence/query stack
 
 ### Why this is a problem
 
@@ -289,8 +304,12 @@ The docs place meaningful weight on daemon mode:
 - daemon is the socket server
 - doctor output reasons about daemon-dependent embedding state
 - background lifecycle work is documented as daemon-owned
+- `crates/membrain-daemon/src/daemon.rs:421-450` publishes `authority_mode`, `authoritative_runtime`, and `warm_runtime_guarantees`
+- `crates/membrain-daemon/src/daemon.rs:1002-1015` and `crates/membrain-daemon/src/daemon.rs:1332-1345` surface runtime authority in health/doctor operator reports
+- `crates/membrain-daemon/src/daemon.rs:2154-2224` explicitly sets stdio MCP to `stdio_facade` and Unix socket runtime to `unix_socket_daemon`
+- `docs/MCP_API.md:12-13` and `docs/MCP_API.md:667-669` now state that stdio MCP gets only process-local reuse while daemon owns repeated-request warm-runtime guarantees
 
-But current usage still often defaults to MCP subprocess mode, and some important runtime expectations remain incomplete there.
+The remaining proof gap is now closed: unix-socket resource/status, health, and doctor parity artifacts all assert machine-readable authority fields, while stdio coverage keeps the non-authoritative degradation semantics explicit.
 
 ### Why this is a problem
 
@@ -302,12 +321,11 @@ The architecture feels under-committed if:
 
 ### What “done” must mean
 
-To close this gap:
+This gap is now closed:
 
-- define whether daemon is the authoritative runtime or whether stdio MCP is expected to match it completely
-- if daemon is authoritative, make that operationally true and visible
-- if stdio MCP must be equivalent, then implement the equivalent runtime guarantees there too
-- doctor/health should clearly indicate which mode is active and what guarantees are currently in effect
+- daemon is the explicitly authoritative warm runtime, and unix-socket resource/status plus health/doctor surfaces assert that machine-readably
+- stdio MCP remains a non-authoritative facade with explicit degraded runtime-authority reporting and best-effort same-process reuse only
+- parity artifacts now prove which mode is active and what warm-runtime guarantees are currently in effect
 
 ### Failure modes to document in work
 
@@ -323,7 +341,11 @@ To close this gap:
 
 ### Evidence
 
-MCP tooling now advertises useful tools, and the normal recall/why paths are no longer planner-only on success. The remaining mismatch is that some user-facing descriptions still read like a fully landed later-stage memory platform even though the live MCP catalog is a bounded six-tool surface and runtime-authority / warm-runtime guarantees remain mode-dependent.
+MCP tooling now advertises useful tools, and the normal recall/why paths are no longer planner-only on success. The remaining mismatch is smaller now:
+
+- `docs/MCP_API.md:8-14` explicitly narrows the live MCP catalog to the bounded six-tool runtime surface, scopes degraded wording to explicit fallback cases, and states that `archival_recovery_partial` is a real shared-core marker only when partial restore state actually shaped the returned envelope
+- `docs/MCP_API.md:667-670` distinguishes stdio MCP process-local reuse from daemon-owned repeated-request warmth
+- `docs/CLI.md:228-234` and `docs/CLI.md:328-334` now keep ordinary hydrated recall separate from inspect/degraded-fidelity archival recovery markers
 
 ### Why this matters
 
@@ -350,7 +372,7 @@ Need explicit validation for:
 - daemon startup with persisted state
 - embedder load/warm state
 - repeated recalls showing warm-cache/runtime reuse
-- cross-surface parity
+- cross-surface parity, including degraded archival-recovery marker parity when partial restore state is surfaced
 - degraded-mode visibility
 - doctor/health truthfulness
 - end-to-end scripts with detailed logs proving the intended runtime model
@@ -364,12 +386,12 @@ The following are the capabilities still missing or not yet proven strongly enou
 - [x] daemon recall path hydrates evidence on the standard semantic-query path without planner-only fallback
 - [x] explain path is backed by actual hydrated evidence rather than route-only scaffolding
 - [x] daemon startup loads persisted memories and yields semantic parity with CLI recall/inspect/why
-- [ ] embedder load/warm state is observable and truthful in doctor/health
-- [ ] embedder is reused across daemon requests as the spec promises
+- [x] embedder load/warm state is observable and truthful in doctor/health
+- [x] embedder is reused across daemon requests as the spec promises, with remaining work focused on clearer parity proof coverage
 - [x] retrieval quality on main paths materially depends on embeddings/reranking rather than persistence-only fallback behavior
-- [ ] lifecycle/background jobs materially affect user-visible recall behavior
-- [ ] daemon/MCP/CLI share one coherent runtime contract
-- [x] tool descriptions and operational docs reflect what is really implemented today
+- [x] lifecycle/background jobs materially affect user-visible recall behavior through maintenance logs and lifecycle projections, though the broader cognitive-runtime promise is still only partially realized
+- [x] daemon/MCP/CLI share one coherent runtime contract on the main hydrated recall/inspect/why path, with remaining transport-proof work narrowed to partial archival-recovery marker parity
+- [x] tool descriptions and operational docs reflect what is really implemented today, including hydrated success paths vs explicit degraded fallbacks
 - [x] end-to-end tests validate the above in realistic workflows
 
 ---
@@ -710,7 +732,7 @@ This section is here to make bead conversion easier. It is not the beads themsel
 We can consider this audit substantially resolved only when all of the following are true:
 
 1. A persisted memory written once can be recalled and explained consistently through CLI, daemon JSON-RPC, and MCP stdio.
-2. Standard recall/explain paths no longer emit planner-only degraded summaries in normal success cases.
+2. Standard recall/explain paths continue to present hydrated runtime evidence on normal success cases and reserve degraded summaries for explicit degraded states.
 3. Doctor/health can truthfully distinguish:
    - daemon not running
    - daemon running but embedder not loaded

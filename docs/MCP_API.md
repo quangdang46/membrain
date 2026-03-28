@@ -10,6 +10,7 @@ Status note:
 - The live daemon/MCP tool catalog is presently the bounded six-tool surface (`encode`, `recall`, `inspect`, `why`, `health`, `doctor`) plus `resources.list`, `resource.read`, `streams.list`, and `shutdown` on the transport side.
 - The broader `memory_*`, feature-specific, and later-stage operator tools described below remain the canonical target contract unless a section explicitly says they are live today.
 - Normal daemon/MCP recall now returns hydrated evidence on success; explicit degraded/fallback language below should be read as applying to no-hydrated-evidence, capped, or repair/degraded cases rather than the default success path.
+- Current proof coverage includes daemon-path regression assertions that the semantic winner stays hydrated with `entry_lane=semantic`, and that daemon status/doctor surface a warm embedder with load/request/cache counters after real recall traffic.
 - `membrain mcp` is a stdio transport adapter with process-local reuse only; daemon-owned repeated-request warm-runtime guarantees belong to the long-lived Unix-socket daemon.
 
 1. Every MCP tool preserves namespace and policy context

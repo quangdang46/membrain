@@ -985,9 +985,9 @@ BOTTLENECK 3: Decay iteration
 
 BOTTLENECK 4: Context window cold start
   Naive: each process spawn → load model → 500ms+
-  Fix:      daemon mode — model loaded once, always warm
+  Fix:      daemon mode owns the canonical warm embedder lifecycle
             Standalone mode: acceptable cho CLI, not agent
-            Result: daemon <1ms, standalone ~500ms first call
+            Result: daemon can reuse a loaded embedder across repeated requests; standalone may still pay first-call cold-start cost
 
 BOTTLENECK 5: Consolidation blocking retrieval
   Naive:    consolidation job locks store → retrieval blocked
@@ -11406,12 +11406,12 @@ GOAL:
 DELIVERABLES:
   - tokio Unix socket server: accept → spawn per-connection task → handle JSON-RPC
   - JSON-RPC 2.0 dispatcher: method → brain_store call → response
-  - All methods: remember, recall, forget, strengthen, update, stats,
-                 consolidate, prime, remind, watch, export, import
+  - Current live daemon/stdio JSON-RPC methods: `encode`, `observe`, `recall`, `inspect`, `why`, `health`, `doctor`, runtime status/posture controls, transport-side `resources.list` / `resource.read` / `streams.list` / `tools.list`, and `shutdown`
+  - Broader method families such as remember/forget/strengthen/update/stats/consolidate/prime/remind/watch/export/import remain target-surface contract items, not fully landed runtime truth
   - Daemon lifecycle: start (daemonize) + stop (SIGTERM graceful) + status
   - PID file + socket file management
   - CLI: detect daemon socket → forward vs standalone fallback
-  - rmcp MCP server: stdio transport with all tools defined
+  - rmcp MCP server: stdio transport with the current bounded live tool catalog, while broader MCP tool families remain target-contract work
   - Python client: membrain.py (zero deps, socket + json)
   - Node client: membrain.js (zero deps, net + readline)
   - `membrain daemon start|stop|status` CLI subcommand
@@ -11447,7 +11447,7 @@ ACCEPTANCE CRITERIA:
   ✅ MCP tool `remember` → JSON response with valid UUID
   ✅ MCP tool `recall` → JSON array of memories
   ✅ CLI without daemon → falls back to standalone mode automatically
-  ✅ Daemon warm: embedding model loaded once at startup
+  ✅ Daemon warm-runtime truth is operator-visible: health/doctor distinguish `not_loaded`, `loaded`, and `warm`, and repeated daemon requests can demonstrate reuse within the same long-lived process
   ✅ recall latency with daemon: Tier1 < 0.5ms, Tier2 < 10ms (IPC overhead included)
 ```
 

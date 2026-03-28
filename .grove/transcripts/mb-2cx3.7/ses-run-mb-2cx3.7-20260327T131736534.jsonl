@@ -1,0 +1,78 @@
+{"ts":"2026-03-27T13:17:36.563193989Z","kind":"session_started","session_id":"ses-run-mb-2cx3.7-20260327T131736534"}
+{"ts":"2026-03-27T13:46:26.905538302Z","kind":"stdout","line":"GROVE_RESULT:"}
+{"ts":"2026-03-27T13:46:29.160611441Z","kind":"stdout","line":"- Resolved `gap.freshness_marker_contract_completion` by tightening the recall/why freshness contract to the markers actually backed by shared retrieval packaging truth."}
+{"ts":"2026-03-27T13:46:29.160627986Z","kind":"stdout","line":"- Kept the shared multi-marker behavior intact and added regression coverage so recall/why do not over-claim inspect/restore-only states."}
+{"ts":"2026-03-27T13:46:29.160631891Z","kind":"stdout","line":""}
+{"ts":"2026-03-27T13:46:29.160634768Z","kind":"stdout","line":"GROVE_ARTIFACTS:"}
+{"ts":"2026-03-27T13:46:29.160634768Z","kind":"protocol","event":{"type":"artifacts","items":[]}}
+{"ts":"2026-03-27T13:46:29.160661897Z","kind":"stdout","line":"- Updated docs contract in `docs/RETRIEVAL.md:153` to define the applicable recall/why freshness vocabulary as:"}
+{"ts":"2026-03-27T13:46:29.160661897Z","kind":"protocol","event":{"type":"artifacts","items":["Updated docs contract in `docs/RETRIEVAL.md:153` to define the applicable recall/why freshness vocabulary as:"]}}
+{"ts":"2026-03-27T13:46:29.160671043Z","kind":"stdout","line":"  - `lifecycle_projection`"}
+{"ts":"2026-03-27T13:46:29.160671043Z","kind":"protocol","event":{"type":"artifacts","items":["`lifecycle_projection`"]}}
+{"ts":"2026-03-27T13:46:29.160676387Z","kind":"stdout","line":"  - `snapshot_scoped`"}
+{"ts":"2026-03-27T13:46:29.160676387Z","kind":"protocol","event":{"type":"artifacts","items":["`snapshot_scoped`"]}}
+{"ts":"2026-03-27T13:46:29.160681422Z","kind":"stdout","line":"  - `as_of_scoped`"}
+{"ts":"2026-03-27T13:46:29.160681422Z","kind":"protocol","event":{"type":"artifacts","items":["`as_of_scoped`"]}}
+{"ts":"2026-03-27T13:46:29.160689643Z","kind":"stdout","line":"  - `lease_sensitive`"}
+{"ts":"2026-03-27T13:46:29.160689643Z","kind":"protocol","event":{"type":"artifacts","items":["`lease_sensitive`"]}}
+{"ts":"2026-03-27T13:46:29.160696836Z","kind":"stdout","line":"  - `recheck_required`"}
+{"ts":"2026-03-27T13:46:29.160696836Z","kind":"protocol","event":{"type":"artifacts","items":["`recheck_required`"]}}
+{"ts":"2026-03-27T13:46:29.160701974Z","kind":"stdout","line":"  - `stale_derived`"}
+{"ts":"2026-03-27T13:46:29.160701974Z","kind":"protocol","event":{"type":"artifacts","items":["`stale_derived`"]}}
+{"ts":"2026-03-27T13:46:29.160706907Z","kind":"stdout","line":"- Clarified in `docs/RETRIEVAL.md:164` that `archival_recovery_partial` belongs to inspect/restore degraded-fidelity surfaces, not ordinary recall/why freshness packaging unless that state truly participates in the retrieval envelope."}
+{"ts":"2026-03-27T13:46:29.160706907Z","kind":"protocol","event":{"type":"artifacts","items":["Clarified in `docs/RETRIEVAL.md:164` that `archival_recovery_partial` belongs to inspect/restore degraded-fidelity surfaces, not ordinary recall/why freshness packaging unless that state truly participates in the retrieval envelope."]}}
+{"ts":"2026-03-27T13:46:29.160713895Z","kind":"stdout","line":"- Marked the gap done in `MISSING.md:48`."}
+{"ts":"2026-03-27T13:46:29.160713895Z","kind":"protocol","event":{"type":"artifacts","items":["Marked the gap done in `MISSING.md:48`."]}}
+{"ts":"2026-03-27T13:46:29.160719958Z","kind":"stdout","line":"- Added focused regression assertions in `crates/membrain-core/src/observability.rs:1413` covering:"}
+{"ts":"2026-03-27T13:46:29.160719958Z","kind":"protocol","event":{"type":"artifacts","items":["Added focused regression assertions in `crates/membrain-core/src/observability.rs:1413` covering:"]}}
+{"ts":"2026-03-27T13:46:29.160725610Z","kind":"stdout","line":"  - `recheck_required`"}
+{"ts":"2026-03-27T13:46:29.160725610Z","kind":"protocol","event":{"type":"artifacts","items":["`recheck_required`"]}}
+{"ts":"2026-03-27T13:46:29.160730542Z","kind":"stdout","line":"  - `snapshot_scoped`"}
+{"ts":"2026-03-27T13:46:29.160730542Z","kind":"protocol","event":{"type":"artifacts","items":["`snapshot_scoped`"]}}
+{"ts":"2026-03-27T13:46:29.160758391Z","kind":"stdout","line":"  - `as_of_scoped`"}
+{"ts":"2026-03-27T13:46:29.160758391Z","kind":"protocol","event":{"type":"artifacts","items":["`as_of_scoped`"]}}
+{"ts":"2026-03-27T13:46:29.160764865Z","kind":"stdout","line":"  - `lease_sensitive`"}
+{"ts":"2026-03-27T13:46:29.160764865Z","kind":"protocol","event":{"type":"artifacts","items":["`lease_sensitive`"]}}
+{"ts":"2026-03-27T13:46:29.160769181Z","kind":"stdout","line":"  - `stale_derived`"}
+{"ts":"2026-03-27T13:46:29.160769181Z","kind":"protocol","event":{"type":"artifacts","items":["`stale_derived`"]}}
+{"ts":"2026-03-27T13:46:29.160773188Z","kind":"stdout","line":"  - explicit non-emission of `archival_recovery_partial` and `decaying_soon`"}
+{"ts":"2026-03-27T13:46:29.160773188Z","kind":"protocol","event":{"type":"artifacts","items":["explicit non-emission of `archival_recovery_partial` and `decaying_soon`"]}}
+{"ts":"2026-03-27T13:46:29.160778224Z","kind":"stdout","line":"- Fixed and tightened the result-layer regression in `crates/membrain-core/src/engine/result.rs:3151` so a non-historical retrieval expects `fresh`, not `snapshot_scoped`, and also rejects `archival_recovery_partial` / `decaying_soon`."}
+{"ts":"2026-03-27T13:46:29.160778224Z","kind":"protocol","event":{"type":"artifacts","items":["Fixed and tightened the result-layer regression in `crates/membrain-core/src/engine/result.rs:3151` so a non-historical retrieval expects `fresh`, not `snapshot_scoped`, and also rejects `archival_recovery_partial` / `decaying_soon`."]}}
+{"ts":"2026-03-27T13:46:29.160782745Z","kind":"stdout","line":""}
+{"ts":"2026-03-27T13:46:29.160784698Z","kind":"stdout","line":"GROVE_LESSONS:"}
+{"ts":"2026-03-27T13:46:29.160784698Z","kind":"protocol","event":{"type":"lessons","items":[]}}
+{"ts":"2026-03-27T13:46:29.160788397Z","kind":"stdout","line":"- The remaining gap was documentation scope, not missing recall/why runtime markers."}
+{"ts":"2026-03-27T13:46:29.160788397Z","kind":"protocol","event":{"type":"lessons","items":["The remaining gap was documentation scope, not missing recall/why runtime markers."]}}
+{"ts":"2026-03-27T13:46:29.160793330Z","kind":"stdout","line":"- `archival_recovery_partial` is real, but its canonical truth currently lives on inspect/restore paths rather than shared recall freshness packaging."}
+{"ts":"2026-03-27T13:46:29.160793330Z","kind":"protocol","event":{"type":"lessons","items":["`archival_recovery_partial` is real, but its canonical truth currently lives on inspect/restore paths rather than shared recall freshness packaging."]}}
+{"ts":"2026-03-27T13:46:29.160797646Z","kind":"stdout","line":"- An older result-layer test had drifted into expecting `snapshot_scoped` for a non-historical case; the focused rerun caught it."}
+{"ts":"2026-03-27T13:46:29.160797646Z","kind":"protocol","event":{"type":"lessons","items":["An older result-layer test had drifted into expecting `snapshot_scoped` for a non-historical case; the focused rerun caught it."]}}
+{"ts":"2026-03-27T13:46:29.160810697Z","kind":"stdout","line":""}
+{"ts":"2026-03-27T13:46:29.160812444Z","kind":"stdout","line":"GROVE_DECISIONS:"}
+{"ts":"2026-03-27T13:46:29.160812444Z","kind":"protocol","event":{"type":"decision","items":[]}}
+{"ts":"2026-03-27T13:46:29.160816143Z","kind":"stdout","line":"- Did not invent new freshness markers."}
+{"ts":"2026-03-27T13:46:29.160816143Z","kind":"protocol","event":{"type":"decision","items":["Did not invent new freshness markers."]}}
+{"ts":"2026-03-27T13:46:29.160820870Z","kind":"stdout","line":"- Did not project archival recovery loss into recall/why without a canonical retrieval-envelope source of truth."}
+{"ts":"2026-03-27T13:46:29.160820870Z","kind":"protocol","event":{"type":"decision","items":["Did not project archival recovery loss into recall/why without a canonical retrieval-envelope source of truth."]}}
+{"ts":"2026-03-27T13:46:29.160824981Z","kind":"stdout","line":"- Treated the documented contract as “full applicable contract” for recall/why rather than “every freshness-ish term anywhere in the repo.”"}
+{"ts":"2026-03-27T13:46:29.160824981Z","kind":"protocol","event":{"type":"decision","items":["Treated the documented contract as “full applicable contract” for recall/why rather than “every freshness-ish term anywhere in the repo.”"]}}
+{"ts":"2026-03-27T13:46:29.160834126Z","kind":"stdout","line":""}
+{"ts":"2026-03-27T13:46:29.160836079Z","kind":"stdout","line":"GROVE_WARNINGS:"}
+{"ts":"2026-03-27T13:46:29.160836079Z","kind":"protocol","event":{"type":"warning","items":[]}}
+{"ts":"2026-03-27T13:46:29.160839675Z","kind":"stdout","line":"- `cargo check --all-targets` passed, but there is an existing warning in `crates/membrain-daemon/src/daemon.rs:1859` for unused method `persisted_memory_count`."}
+{"ts":"2026-03-27T13:46:29.160839675Z","kind":"protocol","event":{"type":"warning","items":["`cargo check --all-targets` passed, but there is an existing warning in `crates/membrain-daemon/src/daemon.rs:1859` for unused method `persisted_memory_count`."]}}
+{"ts":"2026-03-27T13:46:29.160843889Z","kind":"stdout","line":"- Agent Mail reservation release failed because the registered session identity name was not available from the earlier macro result in this turn; no code change depends on that cleanup."}
+{"ts":"2026-03-27T13:46:29.160843889Z","kind":"protocol","event":{"type":"warning","items":["Agent Mail reservation release failed because the registered session identity name was not available from the earlier macro result in this turn; no code change depends on that cleanup."]}}
+{"ts":"2026-03-27T13:46:29.160848719Z","kind":"stdout","line":""}
+{"ts":"2026-03-27T13:46:29.160850465Z","kind":"stdout","line":"Validation run:"}
+{"ts":"2026-03-27T13:46:29.160852623Z","kind":"stdout","line":"- `cargo test -p membrain-core observability::tests:: -- --nocapture`"}
+{"ts":"2026-03-27T13:46:29.160854679Z","kind":"stdout","line":"- `cargo test -p membrain-core engine::result::tests::explain_markers_returns_freshness_conflict_and_uncertainty_markers -- --nocapture`"}
+{"ts":"2026-03-27T13:46:29.160856631Z","kind":"stdout","line":"- `cargo check --all-targets`"}
+{"ts":"2026-03-27T13:46:29.160858481Z","kind":"stdout","line":""}
+{"ts":"2026-03-27T13:46:29.160860125Z","kind":"stdout","line":"Bead:"}
+{"ts":"2026-03-27T13:46:29.160862180Z","kind":"stdout","line":"- Closed `mb-2cx3.7` as completed."}
+{"ts":"2026-03-27T13:46:29.160864030Z","kind":"stdout","line":""}
+{"ts":"2026-03-27T13:46:29.160865674Z","kind":"stdout","line":"GROVE_EXIT: true"}
+{"ts":"2026-03-27T13:46:29.160865674Z","kind":"protocol","event":{"type":"exit","value":true}}
+{"ts":"2026-03-27T13:46:33.407698378Z","kind":"session_ended","exit_code":0}

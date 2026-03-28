@@ -682,7 +682,7 @@ impl ObservabilityModule {
         Vec<ConflictMarker>,
         Vec<UncertaintyMarker>,
     ) {
-        let freshness = vec![freshness_marker(&result_set.freshness_markers)];
+        let freshness = freshness_markers(&result_set.freshness_markers);
         let conflict = result_set
             .evidence_pack
             .iter()
@@ -833,12 +833,14 @@ fn reason_code_label(reason_code: &str) -> &'static str {
     }
 }
 
-fn freshness_marker(markers: &crate::engine::result::FreshnessMarkers) -> FreshnessMarker {
+fn freshness_markers(markers: &crate::engine::result::FreshnessMarkers) -> Vec<FreshnessMarker> {
+    let mut freshness = Vec::new();
+
     if let (Some(durable), Some(routing)) = (
         markers.durable_lifecycle_state.as_deref(),
         markers.routing_lifecycle_state.as_deref(),
     ) {
-        FreshnessMarker {
+        freshness.push(FreshnessMarker {
             code: "lifecycle_projection",
             detail: Box::leak(
                 format!(
@@ -846,38 +848,73 @@ fn freshness_marker(markers: &crate::engine::result::FreshnessMarkers) -> Freshn
                 )
                 .into_boxed_str(),
             ),
+        });
+
+        if durable == "partially_restored" && routing == "archival_recovery_partial" {
+            freshness.push(FreshnessMarker {
+                code: "archival_recovery_partial",
+                detail: "result set includes evidence materially shaped by partial archival recovery with explicit restore-loss semantics",
+            });
         }
-    } else if markers.recheck_required {
-        FreshnessMarker {
-            code: "lease_sensitive",
+    }
+
+    if markers.recheck_required {
+        freshness.push(FreshnessMarker {
+            code: "recheck_required",
             detail: "result set contains stale action-critical evidence that now requires re-check or withholding",
-        }
+        });
     } else if markers.lease_sensitive {
-        FreshnessMarker {
+        freshness.push(FreshnessMarker {
             code: "lease_sensitive",
             detail: "result set contains evidence whose lease expired and confidence was downgraded explicitly",
-        }
-    } else if let Some(as_of_tick) = markers.as_of_tick {
-        FreshnessMarker {
-            code: "as_of_scoped",
+        });
+    }
+
+    if let Some(as_of_tick) = markers.as_of_tick {
+        let code = if markers.stale_warning {
+            "snapshot_scoped"
+        } else {
+            "as_of_scoped"
+        };
+        freshness.push(FreshnessMarker {
+            code,
             detail: Box::leak(
                 format!(
                     "result set was packaged against historical state at as_of_tick={as_of_tick}"
                 )
                 .into_boxed_str(),
             ),
-        }
-    } else if markers.stale_warning {
-        FreshnessMarker {
-            code: "stale_warning",
-            detail: "result set includes stale or aging evidence",
-        }
-    } else {
-        FreshnessMarker {
+        });
+    }
+
+    if markers.stale_warning && !markers.recheck_required {
+        let stale_code = if matches!(
+            markers.durable_lifecycle_state.as_deref(),
+            Some("consolidated")
+        ) {
+            "stale_derived"
+        } else {
+            "stale_warning"
+        };
+        let stale_detail = if stale_code == "stale_derived" {
+            "result set depends on derived or archived evidence whose authoritative durable state is older than the active hot path"
+        } else {
+            "result set includes stale or aging evidence"
+        };
+        freshness.push(FreshnessMarker {
+            code: stale_code,
+            detail: stale_detail,
+        });
+    }
+
+    if freshness.is_empty() {
+        freshness.push(FreshnessMarker {
             code: "fresh",
             detail: "result set freshness remained within the default packaging window",
-        }
+        });
     }
+
+    freshness
 }
 
 fn conflict_marker(markers: &crate::engine::result::ConflictMarkers) -> Option<ConflictMarker> {
@@ -1380,7 +1417,7 @@ mod tests {
         assert_eq!(report.retry_attempts, 1);
         assert!(report.partial_run);
 
-        let freshness_marker = super::freshness_marker(&FreshnessMarkers {
+        let freshness_markers = super::freshness_markers(&FreshnessMarkers {
             oldest_item_days: 0,
             newest_item_days: 0,
             volatile_items_included: true,
@@ -1391,8 +1428,84 @@ mod tests {
             durable_lifecycle_state: None,
             routing_lifecycle_state: None,
         });
-        assert_eq!(freshness_marker.code, "lease_sensitive");
-        assert!(freshness_marker.detail.contains("re-check or withholding"));
+        assert!(freshness_markers
+            .iter()
+            .any(|marker| marker.code == "recheck_required"));
+        assert!(freshness_markers
+            .iter()
+            .any(|marker| marker.detail.contains("re-check or withholding")));
+        assert!(freshness_markers
+            .iter()
+            .any(|marker| marker.code == "snapshot_scoped"));
+        assert!(!freshness_markers
+            .iter()
+            .any(|marker| marker.code == "stale_derived"));
+        assert!(!freshness_markers
+            .iter()
+            .any(|marker| marker.code == "archival_recovery_partial"));
+        assert!(!freshness_markers
+            .iter()
+            .any(|marker| marker.code == "decaying_soon"));
+
+        let as_of_markers = super::freshness_markers(&FreshnessMarkers {
+            oldest_item_days: 2,
+            newest_item_days: 0,
+            volatile_items_included: false,
+            stale_warning: false,
+            lease_sensitive: false,
+            recheck_required: false,
+            as_of_tick: Some(34),
+            durable_lifecycle_state: None,
+            routing_lifecycle_state: None,
+        });
+        assert!(as_of_markers
+            .iter()
+            .any(|marker| marker.code == "as_of_scoped"));
+        assert!(!as_of_markers
+            .iter()
+            .any(|marker| marker.code == "snapshot_scoped"));
+
+        let lease_markers = super::freshness_markers(&FreshnessMarkers {
+            oldest_item_days: 1,
+            newest_item_days: 0,
+            volatile_items_included: false,
+            stale_warning: false,
+            lease_sensitive: true,
+            recheck_required: false,
+            as_of_tick: None,
+            durable_lifecycle_state: None,
+            routing_lifecycle_state: None,
+        });
+        assert!(lease_markers
+            .iter()
+            .any(|marker| marker.code == "lease_sensitive"));
+        assert!(!lease_markers
+            .iter()
+            .any(|marker| marker.code == "recheck_required"));
+
+        let consolidated_markers = super::freshness_markers(&FreshnessMarkers {
+            oldest_item_days: 9,
+            newest_item_days: 3,
+            volatile_items_included: false,
+            stale_warning: true,
+            lease_sensitive: false,
+            recheck_required: false,
+            as_of_tick: None,
+            durable_lifecycle_state: Some("consolidated".to_string()),
+            routing_lifecycle_state: Some("dormant".to_string()),
+        });
+        assert!(consolidated_markers
+            .iter()
+            .any(|marker| marker.code == "stale_derived"));
+
+        let archival_recovery_markers =
+            super::freshness_markers(&FreshnessMarkers::archival_recovery_partial(None));
+        assert!(archival_recovery_markers
+            .iter()
+            .any(|marker| marker.code == "lifecycle_projection"));
+        assert!(archival_recovery_markers
+            .iter()
+            .any(|marker| marker.code == "archival_recovery_partial"));
     }
 
     #[test]

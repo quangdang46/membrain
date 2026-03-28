@@ -3,13 +3,17 @@ use membrain_core::engine::contradiction::{
     ContradictionCandidate, ContradictionExplain, ContradictionKind, PreferredAnswerState,
     ResolutionState,
 };
+use membrain_core::embed::{CachedTextEmbedder, EmbedError, EmbeddingPurpose, LocalTextEmbedder};
 use membrain_core::engine::ranking::{fuse_scores, RankingInput, RankingProfile};
-use membrain_core::engine::recall::{RecallRequest, RecallRuntime, RecallTraceStage};
+use membrain_core::engine::recall::{RecallPlanKind, RecallRequest, RecallRuntime, RecallTraceStage};
 use membrain_core::engine::result::{
     AnsweredFrom, EvidenceRole, PayloadState, ResultBuilder, ResultReason, RetrievalExplain,
     RetrievalResultSet,
 };
 use membrain_core::engine::retrieval_planner::{PrimaryCue, RetrievalPlanTrace, RetrievalRequest};
+use membrain_core::engine::semantic_retrieval::{
+    HydratedMemoryRecord, SemanticExecutorConfig, SharedSemanticRetrievalExecutor,
+};
 use membrain_core::graph::{
     BoundedExpansionPlanner, CutoffReason, EntityId, EntityKind, ExpansionConstraints, GraphEdge,
     GraphEntity, RelationKind,
@@ -30,6 +34,87 @@ use membrain_core::BrainStore;
 
 fn ns(s: &str) -> NamespaceId {
     NamespaceId::new(s).unwrap()
+}
+
+#[derive(Debug, Clone)]
+struct SemanticFixtureEmbedder;
+
+impl SemanticFixtureEmbedder {
+    fn vector_for(&self, text: &str) -> Vec<f32> {
+        let normalized = text.to_ascii_lowercase();
+        let rollout = if normalized.contains("deploy")
+            || normalized.contains("rollout")
+            || normalized.contains("pipeline")
+            || normalized.contains("production")
+            || normalized.contains("remediation")
+        {
+            2.0
+        } else {
+            0.0
+        };
+        let rollback = if normalized.contains("rollback") || normalized.contains("checklist") {
+            1.0
+        } else {
+            0.0
+        };
+        let checkout = if normalized.contains("checkout") || normalized.contains("cart") {
+            1.0
+        } else {
+            0.0
+        };
+        let general_release = if normalized.contains("release") || normalized.contains("outage") {
+            1.0
+        } else {
+            0.0
+        };
+        vec![rollout, rollback, checkout, general_release]
+    }
+}
+
+impl LocalTextEmbedder for SemanticFixtureEmbedder {
+    fn backend_kind(&self) -> &'static str {
+        "semantic_fixture"
+    }
+
+    fn generation(&self) -> &str {
+        "fixture-v1"
+    }
+
+    fn dimensions(&self) -> usize {
+        4
+    }
+
+    fn embed_text(
+        &mut self,
+        _purpose: EmbeddingPurpose,
+        normalized_text: &str,
+    ) -> Result<Vec<f32>, EmbedError> {
+        Ok(self.vector_for(normalized_text))
+    }
+
+    fn embed_texts(
+        &mut self,
+        _purpose: EmbeddingPurpose,
+        normalized_texts: &[String],
+    ) -> Result<Vec<Vec<f32>>, EmbedError> {
+        Ok(normalized_texts
+            .iter()
+            .map(|text| self.vector_for(text))
+            .collect())
+    }
+}
+
+fn semantic_record(memory_id: u64, namespace: &NamespaceId, text: &str) -> HydratedMemoryRecord {
+    HydratedMemoryRecord {
+        memory_id: MemoryId(memory_id),
+        namespace: namespace.clone(),
+        session_id: SessionId(1),
+        memory_type: CanonicalMemoryType::Event,
+        route_family: membrain_core::types::FastPathRouteFamily::Observation,
+        compact_text: text.to_string(),
+        raw_text: text.to_string(),
+        affect: None,
+    }
 }
 
 #[test]
@@ -739,6 +824,117 @@ fn answered_from_tier_reports_correct_source() {
     assert_eq!(AnsweredFrom::Tier1Hot.as_str(), "tier1_hot");
     assert_eq!(AnsweredFrom::Tier2Indexed.as_str(), "tier2_indexed");
     assert_eq!(AnsweredFrom::Tier3Cold.as_str(), "tier3_cold");
+}
+
+#[test]
+fn realistic_semantic_query_beats_lexical_distractor_on_normal_tier2_path() {
+    let namespace = ns("semantic_normal_path");
+    let query = "Which release deploy fix should we roll out after the pipeline outage?";
+    let lexical_distractor = "release rollback checklist after outage";
+    let semantic_winner = "production deploy pipeline remediation rollout for incident fix";
+
+    let records = vec![
+        semantic_record(10, &namespace, lexical_distractor),
+        semantic_record(20, &namespace, semantic_winner),
+    ];
+    let mut embedder = CachedTextEmbedder::new(SemanticFixtureEmbedder, 8);
+    let semantic = SharedSemanticRetrievalExecutor.execute(
+        &records,
+        &namespace,
+        query,
+        None,
+        SemanticExecutorConfig::bounded(2),
+        &mut embedder,
+    );
+
+    assert_eq!(semantic.candidates.len(), 2);
+    assert!(semantic.trace.degraded_reason.is_none());
+    assert_eq!(semantic.trace.lexical_prefilter_count, 2);
+    assert_eq!(semantic.trace.semantic_candidate_count, 2);
+    assert_eq!(semantic.candidates[0].record.memory_id, MemoryId(20));
+    assert!(semantic.candidates[0].semantic_score > semantic.candidates[1].semantic_score);
+    assert!(semantic.candidates[1].lexical_score > semantic.candidates[0].lexical_score);
+    assert_eq!(
+        semantic
+            .trace
+            .query_trace
+            .as_ref()
+            .expect("query trace")
+            .backend_kind,
+        "semantic_fixture"
+    );
+
+    let top_ranking = fuse_scores(
+        RankingInput {
+            recency: semantic.candidates[0].ranking_score,
+            salience: semantic.candidates[0].ranking_score,
+            strength: semantic.candidates[0].ranking_score,
+            provenance: 700,
+            conflict: 500,
+            confidence: semantic.candidates[0].ranking_score,
+        },
+        RankingProfile::balanced(),
+    );
+    let runner_up_ranking = fuse_scores(
+        RankingInput {
+            recency: semantic.candidates[1].ranking_score,
+            salience: semantic.candidates[1].ranking_score,
+            strength: semantic.candidates[1].ranking_score,
+            provenance: 650,
+            conflict: 500,
+            confidence: semantic.candidates[1].ranking_score,
+        },
+        RankingProfile::balanced(),
+    );
+
+    let mut builder = ResultBuilder::new(2, namespace.clone());
+    builder.add(
+        semantic.candidates[0].record.memory_id,
+        namespace.clone(),
+        SessionId(1),
+        CanonicalMemoryType::Event,
+        semantic.candidates[0].record.compact_text.clone(),
+        &top_ranking,
+        AnsweredFrom::Tier2Indexed,
+    );
+    builder.add(
+        semantic.candidates[1].record.memory_id,
+        namespace.clone(),
+        SessionId(1),
+        CanonicalMemoryType::Event,
+        semantic.candidates[1].record.compact_text.clone(),
+        &runner_up_ranking,
+        AnsweredFrom::Tier2Indexed,
+    );
+
+    let result_set = builder.build(RetrievalExplain {
+        recall_plan: RecallPlanKind::Tier2ExactThenTier3Fallback,
+        route_reason: "normal semantic retrieval path outranked lexical distractor".to_string(),
+        tiers_consulted: vec!["tier2_semantic".to_string()],
+        trace_stages: vec![RecallTraceStage::Tier2Exact],
+        tier1_answered_directly: false,
+        candidate_budget: 2,
+        time_consumed_ms: Some(3),
+        ranking_profile: "balanced".to_string(),
+        contradictions_found: 0,
+        historical_context: None,
+        query_by_example: None,
+        result_reasons: vec![ResultReason {
+            memory_id: Some(MemoryId(20)),
+            reason_code: "semantic_path_won".to_string(),
+            detail: "bounded semantic scoring promoted the deployment remediation memory over the lexical distractor"
+                .to_string(),
+        }],
+    });
+
+    let top = result_set.top().expect("top result");
+    assert_eq!(top.result.memory_id, MemoryId(20));
+    assert_eq!(top.result.answered_from, AnsweredFrom::Tier2Indexed);
+    assert_eq!(top.result.entry_lane.as_str(), "semantic");
+    assert!(result_set.explain.result_reasons.iter().any(|reason| {
+        reason.reason_code == "semantic_path_won"
+            && reason.detail.contains("lexical distractor")
+    }));
 }
 
 #[test]

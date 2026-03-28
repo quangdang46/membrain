@@ -1,0 +1,102 @@
+{"ts":"2026-03-27T13:08:49.333928003Z","kind":"session_started","session_id":"ses-run-mb-2cx3-20260327T130849307"}
+{"ts":"2026-03-27T13:26:31.119566659Z","kind":"stdout","line":"GROVE_RESULT: partial"}
+{"ts":"2026-03-27T13:26:31.119566659Z","kind":"protocol","event":{"type":"result","summary":"partial"}}
+{"ts":"2026-03-27T13:26:31.166219265Z","kind":"stdout","line":""}
+{"ts":"2026-03-27T13:26:31.166306133Z","kind":"stdout","line":"GROVE_ARTIFACTS:"}
+{"ts":"2026-03-27T13:26:31.166306133Z","kind":"protocol","event":{"type":"artifacts","items":[]}}
+{"ts":"2026-03-27T13:26:31.167298297Z","kind":"stdout","line":"- Updated `MISSING.md`"}
+{"ts":"2026-03-27T13:26:31.167298297Z","kind":"protocol","event":{"type":"artifacts","items":["Updated `MISSING.md`"]}}
+{"ts":"2026-03-27T13:26:31.167321199Z","kind":"stdout","line":"  - refreshed gap scoreboard statuses and wording for:"}
+{"ts":"2026-03-27T13:26:31.167321199Z","kind":"protocol","event":{"type":"artifacts","items":["refreshed gap scoreboard statuses and wording for:"]}}
+{"ts":"2026-03-27T13:26:31.167330683Z","kind":"stdout","line":"    - `gap.audit_wording_planner_drift` → done"}
+{"ts":"2026-03-27T13:26:31.167330683Z","kind":"protocol","event":{"type":"artifacts","items":["`gap.audit_wording_planner_drift` → done"]}}
+{"ts":"2026-03-27T13:26:31.167395354Z","kind":"stdout","line":"    - `gap.embedder_daemon_authority` → partial"}
+{"ts":"2026-03-27T13:26:31.167395354Z","kind":"protocol","event":{"type":"artifacts","items":["`gap.embedder_daemon_authority` → partial"]}}
+{"ts":"2026-03-27T13:26:31.167403526Z","kind":"stdout","line":"    - `gap.cross_surface_semantic_parity` → partial"}
+{"ts":"2026-03-27T13:26:31.167403526Z","kind":"protocol","event":{"type":"artifacts","items":["`gap.cross_surface_semantic_parity` → partial"]}}
+{"ts":"2026-03-27T13:26:31.167415331Z","kind":"stdout","line":"    - `gap.cognitive_runtime_vs_db_query` → partial"}
+{"ts":"2026-03-27T13:26:31.167415331Z","kind":"protocol","event":{"type":"artifacts","items":["`gap.cognitive_runtime_vs_db_query` → partial"]}}
+{"ts":"2026-03-27T13:26:31.167423301Z","kind":"stdout","line":"    - `gap.daemon_authoritative_runtime_posture` → partial"}
+{"ts":"2026-03-27T13:26:31.167423301Z","kind":"protocol","event":{"type":"artifacts","items":["`gap.daemon_authoritative_runtime_posture` → partial"]}}
+{"ts":"2026-03-27T13:26:31.167435307Z","kind":"stdout","line":"    - `gap.restore_archival_recovery_projection` → open"}
+{"ts":"2026-03-27T13:26:31.167435307Z","kind":"protocol","event":{"type":"artifacts","items":["`gap.restore_archival_recovery_projection` → open"]}}
+{"ts":"2026-03-27T13:26:31.167442773Z","kind":"stdout","line":"    - `gap.freshness_marker_contract_completion` → done"}
+{"ts":"2026-03-27T13:26:31.167442773Z","kind":"protocol","event":{"type":"artifacts","items":["`gap.freshness_marker_contract_completion` → done"]}}
+{"ts":"2026-03-27T13:26:31.167450844Z","kind":"stdout","line":"    - `gap.docs_truth_and_parity_artifacts` → partial"}
+{"ts":"2026-03-27T13:26:31.167450844Z","kind":"protocol","event":{"type":"artifacts","items":["`gap.docs_truth_and_parity_artifacts` → partial"]}}
+{"ts":"2026-03-27T13:26:31.167458512Z","kind":"stdout","line":"  - updated supporting audit sections for embedder authority, daemon authority, docs truth, and missing-capabilities checklist"}
+{"ts":"2026-03-27T13:26:31.167458512Z","kind":"protocol","event":{"type":"artifacts","items":["updated supporting audit sections for embedder authority, daemon authority, docs truth, and missing-capabilities checklist"]}}
+{"ts":"2026-03-27T13:26:31.167471931Z","kind":"stdout","line":""}
+{"ts":"2026-03-27T13:26:31.167475462Z","kind":"stdout","line":"GROVE_LESSONS:"}
+{"ts":"2026-03-27T13:26:31.167475462Z","kind":"protocol","event":{"type":"lessons","items":[]}}
+{"ts":"2026-03-27T13:26:31.167483432Z","kind":"stdout","line":"- The live repo already proves more than the old audit text claimed:"}
+{"ts":"2026-03-27T13:26:31.167483432Z","kind":"protocol","event":{"type":"lessons","items":["The live repo already proves more than the old audit text claimed:"]}}
+{"ts":"2026-03-27T13:26:31.167515818Z","kind":"stdout","line":"  - daemon status exposes `authority_mode`, `authoritative_runtime`, and `warm_runtime_guarantees`"}
+{"ts":"2026-03-27T13:26:31.167515818Z","kind":"protocol","event":{"type":"lessons","items":["daemon status exposes `authority_mode`, `authoritative_runtime`, and `warm_runtime_guarantees`"]}}
+{"ts":"2026-03-27T13:26:31.167525201Z","kind":"stdout","line":"  - health/doctor expose machine-readable embedder state plus load/request/cache counters"}
+{"ts":"2026-03-27T13:26:31.167525201Z","kind":"protocol","event":{"type":"lessons","items":["health/doctor expose machine-readable embedder state plus load/request/cache counters"]}}
+{"ts":"2026-03-27T13:26:31.167587956Z","kind":"stdout","line":"  - daemon tests already warm the embedder via `encode`/`recall`"}
+{"ts":"2026-03-27T13:26:31.167587956Z","kind":"protocol","event":{"type":"lessons","items":["daemon tests already warm the embedder via `encode`/`recall`"]}}
+{"ts":"2026-03-27T13:26:31.167594110Z","kind":"stdout","line":"  - warm reuse is already asserted on the daemon path"}
+{"ts":"2026-03-27T13:26:31.167594110Z","kind":"protocol","event":{"type":"lessons","items":["warm reuse is already asserted on the daemon path"]}}
+{"ts":"2026-03-27T13:26:31.167601374Z","kind":"stdout","line":"- The main remaining unresolved runtime gap in this slice is archival recovery projection: recall/explain freshness markers still do not emit a dedicated `archival_recovery_partial`-style marker even though cold/forgetting surfaces model partial restore explicitly."}
+{"ts":"2026-03-27T13:26:31.167601374Z","kind":"protocol","event":{"type":"lessons","items":["The main remaining unresolved runtime gap in this slice is archival recovery projection: recall/explain freshness markers still do not emit a dedicated `archival_recovery_partial`-style marker even though cold/forgetting surfaces model partial restore explicitly."]}}
+{"ts":"2026-03-27T13:26:31.167609345Z","kind":"stdout","line":""}
+{"ts":"2026-03-27T13:26:31.167611463Z","kind":"stdout","line":"GROVE_DECISIONS:"}
+{"ts":"2026-03-27T13:26:31.167611463Z","kind":"protocol","event":{"type":"decision","items":[]}}
+{"ts":"2026-03-27T13:26:31.167616306Z","kind":"stdout","line":"- I limited changes to `MISSING.md` because the relevant code/test files are actively reserved by other agents."}
+{"ts":"2026-03-27T13:26:31.167616306Z","kind":"protocol","event":{"type":"decision","items":["I limited changes to `MISSING.md` because the relevant code/test files are actively reserved by other agents."]}}
+{"ts":"2026-03-27T13:26:31.167624176Z","kind":"stdout","line":"- I treated `gap.freshness_marker_contract_completion` as done based on current retrieval-time marker coverage and kept `gap.restore_archival_recovery_projection` open as the remaining archival-loss projection gap."}
+{"ts":"2026-03-27T13:26:31.167624176Z","kind":"protocol","event":{"type":"decision","items":["I treated `gap.freshness_marker_contract_completion` as done based on current retrieval-time marker coverage and kept `gap.restore_archival_recovery_projection` open as the remaining archival-loss projection gap."]}}
+{"ts":"2026-03-27T13:26:31.167630633Z","kind":"stdout","line":""}
+{"ts":"2026-03-27T13:26:31.167632751Z","kind":"stdout","line":"GROVE_WARNINGS:"}
+{"ts":"2026-03-27T13:26:31.167632751Z","kind":"protocol","event":{"type":"warning","items":[]}}
+{"ts":"2026-03-27T13:26:31.167637998Z","kind":"stdout","line":"- Full validation is currently blocked by an existing compile failure outside my doc edit:"}
+{"ts":"2026-03-27T13:26:31.167637998Z","kind":"protocol","event":{"type":"warning","items":["Full validation is currently blocked by an existing compile failure outside my doc edit:"]}}
+{"ts":"2026-03-27T13:26:31.167645161Z","kind":"stdout","line":"  - `crates/membrain-core/src/engine/semantic_retrieval.rs:209`"}
+{"ts":"2026-03-27T13:26:31.167645161Z","kind":"protocol","event":{"type":"warning","items":["`crates/membrain-core/src/engine/semantic_retrieval.rs:209`"]}}
+{"ts":"2026-03-27T13:26:31.167653333Z","kind":"stdout","line":"  - error: `cannot find value lexical_prefilter_count in this scope`"}
+{"ts":"2026-03-27T13:26:31.167653333Z","kind":"protocol","event":{"type":"warning","items":["error: `cannot find value lexical_prefilter_count in this scope`"]}}
+{"ts":"2026-03-27T13:26:31.167665339Z","kind":"stdout","line":"- Because of that, I could not complete the requested validation bar (`cargo check --all-targets` / full targeted parity run) in this attempt."}
+{"ts":"2026-03-27T13:26:31.167665339Z","kind":"protocol","event":{"type":"warning","items":["Because of that, I could not complete the requested validation bar (`cargo check --all-targets` / full targeted parity run) in this attempt."]}}
+{"ts":"2026-03-27T13:26:31.167675933Z","kind":"stdout","line":"- I also hit active Agent Mail reservation conflicts on:"}
+{"ts":"2026-03-27T13:26:31.167675933Z","kind":"protocol","event":{"type":"warning","items":["I also hit active Agent Mail reservation conflicts on:"]}}
+{"ts":"2026-03-27T13:26:31.167684307Z","kind":"stdout","line":"  - `crates/membrain-daemon/tests/runtime_doctor_parity.rs`"}
+{"ts":"2026-03-27T13:26:31.167684307Z","kind":"protocol","event":{"type":"warning","items":["`crates/membrain-daemon/tests/runtime_doctor_parity.rs`"]}}
+{"ts":"2026-03-27T13:26:31.167688948Z","kind":"stdout","line":"  - `crates/membrain-daemon/src/daemon.rs`"}
+{"ts":"2026-03-27T13:26:31.167688948Z","kind":"protocol","event":{"type":"warning","items":["`crates/membrain-daemon/src/daemon.rs`"]}}
+{"ts":"2026-03-27T13:26:31.167694093Z","kind":"stdout","line":""}
+{"ts":"2026-03-27T13:26:31.167697019Z","kind":"stdout","line":"GROVE_CHECKPOINT:"}
+{"ts":"2026-03-27T13:26:31.169516996Z","kind":"stdout","line":"```json"}
+{"ts":"2026-03-27T13:26:31.169538788Z","kind":"stdout","line":"{"}
+{"ts":"2026-03-27T13:26:31.169542118Z","kind":"stdout","line":"  \"completed\": ["}
+{"ts":"2026-03-27T13:26:31.169548373Z","kind":"stdout","line":"    \"Audited current runtime truth against MISSING.md\","}
+{"ts":"2026-03-27T13:26:31.169552711Z","kind":"stdout","line":"    \"Updated MISSING.md scoreboard and supporting sections to match current implementation truth\""}
+{"ts":"2026-03-27T13:26:31.169556545Z","kind":"stdout","line":"  ],"}
+{"ts":"2026-03-27T13:26:31.169559875Z","kind":"stdout","line":"  \"blocked\": ["}
+{"ts":"2026-03-27T13:26:31.169563608Z","kind":"stdout","line":"    {"}
+{"ts":"2026-03-27T13:26:31.169567441Z","kind":"stdout","line":"      \"type\": \"compile_failure\","}
+{"ts":"2026-03-27T13:26:31.169571780Z","kind":"stdout","line":"      \"file\": \"crates/membrain-core/src/engine/semantic_retrieval.rs\","}
+{"ts":"2026-03-27T13:26:31.169577127Z","kind":"stdout","line":"      \"line\": 209,"}
+{"ts":"2026-03-27T13:26:31.169611834Z","kind":"stdout","line":"      \"error\": \"cannot find value `lexical_prefilter_count` in this scope\""}
+{"ts":"2026-03-27T13:26:31.169616777Z","kind":"stdout","line":"    },"}
+{"ts":"2026-03-27T13:26:31.169620813Z","kind":"stdout","line":"    {"}
+{"ts":"2026-03-27T13:26:31.169624243Z","kind":"stdout","line":"      \"type\": \"reservation_conflict\","}
+{"ts":"2026-03-27T13:26:31.169628077Z","kind":"stdout","line":"      \"files\": ["}
+{"ts":"2026-03-27T13:26:31.169631306Z","kind":"stdout","line":"        \"crates/membrain-daemon/src/daemon.rs\","}
+{"ts":"2026-03-27T13:26:31.169635543Z","kind":"stdout","line":"        \"crates/membrain-daemon/tests/runtime_doctor_parity.rs\""}
+{"ts":"2026-03-27T13:26:31.169639377Z","kind":"stdout","line":"      ]"}
+{"ts":"2026-03-27T13:26:31.169642807Z","kind":"stdout","line":"    }"}
+{"ts":"2026-03-27T13:26:31.169648356Z","kind":"stdout","line":"  ],"}
+{"ts":"2026-03-27T13:26:31.169651383Z","kind":"stdout","line":"  \"next_steps\": ["}
+{"ts":"2026-03-27T13:26:31.169654813Z","kind":"stdout","line":"    \"Wait for or coordinate around active reservations before touching daemon proof files\","}
+{"ts":"2026-03-27T13:26:31.169659555Z","kind":"stdout","line":"    \"Fix the existing semantic_retrieval compile error\","}
+{"ts":"2026-03-27T13:26:31.169663591Z","kind":"stdout","line":"    \"Re-run targeted daemon/core tests and cargo check --all-targets\","}
+{"ts":"2026-03-27T13:26:31.169678724Z","kind":"stdout","line":"    \"Then update bead state and close or split remaining scoreboard rows\""}
+{"ts":"2026-03-27T13:26:31.169682155Z","kind":"stdout","line":"  ]"}
+{"ts":"2026-03-27T13:26:31.169713734Z","kind":"stdout","line":"}"}
+{"ts":"2026-03-27T13:26:31.169722309Z","kind":"stdout","line":"```"}
+{"ts":"2026-03-27T13:26:31.169725336Z","kind":"stdout","line":""}
+{"ts":"2026-03-27T13:26:31.169728666Z","kind":"stdout","line":"GROVE_EXIT: false"}
+{"ts":"2026-03-27T13:26:31.169728666Z","kind":"protocol","event":{"type":"exit","value":false}}
+{"ts":"2026-03-27T13:26:31.862328152Z","kind":"session_ended","exit_code":0}

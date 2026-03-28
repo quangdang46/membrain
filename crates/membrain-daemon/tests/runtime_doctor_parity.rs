@@ -823,6 +823,36 @@ async fn runtime_health_resource_read_matches_runtime_health_payload_shape() {
         result["payload"]["payload"]["feature_availability"][0]["posture"],
         json!("Full")
     );
+    assert_eq!(
+        result["payload"]["payload"]["feature_availability"][1]["feature"],
+        json!("runtime_authority")
+    );
+    assert_eq!(
+        result["payload"]["payload"]["feature_availability"][1]["posture"],
+        json!("Full")
+    );
+    assert!(result["payload"]["payload"]["feature_availability"][1]["note"]
+        .as_str()
+        .is_some_and(|note| {
+            note.contains("mode=unix_socket_daemon")
+                && note.contains("authoritative_runtime=true")
+                && note.contains("warm_runtime_guarantees=")
+        }));
+    assert_eq!(
+        result["payload"]["payload"]["feature_availability"][2]["feature"],
+        json!("embedder_runtime")
+    );
+    assert_eq!(
+        result["payload"]["payload"]["feature_availability"][2]["posture"],
+        json!("Degraded")
+    );
+    assert!(result["payload"]["payload"]["feature_availability"][2]["note"]
+        .as_str()
+        .is_some_and(|note| {
+            note.contains("state=not_loaded")
+                && note.contains("backend=local_fastembed")
+                && note.contains("generation=all-minilm-l6-v2@default")
+        }));
     assert!(result["payload"]["payload"]["degraded_status"].is_null());
 
     shutdown_runtime(&socket_path, handle).await;
@@ -914,6 +944,44 @@ async fn runtime_doctor_resource_read_matches_runtime_doctor_payload_shape() {
     assert_eq!(
         result["payload"]["payload"]["health"]["availability_posture"],
         json!(null)
+    );
+    assert_eq!(
+        result["payload"]["payload"]["health"]["feature_availability"][1]["feature"],
+        json!("runtime_authority")
+    );
+    assert_eq!(
+        result["payload"]["payload"]["health"]["feature_availability"][1]["posture"],
+        json!("Full")
+    );
+    assert!(result["payload"]["payload"]["health"]["feature_availability"][1]["note"]
+        .as_str()
+        .is_some_and(|note| {
+            note.contains("mode=unix_socket_daemon")
+                && note.contains("authoritative_runtime=true")
+                && note.contains("warm_runtime_guarantees=")
+        }));
+    assert_eq!(
+        result["payload"]["payload"]["health"]["feature_availability"][2]["feature"],
+        json!("embedder_runtime")
+    );
+    assert_eq!(
+        result["payload"]["payload"]["health"]["feature_availability"][2]["posture"],
+        json!("Degraded")
+    );
+    assert!(result["payload"]["payload"]["health"]["feature_availability"][2]["note"]
+        .as_str()
+        .is_some_and(|note| {
+            note.contains("state=not_loaded")
+                && note.contains("backend=local_fastembed")
+                && note.contains("generation=all-minilm-l6-v2@default")
+        }));
+    assert_eq!(
+        result["payload"]["payload"]["checks"][4]["name"],
+        json!("runtime_authority")
+    );
+    assert_eq!(
+        result["payload"]["payload"]["checks"][4]["status"],
+        json!("ok")
     );
 
     let metrics =

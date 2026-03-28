@@ -328,6 +328,73 @@ fn cli_recall_high_mode_can_suppress_action_pack_when_policy_caveat_exists() {
 }
 
 #[test]
+fn cli_recall_semantic_query_prefers_semantic_winner_over_lexical_distractor() {
+    let db_root = test_db_root();
+    let namespace = "semantic_cli";
+
+    let (lexical_ok, _lexical_stdout, lexical_stderr) = run_membrain_with_db(
+        &db_root,
+        &[
+            "remember",
+            "release rollback checklist after outage",
+            "--namespace",
+            namespace,
+            "--kind",
+            "semantic",
+            "--json",
+        ],
+    );
+    assert!(lexical_ok, "stderr: {lexical_stderr}");
+
+    let (semantic_ok, _semantic_stdout, semantic_stderr) = run_membrain_with_db(
+        &db_root,
+        &[
+            "remember",
+            "production deploy pipeline remediation rollout for incident fix",
+            "--namespace",
+            namespace,
+            "--kind",
+            "semantic",
+            "--json",
+        ],
+    );
+    assert!(semantic_ok, "stderr: {semantic_stderr}");
+
+    let (ok, stdout, stderr) = run_membrain_with_db(
+        &db_root,
+        &[
+            "recall",
+            "Which release deploy fix should we roll out after the pipeline outage?",
+            "--namespace",
+            namespace,
+            "--top",
+            "2",
+            "--explain",
+            "full",
+            "--json",
+        ],
+    );
+
+    assert!(ok, "stderr: {stderr}");
+    let json = parse_json(&stdout);
+    assert_eq!(json["ok"], true);
+    assert_eq!(json["result"]["packaging_metadata"]["degraded_summary"], json!(null));
+    assert_eq!(
+        json["result"]["evidence_pack"][0]["result"]["compact_text"],
+        "production deploy pipeline remediation rollout for incident fix"
+    );
+    assert_eq!(
+        json["result"]["evidence_pack"][0]["result"]["entry_lane"],
+        "semantic"
+    );
+    assert!(json["result"]["explain"]["result_reasons"]
+        .as_array()
+        .expect("result_reasons should be an array")
+        .iter()
+        .any(|value| value["reason_code"] == "semantic_recall_trace"));
+}
+
+#[test]
 fn cli_explain_json_preserves_trace_stages_and_patterns() {
     let db_root = test_db_root();
     let (remember_ok, _remember_stdout, remember_stderr) = run_membrain_with_db(

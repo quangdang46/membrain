@@ -176,7 +176,7 @@ Current behavior:
 - reads newline-delimited JSON-RPC requests from stdin
 - writes newline-delimited responses to stdout
 - logs a startup message to stderr
-- supports the same real installed operation families already exposed by the daemon path, including `encode`, `recall`, `inspect`, `health`, `doctor`, `observe`, `resources.list`, `resource.read`, and `streams.list`
+- exposes the current live MCP tool catalog of `encode`, `recall`, `inspect`, `why`, `health`, and `doctor`, plus transport-side `resources.list`, `resource.read`, `streams.list`, and `shutdown`
 
 Typical usage:
 
@@ -228,6 +228,8 @@ All CLI recall invocations normalize into the canonical `RecallRequest` describe
 The machine-readable result for `recall` is the canonical `RetrievalResult` envelope from `mb-1hw.8`. In practice that means CLI JSON should expose a bounded `evidence_pack`, optional `action_pack`, explicit `output_mode`, `outcome_class`, omission/deferred-payload state, and the same policy/provenance/freshness/conflict/explanation families used by daemon/JSON-RPC and MCP.
 
 On ordinary success paths, that `evidence_pack` is hydrated runtime evidence rather than planner-only route scaffolding. Planner-style degraded summaries are reserved for explicit no-hydrated-evidence, capped, repair-limited, or other degraded cases and should surface as such in packaging and explain fields instead of replacing normal success evidence.
+
+Current proof coverage also includes a realistic semantic-recall regression on the CLI path: a deployment/remediation memory must outrank a lexical rollback/checklist distractor for the same query while preserving `entry_lane=semantic`, hydrated evidence, and `degraded_summary=null` on the accepted success path.
 
 `--confidence fast|normal|high` doubles as the Dual Memory Output packaging mode selector for CLI recall: `fast` keeps derived action guidance permissive, `normal` maps to balanced evidence/action packaging, and `high` maps to strict packaging that suppresses action suggestions when uncertainty, freshness caveats, or policy caveats would make them unsafe to foreground.
 

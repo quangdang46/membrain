@@ -1,0 +1,56 @@
+{"ts":"2026-03-27T13:08:49.384739388Z","kind":"session_started","session_id":"ses-run-mb-2cx3.1-20260327T130849363"}
+{"ts":"2026-03-27T13:17:30.539362211Z","kind":"stdout","line":"GROVE_RESULT: success"}
+{"ts":"2026-03-27T13:17:30.539362211Z","kind":"protocol","event":{"type":"result","summary":"success"}}
+{"ts":"2026-03-27T13:17:30.683852189Z","kind":"stdout","line":""}
+{"ts":"2026-03-27T13:17:30.683871821Z","kind":"stdout","line":"GROVE_ARTIFACTS:"}
+{"ts":"2026-03-27T13:17:30.683871821Z","kind":"protocol","event":{"type":"artifacts","items":[]}}
+{"ts":"2026-03-27T13:17:30.684377114Z","kind":"stdout","line":"- Updated `MISSING.md`"}
+{"ts":"2026-03-27T13:17:30.684377114Z","kind":"protocol","event":{"type":"artifacts","items":["Updated `MISSING.md`"]}}
+{"ts":"2026-03-27T13:17:30.684384206Z","kind":"stdout","line":"- Closed bead `mb-2cx3.1`"}
+{"ts":"2026-03-27T13:17:30.684384206Z","kind":"protocol","event":{"type":"artifacts","items":["Closed bead `mb-2cx3.1`"]}}
+{"ts":"2026-03-27T13:17:30.684389551Z","kind":"stdout","line":"- Synced beads with `br sync --flush-only`"}
+{"ts":"2026-03-27T13:17:30.684389551Z","kind":"protocol","event":{"type":"artifacts","items":["Synced beads with `br sync --flush-only`"]}}
+{"ts":"2026-03-27T13:17:30.684415350Z","kind":"stdout","line":""}
+{"ts":"2026-03-27T13:17:30.684418228Z","kind":"stdout","line":"GROVE_LESSONS:"}
+{"ts":"2026-03-27T13:17:30.684418228Z","kind":"protocol","event":{"type":"lessons","items":[]}}
+{"ts":"2026-03-27T13:17:30.684423984Z","kind":"stdout","line":"- The main drift was in `MISSING.md`; `docs/CLI.md` and `docs/MCP_API.md` were already aligned on hydrated success-path wording."}
+{"ts":"2026-03-27T13:17:30.684423984Z","kind":"protocol","event":{"type":"lessons","items":["The main drift was in `MISSING.md`; `docs/CLI.md` and `docs/MCP_API.md` were already aligned on hydrated success-path wording."]}}
+{"ts":"2026-03-27T13:17:30.684442382Z","kind":"stdout","line":"- Existing targeted daemon and CLI tests already prove the intended distinction: hydrated evidence on normal success, `degraded_summary` only on explicit degraded paths."}
+{"ts":"2026-03-27T13:17:30.684442382Z","kind":"protocol","event":{"type":"lessons","items":["Existing targeted daemon and CLI tests already prove the intended distinction: hydrated evidence on normal success, `degraded_summary` only on explicit degraded paths."]}}
+{"ts":"2026-03-27T13:17:30.684449372Z","kind":"stdout","line":""}
+{"ts":"2026-03-27T13:17:30.684451941Z","kind":"stdout","line":"GROVE_DECISIONS:"}
+{"ts":"2026-03-27T13:17:30.684451941Z","kind":"protocol","event":{"type":"decision","items":[]}}
+{"ts":"2026-03-27T13:17:30.684457903Z","kind":"stdout","line":"- Kept the fix scoped to docs/audit truth only; no code or fixture changes were needed."}
+{"ts":"2026-03-27T13:17:30.684457903Z","kind":"protocol","event":{"type":"decision","items":["Kept the fix scoped to docs/audit truth only; no code or fixture changes were needed."]}}
+{"ts":"2026-03-27T13:17:30.684464276Z","kind":"stdout","line":"- Marked `gap.audit_wording_planner_drift` as `done` in the gap scoreboard because the remaining planner/degraded references in `MISSING.md` are now framed as guardrails or historical context, not as normal-path behavior."}
+{"ts":"2026-03-27T13:17:30.684464276Z","kind":"protocol","event":{"type":"decision","items":["Marked `gap.audit_wording_planner_drift` as `done` in the gap scoreboard because the remaining planner/degraded references in `MISSING.md` are now framed as guardrails or historical context, not as normal-path behavior."]}}
+{"ts":"2026-03-27T13:17:30.684482058Z","kind":"stdout","line":""}
+{"ts":"2026-03-27T13:17:30.684484524Z","kind":"stdout","line":"GROVE_WARNINGS:"}
+{"ts":"2026-03-27T13:17:30.684484524Z","kind":"protocol","event":{"type":"warning","items":[]}}
+{"ts":"2026-03-27T13:17:30.684489355Z","kind":"stdout","line":"- `cargo check --all-targets` passed, but there is an existing warning in `crates/membrain-daemon/src/daemon.rs:1790` for unused `persisted_memory_count`."}
+{"ts":"2026-03-27T13:17:30.684489355Z","kind":"protocol","event":{"type":"warning","items":["`cargo check --all-targets` passed, but there is an existing warning in `crates/membrain-daemon/src/daemon.rs:1790` for unused `persisted_memory_count`."]}}
+{"ts":"2026-03-27T13:17:30.684505801Z","kind":"stdout","line":"- Agent Mail reservations initially conflicted with `OrangeBarn`, so I limited actual edits to `MISSING.md` and released all reservations after completion."}
+{"ts":"2026-03-27T13:17:30.684505801Z","kind":"protocol","event":{"type":"warning","items":["Agent Mail reservations initially conflicted with `OrangeBarn`, so I limited actual edits to `MISSING.md` and released all reservations after completion."]}}
+{"ts":"2026-03-27T13:17:30.684511146Z","kind":"stdout","line":""}
+{"ts":"2026-03-27T13:17:30.684513202Z","kind":"stdout","line":"GROVE_EXIT: true"}
+{"ts":"2026-03-27T13:17:30.684513202Z","kind":"protocol","event":{"type":"exit","value":true}}
+{"ts":"2026-03-27T13:17:30.691919600Z","kind":"stdout","line":""}
+{"ts":"2026-03-27T13:17:30.700130498Z","kind":"stdout","line":"Done. I updated `MISSING.md` so normal recall/explain success is described as hydrated runtime evidence and degraded wording is scoped to explicit fallback states."}
+{"ts":"2026-03-27T13:17:30.700155680Z","kind":"stdout","line":""}
+{"ts":"2026-03-27T13:17:30.700157839Z","kind":"stdout","line":"Validation passed:"}
+{"ts":"2026-03-27T13:17:30.700162259Z","kind":"stdout","line":"- `cargo test -p membrain-daemon runtime_query_explain_returns_hydrated_evidence_for_matching_query_text`"}
+{"ts":"2026-03-27T13:17:30.700167192Z","kind":"stdout","line":"- `cargo test -p membrain-daemon runtime_query_explain_keeps_explicit_degraded_summary_when_no_hydrated_evidence_matches`"}
+{"ts":"2026-03-27T13:17:30.700170276Z","kind":"stdout","line":"- `cargo test -p membrain-cli --test cli_end_to_end cli_recall_json_preserves_route_and_result_fields`"}
+{"ts":"2026-03-27T13:17:30.700172948Z","kind":"stdout","line":"- `cargo test -p membrain-cli --test cli_end_to_end cli_explain_json_preserves_trace_stages_and_patterns`"}
+{"ts":"2026-03-27T13:17:30.700175004Z","kind":"stdout","line":"- `cargo check --all-targets`"}
+{"ts":"2026-03-27T13:17:30.700177471Z","kind":"stdout","line":""}
+{"ts":"2026-03-27T13:17:30.700180349Z","kind":"stdout","line":"Key changed spots:"}
+{"ts":"2026-03-27T13:17:30.700182302Z","kind":"stdout","line":"- `MISSING.md:22`"}
+{"ts":"2026-03-27T13:17:30.700194944Z","kind":"stdout","line":"- `MISSING.md:42`"}
+{"ts":"2026-03-27T13:17:30.700197103Z","kind":"stdout","line":"- `MISSING.md:140`"}
+{"ts":"2026-03-27T13:17:30.700199364Z","kind":"stdout","line":"- `MISSING.md:163`"}
+{"ts":"2026-03-27T13:17:30.700201317Z","kind":"stdout","line":"- `MISSING.md:167`"}
+{"ts":"2026-03-27T13:17:30.700203167Z","kind":"stdout","line":"- `MISSING.md:177`"}
+{"ts":"2026-03-27T13:17:30.700205017Z","kind":"stdout","line":"- `MISSING.md:387`"}
+{"ts":"2026-03-27T13:17:30.700206765Z","kind":"stdout","line":"- `MISSING.md:728`"}
+{"ts":"2026-03-27T13:17:31.940359020Z","kind":"session_ended","exit_code":0}

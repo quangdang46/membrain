@@ -152,16 +152,17 @@ When present, `action_pack` is the only stable home for synthesized answer text,
 
 ### `freshness_markers` contract
 
-`freshness_markers` must preserve relevant markers such as:
-- `decaying_soon`
+`freshness_markers` must preserve the applicable retrieval-time markers backed by canonical packaging truth, such as:
 - `snapshot_scoped`
 - `as_of_scoped`
 - `lease_sensitive`
 - `recheck_required`
 - `stale_derived`
-- `archival_recovery_partial`
+- `lifecycle_projection`
 
 When lease-sensitive evidence is action-critical, the packaged result must disclose that the item requires re-check or withholding instead of silently keeping a high-confidence answer surface.
+
+Markers such as `archival_recovery_partial` belong to inspect or restore-oriented degraded-fidelity surfaces when archival recovery is incomplete, not to ordinary recall/why freshness packaging unless that degraded restore state actually participates in the returned retrieval envelope.
 
 ### `conflict_markers` contract
 

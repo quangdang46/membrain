@@ -1,0 +1,38 @@
+{"ts":"2026-03-27T13:08:49.366129927Z","kind":"session_started","session_id":"ses-run-mb-2i12-20260327T130849360"}
+{"ts":"2026-03-27T13:51:04.033596729Z","kind":"stdout","line":"Completed."}
+{"ts":"2026-03-27T13:51:04.257118060Z","kind":"stdout","line":""}
+{"ts":"2026-03-27T13:51:04.257235787Z","kind":"stdout","line":"Changed:"}
+{"ts":"2026-03-27T13:51:04.257245410Z","kind":"stdout","line":"- `crates/membrain-core/tests/recall_pipeline_integration.rs:830`"}
+{"ts":"2026-03-27T13:51:04.257267830Z","kind":"stdout","line":"- `crates/membrain-daemon/tests/runtime_doctor_parity.rs:792`"}
+{"ts":"2026-03-27T13:51:04.257285335Z","kind":"stdout","line":"- `crates/membrain-daemon/tests/runtime_doctor_parity.rs:832`"}
+{"ts":"2026-03-27T13:51:04.257290351Z","kind":"stdout","line":"- `docs/CLI.md:175`"}
+{"ts":"2026-03-27T13:51:04.257297927Z","kind":"stdout","line":"- `docs/PLAN.md:988`"}
+{"ts":"2026-03-27T13:51:04.257303148Z","kind":"stdout","line":"- `docs/PLAN.md:11409`"}
+{"ts":"2026-03-27T13:51:04.257311952Z","kind":"stdout","line":"- `docs/PLAN.md:11450`"}
+{"ts":"2026-03-27T13:51:04.257315842Z","kind":"stdout","line":""}
+{"ts":"2026-03-27T13:51:04.257319016Z","kind":"stdout","line":"What landed:"}
+{"ts":"2026-03-27T13:51:04.257323315Z","kind":"stdout","line":"- Added a core integration proof that a realistic semantic query beats a lexical distractor on the normal Tier2 path and is packaged as `AnsweredFrom::Tier2Indexed` with `entry_lane == semantic`."}
+{"ts":"2026-03-27T13:51:04.257330993Z","kind":"stdout","line":"- Added daemon `resource.read` parity assertions so MCP resource surfaces now explicitly prove:"}
+{"ts":"2026-03-27T13:51:04.257341844Z","kind":"stdout","line":"  - `runtime_authority`"}
+{"ts":"2026-03-27T13:51:04.257345325Z","kind":"stdout","line":"  - `embedder_runtime`"}
+{"ts":"2026-03-27T13:51:04.257349318Z","kind":"stdout","line":"  - daemon-mode warm-runtime truth"}
+{"ts":"2026-03-27T13:51:04.257409921Z","kind":"stdout","line":"- Updated docs to reflect the live MCP tool catalog and current daemon warm-embedder reality."}
+{"ts":"2026-03-27T13:51:04.257428246Z","kind":"stdout","line":"- Left `MISSING.md` alone because it was reserved by other agents."}
+{"ts":"2026-03-27T13:51:04.257436026Z","kind":"stdout","line":""}
+{"ts":"2026-03-27T13:51:04.257440531Z","kind":"stdout","line":"Validation run:"}
+{"ts":"2026-03-27T13:51:04.257444216Z","kind":"stdout","line":"- `cargo check --all-targets`"}
+{"ts":"2026-03-27T13:51:04.257447594Z","kind":"stdout","line":"- `cargo test -p membrain-core --test retrieval_quality_proof -- --nocapture`"}
+{"ts":"2026-03-27T13:51:04.257454863Z","kind":"stdout","line":"- `cargo test -p membrain-core --test recall_pipeline_integration -- --nocapture`"}
+{"ts":"2026-03-27T13:51:04.257459879Z","kind":"stdout","line":"- `cargo test -p membrain-daemon --test runtime_doctor_parity -- --nocapture`"}
+{"ts":"2026-03-27T13:51:04.257465305Z","kind":"stdout","line":"- `cargo test -p membrain-cli --test cli_end_to_end -- --nocapture`"}
+{"ts":"2026-03-27T13:51:04.257469092Z","kind":"stdout","line":"- `bash crates/membrain-cli/tests/e2e_cli.sh`"}
+{"ts":"2026-03-27T13:51:04.257480046Z","kind":"stdout","line":"- targeted daemon reruns for:"}
+{"ts":"2026-03-27T13:51:04.257485472Z","kind":"stdout","line":"  - `runtime_health_jsonrpc_response_matches_shared_health_contract_fields`"}
+{"ts":"2026-03-27T13:51:04.257490693Z","kind":"stdout","line":"  - `runtime_doctor_jsonrpc_response_matches_shared_doctor_contract_fields`"}
+{"ts":"2026-03-27T13:51:04.257498575Z","kind":"stdout","line":"  - `runtime_health_resource_read_matches_runtime_health_payload_shape`"}
+{"ts":"2026-03-27T13:51:04.257503080Z","kind":"stdout","line":"  - `runtime_doctor_resource_read_matches_runtime_doctor_payload_shape`"}
+{"ts":"2026-03-27T13:51:04.257506458Z","kind":"stdout","line":""}
+{"ts":"2026-03-27T13:51:04.257545769Z","kind":"stdout","line":"Notes:"}
+{"ts":"2026-03-27T13:51:04.257567164Z","kind":"stdout","line":"- Everything above passed."}
+{"ts":"2026-03-27T13:51:04.262473938Z","kind":"stdout","line":"- One unrelated warning remains in `crates/membrain-daemon/src/daemon.rs:1859` for unused `persisted_memory_count`."}
+{"ts":"2026-03-27T13:51:05.797432093Z","kind":"session_ended","exit_code":0}

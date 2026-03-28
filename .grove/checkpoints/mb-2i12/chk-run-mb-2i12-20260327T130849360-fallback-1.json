@@ -1,0 +1,45 @@
+{
+  "id": "chk-run-mb-2i12-20260327T130849360-fallback-1",
+  "bead_id": "mb-2i12",
+  "run_id": "run-mb-2i12-20260327T130849360",
+  "session_id": "ses-run-mb-2i12-20260327T130849360",
+  "progress": "Synthetic fallback checkpoint after NoProgress",
+  "next_step": "Resume from the transcript tail, avoid repeating completed setup, and continue with the smallest safe remaining step.",
+  "payload": {
+    "claimed_paths": [],
+    "confidence": 0.25,
+    "context": {
+      "failure_class": "NoProgress",
+      "failure_detail": "session ended with Unknown",
+      "stderr_tail": [],
+      "stdout_tail": [
+        "  - daemon-mode warm-runtime truth",
+        "- Updated docs to reflect the live MCP tool catalog and current daemon warm-embedder reality.",
+        "- Left `MISSING.md` alone because it was reserved by other agents.",
+        "",
+        "Validation run:",
+        "- `cargo check --all-targets`",
+        "- `cargo test -p membrain-core --test retrieval_quality_proof -- --nocapture`",
+        "- `cargo test -p membrain-core --test recall_pipeline_integration -- --nocapture`",
+        "- `cargo test -p membrain-daemon --test runtime_doctor_parity -- --nocapture`",
+        "- `cargo test -p membrain-cli --test cli_end_to_end -- --nocapture`",
+        "- `bash crates/membrain-cli/tests/e2e_cli.sh`",
+        "- targeted daemon reruns for:",
+        "  - `runtime_health_jsonrpc_response_matches_shared_health_contract_fields`",
+        "  - `runtime_doctor_jsonrpc_response_matches_shared_doctor_contract_fields`",
+        "  - `runtime_health_resource_read_matches_runtime_health_payload_shape`",
+        "  - `runtime_doctor_resource_read_matches_runtime_doctor_payload_shape`",
+        "",
+        "Notes:",
+        "- Everything above passed.",
+        "- One unrelated warning remains in `crates/membrain-daemon/src/daemon.rs:1859` for unused `persisted_memory_count`."
+      ],
+      "synthetic": true
+    },
+    "next_step": "Resume from the transcript tail, avoid repeating completed setup, and continue with the smallest safe remaining step.",
+    "open_questions": [],
+    "progress": "Synthetic fallback checkpoint after NoProgress"
+  },
+  "saved_at": "2026-03-27T13:51:05.797432093Z",
+  "resume_generation": 1
+}

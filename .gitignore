@@ -5,6 +5,7 @@ target/
 .logs/
 __pycache__/
 state.json
+references/
 .fastembed_cache/
 .saw/
 .scope/

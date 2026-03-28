@@ -7,7 +7,7 @@ use membrain_core::engine::ranking::{
 };
 use membrain_core::engine::recall::{RecallPlanKind, RecallTraceStage};
 use membrain_core::engine::result::{
-    AnsweredFrom, ResultBuilder, ResultReason, RetrievalExplain,
+    AnsweredFrom, FreshnessMarkers, ResultBuilder, ResultReason, RetrievalExplain,
 };
 use membrain_core::engine::retrieval_planner::{PlannerStage, RetrievalPlan, RetrievalRequest};
 use membrain_core::observability::{
@@ -255,6 +255,122 @@ fn reranking_changes_final_order_and_keeps_semantic_path_metadata_inspectable() 
         reason.reason_code == "rerank_promoted"
             && reason.detail.contains("bounded local reranker")
     }));
+}
+
+#[test]
+fn result_set_lifecycle_markers_show_cold_and_reconsolidating_runtime_effects() {
+    let namespace = ns("retrieval-quality/lifecycle");
+    let mut builder = ResultBuilder::new(2, namespace.clone());
+
+    let cold_ranked = fuse_scores(
+        RankingInput {
+            recency: 610,
+            salience: 680,
+            strength: 640,
+            provenance: 620,
+            conflict: 500,
+            confidence: 720,
+        },
+        RankingProfile::balanced(),
+    );
+    builder.add_with_confidence(
+        MemoryId(101),
+        namespace.clone(),
+        SessionId(1),
+        CanonicalMemoryType::Event,
+        "cold consolidated rollout fix".into(),
+        &cold_ranked,
+        AnsweredFrom::Tier3Cold,
+        &membrain_core::engine::confidence::ConfidenceInputs {
+            corroboration_count: 3,
+            reconsolidation_count: 0,
+            ticks_since_last_access: 2048,
+            age_ticks: 4096,
+            resolution_state: membrain_core::engine::contradiction::ResolutionState::None,
+            conflict_score: 0,
+            causal_parent_count: 1,
+            authoritativeness: 820,
+            recall_count: 1,
+        },
+        &membrain_core::engine::confidence::ConfidencePolicy::default(),
+    );
+
+    let volatile_ranked = fuse_scores(
+        RankingInput {
+            recency: 830,
+            salience: 720,
+            strength: 690,
+            provenance: 640,
+            conflict: 500,
+            confidence: 610,
+        },
+        RankingProfile::balanced(),
+    );
+    builder.add_with_confidence(
+        MemoryId(202),
+        namespace.clone(),
+        SessionId(1),
+        CanonicalMemoryType::Observation,
+        "fresh reconsolidating incident memory".into(),
+        &volatile_ranked,
+        AnsweredFrom::Tier2Indexed,
+        &membrain_core::engine::confidence::ConfidenceInputs {
+            corroboration_count: 1,
+            reconsolidation_count: 9,
+            ticks_since_last_access: 6,
+            age_ticks: 24,
+            resolution_state: membrain_core::engine::contradiction::ResolutionState::None,
+            conflict_score: 0,
+            causal_parent_count: 0,
+            authoritativeness: 620,
+            recall_count: 7,
+        },
+        &membrain_core::engine::confidence::ConfidencePolicy::default(),
+    );
+
+    let result_set = builder.build(RetrievalExplain {
+        recall_plan: RecallPlanKind::Tier2ExactThenTier3Fallback,
+        route_reason: "bounded runtime mixed hot semantic evidence with cold consolidated evidence".into(),
+        tiers_consulted: vec!["tier2_exact".into(), "tier3_cold".into()],
+        trace_stages: vec![RecallTraceStage::Tier2Exact, RecallTraceStage::Tier3Fallback],
+        tier1_answered_directly: false,
+        candidate_budget: 2,
+        time_consumed_ms: Some(11),
+        ranking_profile: "balanced".into(),
+        contradictions_found: 0,
+        historical_context: None,
+        query_by_example: None,
+        result_reasons: vec![],
+    });
+
+    let reasons = result_set.explain_result_reasons();
+    assert!(reasons.iter().any(|reason| reason.reason_code == "cold_consolidated"));
+    assert!(reasons
+        .iter()
+        .any(|reason| reason.reason_code == "reconsolidation_window_open"));
+
+    let (freshness_markers, _conflict_markers, uncertainty_markers) = result_set.explain_markers();
+    assert!(freshness_markers
+        .iter()
+        .any(|marker| marker.code == "lifecycle_projection"));
+    assert!(!freshness_markers
+        .iter()
+        .any(|marker| marker.code == "fresh"));
+    assert!(uncertainty_markers
+        .iter()
+        .any(|marker| marker.code == "reconsolidation_churn"));
+    assert!(result_set.has_cold_consolidated_evidence());
+    assert_eq!(result_set.freshness_markers, FreshnessMarkers {
+        oldest_item_days: 0,
+        newest_item_days: 0,
+        volatile_items_included: true,
+        stale_warning: true,
+        lease_sensitive: false,
+        recheck_required: false,
+        as_of_tick: None,
+        durable_lifecycle_state: Some("labile".to_string()),
+        routing_lifecycle_state: Some("fresh".to_string()),
+    });
 }
 
 #[test]

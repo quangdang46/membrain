@@ -298,6 +298,21 @@ impl FreshnessMarkers {
             routing_lifecycle_state: None,
         }
     }
+
+    /// Builds freshness markers for retrieval envelopes materially shaped by partial archival recovery.
+    pub fn archival_recovery_partial(as_of_tick: Option<u64>) -> Self {
+        Self {
+            oldest_item_days: 0,
+            newest_item_days: 0,
+            volatile_items_included: false,
+            stale_warning: false,
+            lease_sensitive: false,
+            recheck_required: false,
+            as_of_tick,
+            durable_lifecycle_state: Some("partially_restored".to_string()),
+            routing_lifecycle_state: Some("archival_recovery_partial".to_string()),
+        }
+    }
 }
 
 /// Provenance trace for an item.
@@ -3151,9 +3166,78 @@ mod tests {
         let (freshness_markers, conflict_markers, uncertainty_markers) =
             result_set.explain_markers();
 
-        assert!(!freshness_markers.is_empty());
+        assert!(freshness_markers.iter().any(|marker| marker.code == "fresh"));
+        assert!(!freshness_markers
+            .iter()
+            .any(|marker| marker.code == "snapshot_scoped"));
+        assert!(!freshness_markers
+            .iter()
+            .any(|marker| marker.code == "archival_recovery_partial"));
+        assert!(!freshness_markers
+            .iter()
+            .any(|marker| marker.code == "decaying_soon"));
         assert!(conflict_markers.is_empty());
         assert_eq!(uncertainty_markers.len(), 1);
+    }
+
+    #[test]
+    fn explain_markers_surface_archival_recovery_partial_when_packaging_projects_partial_restore() {
+        let mut builder = ResultBuilder::new(1, ns("markers"));
+        let ranked = fuse_scores(
+            RankingInput {
+                recency: 600,
+                salience: 550,
+                strength: 500,
+                provenance: 450,
+                conflict: 500,
+                confidence: 500,
+            },
+            RankingProfile::balanced(),
+        );
+        builder.add(
+            MemoryId(11),
+            ns("markers"),
+            SessionId(1),
+            CanonicalMemoryType::Event,
+            "archival recovery marker test".into(),
+            &ranked,
+            AnsweredFrom::Tier3Cold,
+        );
+        builder.evidence_pack[0].freshness_markers =
+            FreshnessMarkers::archival_recovery_partial(None);
+        let explain = RetrievalExplain {
+            recall_plan: RecallPlanKind::Tier2ExactThenTier3Fallback,
+            route_reason: "partial archival recovery shaped result".to_string(),
+            tiers_consulted: vec!["tier3_fallback".to_string()],
+            trace_stages: vec![RecallTraceStage::Tier3Fallback],
+            tier1_answered_directly: false,
+            candidate_budget: 1,
+            time_consumed_ms: Some(5),
+            ranking_profile: "balanced".to_string(),
+            contradictions_found: 0,
+            historical_context: None,
+            query_by_example: None,
+            result_reasons: vec![],
+        };
+        let result_set = builder.build(explain);
+
+        let (freshness_markers, _conflict_markers, _uncertainty_markers) =
+            result_set.explain_markers();
+
+        assert!(freshness_markers
+            .iter()
+            .any(|marker| marker.code == "lifecycle_projection"));
+        assert!(freshness_markers
+            .iter()
+            .any(|marker| marker.code == "archival_recovery_partial"));
+        assert_eq!(
+            result_set.freshness_markers.durable_lifecycle_state.as_deref(),
+            Some("partially_restored")
+        );
+        assert_eq!(
+            result_set.freshness_markers.routing_lifecycle_state.as_deref(),
+            Some("archival_recovery_partial")
+        );
     }
 
     #[test]

@@ -302,6 +302,45 @@ assert any(
 print("validated recall json envelope")
 PY
 
+run_capture "Remember lexical distractor for semantic parity" \
+  "${CLI_BIN}" remember "release rollback checklist after outage" \
+  --namespace semantic_cli \
+  --kind semantic \
+  --json
+require_status 0
+
+run_capture "Remember semantic winner for semantic parity" \
+  "${CLI_BIN}" remember "production deploy pipeline remediation rollout for incident fix" \
+  --namespace semantic_cli \
+  --kind semantic \
+  --json
+require_status 0
+
+run_capture "Recall JSON semantic parity" \
+  "${CLI_BIN}" recall "Which release deploy fix should we roll out after the pipeline outage?" \
+  --namespace semantic_cli \
+  --top 2 \
+  --explain full \
+  --json
+require_status 0
+JSON_PAYLOAD="${LAST_STDOUT}" "${PYTHON}" - <<'PY'
+import json
+import os
+
+data = json.loads(os.environ["JSON_PAYLOAD"])
+
+assert data["ok"] is True
+assert data["namespace"] == "semantic_cli"
+assert data["result"]["packaging_metadata"]["degraded_summary"] is None
+assert data["result"]["evidence_pack"][0]["result"]["compact_text"] == "production deploy pipeline remediation rollout for incident fix"
+assert data["result"]["evidence_pack"][0]["result"]["entry_lane"] == "semantic"
+assert any(
+    reason["reason_code"] == "semantic_recall_trace"
+    for reason in data["result"]["explain"]["result_reasons"]
+)
+print("validated semantic recall parity envelope")
+PY
+
 run_capture "Recall JSON strict dual-output mode" \
   "${CLI_BIN}" recall "capital of France" \
   --namespace test_ns \

@@ -1,0 +1,45 @@
+{
+  "id": "chk-run-mb-2cx3-20260327T130849307-fallback-1",
+  "bead_id": "mb-2cx3",
+  "run_id": "run-mb-2cx3-20260327T130849307",
+  "session_id": "ses-run-mb-2cx3-20260327T130849307",
+  "progress": "Synthetic fallback checkpoint after NoProgress",
+  "next_step": "Resume from the transcript tail, avoid repeating completed setup, and continue with the smallest safe remaining step.",
+  "payload": {
+    "claimed_paths": [],
+    "confidence": 0.25,
+    "context": {
+      "failure_class": "NoProgress",
+      "failure_detail": "session ended with Unknown",
+      "stderr_tail": [],
+      "stdout_tail": [
+        "      \"line\": 209,",
+        "      \"error\": \"cannot find value `lexical_prefilter_count` in this scope\"",
+        "    },",
+        "    {",
+        "      \"type\": \"reservation_conflict\",",
+        "      \"files\": [",
+        "        \"crates/membrain-daemon/src/daemon.rs\",",
+        "        \"crates/membrain-daemon/tests/runtime_doctor_parity.rs\"",
+        "      ]",
+        "    }",
+        "  ],",
+        "  \"next_steps\": [",
+        "    \"Wait for or coordinate around active reservations before touching daemon proof files\",",
+        "    \"Fix the existing semantic_retrieval compile error\",",
+        "    \"Re-run targeted daemon/core tests and cargo check --all-targets\",",
+        "    \"Then update bead state and close or split remaining scoreboard rows\"",
+        "  ]",
+        "}",
+        "```",
+        ""
+      ],
+      "synthetic": true
+    },
+    "next_step": "Resume from the transcript tail, avoid repeating completed setup, and continue with the smallest safe remaining step.",
+    "open_questions": [],
+    "progress": "Synthetic fallback checkpoint after NoProgress"
+  },
+  "saved_at": "2026-03-27T13:26:31.862328152Z",
+  "resume_generation": 1
+}

@@ -3700,11 +3700,15 @@ fn append_semantic_executor_trace(
     explain_mode: bool,
 ) {
     let mut details = vec![format!(
-        "semantic executor considered {} namespace candidate(s), lexical prefilter kept {}, semantic ranking returned {}",
+        "semantic executor considered {} namespace candidate(s), lexical prefilter kept {}, semantic ranking returned {} within bounded result_limit={}",
         semantic_result.trace.namespace_candidate_count,
         semantic_result.trace.lexical_prefilter_count,
         semantic_result.trace.semantic_candidate_count,
+        semantic_result.trace.result_limit,
     )];
+    if semantic_result.trace.bounded_shortlist_truncated {
+        details.push("bounded shortlist truncated lower-ranked candidates before hydration to preserve the declared runtime budget".to_string());
+    }
     if let Some(reason) = semantic_result.trace.degraded_reason.as_deref() {
         details.push(format!("degraded_reason={reason}"));
     }
