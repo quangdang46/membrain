@@ -8,15 +8,11 @@
   "hooks": {
     "SessionStart": [
       {
-        "matcher": "startup|resume",
+        "matcher": "startup|resume|clear|compact",
         "hooks": [
           {
             "type": "command",
-            "command": "bash -lc 'pgrep -f \"membrain-daemon\" >/dev/null || nohup membrain-daemon >/tmp/membrain-daemon.log 2>&1 &'"
-          },
-          {
-            "type": "command",
-            "command": "echo 'Membrain is available in this project. Prefer using Membrain MCP or CLI recall/inspect/why before guessing prior context. Local state lives under ~/.membrain by default.'"
+            "command": "python3 \"$CLAUDE_PROJECT_DIR/.claude/hooks/membrain_hook.py\" --event SessionStart"
           }
         ]
       }
@@ -26,40 +22,40 @@
         "hooks": [
           {
             "type": "command",
-            "command": "echo 'Membrain reminder: use memory tools for prior context, incidents, reusable facts, and earlier decisions. Prefer `membrain recall`, `membrain inspect`, `membrain why`, or the Membrain MCP server when context may already exist.'"
+            "command": "python3 \"$CLAUDE_PROJECT_DIR/.claude/hooks/membrain_hook.py\" --event UserPromptSubmit --emit-additional-context 'Membrain hook logging is active in this repo. Hook events are being persisted into Membrain. Prefer Membrain recall, inspect, why, or the MCP server before guessing prior context.'"
           }
         ]
       }
     ],
     "PreToolUse": [
       {
-        "matcher": "Read|Grep|Glob|WebFetch|WebSearch|Bash",
+        "matcher": "Read|Grep|Glob|WebFetch|WebSearch|Bash|Edit|Write|MultiEdit|Task",
         "hooks": [
           {
             "type": "command",
-            "command": "echo 'Before expensive exploration or external lookup, consider whether relevant context may already be in Membrain.'"
+            "command": "python3 \"$CLAUDE_PROJECT_DIR/.claude/hooks/membrain_hook.py\" --event PreToolUse"
           }
         ]
       }
     ],
     "PostToolUse": [
       {
-        "matcher": "Read|Grep|Glob|Edit|Write|Bash",
+        "matcher": "Read|Grep|Glob|Edit|Write|MultiEdit|Bash|Task|WebFetch|WebSearch",
         "hooks": [
           {
             "type": "command",
-            "command": "echo 'If this step surfaced a durable fact, decision, incident, or reusable context, consider storing it in Membrain rather than leaving it only in transient conversation state.'"
+            "command": "python3 \"$CLAUDE_PROJECT_DIR/.claude/hooks/membrain_hook.py\" --event PostToolUse"
           }
         ]
       }
     ],
     "PostToolUseFailure": [
       {
-        "matcher": "Bash|Read|Edit|Write|mcp__.*",
+        "matcher": "Bash|Read|Edit|Write|MultiEdit|Task|WebFetch|WebSearch|Grep|Glob|mcp__.*",
         "hooks": [
           {
             "type": "command",
-            "command": "echo 'If a failure reveals a reusable incident pattern or environment constraint, consider recording it in Membrain after diagnosis.'"
+            "command": "python3 \"$CLAUDE_PROJECT_DIR/.claude/hooks/membrain_hook.py\" --event PostToolUseFailure"
           }
         ]
       }
@@ -69,7 +65,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "echo 'Before stopping, consider whether any important findings from this turn should be persisted into Membrain.'"
+            "command": "python3 \"$CLAUDE_PROJECT_DIR/.claude/hooks/membrain_hook.py\" --event Stop"
           }
         ]
       }
@@ -79,7 +75,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "echo 'Membrain is available to support subagent context lookup and explanation.'"
+            "command": "python3 \"$CLAUDE_PROJECT_DIR/.claude/hooks/membrain_hook.py\" --event SubagentStart"
           }
         ]
       }
@@ -89,7 +85,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "echo 'If the subagent produced durable context or conclusions, consider folding them into Membrain.'"
+            "command": "python3 \"$CLAUDE_PROJECT_DIR/.claude/hooks/membrain_hook.py\" --event SubagentStop"
           }
         ]
       }
@@ -99,7 +95,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "echo 'When a task completes, persist important reusable findings or decisions into Membrain if they will matter later.'"
+            "command": "python3 \"$CLAUDE_PROJECT_DIR/.claude/hooks/membrain_hook.py\" --event TaskCompleted"
           }
         ]
       }
@@ -109,7 +105,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "echo 'If a teammate is going idle after meaningful findings, consider whether those findings belong in Membrain.'"
+            "command": "python3 \"$CLAUDE_PROJECT_DIR/.claude/hooks/membrain_hook.py\" --event TeammateIdle"
           }
         ]
       }
@@ -120,7 +116,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "echo 'Instructions loaded. Keep Membrain available as the durable place for important repo context and reusable facts.'"
+            "command": "python3 \"$CLAUDE_PROJECT_DIR/.claude/hooks/membrain_hook.py\" --event InstructionsLoaded"
           }
         ]
       }
@@ -130,7 +126,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "echo 'Configuration changed. If the new config affects how the project is operated or debugged, consider preserving that fact in Membrain.'"
+            "command": "python3 \"$CLAUDE_PROJECT_DIR/.claude/hooks/membrain_hook.py\" --event ConfigChange"
           }
         ]
       }
@@ -140,7 +136,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "echo 'Working directory changed. Re-evaluate whether Membrain should be consulted for this scope.'"
+            "command": "python3 \"$CLAUDE_PROJECT_DIR/.claude/hooks/membrain_hook.py\" --event CwdChanged"
           }
         ]
       }
@@ -151,7 +147,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "echo 'Important control/documentation file changed. Consider whether the change introduces durable context worth storing in Membrain.'"
+            "command": "python3 \"$CLAUDE_PROJECT_DIR/.claude/hooks/membrain_hook.py\" --event FileChanged"
           }
         ]
       }
@@ -161,7 +157,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "echo 'Before compaction, consider whether any important context should be persisted in Membrain.'"
+            "command": "python3 \"$CLAUDE_PROJECT_DIR/.claude/hooks/membrain_hook.py\" --event PreCompact"
           }
         ]
       }
@@ -171,7 +167,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "echo 'Context was compacted. Membrain remains the durable place to preserve important facts across compression.'"
+            "command": "python3 \"$CLAUDE_PROJECT_DIR/.claude/hooks/membrain_hook.py\" --event PostCompact"
           }
         ]
       }
@@ -181,7 +177,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "echo 'Session ending. If key takeaways were not persisted, consider Membrain for durable retention next session.'"
+            "command": "python3 \"$CLAUDE_PROJECT_DIR/.claude/hooks/membrain_hook.py\" --event SessionEnd"
           }
         ]
       }
@@ -191,18 +187,18 @@
         "hooks": [
           {
             "type": "command",
-            "command": "echo 'Claude Code notification fired. Keep Membrain in mind for durable project memory, not just transient prompts.'"
+            "command": "python3 \"$CLAUDE_PROJECT_DIR/.claude/hooks/membrain_hook.py\" --event Notification"
           }
         ]
       }
     ],
     "PermissionRequest": [
       {
-        "matcher": "Bash|Write|Edit|mcp__.*",
+        "matcher": "Bash|Write|Edit|MultiEdit|Task|mcp__.*",
         "hooks": [
           {
             "type": "command",
-            "command": "echo 'If the action is important enough to require permission, it may also deserve durable context in Membrain once completed.'"
+            "command": "python3 \"$CLAUDE_PROJECT_DIR/.claude/hooks/membrain_hook.py\" --event PermissionRequest"
           }
         ]
       }
@@ -212,7 +208,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "echo 'The turn ended in failure. If the failure reveals a reusable environment issue, store it in Membrain after recovery.'"
+            "command": "python3 \"$CLAUDE_PROJECT_DIR/.claude/hooks/membrain_hook.py\" --event StopFailure"
           }
         ]
       }
@@ -222,7 +218,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "echo 'An MCP server requested user input. If the answer creates durable project context, consider storing it in Membrain later.'"
+            "command": "python3 \"$CLAUDE_PROJECT_DIR/.claude/hooks/membrain_hook.py\" --event Elicitation"
           }
         ]
       }
@@ -232,7 +228,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "echo 'User input was collected for an MCP flow. If it creates lasting context, consider persisting it in Membrain.'"
+            "command": "python3 \"$CLAUDE_PROJECT_DIR/.claude/hooks/membrain_hook.py\" --event ElicitationResult"
           }
         ]
       }
@@ -242,7 +238,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "echo 'A worktree is being created. Treat Membrain as the durable store for reusable context that should survive across worktree boundaries.'"
+            "command": "python3 \"$CLAUDE_PROJECT_DIR/.claude/hooks/membrain_hook.py\" --event WorktreeCreate"
           }
         ]
       }
@@ -252,7 +248,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "echo 'A worktree is being removed. Preserve any important findings in Membrain if they should outlive the worktree.'"
+            "command": "python3 \"$CLAUDE_PROJECT_DIR/.claude/hooks/membrain_hook.py\" --event WorktreeRemove"
           }
         ]
       }

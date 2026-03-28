@@ -243,7 +243,25 @@ Live bounded stdio MCP surface today:
 
 ### Claude Code integration
 
-For Claude Code, configure Membrain in the `mcpServers` section like this:
+Recommended Claude Code setup:
+
+```bash
+claude mcp add --transport stdio membrain -- membrain mcp
+```
+
+If you want Claude Code to use a specific storage root instead of the default local state:
+
+```bash
+claude mcp add --transport stdio membrain -- membrain mcp --db-path /path/to/state-root
+```
+
+If you want a team-shared config committed in the repo, use project scope:
+
+```bash
+claude mcp add --transport stdio --scope project membrain -- membrain mcp
+```
+
+That creates or updates a project-root `.mcp.json` entry like:
 
 ```json
 {
@@ -256,20 +274,41 @@ For Claude Code, configure Membrain in the `mcpServers` section like this:
 }
 ```
 
-If you want Claude Code to use a specific storage root instead of the default local state, pass `--db-path` too:
+Claude Code prompts for approval before using project-scoped servers from `.mcp.json`.
 
-```json
-{
-  "mcpServers": {
-    "membrain": {
-      "command": "membrain",
-      "args": ["mcp", "--db-path", "/path/to/state-root"]
-    }
-  }
-}
+This repo also ships a Claude-specific hook helper at [`.claude/hooks/membrain_hook.py`](/home/quangdang/projects/tools/membrain/.claude/hooks/membrain_hook.py), wired from [`.claude/settings.json`](/home/quangdang/projects/tools/membrain/.claude/settings.json), so configured Claude hook events can be summarized into Membrain through normal CLI writes.
+
+### Codex integration
+
+Recommended Codex setup:
+
+```bash
+codex mcp add membrain -- membrain mcp
 ```
 
-A practical project-level `.claude/settings.json` can also combine Membrain MCP with Claude Code hooks:
+If you want Codex to use a specific storage root instead of the default local state:
+
+```bash
+codex mcp add membrain -- membrain mcp --db-path /path/to/state-root
+```
+
+Equivalent Codex config in `~/.codex/config.toml`:
+
+```toml
+[mcp_servers.membrain]
+command = "membrain"
+args = ["mcp"]
+```
+
+Codex shares MCP configuration between the CLI and IDE extension, so setup only needs to happen once.
+
+Current Codex boundary:
+- the documented Codex setup here is MCP configuration
+- this document does not claim a Claude-style Codex hook event surface today
+
+### Manual JSON examples
+
+Claude Code project config:
 
 ```json
 {
@@ -278,35 +317,16 @@ A practical project-level `.claude/settings.json` can also combine Membrain MCP 
       "command": "membrain",
       "args": ["mcp"]
     }
-  },
-  "hooks": {
-    "SessionStart": [
-      {
-        "matcher": "startup|resume",
-        "hooks": [
-          {
-            "type": "command",
-            "command": "bash -lc 'pgrep -f \"membrain-daemon\" >/dev/null || nohup membrain-daemon >/tmp/membrain-daemon.log 2>&1 &'"
-          },
-          {
-            "type": "command",
-            "command": "echo 'Membrain is available in this project. Prefer using Membrain MCP or CLI recall/inspect/why before guessing prior context. Local state lives under ~/.membrain by default.'"
-          }
-        ]
-      }
-    ],
-    "UserPromptSubmit": [
-      {
-        "hooks": [
-          {
-            "type": "command",
-            "command": "echo 'Membrain reminder: use memory tools for prior context, incidents, and reusable facts. Prefer `membrain recall`, `membrain inspect`, `membrain why`, or the Membrain MCP server when context may already exist.'"
-          }
-        ]
-      }
-    ]
   }
 }
+```
+
+Codex config:
+
+```toml
+[mcp_servers.membrain]
+command = "membrain"
+args = ["mcp"]
 ```
 
 Manual smoke test before wiring a client:
@@ -339,8 +359,13 @@ That path serves the same underlying operation families over a Unix domain socke
 ```
 
 Recommended usage split:
-- `membrain mcp` — easiest client/subprocess integration, including Claude Code
+- `membrain mcp` — easiest client/subprocess integration, including Claude Code and Codex
 - `membrain daemon` / `membrain-daemon` — background local service mode
+
+Important operational note:
+- installing `membrain` does not auto-register it with Claude Code or Codex
+- installing `membrain` does not auto-start `membrain-daemon`
+- if you want the daemon running at login or boot, configure that yourself with a process supervisor
 
 ## Daemon JSON-RPC Contract
 

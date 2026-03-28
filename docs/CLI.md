@@ -123,7 +123,19 @@ Run Membrain as a stdio MCP-style server for easy client integration.
 
 Use this when you want an MCP client to launch Membrain directly as a subprocess without manually connecting to a Unix socket.
 
-For Claude Code, configure it in `mcpServers` like this:
+Recommended Claude Code setup:
+
+```bash
+claude mcp add --transport stdio membrain -- membrain mcp
+```
+
+Project-scoped Claude Code setup:
+
+```bash
+claude mcp add --transport stdio --scope project membrain -- membrain mcp
+```
+
+That writes a project-root `.mcp.json` entry shaped like:
 
 ```json
 {
@@ -136,28 +148,37 @@ For Claude Code, configure it in `mcpServers` like this:
 }
 ```
 
-A practical project-level `.claude/settings.json` example can combine Membrain MCP with hooks:
+Claude Code prompts for approval before using project-scoped servers from `.mcp.json`.
+
+Recommended Codex setup:
+
+```bash
+codex mcp add membrain -- membrain mcp
+```
+
+Equivalent Codex config in `~/.codex/config.toml`:
+
+```toml
+[mcp_servers.membrain]
+command = "membrain"
+args = ["mcp"]
+```
+
+If you want a custom Membrain state root in either client, append `--db-path /path/to/state-root` after `membrain mcp`.
+
+This repo also includes a working Claude hook sink at [`.claude/hooks/membrain_hook.py`](/home/quangdang/projects/tools/membrain/.claude/hooks/membrain_hook.py), wired from [`.claude/settings.json`](/home/quangdang/projects/tools/membrain/.claude/settings.json).
+
+Current hook behavior in this repo:
+- configured Claude hook events are persisted into Membrain with `membrain remember`
+- `UserPromptSubmit` also injects a short additional-context reminder back into Claude
+- hook storage is bounded and sanitized; it does not attempt to dump raw full transcripts into Membrain on every event
+- the helper does not auto-start `membrain-daemon`; it records events against the normal local Membrain state root unless you override it
+
+Optional Claude Code hook example for a prompt reminder only:
 
 ```json
 {
-  "mcpServers": {
-    "membrain": {
-      "command": "membrain",
-      "args": ["mcp"]
-    }
-  },
   "hooks": {
-    "SessionStart": [
-      {
-        "matcher": "startup|resume",
-        "hooks": [
-          {
-            "type": "command",
-            "command": "bash -lc 'pgrep -f \"membrain-daemon\" >/dev/null || nohup membrain-daemon >/tmp/membrain-daemon.log 2>&1 &'"
-          }
-        ]
-      }
-    ],
     "UserPromptSubmit": [
       {
         "hooks": [
@@ -181,6 +202,7 @@ Current behavior:
 - keeps `prompts/list` / `prompts/get` as intentionally minimal placeholder surfaces today: empty prompt list and `unknown prompt` on named lookup
 - also accepts direct JSON-RPC compatibility methods such as `encode`, `recall`, `inspect`, `why`, `health`, `doctor`, and `shutdown` on the stdio adapter for bounded manual integration flows
 - does not make stdio MCP the authoritative warm runtime; daemon-owned repeated-request warmth still belongs to `membrain daemon`
+- does not auto-start a daemon just because the binary is installed or the MCP server is configured in a client
 
 Typical usage:
 
@@ -197,6 +219,8 @@ printf '%s\n' '{"jsonrpc":"2.0","id":"1","method":"tools/list","params":{}}' | m
 High-level guidance:
 - use `membrain daemon` for long-lived local service mode
 - use `membrain mcp` for easy subprocess-based MCP client integration
+- if you want daemon mode at login or boot, manage that separately with your own process supervisor; Membrain does not install one automatically
+- use Claude hooks only for side-effect-safe ingestion and reminders; the authoritative warm background runtime is still the daemon, not the hook process
 
 
 ### `membrain remember [CONTENT] [OPTIONS]`

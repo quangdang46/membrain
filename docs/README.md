@@ -10,9 +10,27 @@ Quick pointers:
 
 ### Claude Code integration
 
-Membrain now supports an easy Claude Code subprocess integration path through `membrain mcp`.
+Membrain supports Claude Code through the local stdio MCP entrypoint `membrain mcp`.
 
-To wire it into Claude Code, add this under `mcpServers` in your Claude Code MCP configuration:
+Recommended setup from the Claude Code CLI:
+
+```bash
+claude mcp add --transport stdio membrain -- membrain mcp
+```
+
+If you want Membrain to use a custom local state root:
+
+```bash
+claude mcp add --transport stdio membrain -- membrain mcp --db-path /path/to/state-root
+```
+
+If you want the config checked into the repo for the team, use project scope:
+
+```bash
+claude mcp add --transport stdio --scope project membrain -- membrain mcp
+```
+
+That creates or updates a project-root `.mcp.json` like this:
 
 ```json
 {
@@ -25,18 +43,7 @@ To wire it into Claude Code, add this under `mcpServers` in your Claude Code MCP
 }
 ```
 
-If you want Membrain to use a custom local state root:
-
-```json
-{
-  "mcpServers": {
-    "membrain": {
-      "command": "membrain",
-      "args": ["mcp", "--db-path", "/path/to/state-root"]
-    }
-  }
-}
-```
+Claude Code prompts for approval before using project-scoped servers from `.mcp.json`.
 
 `membrain mcp` uses stdio, so it does **not** listen on a TCP port or Unix socket. Claude Code launches it directly as a subprocess and talks over stdin/stdout.
 
@@ -47,48 +54,49 @@ Current bounded MCP truth:
 - the stdio adapter also accepts direct JSON-RPC compatibility methods like `encode`, `recall`, `inspect`, `why`, `health`, `doctor`, and `shutdown`
 - long-lived warm-runtime guarantees still belong to `membrain daemon`, not the stdio adapter
 
-For Claude Code hooks guidance, see the official hooks docs:
+For Claude Code MCP details, scopes, and hooks, see the official docs:
+- https://code.claude.com/docs/en/mcp
 - https://code.claude.com/docs/en/hooks
 
-A practical project-level `.claude/settings.json` example that enables Membrain MCP plus startup/prompt reminders looks like this:
+This repo also ships a project-local Claude hook sink:
+- [`.claude/settings.json`](/home/quangdang/projects/tools/membrain/.claude/settings.json)
+- [`.claude/hooks/membrain_hook.py`](/home/quangdang/projects/tools/membrain/.claude/hooks/membrain_hook.py)
 
-```json
-{
-  "mcpServers": {
-    "membrain": {
-      "command": "membrain",
-      "args": ["mcp"]
-    }
-  },
-  "hooks": {
-    "SessionStart": [
-      {
-        "matcher": "startup|resume",
-        "hooks": [
-          {
-            "type": "command",
-            "command": "bash -lc 'pgrep -f \"membrain-daemon\" >/dev/null || nohup membrain-daemon >/tmp/membrain-daemon.log 2>&1 &'"
-          },
-          {
-            "type": "command",
-            "command": "echo 'Membrain is available in this project. Prefer using Membrain MCP or CLI recall/inspect/why before guessing prior context. Local state lives under ~/.membrain by default.'"
-          }
-        ]
-      }
-    ],
-    "UserPromptSubmit": [
-      {
-        "hooks": [
-          {
-            "type": "command",
-            "command": "echo 'Membrain reminder: use memory tools for prior context, incidents, and reusable facts. Prefer `membrain recall`, `membrain inspect`, `membrain why`, or the Membrain MCP server when context may already exist.'"
-          }
-        ]
-      }
-    ]
-  }
-}
+Current hook posture in this repo:
+- configured Claude hook events are persisted into Membrain through `membrain remember`
+- the helper is fail-open: if hook parsing or Membrain invocation fails, Claude should keep running
+- obvious secret-bearing keys such as tokens, passwords, and authorization headers are redacted before summaries are stored
+- the hook stores bounded event summaries, not raw full transcripts or daemon auto-start state
+
+### Codex integration
+
+Codex also supports Membrain through the same stdio MCP entrypoint.
+
+Recommended setup from the Codex CLI:
+
+```bash
+codex mcp add membrain -- membrain mcp
 ```
+
+If you want Membrain to use a custom local state root:
+
+```bash
+codex mcp add membrain -- membrain mcp --db-path /path/to/state-root
+```
+
+Equivalent Codex config in `~/.codex/config.toml`:
+
+```toml
+[mcp_servers.membrain]
+command = "membrain"
+args = ["mcp"]
+```
+
+Codex shares MCP configuration between the CLI and the IDE extension, so you only need to set it up once.
+
+Current Codex note:
+- the documented Codex integration path here is MCP configuration
+- this repo does not claim a Claude-style Codex hook event system today
 
 ### MCP client / subprocess mode
 
@@ -98,17 +106,11 @@ Use this when you want a client to launch Membrain directly without manually con
 membrain mcp
 ```
 
-For Claude Code, add Membrain in `mcpServers` like this:
+Recommended client setup commands:
 
-```json
-{
-  "mcpServers": {
-    "membrain": {
-      "command": "membrain",
-      "args": ["mcp"]
-    }
-  }
-}
+```bash
+claude mcp add --transport stdio membrain -- membrain mcp
+codex mcp add membrain -- membrain mcp
 ```
 
 ### Background local service mode
@@ -126,3 +128,9 @@ Default daemon socket:
 ```bash
 ~/.membrain/membrain.sock
 ```
+
+Important:
+- installing `membrain` does **not** auto-register the MCP server with Claude Code or Codex
+- installing `membrain` does **not** auto-start `membrain-daemon`
+- `membrain mcp` is enough for Claude Code and Codex MCP integration
+- only `membrain daemon` / `membrain-daemon` provides the authoritative warm background runtime
