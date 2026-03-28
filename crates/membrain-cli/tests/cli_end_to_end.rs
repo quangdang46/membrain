@@ -1,3 +1,5 @@
+#![cfg(not(windows))]
+
 #[cfg(unix)]
 use membrain_core::engine::confidence::{ConfidenceInputs, ConfidenceOutput};
 #[cfg(unix)]
