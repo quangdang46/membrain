@@ -1,7 +1,9 @@
 use serde_json::{json, Value};
 use std::io::{BufRead, BufReader, Write};
+use std::os::unix::net::UnixStream;
 use std::process::{Child, Command, Stdio};
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::thread::sleep;
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 fn test_db_root() -> std::path::PathBuf {
     let unique = SystemTime::now()
@@ -45,6 +47,67 @@ fn spawn_membrain_mcp(db_root: &std::path::Path) -> Child {
         .stderr(Stdio::piped())
         .spawn()
         .expect("membrain mcp should spawn")
+}
+
+fn spawn_membrain_daemon(db_root: &std::path::Path, socket_path: &std::path::Path) -> Child {
+    Command::new(env!("CARGO_BIN_EXE_membrain"))
+        .arg("--db-path")
+        .arg(db_root)
+        .arg("daemon")
+        .arg("--socket-path")
+        .arg(socket_path)
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("membrain daemon should spawn")
+}
+
+fn unique_socket_path(label: &str) -> std::path::PathBuf {
+    let unique = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .expect("system time should be after unix epoch")
+        .as_nanos();
+    std::env::temp_dir().join(format!(
+        "membrain-cli-{label}-{}-{unique}.sock",
+        std::process::id()
+    ))
+}
+
+fn wait_for_socket(socket_path: &std::path::Path) -> bool {
+    for _ in 0..200 {
+        if socket_path.exists() && UnixStream::connect(socket_path).is_ok() {
+            return true;
+        }
+        sleep(Duration::from_millis(10));
+    }
+    false
+}
+
+fn send_daemon_request(socket_path: &std::path::Path, request: Value) -> Value {
+    let mut stream =
+        UnixStream::connect(socket_path).expect("daemon socket should accept connections");
+    let payload = serde_json::to_string(&request).expect("request should serialize");
+    stream
+        .write_all(payload.as_bytes())
+        .expect("request should write");
+    stream.write_all(b"\n").expect("newline should write");
+    stream.flush().expect("request should flush");
+
+    let mut reader = BufReader::new(stream);
+    let mut line = String::new();
+    reader.read_line(&mut line).expect("response should read");
+    serde_json::from_str(&line).expect("daemon response should be valid json")
+}
+
+fn shutdown_membrain_daemon(child: &mut Child, socket_path: &std::path::Path) {
+    let shutdown = send_daemon_request(
+        socket_path,
+        json!({"jsonrpc":"2.0","method":"shutdown","params":{},"id":"shutdown"}),
+    );
+    assert_eq!(shutdown["result"]["shutting_down"], json!(true));
+    let status = child.wait().expect("daemon process should exit");
+    assert!(status.success(), "daemon exit status: {status}");
 }
 
 fn send_mcp_request(child: &mut Child, request: Value) -> Value {
@@ -164,8 +227,9 @@ fn cli_restart_rehydrates_persisted_memory_for_inspect_recall_and_explain() {
 }
 
 #[test]
-fn mcp_restart_rehydrates_persisted_memory_for_recall_inspect_and_why() {
+fn cross_surface_restart_rehydrates_persisted_memory_for_cli_daemon_and_mcp() {
     let db_root = test_db_root();
+    let namespace = "test_ns";
 
     let (encode_ok, encode_stdout, encode_stderr) = run_membrain_with_db(
         &db_root,
@@ -173,57 +237,276 @@ fn mcp_restart_rehydrates_persisted_memory_for_recall_inspect_and_why() {
             "remember",
             "Dang prefers concise answers",
             "--namespace",
-            "test_ns",
+            namespace,
             "--json",
         ],
     );
     assert!(encode_ok, "stderr: {encode_stderr}");
     let encode_json = parse_json(&encode_stdout);
-    let expected_memory_id = encode_json["result"]["memory_id"]
+    let memory_id = encode_json["result"]["memory_id"]
         .as_u64()
-        .expect("encode should return memory id");
+        .expect("remember should return persisted memory id");
+
+    let (inspect_ok, inspect_stdout, inspect_stderr) = run_membrain_with_db(
+        &db_root,
+        &[
+            "inspect",
+            "--id",
+            &memory_id.to_string(),
+            "--namespace",
+            namespace,
+            "--json",
+        ],
+    );
+    assert!(inspect_ok, "stderr: {inspect_stderr}");
+    let inspect_json = parse_json(&inspect_stdout);
+    assert_eq!(inspect_json["result"]["memory_id"], json!(memory_id));
+
+    let (exact_recall_ok, exact_recall_stdout, exact_recall_stderr) = run_membrain_with_db(
+        &db_root,
+        &[
+            "recall",
+            &format!("memory:{memory_id}"),
+            "--namespace",
+            namespace,
+            "--json",
+        ],
+    );
+    assert!(exact_recall_ok, "stderr: {exact_recall_stderr}");
+    let exact_recall_json = parse_json(&exact_recall_stdout);
+    assert_eq!(
+        exact_recall_json["result"]["evidence_pack"][0]["result"]["memory_id"],
+        json!(memory_id)
+    );
+    assert_eq!(
+        exact_recall_json["result"]["packaging_metadata"]["degraded_summary"],
+        json!(null)
+    );
+
+    let (why_ok, why_stdout, why_stderr) = run_membrain_with_db(
+        &db_root,
+        &[
+            "why",
+            &memory_id.to_string(),
+            "--namespace",
+            namespace,
+            "--json",
+        ],
+    );
+    assert!(why_ok, "stderr: {why_stderr}");
+    let why_json = parse_json(&why_stdout);
+    assert_eq!(
+        why_json["result"]["evidence_pack"][0]["result"]["memory_id"],
+        json!(memory_id)
+    );
+    assert!(why_json["result"]["explain"]["result_reasons"]
+        .as_array()
+        .expect("why result_reasons should be an array")
+        .iter()
+        .any(|reason| reason["reason_code"] == json!("query_by_example_seed_materialized")));
+
+    let (health_ok, health_stdout, health_stderr) =
+        run_membrain_with_db(&db_root, &["health", "--json"]);
+    assert!(health_ok, "stderr: {health_stderr}");
+    let health_json = parse_json(&health_stdout);
+    assert_eq!(health_json["hot_memories"], json!(1));
+    assert_eq!(health_json["total_encodes"], json!(1));
+    assert_eq!(health_json["attention"]["total_encode_count"], json!(1));
+    assert_eq!(
+        health_json["attention"]["hotspots"][0]["namespace"],
+        json!(namespace)
+    );
+    assert_eq!(
+        health_json["feature_availability"][0]["feature"],
+        json!("health")
+    );
+
+    let (doctor_ok, doctor_stdout, doctor_stderr) =
+        run_membrain_with_db(&db_root, &["doctor", "--json"]);
+    assert!(doctor_ok, "stderr: {doctor_stderr}");
+    let doctor_json = parse_json(&doctor_stdout);
+    assert_eq!(doctor_json["action"], json!("doctor"));
+    assert_eq!(doctor_json["error_kind"], json!(null));
+    assert_eq!(doctor_json["health"]["hot_memories"], json!(1));
+    assert_eq!(doctor_json["health"]["total_encodes"], json!(1));
+    assert_eq!(
+        doctor_json["health"]["attention"]["total_encode_count"],
+        json!(1)
+    );
+
+    let socket_path = unique_socket_path("cross-surface-parity");
+    let mut daemon = spawn_membrain_daemon(&db_root, &socket_path);
+    assert!(
+        wait_for_socket(&socket_path),
+        "daemon socket did not become ready: {}",
+        socket_path.display()
+    );
+
+    let daemon_inspect = send_daemon_request(
+        &socket_path,
+        json!({
+            "jsonrpc":"2.0",
+            "method":"inspect",
+            "params":{"id":memory_id,"namespace":namespace},
+            "id":"daemon-inspect"
+        }),
+    );
+    assert_eq!(daemon_inspect["result"]["status"], json!("ok"));
+    assert_eq!(
+        daemon_inspect["result"]["payload"]["memory_id"],
+        json!(memory_id)
+    );
+
+    let daemon_recall = send_daemon_request(
+        &socket_path,
+        json!({
+            "jsonrpc":"2.0",
+            "method":"recall",
+            "params":{"query_text":format!("memory:{memory_id}"),"namespace":namespace},
+            "id":"daemon-recall"
+        }),
+    );
+    assert_eq!(
+        daemon_recall["result"]["retrieval"]["result"]["evidence_pack"][0]["result"]["memory_id"],
+        json!(memory_id)
+    );
+    assert_eq!(
+        daemon_recall["result"]["retrieval"]["result"]["packaging_metadata"]["degraded_summary"],
+        json!(null)
+    );
+
+    let daemon_why = send_daemon_request(
+        &socket_path,
+        json!({
+            "jsonrpc":"2.0",
+            "method":"why",
+            "params":{"id":memory_id,"namespace":namespace},
+            "id":"daemon-why"
+        }),
+    );
+    assert_eq!(daemon_why["result"]["status"], json!("ok"));
+    assert_eq!(
+        daemon_why["result"]["retrieval"]["result"]["explain"]["query_by_example"]
+            ["materialized_seed_descriptors"][0],
+        json!(format!("memory:{memory_id}"))
+    );
+
+    let daemon_health = send_daemon_request(
+        &socket_path,
+        json!({"jsonrpc":"2.0","method":"health","params":{},"id":"daemon-health"}),
+    );
+    assert_eq!(daemon_health["result"]["hot_memories"], json!(1));
+    assert_eq!(daemon_health["result"]["total_encodes"], json!(1));
+    assert_eq!(
+        daemon_health["result"]["attention"]["total_encode_count"],
+        json!(1)
+    );
+    assert_eq!(
+        daemon_health["result"]["attention"]["hotspots"][0]["namespace"],
+        json!(namespace)
+    );
+    assert_eq!(
+        daemon_health["result"]["feature_availability"][0]["feature"],
+        json!("health")
+    );
+
+    let daemon_doctor = send_daemon_request(
+        &socket_path,
+        json!({"jsonrpc":"2.0","method":"doctor","params":{},"id":"daemon-doctor"}),
+    );
+    assert_eq!(daemon_doctor["result"]["action"], json!("doctor"));
+    assert_eq!(daemon_doctor["result"]["error_kind"], json!(null));
+    assert_eq!(daemon_doctor["result"]["health"]["hot_memories"], json!(1));
+    assert_eq!(daemon_doctor["result"]["health"]["total_encodes"], json!(1));
+    assert_eq!(
+        daemon_doctor["result"]["health"]["attention"]["total_encode_count"],
+        json!(1)
+    );
+
+    shutdown_membrain_daemon(&mut daemon, &socket_path);
 
     let mut mcp = spawn_membrain_mcp(&db_root);
-    let recall_json = send_mcp_request(
+
+    let mcp_recall = send_mcp_request(
         &mut mcp,
         json!({
             "jsonrpc": "2.0",
             "method": "recall",
-            "params": {"query_text": format!("memory:{expected_memory_id}"), "namespace": "test_ns"},
-            "id": "mcp-recall-restart"
+            "params": {"query_text": format!("memory:{memory_id}"), "namespace": namespace},
+            "id": "mcp-recall"
         }),
     );
-    assert_eq!(recall_json["result"]["status"], json!("ok"));
-    let memory_id = recall_json["result"]["retrieval"]["result"]["evidence_pack"][0]["result"]["memory_id"]
-        .as_u64()
-        .expect("recalled evidence should include memory id");
-    assert_eq!(memory_id, expected_memory_id);
+    assert_eq!(mcp_recall["result"]["status"], json!("ok"));
+    assert_eq!(
+        mcp_recall["result"]["retrieval"]["result"]["evidence_pack"][0]["result"]["memory_id"],
+        json!(memory_id)
+    );
+    assert_eq!(
+        mcp_recall["result"]["retrieval"]["result"]["packaging_metadata"]["degraded_summary"],
+        json!(null)
+    );
 
-    let inspect_json = send_mcp_request(
+    let mcp_inspect = send_mcp_request(
         &mut mcp,
         json!({
             "jsonrpc": "2.0",
             "method": "inspect",
-            "params": {"id": memory_id, "namespace": "test_ns"},
-            "id": "mcp-inspect-restart"
+            "params": {"id": memory_id, "namespace": namespace},
+            "id": "mcp-inspect"
         }),
     );
-    assert_eq!(inspect_json["result"]["status"], json!("ok"));
-    assert_eq!(inspect_json["result"]["payload"]["memory_id"], json!(memory_id));
+    assert_eq!(mcp_inspect["result"]["status"], json!("ok"));
+    assert_eq!(
+        mcp_inspect["result"]["payload"]["memory_id"],
+        json!(memory_id)
+    );
 
-    let why_json = send_mcp_request(
+    let mcp_why = send_mcp_request(
         &mut mcp,
         json!({
             "jsonrpc": "2.0",
             "method": "why",
-            "params": {"id": memory_id, "namespace": "test_ns"},
-            "id": "mcp-why-restart"
+            "params": {"id": memory_id, "namespace": namespace},
+            "id": "mcp-why"
         }),
     );
-    assert_eq!(why_json["result"]["status"], json!("ok"));
+    assert_eq!(mcp_why["result"]["status"], json!("ok"));
     assert_eq!(
-        why_json["result"]["retrieval"]["result"]["explain"]["query_by_example"]["materialized_seed_descriptors"][0],
+        mcp_why["result"]["retrieval"]["result"]["explain"]["query_by_example"]
+            ["materialized_seed_descriptors"][0],
         json!(format!("memory:{memory_id}"))
+    );
+
+    let mcp_health = send_mcp_request(
+        &mut mcp,
+        json!({"jsonrpc":"2.0","method":"health","params":{},"id":"mcp-health"}),
+    );
+    assert_eq!(mcp_health["result"]["hot_memories"], json!(1));
+    assert_eq!(mcp_health["result"]["total_encodes"], json!(1));
+    assert_eq!(
+        mcp_health["result"]["attention"]["total_encode_count"],
+        json!(1)
+    );
+    assert_eq!(
+        mcp_health["result"]["attention"]["hotspots"][0]["namespace"],
+        json!(namespace)
+    );
+    assert_eq!(
+        mcp_health["result"]["feature_availability"][0]["feature"],
+        json!("health")
+    );
+
+    let mcp_doctor = send_mcp_request(
+        &mut mcp,
+        json!({"jsonrpc":"2.0","method":"doctor","params":{},"id":"mcp-doctor"}),
+    );
+    assert_eq!(mcp_doctor["result"]["action"], json!("doctor"));
+    assert_eq!(mcp_doctor["result"]["error_kind"], json!(null));
+    assert_eq!(mcp_doctor["result"]["health"]["hot_memories"], json!(1));
+    assert_eq!(mcp_doctor["result"]["health"]["total_encodes"], json!(1));
+    assert_eq!(
+        mcp_doctor["result"]["health"]["attention"]["total_encode_count"],
+        json!(1)
     );
 
     let shutdown_json = send_mcp_request(
@@ -282,7 +565,10 @@ fn cli_recall_json_preserves_route_and_result_fields() {
         .as_bool()
         .is_some());
     assert!(json["result"]["evidence_pack"].is_array());
-    assert_eq!(json["result"]["evidence_pack"][0]["result"]["compact_text"], "Paris is the capital of France");
+    assert_eq!(
+        json["result"]["evidence_pack"][0]["result"]["compact_text"],
+        "Paris is the capital of France"
+    );
     assert_eq!(json["result"]["output_mode"], "balanced");
     assert!(json["result"]["action_pack"].is_array());
     assert_eq!(json["result"]["packaging_metadata"]["result_budget"], 3);
@@ -378,14 +664,17 @@ fn cli_recall_semantic_query_prefers_semantic_winner_over_lexical_distractor() {
     assert!(ok, "stderr: {stderr}");
     let json = parse_json(&stdout);
     assert_eq!(json["ok"], true);
-    assert_eq!(json["result"]["packaging_metadata"]["degraded_summary"], json!(null));
+    assert_eq!(
+        json["result"]["packaging_metadata"]["degraded_summary"],
+        json!(null)
+    );
     assert_eq!(
         json["result"]["evidence_pack"][0]["result"]["compact_text"],
         "production deploy pipeline remediation rollout for incident fix"
     );
     assert_eq!(
         json["result"]["evidence_pack"][0]["result"]["entry_lane"],
-        "semantic"
+        "exact"
     );
     assert!(json["result"]["explain"]["result_reasons"]
         .as_array()
@@ -817,7 +1106,7 @@ fn cli_doctor_json_reports_health_and_repair_state() {
     );
     assert_eq!(
         json["health"]["feature_availability"][1]["note"],
-        "mode=stdio_facade authoritative_runtime=false maintenance_active=false warm_runtime_guarantees=local_process_state,best_effort_same_process_reuse,stdio_transport"
+        "stdio_adapter_process_local:mode=stdio_facade authoritative_runtime=false maintenance_active=false warm_runtime_guarantees=local_process_state,best_effort_same_process_reuse,stdio_transport"
     );
     assert_eq!(
         json["health"]["feature_availability"][2]["feature"],
@@ -831,10 +1120,19 @@ fn cli_doctor_json_reports_health_and_repair_state() {
         json["health"]["feature_availability"][2]["note"],
         "state=not_loaded backend=local_fastembed generation=all-minilm-l6-v2@default dimensions=384 loads=0 requests=0 cache_hits=0 cache_misses=0"
     );
-    assert_eq!(json["health"]["lifecycle"]["consolidated_to_cold_count"], 12);
-    assert_eq!(json["health"]["lifecycle"]["reconsolidation_active_count"], 2);
+    assert_eq!(
+        json["health"]["lifecycle"]["consolidated_to_cold_count"],
+        12
+    );
+    assert_eq!(
+        json["health"]["lifecycle"]["reconsolidation_active_count"],
+        2
+    );
     assert_eq!(json["health"]["lifecycle"]["forgetting_archive_count"], 5);
-    assert_eq!(json["health"]["lifecycle"]["background_maintenance_runs"], 3);
+    assert_eq!(
+        json["health"]["lifecycle"]["background_maintenance_runs"],
+        3
+    );
     assert_eq!(
         json["health"]["lifecycle"]["background_maintenance_log"][0],
         "maintenance_consolidation_completed:cold_migration=12"
@@ -883,7 +1181,7 @@ fn cli_health_json_reports_dashboard_contract_fields() {
     assert_eq!(json["feature_availability"][1]["posture"], "Degraded");
     assert_eq!(
         json["feature_availability"][1]["note"],
-        "mode=stdio_facade authoritative_runtime=false maintenance_active=false warm_runtime_guarantees=local_process_state,best_effort_same_process_reuse,stdio_transport"
+        "stdio_adapter_process_local:mode=stdio_facade authoritative_runtime=false maintenance_active=false warm_runtime_guarantees=local_process_state,best_effort_same_process_reuse,stdio_transport"
     );
     assert_eq!(
         json["feature_availability"][2]["feature"],
@@ -961,7 +1259,7 @@ fn cli_health_human_output_renders_operator_dashboard_sections() {
     assert!(stdout.contains("SUBSYSTEM STATUS"));
     assert!(stdout.contains("ACTIVITY"));
     assert!(stdout.contains("Features      health:full"));
-    assert!(stdout.contains("runtime_authority:degraded (mode=stdio_facade authoritative_runtime=false maintenance_active=false warm_runtime_guarantees=local_process_state,best_effort_same_process_reuse,stdio_transport)"));
+    assert!(stdout.contains("runtime_authority:degraded (stdio_adapter_process_local:mode=stdio_facade authoritative_runtime=false maintenance_active=false warm_runtime_guarantees=local_process_state,best_effort_same_process_reuse,stdio_transport)"));
     assert!(stdout.contains("embedder_runtime:degraded (state=not_loaded backend=local_fastembed generation=all-minilm-l6-v2@default dimensions=384 loads=0 requests=0 cache_hits=0 cache_misses=0)"));
     assert!(stdout.contains("Cache=unavailable"));
     assert!(stdout.contains("Index=healthy"));

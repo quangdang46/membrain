@@ -22,6 +22,20 @@ fn unique_socket_path(label: &str) -> PathBuf {
     ))
 }
 
+fn unique_db_root(label: &str) -> PathBuf {
+    static NEXT_DB_ID: AtomicU64 = AtomicU64::new(1);
+
+    let nanos = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .expect("clock should be after epoch")
+        .as_nanos();
+    let unique_id = NEXT_DB_ID.fetch_add(1, Ordering::Relaxed);
+    std::env::temp_dir().join(format!(
+        "membrain-daemon-{label}-db-{}-{nanos}-{unique_id}",
+        std::process::id()
+    ))
+}
+
 async fn send_request(socket_path: &std::path::Path, request: Value) -> Value {
     let stream = UnixStream::connect(socket_path)
         .await
@@ -46,6 +60,34 @@ async fn send_request(socket_path: &std::path::Path, request: Value) -> Value {
 async fn spawn_runtime() -> (PathBuf, tokio::task::JoinHandle<anyhow::Result<()>>) {
     let socket_path = unique_socket_path("doctor-parity");
     let mut config = DaemonRuntimeConfig::new(&socket_path);
+    config.maintenance_interval = Duration::from_secs(3600);
+    let runtime = DaemonRuntime::with_config(config);
+    let handle = tokio::spawn(async move { runtime.run_until_stopped().await });
+
+    timeout(Duration::from_secs(2), async {
+        while tokio::fs::metadata(&socket_path).await.is_err() {
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("daemon socket should appear");
+
+    (socket_path, handle)
+}
+
+async fn spawn_runtime_with_db(
+    label: &str,
+) -> (PathBuf, tokio::task::JoinHandle<anyhow::Result<()>>) {
+    let socket_path = unique_socket_path(label);
+    let db_root = unique_db_root(label);
+    let hot_db_path = db_root.join("hot.db");
+    let cold_db_path = db_root.join("cold.db");
+    tokio::fs::create_dir_all(&db_root)
+        .await
+        .expect("db root should exist");
+
+    let mut config =
+        DaemonRuntimeConfig::new(&socket_path).with_db_paths(&hot_db_path, &cold_db_path);
     config.maintenance_interval = Duration::from_secs(3600);
     let runtime = DaemonRuntime::with_config(config);
     let handle = tokio::spawn(async move { runtime.run_until_stopped().await });
@@ -780,10 +822,248 @@ async fn runtime_health_jsonrpc_surfaces_lifecycle_transition_after_background_m
     }));
     assert!(background_log.iter().any(|entry| {
         entry.as_str().is_some_and(|value| {
-            value.contains("maintenance_forgetting_evaluated")
-                && value.contains("maintenance_id=1")
+            value.contains("maintenance_forgetting_evaluated") && value.contains("maintenance_id=1")
         })
     }));
+
+    shutdown_runtime(&socket_path, handle).await;
+}
+
+#[tokio::test]
+async fn runtime_recall_and_why_keep_hydrated_evidence_visible_after_maintenance() {
+    let (socket_path, handle) = spawn_runtime().await;
+
+    let observe_response = send_request(
+        &socket_path,
+        json!({
+            "jsonrpc":"2.0",
+            "method":"observe",
+            "params":{
+                "content":"Dang prefers concise answers after launch review",
+                "namespace":"team.alpha",
+                "source_label":"stdin:test"
+            },
+            "id":"observe-lifecycle-wrapper"
+        }),
+    )
+    .await;
+    assert_eq!(observe_response["result"]["status"], json!("accepted"));
+
+    let maintenance_response = send_request(
+        &socket_path,
+        json!({
+            "jsonrpc":"2.0",
+            "method":"run_maintenance",
+            "params":{"polls_budget":2,"step_delay_ms":10},
+            "id":"run-maintenance-lifecycle-wrapper"
+        }),
+    )
+    .await;
+    assert!(maintenance_response.get("result").is_some());
+
+    tokio::time::sleep(Duration::from_millis(40)).await;
+
+    let recall_response = send_request(
+        &socket_path,
+        json!({
+            "jsonrpc":"2.0",
+            "method":"recall",
+            "params":{
+                "query_text":"Dang prefers concise answers",
+                "namespace":"team.alpha",
+                "session_id":"session-lifecycle",
+                "task_id":"task-lifecycle"
+            },
+            "id":"recall-lifecycle-wrapper"
+        }),
+    )
+    .await;
+    assert_eq!(recall_response["result"]["status"], json!("ok"));
+    assert_eq!(
+        recall_response["result"]["retrieval"]["result"]["packaging_metadata"]["degraded_summary"],
+        json!(null)
+    );
+    let memory_id = recall_response["result"]["retrieval"]["result"]["evidence_pack"][0]["result"]
+        ["memory_id"]
+        .as_u64()
+        .expect("maintenance recall should expose the observed memory id");
+    assert_eq!(
+        recall_response["result"]["retrieval"]["result"]["evidence_pack"][0]["result"]["memory_id"],
+        json!(memory_id)
+    );
+    let recall_result_reasons = recall_response["result"]["retrieval"]["explain_trace"]
+        ["result_reasons"]
+        .as_array()
+        .expect("recall result reasons should be an array");
+    assert!(recall_result_reasons.iter().any(|reason| {
+        reason["memory_id"] == json!(memory_id) && reason["reason_code"] == json!("score_kept")
+    }));
+
+    let why_response = send_request(
+        &socket_path,
+        json!({
+            "jsonrpc":"2.0",
+            "method":"why",
+            "params":{"id":memory_id,"namespace":"team.alpha"},
+            "id":"why-lifecycle-wrapper"
+        }),
+    )
+    .await;
+    assert_eq!(why_response["result"]["status"], json!("ok"));
+    assert_eq!(
+        why_response["result"]["retrieval"]["result"]["packaging_metadata"]["degraded_summary"],
+        json!(null)
+    );
+    assert_eq!(
+        why_response["result"]["retrieval"]["result"]["evidence_pack"][0]["result"]["memory_id"],
+        json!(memory_id)
+    );
+    let why_result_reasons = why_response["result"]["retrieval"]["explain_trace"]["result_reasons"]
+        .as_array()
+        .expect("why result reasons should be an array");
+    assert!(why_result_reasons.iter().any(|reason| {
+        reason["memory_id"] == json!(memory_id)
+            && reason["reason_code"] == json!("query_by_example_seed_materialized")
+    }));
+    let why_freshness_markers = why_response["result"]["retrieval"]["explain_trace"]
+        ["freshness_markers"]
+        .as_array()
+        .expect("why freshness markers should be an array");
+    assert!(!why_freshness_markers.is_empty());
+
+    shutdown_runtime(&socket_path, handle).await;
+}
+
+#[tokio::test]
+async fn runtime_maintenance_projects_cold_and_reconsolidating_lifecycle_reasons_on_real_daemon_path(
+) {
+    let (socket_path, handle) = spawn_runtime_with_db("maintenance-real-lifecycle").await;
+
+    for (id, content) in [
+        (
+            "observe-maintenance-oldest",
+            "release deploy rollback checklist from last quarter",
+        ),
+        (
+            "observe-maintenance-newest",
+            "current deploy remediation plan for production rollout",
+        ),
+    ] {
+        let observe_response = send_request(
+            &socket_path,
+            json!({
+                "jsonrpc":"2.0",
+                "method":"observe",
+                "params":{
+                    "content":content,
+                    "namespace":"team.alpha",
+                    "source_label":"stdin:test"
+                },
+                "id":id
+            }),
+        )
+        .await;
+        assert_eq!(observe_response["result"]["status"], json!("accepted"));
+        assert_eq!(observe_response["result"]["memories_created"], json!(1));
+    }
+
+    let maintenance_response = send_request(
+        &socket_path,
+        json!({
+            "jsonrpc":"2.0",
+            "method":"run_maintenance",
+            "params":{"polls_budget":2,"step_delay_ms":10},
+            "id":"run-maintenance-real-lifecycle"
+        }),
+    )
+    .await;
+    assert!(maintenance_response.get("result").is_some());
+
+    tokio::time::sleep(Duration::from_millis(40)).await;
+
+    let recall_response = send_request(
+        &socket_path,
+        json!({
+            "jsonrpc":"2.0",
+            "method":"recall",
+            "params":{
+                "query_text":"deploy remediation rollout plan",
+                "namespace":"team.alpha",
+                "result_budget":4
+            },
+            "id":"recall-maintenance-real-lifecycle"
+        }),
+    )
+    .await;
+    assert_eq!(recall_response["result"]["status"], json!("ok"));
+    assert_eq!(
+        recall_response["result"]["retrieval"]["result"]["packaging_metadata"]["degraded_summary"],
+        json!(null)
+    );
+    let evidence_pack = recall_response["result"]["retrieval"]["result"]["evidence_pack"]
+        .as_array()
+        .expect("recall evidence pack should be an array");
+    let cold_memory = evidence_pack
+        .iter()
+        .find(|item| {
+            item["result"]["answered_from"] == json!("tier3_cold")
+                && item["result"]["entry_lane"] == json!("cold_fallback")
+        })
+        .expect("maintenance should project one cold durable result");
+    let reconsolidating_memory = evidence_pack
+        .iter()
+        .find(|item| item["result"]["memory_id"] != cold_memory["result"]["memory_id"])
+        .expect("maintenance should leave one non-cold result");
+    let reconsolidating_memory_id = reconsolidating_memory["result"]["memory_id"]
+        .as_u64()
+        .expect("reconsolidating memory id should be present");
+
+    let recall_result_reasons = recall_response["result"]["retrieval"]["explain_trace"]
+        ["result_reasons"]
+        .as_array()
+        .expect("recall result reasons should be an array");
+    assert!(recall_result_reasons
+        .iter()
+        .any(|reason| reason["reason_code"] == json!("cold_consolidated")));
+    assert!(recall_result_reasons
+        .iter()
+        .any(|reason| reason["reason_code"] == json!("reconsolidation_window_open")));
+    let recall_freshness_markers = recall_response["result"]["retrieval"]["explain_trace"]
+        ["freshness_markers"]
+        .as_array()
+        .expect("recall freshness markers should be an array");
+    assert!(recall_freshness_markers
+        .iter()
+        .any(|marker| marker["code"] == json!("lifecycle_projection")));
+
+    let why_response = send_request(
+        &socket_path,
+        json!({
+            "jsonrpc":"2.0",
+            "method":"why",
+            "params":{"id":reconsolidating_memory_id,"namespace":"team.alpha"},
+            "id":"why-maintenance-real-lifecycle"
+        }),
+    )
+    .await;
+    assert_eq!(why_response["result"]["status"], json!("ok"));
+    let why_result_reasons = why_response["result"]["retrieval"]["explain_trace"]["result_reasons"]
+        .as_array()
+        .expect("why result reasons should be an array");
+    assert!(why_result_reasons
+        .iter()
+        .any(|reason| { reason["reason_code"] == json!("reconsolidation_window_open") }));
+    assert!(why_result_reasons.iter().any(|reason| {
+        reason["memory_id"] == json!(reconsolidating_memory_id)
+            && reason["reason_code"] == json!("query_by_example_seed_materialized")
+    }));
+    let why_freshness_markers = why_response["result"]["retrieval"]["explain_trace"]
+        ["freshness_markers"]
+        .as_array()
+        .expect("why freshness markers should be an array");
+    assert!(why_freshness_markers
+        .iter()
+        .any(|marker| marker["code"] == json!("lifecycle_projection")));
 
     shutdown_runtime(&socket_path, handle).await;
 }
@@ -831,13 +1111,15 @@ async fn runtime_health_resource_read_matches_runtime_health_payload_shape() {
         result["payload"]["payload"]["feature_availability"][1]["posture"],
         json!("Full")
     );
-    assert!(result["payload"]["payload"]["feature_availability"][1]["note"]
-        .as_str()
-        .is_some_and(|note| {
-            note.contains("mode=unix_socket_daemon")
-                && note.contains("authoritative_runtime=true")
-                && note.contains("warm_runtime_guarantees=")
-        }));
+    assert!(
+        result["payload"]["payload"]["feature_availability"][1]["note"]
+            .as_str()
+            .is_some_and(|note| {
+                note.contains("daemon_authority:mode=unix_socket_daemon")
+                    && note.contains("authoritative_runtime=true")
+                    && note.contains("warm_runtime_guarantees=")
+            })
+    );
     assert_eq!(
         result["payload"]["payload"]["feature_availability"][2]["feature"],
         json!("embedder_runtime")
@@ -846,13 +1128,15 @@ async fn runtime_health_resource_read_matches_runtime_health_payload_shape() {
         result["payload"]["payload"]["feature_availability"][2]["posture"],
         json!("Degraded")
     );
-    assert!(result["payload"]["payload"]["feature_availability"][2]["note"]
-        .as_str()
-        .is_some_and(|note| {
-            note.contains("state=not_loaded")
-                && note.contains("backend=local_fastembed")
-                && note.contains("generation=all-minilm-l6-v2@default")
-        }));
+    assert!(
+        result["payload"]["payload"]["feature_availability"][2]["note"]
+            .as_str()
+            .is_some_and(|note| {
+                note.contains("state=not_loaded")
+                    && note.contains("backend=local_fastembed")
+                    && note.contains("generation=all-minilm-l6-v2@default")
+            })
+    );
     assert!(result["payload"]["payload"]["degraded_status"].is_null());
 
     shutdown_runtime(&socket_path, handle).await;
@@ -953,13 +1237,15 @@ async fn runtime_doctor_resource_read_matches_runtime_doctor_payload_shape() {
         result["payload"]["payload"]["health"]["feature_availability"][1]["posture"],
         json!("Full")
     );
-    assert!(result["payload"]["payload"]["health"]["feature_availability"][1]["note"]
-        .as_str()
-        .is_some_and(|note| {
-            note.contains("mode=unix_socket_daemon")
-                && note.contains("authoritative_runtime=true")
-                && note.contains("warm_runtime_guarantees=")
-        }));
+    assert!(
+        result["payload"]["payload"]["health"]["feature_availability"][1]["note"]
+            .as_str()
+            .is_some_and(|note| {
+                note.contains("daemon_authority:mode=unix_socket_daemon")
+                    && note.contains("authoritative_runtime=true")
+                    && note.contains("warm_runtime_guarantees=")
+            })
+    );
     assert_eq!(
         result["payload"]["payload"]["health"]["feature_availability"][2]["feature"],
         json!("embedder_runtime")
@@ -968,13 +1254,15 @@ async fn runtime_doctor_resource_read_matches_runtime_doctor_payload_shape() {
         result["payload"]["payload"]["health"]["feature_availability"][2]["posture"],
         json!("Degraded")
     );
-    assert!(result["payload"]["payload"]["health"]["feature_availability"][2]["note"]
-        .as_str()
-        .is_some_and(|note| {
-            note.contains("state=not_loaded")
-                && note.contains("backend=local_fastembed")
-                && note.contains("generation=all-minilm-l6-v2@default")
-        }));
+    assert!(
+        result["payload"]["payload"]["health"]["feature_availability"][2]["note"]
+            .as_str()
+            .is_some_and(|note| {
+                note.contains("state=not_loaded")
+                    && note.contains("backend=local_fastembed")
+                    && note.contains("generation=all-minilm-l6-v2@default")
+            })
+    );
     assert_eq!(
         result["payload"]["payload"]["checks"][4]["name"],
         json!("runtime_authority")
@@ -1011,6 +1299,28 @@ async fn runtime_doctor_resource_read_matches_runtime_doctor_payload_shape() {
     assert_eq!(
         status_resource["result"]["payload"]["payload"]["posture"],
         json!("full")
+    );
+    assert_eq!(
+        status_resource["result"]["payload"]["payload"]["authority_mode"],
+        json!("unix_socket_daemon")
+    );
+    assert_eq!(
+        status_resource["result"]["payload"]["payload"]["authoritative_runtime"],
+        json!(true)
+    );
+    assert_eq!(
+        status_resource["result"]["payload"]["payload"]["maintenance_active"],
+        json!(true)
+    );
+    assert_eq!(
+        status_resource["result"]["payload"]["payload"]["warm_runtime_guarantees"],
+        json!([
+            "daemon_owned_runtime_state",
+            "shared_process_state",
+            "unix_socket_authority",
+            "repeated_request_warmth",
+            "background_maintenance_loop"
+        ])
     );
     assert!(status_resource["result"]["payload"]["payload"]["metrics"].is_object());
 

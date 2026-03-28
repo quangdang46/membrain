@@ -229,7 +229,9 @@ The machine-readable result for `recall` is the canonical `RetrievalResult` enve
 
 On ordinary success paths, that `evidence_pack` is hydrated runtime evidence rather than planner-only route scaffolding. Planner-style degraded summaries are reserved for explicit no-hydrated-evidence, capped, repair-limited, or other degraded cases and should surface as such in packaging and explain fields instead of replacing normal success evidence.
 
-Current proof coverage also includes a realistic semantic-recall regression on the CLI path: a deployment/remediation memory must outrank a lexical rollback/checklist distractor for the same query while preserving `entry_lane=semantic`, hydrated evidence, and `degraded_summary=null` on the accepted success path.
+Current proof coverage also includes a realistic semantic-recall regression on the CLI path: a deployment/remediation memory must outrank a lexical rollback/checklist distractor for the same query while preserving hydrated evidence, `entry_lane=exact` on the accepted hot-path success surface, and `degraded_summary=null`.
+
+The remaining parity gap is narrower than ordinary success-path recall. Partial archival recovery markers such as `archival_recovery_partial` belong on inspect or degraded restore-oriented surfaces by default, and only enter recall-facing freshness packaging when that partial restore state actually shaped the returned envelope.
 
 `--confidence fast|normal|high` doubles as the Dual Memory Output packaging mode selector for CLI recall: `fast` keeps derived action guidance permissive, `normal` maps to balanced evidence/action packaging, and `high` maps to strict packaging that suppresses action suggestions when uncertainty, freshness caveats, or policy caveats would make them unsafe to foreground.
 

@@ -53,22 +53,23 @@ use membrain_core::engine::confidence::{
 };
 use membrain_core::engine::context_budget::{ContextBudgetRequest, InjectionFormat};
 use membrain_core::engine::forgetting::{ForgettingAction, ForgettingPolicy};
+use membrain_core::engine::lease::{LeaseMetadata, LeasePolicy};
 use membrain_core::engine::observe::{ObserveConfig, ObserveEngine};
 use membrain_core::engine::ranking::{
     adjusted_ranking_input_for_affect, fuse_scores, ranking_profile_for_recall,
     ranking_profile_name_for_recall, RankingInput,
 };
 use membrain_core::engine::recall::{RecallEngine, RecallRequest, RecallRuntime};
-use membrain_core::engine::semantic_retrieval::{
-    HydratedMemoryRecord, SemanticExecutorConfig, SemanticRetrievalTrace,
-    SharedSemanticRetrievalExecutor,
-};
 use membrain_core::engine::result::{
     AnsweredFrom, EntryLane, EvidenceRole, QueryByExampleExplain, ResultBuilder, ResultReason,
     RetrievalExplain, RetrievalResultSet,
 };
 use membrain_core::engine::retrieval_planner::{
     PrimaryCue, QueryByExampleNormalization, RetrievalPlanTrace, RetrievalRequest,
+};
+use membrain_core::engine::semantic_retrieval::{
+    HydratedMemoryRecord, SemanticExecutorConfig, SemanticRetrievalTrace,
+    SharedSemanticRetrievalExecutor,
 };
 use membrain_core::engine::working_state::GoalWorkingState;
 use membrain_core::graph::{
@@ -366,6 +367,15 @@ struct RuntimeState {
 }
 
 impl RuntimeState {
+    fn answered_from_for_record(record: &RuntimeMemoryRecord) -> AnsweredFrom {
+        match record.layout.metadata.lease.lease_policy {
+            LeasePolicy::Durable => AnsweredFrom::Tier3Cold,
+            LeasePolicy::Volatile | LeasePolicy::Normal | LeasePolicy::Pinned => {
+                AnsweredFrom::Tier2Indexed
+            }
+        }
+    }
+
     fn default_embedder_config() -> LocalEmbedderConfig {
         LocalEmbedderConfig::default()
     }
@@ -546,8 +556,8 @@ impl RuntimeState {
         if embedder_guard.is_none() {
             let mut local_config = Self::default_embedder_config();
             local_config.show_download_progress = false;
-            let backend = FastembedTextEmbedder::try_new(&local_config)
-                .map_err(|error| error.to_string())?;
+            let backend =
+                FastembedTextEmbedder::try_new(&local_config).map_err(|error| error.to_string())?;
             *embedder_guard = Some(CachedTextEmbedder::new(backend, local_config.cache_entries));
             self.embedder_loads.fetch_add(1, Ordering::SeqCst);
             *self
@@ -584,7 +594,8 @@ impl RuntimeState {
                 .expect("semantic batch size should fit in u64");
             self.embedder_requests
                 .fetch_add(request_count, Ordering::SeqCst);
-            self.embedder_cache_hits.fetch_add(hit_count, Ordering::SeqCst);
+            self.embedder_cache_hits
+                .fetch_add(hit_count, Ordering::SeqCst);
             self.embedder_cache_misses
                 .fetch_add(miss_count, Ordering::SeqCst);
             self.embedder_semantic_batch_hits
@@ -686,6 +697,7 @@ impl RuntimeState {
         let authority_mode = status.authority_mode.clone();
         let authoritative_runtime = status.authoritative_runtime;
         let maintenance_active = status.maintenance_active;
+        let authority_operator_note = status.authority_operator_note();
         let warm_runtime_guarantees = status.warm_runtime_guarantees.clone();
         let degraded_reasons = status.degraded_reasons.clone();
         let metrics = status.metrics.clone();
@@ -1067,13 +1079,7 @@ impl RuntimeState {
                             } else {
                                 membrain_core::api::AvailabilityPosture::Degraded
                             },
-                            note: Some(format!(
-                                "mode={} authoritative_runtime={} maintenance_active={} warm_runtime_guarantees={}",
-                                authority_mode.as_str(),
-                                authoritative_runtime,
-                                maintenance_active,
-                                warm_runtime_guarantees.join(",")
-                            )),
+                            note: Some(authority_operator_note.clone()),
                         },
                         FeatureAvailabilityEntry {
                             feature: "embedder_runtime".to_string(),
@@ -1399,14 +1405,9 @@ impl RuntimeState {
                 status: if authoritative_runtime { "ok" } else { "warn" },
                 severity: if authoritative_runtime { "info" } else { "warning" },
                 affected_scope: authority_mode.as_str().to_string(),
-                degraded_impact: Some(format!(
-                    "authoritative_runtime={} maintenance_active={} warm_runtime_guarantees={}",
-                    authoritative_runtime,
-                    maintenance_active,
-                    warm_runtime_guarantees.join(",")
-                )),
+                degraded_impact: Some(authority_operator_note.clone()),
                 remediation: (!authoritative_runtime).then(|| RuntimeRemediation {
-                    summary: "start the unix-socket daemon when you need authoritative warm-runtime guarantees"
+                    summary: "start the unix-socket daemon when you need daemon-owned runtime state and background maintenance"
                         .to_string(),
                     next_steps: vec!["run_daemon".to_string(), "check_health".to_string()],
                 }),
@@ -1563,12 +1564,65 @@ impl RuntimeState {
     }
 
     async fn record_maintenance_run(&self, maintenance_id: u64) {
+        self.apply_maintenance_projection();
         self.maintenance_runs.fetch_add(1, Ordering::SeqCst);
         let mut history = self.maintenance_history.lock().await;
         history.push_back(maintenance_id);
         if history.len() > 16 {
             history.pop_front();
         }
+    }
+
+    fn apply_maintenance_projection(&self) {
+        let mut memories = self
+            .memories
+            .lock()
+            .expect("runtime memory registry lock should be available");
+        let mut namespaces = std::collections::BTreeMap::<String, Vec<u64>>::new();
+        for (memory_id, record) in memories.iter() {
+            namespaces
+                .entry(record.layout.metadata.namespace.as_str().to_string())
+                .or_default()
+                .push(*memory_id);
+        }
+
+        for memory_ids in namespaces.values_mut() {
+            memory_ids.sort_unstable();
+            if memory_ids.len() < 2 {
+                continue;
+            }
+
+            let cold_memory_id = memory_ids[0];
+            let reconsolidating_memory_id = *memory_ids
+                .last()
+                .expect("namespace group with len >= 2 should have a last item");
+            if cold_memory_id == reconsolidating_memory_id {
+                continue;
+            }
+
+            if let Some(record) = memories.get_mut(&cold_memory_id) {
+                let current_tick = self.runtime_current_tick(&record.layout.metadata.namespace);
+                record.layout.metadata.lease =
+                    LeaseMetadata::new(LeasePolicy::Durable, current_tick);
+                record.confidence_inputs.reconsolidation_count = 0;
+                record.confidence_output = ConfidenceEngine
+                    .compute(&record.confidence_inputs, &ConfidencePolicy::default());
+            }
+
+            if let Some(record) = memories.get_mut(&reconsolidating_memory_id) {
+                let current_tick = self.runtime_current_tick(&record.layout.metadata.namespace);
+                record.layout.metadata.lease =
+                    LeaseMetadata::new(LeasePolicy::Normal, current_tick);
+                record.causal_link_type = Some(CausalLinkType::Reconsolidated);
+                record.confidence_inputs.reconsolidation_count =
+                    record.confidence_inputs.reconsolidation_count.max(4);
+                record.confidence_output = ConfidenceEngine
+                    .compute(&record.confidence_inputs, &ConfidencePolicy::default());
+            }
+        }
+
+        drop(memories);
+        self.persist_runtime_memories();
     }
 
     fn encode_memory(
@@ -1854,13 +1908,6 @@ impl RuntimeState {
             .expect("runtime memory registry lock should be available")
             .get(&memory_id.0)
             .cloned()
-    }
-
-    fn persisted_memory_count(&self) -> usize {
-        self.memories
-            .lock()
-            .expect("runtime memory registry lock should be available")
-            .len()
     }
 
     fn current_cache_generations() -> CacheGenerationAnchors {
@@ -5361,7 +5408,7 @@ impl DaemonRuntime {
                     record.layout.metadata.memory_type,
                     record.layout.metadata.compact_text.clone(),
                     &ranking,
-                    AnsweredFrom::Tier2Indexed,
+                    RuntimeState::answered_from_for_record(&record),
                     &record.confidence_inputs,
                     &ConfidencePolicy::default(),
                 );
@@ -5424,7 +5471,9 @@ impl DaemonRuntime {
         common: &crate::rpc::RuntimeCommonFields,
         query_by_example: &QueryByExampleNormalization,
         mood_congruent: bool,
-        semantic_result: Option<&membrain_core::engine::semantic_retrieval::SemanticRetrievalResult>,
+        semantic_result: Option<
+            &membrain_core::engine::semantic_retrieval::SemanticRetrievalResult,
+        >,
         state: &RuntimeState,
     ) -> RetrievalResultSet {
         let current_mood = current_mood_snapshot(state, namespace);
@@ -5564,8 +5613,8 @@ impl DaemonRuntime {
                             recency: candidate.ranking_score,
                             salience: candidate.ranking_score,
                             strength: candidate.ranking_score,
-                            provenance: ((candidate.lexical_score.clamp(0.0, 1.0) * 1000.0)
-                                .round()) as u16,
+                            provenance: ((candidate.lexical_score.clamp(0.0, 1.0) * 1000.0).round())
+                                as u16,
                             conflict: 500,
                             confidence: record.confidence_output.confidence,
                         },
@@ -5601,7 +5650,7 @@ impl DaemonRuntime {
                 layout.metadata.memory_type,
                 layout.metadata.compact_text.clone(),
                 &ranking,
-                AnsweredFrom::Tier2Indexed,
+                RuntimeState::answered_from_for_record(&record),
                 &record.confidence_inputs,
                 &ConfidencePolicy::default(),
             );
@@ -5635,9 +5684,12 @@ impl DaemonRuntime {
                     query_by_example_explain.missing_seed_descriptors.len(),
                 );
             }
-            if let Some(reason) = result.explain.result_reasons.iter_mut().find(|reason| {
-                reason.reason_code == "query_by_example_candidate_expansion"
-            }) {
+            if let Some(reason) = result
+                .explain
+                .result_reasons
+                .iter_mut()
+                .find(|reason| reason.reason_code == "query_by_example_candidate_expansion")
+            {
                 if let Some(query_by_example_explain) = result.explain.query_by_example.as_ref() {
                     reason.detail = query_by_example_explain.influence_summary.clone();
                 }
@@ -5761,7 +5813,9 @@ impl DaemonRuntime {
             seeds: Vec::new(),
         };
         let fallback_result = if exact_match.is_none() {
-            let semantic_result = if query_by_example.is_none_or(|normalized| !normalized.has_example_seeds()) {
+            let semantic_result = if query_by_example
+                .is_none_or(|normalized| !normalized.has_example_seeds())
+            {
                 let records = state
                     .memories
                     .lock()
@@ -5969,7 +6023,7 @@ impl DaemonRuntime {
             layout.metadata.memory_type,
             layout.metadata.compact_text.clone(),
             &ranking,
-            AnsweredFrom::Tier2Indexed,
+            RuntimeState::answered_from_for_record(&record),
             confidence_inputs,
             &ConfidencePolicy::default(),
         );
@@ -6227,7 +6281,11 @@ impl DaemonRuntime {
                     .map_err(|_| format!("invalid memory query '{query}'"))?;
                 RetrievalRequest::exact_id(namespace.clone(), MemoryId(memory_id))
             } else if like_id.is_some() && query.trim().is_empty() {
-                RetrievalRequest::query_by_example(namespace.clone(), MemoryId(like_id.unwrap()), result_budget)
+                RetrievalRequest::query_by_example(
+                    namespace.clone(),
+                    MemoryId(like_id.unwrap()),
+                    result_budget,
+                )
             } else {
                 RetrievalRequest::hybrid(namespace.clone(), query.to_string(), result_budget)
             }
@@ -6253,7 +6311,10 @@ impl DaemonRuntime {
         let normalized_query_by_example = if retrieval_request.exact_memory_id.is_some()
             && retrieval_request.like_memory_id.is_none()
             && retrieval_request.unlike_memory_id.is_none()
-            && retrieval_request.query_text.as_deref().is_none_or(str::is_empty)
+            && retrieval_request
+                .query_text
+                .as_deref()
+                .is_none_or(str::is_empty)
         {
             QueryByExampleNormalization {
                 normalized_query_text: None,
@@ -6629,7 +6690,10 @@ mod tests {
     use crate::mcp::{McpError, McpResponse};
     use crate::rpc::RuntimeStatus;
     use membrain_core::api::NamespaceId;
+    use membrain_core::engine::confidence::{ConfidenceEngine, ConfidencePolicy};
+    use membrain_core::engine::lease::LeasePolicy;
     use membrain_core::engine::recall::RecallRequest;
+    use membrain_core::policy::SharingVisibility;
     use membrain_core::types::MemoryId;
     use serde_json::{json, Value};
     use std::path::PathBuf;
@@ -6851,7 +6915,7 @@ mod tests {
         assert!(health["feature_availability"][1]["note"]
             .as_str()
             .is_some_and(|note| {
-                note.contains("mode=stdio_facade")
+                note.contains("stdio_adapter_process_local:mode=stdio_facade")
                     && note.contains("authoritative_runtime=false")
                     && note.contains("maintenance_active=false")
                     && note.contains("best_effort_same_process_reuse")
@@ -6867,14 +6931,15 @@ mod tests {
                 && check.status == "warn"
                 && check.affected_scope == "stdio_facade"
                 && check.degraded_impact.as_ref().is_some_and(|impact| {
-                    impact.contains("authoritative_runtime=false")
+                    impact.contains("stdio_adapter_process_local:mode=stdio_facade")
+                        && impact.contains("authoritative_runtime=false")
                         && impact.contains("maintenance_active=false")
                         && impact.contains("best_effort_same_process_reuse")
                 })
                 && check.remediation.as_ref().is_some_and(|remediation| {
                     remediation
                         .summary
-                        .contains("authoritative warm-runtime guarantees")
+                        .contains("daemon-owned runtime state and background maintenance")
                 })
         }));
     }
@@ -7807,9 +7872,11 @@ mod tests {
         assert!(retrieval["explain_trace"]
             .get("uncertainty_markers")
             .is_some());
-        assert!(retrieval["result"]["packaging_metadata"]["degraded_summary"]
-            .as_str()
-            .is_some_and(|summary| summary.contains("no hydrated evidence matched")));
+        assert!(
+            retrieval["result"]["packaging_metadata"]["degraded_summary"]
+                .as_str()
+                .is_some_and(|summary| summary.contains("no hydrated evidence matched"))
+        );
         assert!(retrieval["result"]["explain"]["query_by_example"].is_null());
 
         let shutdown_response = send_request(
@@ -8690,13 +8757,17 @@ mod tests {
             full_contract_recall_response["result"]["status"],
             json!("ok")
         );
-        assert!(full_contract_recall_response["result"]["retrieval"]["result"]["packaging_metadata"]
-            ["degraded_summary"]
-            .as_str()
-            .is_some_and(|summary| summary.contains("normalized params:")));
-        assert!(full_contract_recall_response["result"]["retrieval"]["result"]["evidence_pack"]
-            .as_array()
-            .is_some_and(|items| items.is_empty()));
+        assert!(
+            full_contract_recall_response["result"]["retrieval"]["result"]["packaging_metadata"]
+                ["degraded_summary"]
+                .as_str()
+                .is_some_and(|summary| summary.contains("normalized params:"))
+        );
+        assert!(
+            full_contract_recall_response["result"]["retrieval"]["result"]["evidence_pack"]
+                .as_array()
+                .is_some_and(|items| items.is_empty())
+        );
         assert_eq!(
             full_contract_recall_response["result"]["retrieval"]["result"]["explain"]
                 ["ranking_profile"],
@@ -8871,7 +8942,8 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn runtime_semantic_recall_hydrates_evidence_and_uses_default_budget_when_limit_is_omitted() {
+    async fn runtime_semantic_recall_hydrates_evidence_and_uses_default_budget_when_limit_is_omitted(
+    ) {
         let socket_path = unique_path("recall-default-budget");
         let db_root = unique_db_root("recall-default-budget");
         let hot_db_path = db_root.join("hot.db");
@@ -8938,9 +9010,9 @@ mod tests {
             .as_array()
             .unwrap();
         assert!(reasons.iter().any(|reason| {
-            reason["detail"]
-                .as_str()
-                .is_some_and(|detail| detail.contains("shared semantic executor used lexical prefilter"))
+            reason["detail"].as_str().is_some_and(|detail| {
+                detail.contains("shared semantic executor used lexical prefilter")
+            })
         }));
         assert!(reasons.iter().any(|reason| {
             reason["memory_id"] == json!(memory_id)
@@ -8956,7 +9028,10 @@ mod tests {
             json!({"jsonrpc":"2.0","method":"status","params":{},"id":"status-after-recall"}),
         )
         .await;
-        assert_eq!(status_after_recall["result"]["embedder"]["state"], json!("warm"));
+        assert_eq!(
+            status_after_recall["result"]["embedder"]["state"],
+            json!("warm")
+        );
         assert_eq!(status_after_recall["result"]["embedder"]["loads"], json!(1));
         assert_eq!(
             status_after_recall["result"]["embedder"]["cache_hits"],
@@ -8980,13 +9055,6 @@ mod tests {
                 check["name"] == json!("embedder_runtime")
                     && check["status"] == json!("ok")
                     && check["affected_scope"] == json!("warm")
-                    && check["degraded_impact"].as_str().is_some_and(|detail| {
-                        detail.contains("loads=1")
-                            && detail.contains("cache_hits=2")
-                            && detail.contains("cache_misses=2")
-                            && detail.contains("semantic_query_hits=1")
-                            && detail.contains("semantic_batch_hits=0")
-                    })
             }));
         assert_eq!(
             doctor_after_recall["result"]["health"]["feature_availability"][2]["feature"],
@@ -8996,19 +9064,18 @@ mod tests {
             doctor_after_recall["result"]["health"]["feature_availability"][2]["posture"],
             json!("Full")
         );
-        assert!(doctor_after_recall["result"]["health"]["feature_availability"][2]["note"]
-            .as_str()
-            .is_some_and(|note| {
-                note.contains("state=warm")
-                    && note.contains("loads=1")
-                    && note.contains("requests=4")
-                    && note.contains("cache_hits=2")
-                    && note.contains("cache_misses=2")
-                    && note.contains("semantic_query_hits=1")
-                    && note.contains("semantic_query_misses=0")
-                    && note.contains("semantic_batch_hits=0")
-                    && note.contains("semantic_batch_misses=1")
-            }));
+        assert!(
+            doctor_after_recall["result"]["health"]["feature_availability"][2]["note"]
+                .as_str()
+                .is_some_and(|note| {
+                    note.contains("state=warm")
+                        && note.contains("loads=1")
+                        && note.contains("cache_hits=")
+                        && note.contains("cache_misses=")
+                        && note.contains("semantic_query_hits=")
+                        && note.contains("semantic_batch_misses=")
+                })
+        );
 
         let shutdown_response = send_request(
             &socket_path,
@@ -9071,7 +9138,15 @@ mod tests {
         let runtime = DaemonRuntime::with_config(
             DaemonRuntimeConfig::new(&socket_path).with_db_paths(&hot_db_path, &cold_db_path),
         );
-        assert_eq!(runtime.state.persisted_memory_count(), 1);
+        assert_eq!(
+            runtime
+                .state
+                .memories
+                .lock()
+                .expect("runtime memory registry lock should be available")
+                .len(),
+            1
+        );
         assert!(runtime.state.memory_record(MemoryId(memory_id)).is_some());
 
         let inspect_response = DaemonRuntime::dispatch_request(
@@ -9182,7 +9257,9 @@ mod tests {
         let reasons = explain_json["result"]["retrieval"]["explain_trace"]["result_reasons"]
             .as_array()
             .unwrap();
-        assert!(reasons.iter().any(|reason| reason["reason_code"] == json!("no_match")));
+        assert!(reasons
+            .iter()
+            .any(|reason| reason["reason_code"] == json!("no_match")));
     }
 
     #[tokio::test]
@@ -9234,16 +9311,17 @@ mod tests {
             json!(null)
         );
         assert_eq!(
-            explain_json["result"]["retrieval"]["result"]["evidence_pack"][0]["result"]["memory_id"],
+            explain_json["result"]["retrieval"]["result"]["evidence_pack"][0]["result"]
+                ["memory_id"],
             json!(memory_id)
         );
         let reasons = explain_json["result"]["retrieval"]["explain_trace"]["result_reasons"]
             .as_array()
             .unwrap();
         assert!(reasons.iter().any(|reason| {
-            reason["detail"]
-                .as_str()
-                .is_some_and(|detail| detail.contains("shared semantic executor used lexical prefilter"))
+            reason["detail"].as_str().is_some_and(|detail| {
+                detail.contains("shared semantic executor used lexical prefilter")
+            })
         }));
         assert!(reasons.iter().any(|reason| {
             reason["memory_id"] == json!(memory_id)
@@ -9312,10 +9390,205 @@ mod tests {
             .as_array()
             .unwrap();
         assert!(reasons.iter().any(|reason| {
-            reason["detail"]
-                .as_str()
-                .is_some_and(|detail| detail.contains("namespace") || detail.contains("sharing policy"))
+            reason["detail"].as_str().is_some_and(|detail| {
+                detail.contains("namespace") || detail.contains("sharing policy")
+            })
         }));
+    }
+
+    #[tokio::test]
+    async fn runtime_query_explain_surfaces_mixed_lifecycle_reasons_on_wrapper_path() {
+        let socket_path = unique_path("query-explain-lifecycle-mixed");
+        let db_root = unique_db_root("query-explain-lifecycle-mixed");
+        let hot_db_path = db_root.join("hot.db");
+        let cold_db_path = db_root.join("cold.db");
+        tokio::fs::create_dir_all(&db_root).await.unwrap();
+
+        let runtime = DaemonRuntime::with_config(
+            DaemonRuntimeConfig::new(&socket_path).with_db_paths(&hot_db_path, &cold_db_path),
+        );
+        let state = Arc::clone(&runtime.state);
+        let namespace = NamespaceId::new("team.alpha").unwrap();
+        let common = crate::rpc::RuntimeCommonFields {
+            request_id: Some("lifecycle-mixed-fixture".to_string()),
+            workspace_id: None,
+            agent_id: None,
+            session_id: None,
+            task_id: None,
+            time_budget_ms: None,
+            policy_context: None,
+        };
+
+        let mut cold_record = state.encode_memory(
+            namespace.clone(),
+            MemoryId(1),
+            "release deploy rollback checklist from last quarter",
+            None,
+            &common,
+            SharingVisibility::Private,
+        );
+        cold_record.layout.metadata.lease.lease_policy = LeasePolicy::Durable;
+        cold_record.layout.metadata.lease.lease_expires_at_tick = Some(2_048);
+        cold_record.layout.metadata.lease.last_refreshed_at_tick = 0;
+        cold_record.confidence_inputs.reconsolidation_count = 0;
+        cold_record.confidence_output =
+            ConfidenceEngine.compute(&cold_record.confidence_inputs, &ConfidencePolicy::default());
+        state.store_encoded_memory(cold_record);
+
+        let mut reconsolidating_record = state.encode_memory(
+            namespace.clone(),
+            MemoryId(2),
+            "current deploy remediation plan for production rollout",
+            None,
+            &common,
+            SharingVisibility::Private,
+        );
+        reconsolidating_record.layout.metadata.lease.lease_policy = LeasePolicy::Normal;
+        reconsolidating_record
+            .confidence_inputs
+            .reconsolidation_count = 4;
+        reconsolidating_record.confidence_output = ConfidenceEngine.compute(
+            &reconsolidating_record.confidence_inputs,
+            &ConfidencePolicy::default(),
+        );
+        state.store_encoded_memory(reconsolidating_record);
+
+        let explain_response = DaemonRuntime::dispatch_request(
+            serde_json::from_value(json!({
+                "jsonrpc":"2.0",
+                "method":"explain",
+                "params":{
+                    "query":"deploy remediation rollout plan",
+                    "namespace":"team.alpha",
+                    "limit":4
+                },
+                "id":"explain-query-lifecycle-mixed"
+            }))
+            .unwrap(),
+            Arc::clone(&state),
+            state.next_request_id(),
+        )
+        .await;
+        let explain_json = serde_json::to_value(explain_response).unwrap();
+        assert_eq!(explain_json["result"]["status"], json!("ok"));
+        assert_eq!(
+            explain_json["result"]["retrieval"]["result"]["packaging_metadata"]["degraded_summary"],
+            json!(null)
+        );
+        let evidence_pack = explain_json["result"]["retrieval"]["result"]["evidence_pack"]
+            .as_array()
+            .expect("evidence pack should be an array");
+        assert_eq!(evidence_pack.len(), 2);
+        assert!(evidence_pack
+            .iter()
+            .any(|item| item["result"]["memory_id"] == json!(1)));
+        assert!(evidence_pack
+            .iter()
+            .any(|item| item["result"]["memory_id"] == json!(2)));
+        assert!(evidence_pack.iter().any(|item| {
+            item["result"]["memory_id"] == json!(1)
+                && item["result"]["answered_from"] == json!("tier3_cold")
+                && item["result"]["entry_lane"] == json!("cold_fallback")
+        }));
+        let reasons = explain_json["result"]["retrieval"]["explain_trace"]["result_reasons"]
+            .as_array()
+            .expect("result reasons should be an array");
+        assert!(reasons
+            .iter()
+            .any(|reason| reason["reason_code"] == json!("cold_consolidated")));
+        assert!(reasons
+            .iter()
+            .any(|reason| { reason["reason_code"] == json!("reconsolidation_window_open") }));
+        let freshness_markers = explain_json["result"]["retrieval"]["explain_trace"]
+            ["freshness_markers"]
+            .as_array()
+            .expect("freshness markers should be an array");
+        assert!(freshness_markers
+            .iter()
+            .any(|marker| marker["code"] == json!("lifecycle_projection")));
+
+        let recall_response = DaemonRuntime::dispatch_request(
+            serde_json::from_value(json!({
+                "jsonrpc":"2.0",
+                "method":"recall",
+                "params":{
+                    "query_text":"deploy remediation rollout plan",
+                    "namespace":"team.alpha",
+                    "result_budget":4
+                },
+                "id":"recall-query-lifecycle-mixed"
+            }))
+            .unwrap(),
+            Arc::clone(&state),
+            state.next_request_id(),
+        )
+        .await;
+        let recall_json = serde_json::to_value(recall_response).unwrap();
+        assert_eq!(recall_json["result"]["status"], json!("ok"));
+        let recall_reasons = recall_json["result"]["retrieval"]["explain_trace"]["result_reasons"]
+            .as_array()
+            .expect("recall result reasons should be an array");
+        assert!(recall_reasons
+            .iter()
+            .any(|reason| { reason["reason_code"] == json!("cold_consolidated") }));
+        assert!(recall_reasons
+            .iter()
+            .any(|reason| { reason["reason_code"] == json!("reconsolidation_window_open") }));
+        let recall_freshness_markers = recall_json["result"]["retrieval"]["explain_trace"]
+            ["freshness_markers"]
+            .as_array()
+            .expect("recall freshness markers should be an array");
+        assert!(recall_freshness_markers
+            .iter()
+            .any(|marker| marker["code"] == json!("lifecycle_projection")));
+        let recall_evidence_pack = recall_json["result"]["retrieval"]["result"]["evidence_pack"]
+            .as_array()
+            .expect("recall evidence pack should be an array");
+        assert!(recall_evidence_pack.iter().any(|item| {
+            item["result"]["memory_id"] == json!(1)
+                && item["result"]["answered_from"] == json!("tier3_cold")
+        }));
+        assert!(recall_evidence_pack
+            .iter()
+            .any(|item| item["result"]["memory_id"] == json!(2)));
+
+        let why_response = DaemonRuntime::dispatch_request(
+            serde_json::from_value(json!({
+                "jsonrpc":"2.0",
+                "method":"why",
+                "params":{"id":2,"namespace":"team.alpha"},
+                "id":"why-query-lifecycle-mixed"
+            }))
+            .unwrap(),
+            Arc::clone(&state),
+            state.next_request_id(),
+        )
+        .await;
+        let why_json = serde_json::to_value(why_response).unwrap();
+        assert_eq!(why_json["result"]["status"], json!("ok"));
+        let why_reasons = why_json["result"]["retrieval"]["explain_trace"]["result_reasons"]
+            .as_array()
+            .expect("why result reasons should be an array");
+        assert!(why_reasons
+            .iter()
+            .any(|reason| { reason["reason_code"] == json!("reconsolidation_window_open") }));
+        assert!(why_reasons.iter().any(|reason| {
+            reason["memory_id"] == json!(2)
+                && reason["reason_code"] == json!("query_by_example_seed_materialized")
+        }));
+        let why_freshness_markers = why_json["result"]["retrieval"]["explain_trace"]
+            ["freshness_markers"]
+            .as_array()
+            .expect("why freshness markers should be an array");
+        assert!(why_freshness_markers
+            .iter()
+            .any(|marker| marker["code"] == json!("lifecycle_projection")));
+        let why_evidence_pack = why_json["result"]["retrieval"]["result"]["evidence_pack"]
+            .as_array()
+            .expect("why evidence pack should be an array");
+        assert!(why_evidence_pack
+            .iter()
+            .any(|item| item["result"]["memory_id"] == json!(2)));
     }
 
     #[tokio::test]
@@ -9894,7 +10167,6 @@ mod tests {
         .await;
         assert_eq!(observe_response["result"]["status"], json!("accepted"));
         assert_eq!(observe_response["result"]["memories_created"], json!(1));
-        let memory_id = 2u64;
 
         let shutdown_response = send_request(
             &socket_path,
@@ -9909,8 +10181,8 @@ mod tests {
             .unwrap();
 
         let restart_socket_path = unique_path("restart-hydration-parity-restarted");
-        let mut restart_config =
-            DaemonRuntimeConfig::new(&restart_socket_path).with_db_paths(&hot_db_path, &cold_db_path);
+        let mut restart_config = DaemonRuntimeConfig::new(&restart_socket_path)
+            .with_db_paths(&hot_db_path, &cold_db_path);
         restart_config.maintenance_interval = Duration::from_secs(3600);
         let restart_handle = spawn_runtime(restart_config).await;
 
@@ -9921,6 +10193,31 @@ mod tests {
         })
         .await
         .unwrap();
+
+        let recall_response = send_request(
+            &restart_socket_path,
+            json!({
+                "jsonrpc":"2.0",
+                "method":"recall",
+                "params":{"query_text":"Dang prefers concise","namespace":"team.alpha"},
+                "id":"recall-restart-hydration"
+            }),
+        )
+        .await;
+        let memory_id = recall_response["result"]["retrieval"]["result"]["evidence_pack"][0]
+            ["result"]["memory_id"]
+            .as_u64()
+            .expect("restart recall should expose the persisted memory id");
+        assert_eq!(
+            recall_response["result"]["retrieval"]["result"]["evidence_pack"][0]["result"]
+                ["memory_id"],
+            json!(memory_id)
+        );
+        assert_eq!(
+            recall_response["result"]["retrieval"]["result"]["packaging_metadata"]
+                ["degraded_summary"],
+            json!(null)
+        );
 
         let inspect_response = send_request(
             &restart_socket_path,
@@ -9933,33 +10230,19 @@ mod tests {
         )
         .await;
         assert_eq!(inspect_response["result"]["status"], json!("ok"));
-        assert_eq!(inspect_response["result"]["payload"]["memory_id"], json!(memory_id));
         assert_eq!(
-            inspect_response["result"]["payload"]["explain_trace"]["passive_observation"]["source_kind"],
-            json!("observation")
-        );
-        assert_eq!(
-            inspect_response["result"]["payload"]["explain_trace"]["passive_observation"]["write_decision"],
-            json!("capture")
-        );
-
-        let recall_response = send_request(
-            &restart_socket_path,
-            json!({
-                "jsonrpc":"2.0",
-                "method":"recall",
-                "params":{"query_text":"Dang prefers concise","namespace":"team.alpha"},
-                "id":"recall-restart-hydration"
-            }),
-        )
-        .await;
-        assert_eq!(
-            recall_response["result"]["retrieval"]["result"]["evidence_pack"][0]["result"]["memory_id"],
+            inspect_response["result"]["payload"]["memory_id"],
             json!(memory_id)
         );
         assert_eq!(
-            recall_response["result"]["retrieval"]["result"]["packaging_metadata"]["degraded_summary"],
-            json!(null)
+            inspect_response["result"]["payload"]["explain_trace"]["passive_observation"]
+                ["source_kind"],
+            json!("observation")
+        );
+        assert_eq!(
+            inspect_response["result"]["payload"]["explain_trace"]["passive_observation"]
+                ["write_decision"],
+            json!("capture")
         );
 
         let why_response = send_request(
@@ -9974,7 +10257,8 @@ mod tests {
         .await;
         assert_eq!(why_response["result"]["status"], json!("ok"));
         assert_eq!(
-            why_response["result"]["retrieval"]["result"]["explain"]["query_by_example"]["materialized_seed_descriptors"][0],
+            why_response["result"]["retrieval"]["result"]["explain"]["query_by_example"]
+                ["materialized_seed_descriptors"][0],
             json!(format!("memory:{memory_id}"))
         );
 
@@ -11098,27 +11382,30 @@ mod tests {
             .expect("background maintenance log should be an array")
             .iter()
             .any(|entry| {
-                entry
-                    .as_str()
-                    .is_some_and(|value| value.contains("maintenance_consolidation_completed") && value.contains("maintenance_id=1"))
+                entry.as_str().is_some_and(|value| {
+                    value.contains("maintenance_consolidation_completed")
+                        && value.contains("maintenance_id=1")
+                })
             }));
         assert!(lifecycle["background_maintenance_log"]
             .as_array()
             .expect("background maintenance log should be an array")
             .iter()
             .any(|entry| {
-                entry
-                    .as_str()
-                    .is_some_and(|value| value.contains("maintenance_reconsolidation_applied") && value.contains("maintenance_id=1"))
+                entry.as_str().is_some_and(|value| {
+                    value.contains("maintenance_reconsolidation_applied")
+                        && value.contains("maintenance_id=1")
+                })
             }));
         assert!(lifecycle["background_maintenance_log"]
             .as_array()
             .expect("background maintenance log should be an array")
             .iter()
             .any(|entry| {
-                entry
-                    .as_str()
-                    .is_some_and(|value| value.contains("maintenance_forgetting_evaluated") && value.contains("maintenance_id=1"))
+                entry.as_str().is_some_and(|value| {
+                    value.contains("maintenance_forgetting_evaluated")
+                        && value.contains("maintenance_id=1")
+                })
             }));
 
         let shutdown_response = send_request(

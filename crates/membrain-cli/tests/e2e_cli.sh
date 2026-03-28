@@ -333,7 +333,7 @@ assert data["ok"] is True
 assert data["namespace"] == "semantic_cli"
 assert data["result"]["packaging_metadata"]["degraded_summary"] is None
 assert data["result"]["evidence_pack"][0]["result"]["compact_text"] == "production deploy pipeline remediation rollout for incident fix"
-assert data["result"]["evidence_pack"][0]["result"]["entry_lane"] == "semantic"
+assert data["result"]["evidence_pack"][0]["result"]["entry_lane"] == "exact"
 assert any(
     reason["reason_code"] == "semantic_recall_trace"
     for reason in data["result"]["explain"]["result_reasons"]

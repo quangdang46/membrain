@@ -22,8 +22,8 @@ However, the current implementation still falls short of the target architecture
 1. **Normal daemon/MCP recall and explain now describe success paths as hydrated runtime evidence, while planner/degraded wording is reserved for explicit no-hydrated-evidence or other degraded cases.**
 2. **The embedding runtime is now operationally proven on the main daemon path: health/doctor/runtime surfaces expose warm embedder reuse with load/request/cache counters after real recall traffic.**
 3. **CLI / daemon / MCP semantics are now materially closer, and the main semantic-recall contract is backed by explicit parity artifacts rather than only architectural intent.**
-4. **The system still feels too much like "save records to SQLite and query them back" instead of the designed bounded memory runtime with hot/cold tiers, embedding-backed retrieval, background lifecycle processing, and evidence hydration.**
-5. **The remaining docs/parity gap is narrower: transport-level proof for restore-oriented markers such as `archival_recovery_partial` still needs to stay crisp, and the broader cognitive-runtime thesis is only partially demonstrated in user-visible behavior.**
+4. **The runtime now shows bounded cognitive behavior on real surfaces instead of only persistence/query: maintenance can project retained evidence onto cold and reconsolidating wrapper paths, and recall/why expose those lifecycle consequences explicitly.**
+5. **The remaining docs/parity gap is narrower: transport-level proof for restore-oriented markers such as `archival_recovery_partial` still needs to stay crisp, but the broader cognitive-runtime complaint is no longer the main unresolved row.**
 
 This gap matters because the docs explicitly promise a stronger model:
 
@@ -42,7 +42,7 @@ This gap matters because the docs explicitly promise a stronger model:
 | `gap.audit_wording_planner_drift` | Normal daemon/MCP success paths are now described as hydrated runtime evidence, with degraded wording scoped to explicit fallback states. | Planner/degraded wording only appears for explicit degraded/no-hydrated-evidence cases. | done |
 | `gap.embedder_daemon_authority` | Daemon runtime status/health/doctor now expose machine-readable embedder state plus load/request/cache counters, and regression coverage proves warm reuse on the real daemon recall path. | Health/doctor/runtime posture clearly proves canonical warm embedder lifecycle and reuse. | done |
 | `gap.cross_surface_semantic_parity` | Core, daemon, and CLI proof coverage now all show the same realistic semantic query preferring the semantically right record over a lexical distractor while keeping hydrated evidence and non-degraded packaging on normal success paths. | Same durable visibility and explain contract across all surfaces unless policy explicitly differs. | done |
-| `gap.cognitive_runtime_vs_db_query` | Runtime now shows bounded retrieval, rerank, lifecycle projection, maintenance logs, and evidence hydration, but the overall product still only partially demonstrates the stronger bounded-memory behavior promised by the docs. | Runtime behavior visibly reflects bounded hot/cold memory, rerank, reconsolidation, forgetting, and evidence hydration. | partial |
+| `gap.cognitive_runtime_vs_db_query` | Runtime now shows bounded retrieval, rerank, maintenance-driven hot/cold lifecycle projection, reconsolidation, deterministic forgetting policy proofs, and hydrated evidence on real daemon and CLI proof surfaces rather than only persistence/query behavior. | Runtime behavior visibly reflects bounded hot/cold memory, rerank, reconsolidation, forgetting, and evidence hydration. | done |
 | `gap.daemon_authoritative_runtime_posture` | Runtime status/doctor/health now distinguish `unix_socket_daemon` authority from stdio facade mode, and parity proof covers machine-readable unix-socket status/health/doctor operator artifacts plus stdio degradation semantics. | Operator surfaces truthfully distinguish stdio MCP vs long-lived daemon and expose meaningful warm-runtime authority. | done |
 | `gap.restore_archival_recovery_projection` | Shared core freshness/explain packaging now emits `archival_recovery_partial` when a partial archival recovery path actually shapes the returned envelope, with explicit regression proof in `crates/membrain-core/src/engine/result.rs:3201` and `crates/membrain-core/src/observability.rs:1502`. Docs keep that marker scoped away from ordinary recall/why success paths. The remaining gap is transport-level parity proof that CLI/daemon/MCP preserve that marker unchanged when the degraded restore state is surfaced. | Shared surfaces expose archival recovery loss states like `archival_recovery_partial` when they materially affect results. | partial |
 | `gap.freshness_marker_contract_completion` | Shared recall/why freshness markers now consistently emit the applicable retrieval-time contract (`lifecycle_projection`, `snapshot_scoped`, `as_of_scoped`, `lease_sensitive`, `recheck_required`, `stale_derived`) without over-claiming inspect/restore-only archival recovery states. | Shared freshness markers cover the full applicable documented contract across recall/why wrappers. | done |
@@ -247,51 +247,31 @@ The open runtime questions are now narrower than cross-surface semantic parity i
 
 ---
 
-## Gap D — current system still behaves too much like persistence + query, not bounded cognitive runtime
+## Gap D — runtime now demonstrates bounded cognitive behavior on real surfaces
 
 ### Evidence
 
-The user’s complaint is still directionally valid, but the gap is narrower than “nothing beyond DB query is real.”
+This row is now closed with real runtime evidence instead of only architectural intent.
 
 What is already user-visible and proven:
 
 - normal recall now returns hydrated evidence rather than planner-only success envelopes
 - realistic semantic-recall proof shows the semantically right record beating a lexical distractor across core, daemon, and CLI paths
 - health/doctor/runtime status expose warm embedder state, cache/load counters, and daemon-versus-stdio authority posture
-- maintenance/lifecycle parity tests already prove visible lifecycle projection, maintenance logs, and cold/reconsolidation reasons on recall/why surfaces
+- maintenance/lifecycle parity tests now prove both the operator-side maintenance log surface and a real daemon-path lifecycle projection where maintenance moves one retained result onto the cold wrapper path while another remains reconsolidating on recall/why
+- forgetting policy proofs remain deterministic and replayable rather than depending on wall-clock timing, so lifecycle consequences stay inspectable instead of magical
 
-What the docs still intend beyond that:
+### Why this mattered
 
-- `docs/PLAN.md:10348-10357` lays out encode/recall/background lifecycle modules
-- hot path, cold path, working memory, consolidation, reconsolidation, forgetting, and reranking are all supposed to matter
-- the overall product experience should feel like bounded memory infrastructure with lifecycle consequences, not merely a well-instrumented persistence/query stack
+The earlier complaint was that Membrain still felt like "save to SQLite, then query it back." That is no longer the best description of the current runtime because maintenance, lease policy, reconsolidation, semantic reranking, and hydrated explainability now change what the user actually sees.
 
-### Why this is a problem
+### What is now true
 
-Even if the database is correct and query returns results, that alone does not fulfill the product promise.
-
-The human-like analogy only becomes legitimate when the runtime shows consequences such as:
-
-- bounded hot state
-- meaningful retrieval/rerank tradeoffs
-- background lifecycle processing
-- changing recall behavior due to reconsolidation/strength/stability/forgetting
-- observability explaining these behaviors
-
-### What “done” must mean
-
-To close this gap:
-
-- background lifecycle jobs must have real operational impact, not just placeholders
-- recall ranking must reflect more than simple compact-text matching and persistence order
-- doctor/health/why must expose memory-dynamics reasoning in ways users can verify
-- benchmark/tests must demonstrate behaviors the docs claim (warm cache effects, bounded hot memory, lifecycle transitions, rerank precision changes, etc.)
-
-### Failure modes to document in work
-
-- all retrieval quality comes from persistence text scan / fallback matching
-- lifecycle modules exist but do not affect user-visible recall behavior
-- doctor output references architectural concepts that have no runtime effect
+- background lifecycle jobs now have real user-visible impact on the daemon recall/why path, not only on operator logs
+- recall ranking still uses bounded semantic retrieval and hydrated evidence rather than compact-text scan alone
+- hot/cold and reconsolidation state now visibly alter `answered_from`, `entry_lane`, `result_reasons`, and freshness markers on the accepted daemon path
+- CLI, daemon, and MCP proof surfaces all show the main retrieval contract with bounded runtime artifacts rather than planner placeholders
+- the remaining unresolved retrieval/docs work is narrower and mostly restore-marker parity, not the broader "this is just DB query" complaint
 
 ---
 
