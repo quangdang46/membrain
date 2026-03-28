@@ -1,18 +1,27 @@
+#[cfg(unix)]
 use membrain_core::engine::confidence::{ConfidenceInputs, ConfidenceOutput};
+#[cfg(unix)]
 use membrain_core::engine::contradiction::ResolutionState;
+#[cfg(unix)]
 use membrain_core::engine::lease::LeaseMetadata;
+#[cfg(unix)]
 use membrain_core::engine::result::FreshnessMarkers;
+#[cfg(unix)]
 use membrain_core::persistence::{
     open_hot_db, save_runtime_records, PersistedDaemonMemoryRecord, PersistedTier2Layout,
 };
+#[cfg(unix)]
 use membrain_core::types::{CanonicalMemoryType, FastPathRouteFamily};
 use serde_json::{json, Value};
 use std::io::{BufRead, BufReader, Write};
 #[cfg(unix)]
 use std::os::unix::net::UnixStream;
 use std::process::{Child, Command, Stdio};
+#[cfg(unix)]
 use std::thread::sleep;
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
+#[cfg(unix)]
+use std::time::Duration;
+use std::time::{SystemTime, UNIX_EPOCH};
 
 fn test_db_root() -> std::path::PathBuf {
     let unique = SystemTime::now()
@@ -46,6 +55,7 @@ fn parse_json(stdout: &str) -> Value {
     serde_json::from_str(stdout).expect("command should emit valid json")
 }
 
+#[cfg(unix)]
 fn seed_runtime_records(db_root: &std::path::Path, records: &[PersistedDaemonMemoryRecord]) {
     std::fs::create_dir_all(db_root).expect("db root should exist");
     let hot_db_path = db_root.join("hot.db");
@@ -53,6 +63,7 @@ fn seed_runtime_records(db_root: &std::path::Path, records: &[PersistedDaemonMem
     save_runtime_records(&mut conn, records).expect("runtime records should save");
 }
 
+#[cfg(unix)]
 fn seeded_runtime_record(
     memory_id: u64,
     namespace: &str,
