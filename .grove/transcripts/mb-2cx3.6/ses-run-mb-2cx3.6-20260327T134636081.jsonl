@@ -1,1 +1,45 @@
 {"ts":"2026-03-27T13:46:36.140776757Z","kind":"session_started","session_id":"ses-run-mb-2cx3.6-20260327T134636081"}
+{"ts":"2026-03-27T14:19:33.157583787Z","kind":"stdout","line":"GROVE_RESULT: success"}
+{"ts":"2026-03-27T14:19:33.157583787Z","kind":"protocol","event":{"type":"result","summary":"success"}}
+{"ts":"2026-03-27T14:19:33.319426747Z","kind":"stdout","line":""}
+{"ts":"2026-03-27T14:19:33.319467318Z","kind":"stdout","line":"GROVE_ARTIFACTS:"}
+{"ts":"2026-03-27T14:19:33.319467318Z","kind":"protocol","event":{"type":"artifacts","items":[]}}
+{"ts":"2026-03-27T14:19:33.320645935Z","kind":"stdout","line":"- `crates/membrain-core/src/engine/result.rs:303` added shared `FreshnessMarkers::archival_recovery_partial(...)`"}
+{"ts":"2026-03-27T14:19:33.320645935Z","kind":"protocol","event":{"type":"artifacts","items":["`crates/membrain-core/src/engine/result.rs:303` added shared `FreshnessMarkers::archival_recovery_partial(...)`"]}}
+{"ts":"2026-03-27T14:19:33.320656078Z","kind":"stdout","line":"- `crates/membrain-core/src/engine/result.rs:669` preserved explicit partial-restore projection instead of overwriting it with generic `cold_consolidated`"}
+{"ts":"2026-03-27T14:19:33.320656078Z","kind":"protocol","event":{"type":"artifacts","items":["`crates/membrain-core/src/engine/result.rs:669` preserved explicit partial-restore projection instead of overwriting it with generic `cold_consolidated`"]}}
+{"ts":"2026-03-27T14:19:33.320712427Z","kind":"stdout","line":"- `crates/membrain-core/src/observability.rs:853` emits `archival_recovery_partial` only when the retrieval envelope actually carries `partially_restored -> archival_recovery_partial`"}
+{"ts":"2026-03-27T14:19:33.320712427Z","kind":"protocol","event":{"type":"artifacts","items":["`crates/membrain-core/src/observability.rs:853` emits `archival_recovery_partial` only when the retrieval envelope actually carries `partially_restored -> archival_recovery_partial`"]}}
+{"ts":"2026-03-27T14:19:33.320721341Z","kind":"stdout","line":"- `crates/membrain-core/src/engine/result.rs:3201` added focused result-surface test"}
+{"ts":"2026-03-27T14:19:33.320721341Z","kind":"protocol","event":{"type":"artifacts","items":["`crates/membrain-core/src/engine/result.rs:3201` added focused result-surface test"]}}
+{"ts":"2026-03-27T14:19:33.320728Z","kind":"stdout","line":"- `crates/membrain-core/src/observability.rs:1502` added focused observability marker test"}
+{"ts":"2026-03-27T14:19:33.320728Z","kind":"protocol","event":{"type":"artifacts","items":["`crates/membrain-core/src/observability.rs:1502` added focused observability marker test"]}}
+{"ts":"2026-03-27T14:19:33.320734864Z","kind":"stdout","line":""}
+{"ts":"2026-03-27T14:19:33.320737631Z","kind":"stdout","line":"GROVE_DECISIONS:"}
+{"ts":"2026-03-27T14:19:33.320737631Z","kind":"protocol","event":{"type":"decision","items":[]}}
+{"ts":"2026-03-27T14:19:33.320743265Z","kind":"stdout","line":"- Reused existing cold-store restore vocabulary: `partially_restored`"}
+{"ts":"2026-03-27T14:19:33.320743265Z","kind":"protocol","event":{"type":"decision","items":["Reused existing cold-store restore vocabulary: `partially_restored`"]}}
+{"ts":"2026-03-27T14:19:33.320750130Z","kind":"stdout","line":"- Kept ordinary cold recall separate from restore semantics by only emitting `archival_recovery_partial` when the packaged envelope is already marked as partial archival recovery"}
+{"ts":"2026-03-27T14:19:33.320750130Z","kind":"protocol","event":{"type":"decision","items":["Kept ordinary cold recall separate from restore semantics by only emitting `archival_recovery_partial` when the packaged envelope is already marked as partial archival recovery"]}}
+{"ts":"2026-03-27T14:19:33.320756379Z","kind":"stdout","line":"- Left generic consolidated tier3 behavior unchanged for non-restore cold results"}
+{"ts":"2026-03-27T14:19:33.320756379Z","kind":"protocol","event":{"type":"decision","items":["Left generic consolidated tier3 behavior unchanged for non-restore cold results"]}}
+{"ts":"2026-03-27T14:19:33.320762527Z","kind":"stdout","line":""}
+{"ts":"2026-03-27T14:19:33.320764985Z","kind":"stdout","line":"GROVE_LESSONS:"}
+{"ts":"2026-03-27T14:19:33.320764985Z","kind":"protocol","event":{"type":"lessons","items":[]}}
+{"ts":"2026-03-27T14:19:33.320800127Z","kind":"stdout","line":"- The shared freshness surface already had the right projection hook via `durable_lifecycle_state` and `routing_lifecycle_state`; the missing piece was a dedicated partial-restore mapping plus avoiding later overwrite in cold-tier lifecycle projection"}
+{"ts":"2026-03-27T14:19:33.320800127Z","kind":"protocol","event":{"type":"lessons","items":["The shared freshness surface already had the right projection hook via `durable_lifecycle_state` and `routing_lifecycle_state`; the missing piece was a dedicated partial-restore mapping plus avoiding later overwrite in cold-tier lifecycle projection"]}}
+{"ts":"2026-03-27T14:19:33.320806581Z","kind":"stdout","line":"- `apply_lifecycle_observability` was the critical conflict point because tier3 cold handling would otherwise erase explicit restore-loss semantics"}
+{"ts":"2026-03-27T14:19:33.320806581Z","kind":"protocol","event":{"type":"lessons","items":["`apply_lifecycle_observability` was the critical conflict point because tier3 cold handling would otherwise erase explicit restore-loss semantics"]}}
+{"ts":"2026-03-27T14:19:33.320811192Z","kind":"stdout","line":""}
+{"ts":"2026-03-27T14:19:33.320812933Z","kind":"stdout","line":"GROVE_WARNINGS:"}
+{"ts":"2026-03-27T14:19:33.320812933Z","kind":"protocol","event":{"type":"warning","items":[]}}
+{"ts":"2026-03-27T14:19:33.320816622Z","kind":"stdout","line":"- `cargo check --all-targets` passes, but there is a pre-existing warning in `crates/membrain-daemon/src/daemon.rs` for unused `persisted_memory_count`"}
+{"ts":"2026-03-27T14:19:33.320816622Z","kind":"protocol","event":{"type":"warning","items":["`cargo check --all-targets` passes, but there is a pre-existing warning in `crates/membrain-daemon/src/daemon.rs` for unused `persisted_memory_count`"]}}
+{"ts":"2026-03-27T14:19:33.320821539Z","kind":"stdout","line":""}
+{"ts":"2026-03-27T14:19:33.320823588Z","kind":"stdout","line":"Validation:"}
+{"ts":"2026-03-27T14:19:33.320825637Z","kind":"stdout","line":"- `cargo test -p membrain-core archival_recovery_partial`"}
+{"ts":"2026-03-27T14:19:33.320827891Z","kind":"stdout","line":"- `cargo check --all-targets`"}
+{"ts":"2026-03-27T14:19:33.320829838Z","kind":"stdout","line":""}
+{"ts":"2026-03-27T14:19:33.320923173Z","kind":"stdout","line":"GROVE_EXIT: true"}
+{"ts":"2026-03-27T14:19:33.320923173Z","kind":"protocol","event":{"type":"exit","value":true}}
+{"ts":"2026-03-27T14:19:34.821701101Z","kind":"session_ended","exit_code":0}

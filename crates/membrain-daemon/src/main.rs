@@ -1,6 +1,7 @@
 use clap::Parser;
 use membrain_core::persistence::default_local_paths;
 use membrain_daemon::daemon::{DaemonRuntime, DaemonRuntimeConfig};
+use membrain_daemon::init_file_tracing;
 use std::path::PathBuf;
 use std::time::Duration;
 
@@ -74,6 +75,7 @@ struct Cli {
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
     let cli = Cli::parse();
+    init_file_tracing(cli.socket_path.parent());
     let mut config = DaemonRuntimeConfig::new(&cli.socket_path);
     config.request_concurrency = cli.request_concurrency;
     config.max_queue_depth = cli.max_queue_depth;

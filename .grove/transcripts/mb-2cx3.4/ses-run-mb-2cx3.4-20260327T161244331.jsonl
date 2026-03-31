@@ -1,0 +1,60 @@
+{"ts":"2026-03-27T16:12:44.338344768Z","kind":"session_started","session_id":"ses-run-mb-2cx3.4-20260327T161244331"}
+{"ts":"2026-03-27T16:24:53.909032599Z","kind":"stdout","line":"Done."}
+{"ts":"2026-03-27T16:24:54.170959411Z","kind":"stdout","line":""}
+{"ts":"2026-03-27T16:24:54.170975778Z","kind":"stdout","line":"GROVE_RESULT: success"}
+{"ts":"2026-03-27T16:24:54.170975778Z","kind":"protocol","event":{"type":"result","summary":"success"}}
+{"ts":"2026-03-27T16:24:54.177648437Z","kind":"stdout","line":""}
+{"ts":"2026-03-27T16:24:54.177687372Z","kind":"stdout","line":"GROVE_ARTIFACTS:"}
+{"ts":"2026-03-27T16:24:54.177687372Z","kind":"protocol","event":{"type":"artifacts","items":[]}}
+{"ts":"2026-03-27T16:24:54.204814829Z","kind":"stdout","line":"- Updated `crates/membrain-daemon/src/daemon.rs`"}
+{"ts":"2026-03-27T16:24:54.204814829Z","kind":"protocol","event":{"type":"artifacts","items":["Updated `crates/membrain-daemon/src/daemon.rs`"]}}
+{"ts":"2026-03-27T16:24:54.204859762Z","kind":"stdout","line":"- Added regression `runtime_query_explain_surfaces_mixed_lifecycle_reasons_on_wrapper_path`"}
+{"ts":"2026-03-27T16:24:54.204859762Z","kind":"protocol","event":{"type":"artifacts","items":["Added regression `runtime_query_explain_surfaces_mixed_lifecycle_reasons_on_wrapper_path`"]}}
+{"ts":"2026-03-27T16:24:54.204887616Z","kind":"stdout","line":"- Preserved daemon wrapper-path lifecycle tier provenance instead of hard-coding `tier2_indexed`"}
+{"ts":"2026-03-27T16:24:54.204887616Z","kind":"protocol","event":{"type":"artifacts","items":["Preserved daemon wrapper-path lifecycle tier provenance instead of hard-coding `tier2_indexed`"]}}
+{"ts":"2026-03-27T16:24:54.204926347Z","kind":"stdout","line":""}
+{"ts":"2026-03-27T16:24:54.204945357Z","kind":"stdout","line":"GROVE_LESSONS:"}
+{"ts":"2026-03-27T16:24:54.204945357Z","kind":"protocol","event":{"type":"lessons","items":[]}}
+{"ts":"2026-03-27T16:24:54.205032883Z","kind":"stdout","line":"- The missing gap was real production behavior, not just missing proof: daemon semantic/result builders were flattening runtime evidence to `tier2_indexed`, which prevented wrapper-path cold lifecycle reasons from surfacing."}
+{"ts":"2026-03-27T16:24:54.205032883Z","kind":"protocol","event":{"type":"lessons","items":["The missing gap was real production behavior, not just missing proof: daemon semantic/result builders were flattening runtime evidence to `tier2_indexed`, which prevented wrapper-path cold lifecycle reasons from surfacing."]}}
+{"ts":"2026-03-27T16:24:54.205062567Z","kind":"stdout","line":"- A daemon-local seeded runtime fixture was the smallest safe way to prove mixed cold + reconsolidating behavior on a real wrapper path."}
+{"ts":"2026-03-27T16:24:54.205062567Z","kind":"protocol","event":{"type":"lessons","items":["A daemon-local seeded runtime fixture was the smallest safe way to prove mixed cold + reconsolidating behavior on a real wrapper path."]}}
+{"ts":"2026-03-27T16:24:54.205076392Z","kind":"stdout","line":""}
+{"ts":"2026-03-27T16:24:54.205082390Z","kind":"stdout","line":"GROVE_DECISIONS:"}
+{"ts":"2026-03-27T16:24:54.205082390Z","kind":"protocol","event":{"type":"decision","items":[]}}
+{"ts":"2026-03-27T16:24:54.205095402Z","kind":"stdout","line":"- Avoided the contended `crates/membrain-daemon/tests/runtime_doctor_parity.rs`."}
+{"ts":"2026-03-27T16:24:54.205095402Z","kind":"protocol","event":{"type":"decision","items":["Avoided the contended `crates/membrain-daemon/tests/runtime_doctor_parity.rs`."]}}
+{"ts":"2026-03-27T16:24:54.205107601Z","kind":"stdout","line":"- Landed the slice in `crates/membrain-daemon/src/daemon.rs`, where the daemon already has direct runtime-state test seams."}
+{"ts":"2026-03-27T16:24:54.205107601Z","kind":"protocol","event":{"type":"decision","items":["Landed the slice in `crates/membrain-daemon/src/daemon.rs`, where the daemon already has direct runtime-state test seams."]}}
+{"ts":"2026-03-27T16:24:54.205119292Z","kind":"stdout","line":"- Mapped durable lease-backed runtime records to `AnsweredFrom::Tier3Cold` so wrapper output can honestly emit lifecycle consequences."}
+{"ts":"2026-03-27T16:24:54.205119292Z","kind":"protocol","event":{"type":"decision","items":["Mapped durable lease-backed runtime records to `AnsweredFrom::Tier3Cold` so wrapper output can honestly emit lifecycle consequences."]}}
+{"ts":"2026-03-27T16:24:54.205153652Z","kind":"stdout","line":""}
+{"ts":"2026-03-27T16:24:54.205157311Z","kind":"stdout","line":"GROVE_WARNINGS:"}
+{"ts":"2026-03-27T16:24:54.205157311Z","kind":"protocol","event":{"type":"warning","items":[]}}
+{"ts":"2026-03-27T16:24:54.205164529Z","kind":"stdout","line":"- `cargo check --all-targets` still reports the pre-existing warning at `crates/membrain-daemon/src/daemon.rs:1859` for unused `persisted_memory_count`."}
+{"ts":"2026-03-27T16:24:54.205164529Z","kind":"protocol","event":{"type":"warning","items":["`cargo check --all-targets` still reports the pre-existing warning at `crates/membrain-daemon/src/daemon.rs:1859` for unused `persisted_memory_count`."]}}
+{"ts":"2026-03-27T16:24:54.205175Z","kind":"stdout","line":"- I did not touch unrelated warning cleanup."}
+{"ts":"2026-03-27T16:24:54.205175Z","kind":"protocol","event":{"type":"warning","items":["I did not touch unrelated warning cleanup."]}}
+{"ts":"2026-03-27T16:24:54.205184454Z","kind":"stdout","line":""}
+{"ts":"2026-03-27T16:24:54.205187910Z","kind":"stdout","line":"What changed:"}
+{"ts":"2026-03-27T16:24:54.205191773Z","kind":"stdout","line":"- Added `RuntimeState::answered_from_for_record(...)` in `crates/membrain-daemon/src/daemon.rs:369`."}
+{"ts":"2026-03-27T16:24:54.205196551Z","kind":"stdout","line":"- Replaced daemon builder callsites that forced `AnsweredFrom::Tier2Indexed` with runtime-derived provenance in `crates/membrain-daemon/src/daemon.rs:5354`, `crates/membrain-daemon/src/daemon.rs:5594`, and `crates/membrain-daemon/src/daemon.rs:5962`."}
+{"ts":"2026-03-27T16:24:54.205201532Z","kind":"stdout","line":"- Added wrapper-path regression in `crates/membrain-daemon/src/daemon.rs:9321`."}
+{"ts":"2026-03-27T16:24:54.205205192Z","kind":"stdout","line":""}
+{"ts":"2026-03-27T16:24:54.205208546Z","kind":"stdout","line":"What the new regression proves:"}
+{"ts":"2026-03-27T16:24:54.205212511Z","kind":"stdout","line":"- real daemon `explain` wrapper path returns hydrated evidence with `degraded_summary == null`"}
+{"ts":"2026-03-27T16:24:54.205216272Z","kind":"stdout","line":"- mixed lifecycle result now shows:"}
+{"ts":"2026-03-27T16:24:54.205220339Z","kind":"stdout","line":"  - `answered_from = tier3_cold`"}
+{"ts":"2026-03-27T16:24:54.205224507Z","kind":"stdout","line":"  - `entry_lane = cold_fallback`"}
+{"ts":"2026-03-27T16:24:54.205228979Z","kind":"stdout","line":"  - `result_reasons` includes `cold_consolidated`"}
+{"ts":"2026-03-27T16:24:54.205233046Z","kind":"stdout","line":"  - `result_reasons` includes `reconsolidation_window_open`"}
+{"ts":"2026-03-27T16:24:54.205236705Z","kind":"stdout","line":"  - `freshness_markers` includes `lifecycle_projection`"}
+{"ts":"2026-03-27T16:24:54.205240263Z","kind":"stdout","line":""}
+{"ts":"2026-03-27T16:24:54.205243516Z","kind":"stdout","line":"Validation:"}
+{"ts":"2026-03-27T16:24:54.205247379Z","kind":"stdout","line":"- `cargo test -p membrain-daemon runtime_query_explain_surfaces_mixed_lifecycle_reasons_on_wrapper_path -- --nocapture`"}
+{"ts":"2026-03-27T16:24:54.205251547Z","kind":"stdout","line":"- `cargo test -p membrain-daemon runtime_query_explain_reports_policy_filtered_hydration_omission_reasons -- --nocapture`"}
+{"ts":"2026-03-27T16:24:54.205255207Z","kind":"stdout","line":"- `cargo check --all-targets`"}
+{"ts":"2026-03-27T16:24:54.205259172Z","kind":"stdout","line":""}
+{"ts":"2026-03-27T16:24:54.205262526Z","kind":"stdout","line":"GROVE_EXIT: false"}
+{"ts":"2026-03-27T16:24:54.205262526Z","kind":"protocol","event":{"type":"exit","value":false}}
+{"ts":"2026-03-27T16:24:56.170781321Z","kind":"session_ended","exit_code":0}

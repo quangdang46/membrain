@@ -27,6 +27,8 @@ pub mod observability;
 pub mod persistence;
 /// Centralized policy evaluation and early-denial surfaces.
 pub mod policy;
+/// Optional native local reasoning helpers for retrieval-time query rewrites.
+pub mod reasoning;
 /// Namespace-aware hot, warm, and cold storage primitives.
 pub mod store;
 /// Shared canonical data shapes exported to wrappers.

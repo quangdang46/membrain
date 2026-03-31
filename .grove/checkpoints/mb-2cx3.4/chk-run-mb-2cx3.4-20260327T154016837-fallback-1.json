@@ -1,0 +1,45 @@
+{
+  "id": "chk-run-mb-2cx3.4-20260327T154016837-fallback-1",
+  "bead_id": "mb-2cx3.4",
+  "run_id": "run-mb-2cx3.4-20260327T154016837",
+  "session_id": "ses-run-mb-2cx3.4-20260327T154016837",
+  "progress": "Synthetic fallback checkpoint after NoProgress",
+  "next_step": "Resume from the transcript tail, avoid repeating completed setup, and continue with the smallest safe remaining step.",
+  "payload": {
+    "claimed_paths": [],
+    "confidence": 0.25,
+    "context": {
+      "failure_class": "NoProgress",
+      "failure_detail": "session ended with Unknown",
+      "stderr_tail": [],
+      "stdout_tail": [
+        "",
+        "Validated by worker:",
+        "- `cargo test -p membrain-daemon runtime_recall_and_why_keep_hydrated_evidence_visible_after_maintenance -- --nocapture` ✅",
+        "- `cargo check --all-targets` ✅",
+        "",
+        "Important finding:",
+        "- The real daemon wrapper path still does **not** surface the stronger lifecycle trio directly in this scenario:",
+        "  - `cold_consolidated`",
+        "  - `reconsolidation_window_open`",
+        "  - `lifecycle_projection`",
+        "",
+        "So the remaining honest gap is now narrower:",
+        "- the runtime path proves maintenance preserves hydrated, explainable retrieval",
+        "- but it does **not yet** prove that real wrapper-path `recall`/`why` emit those lifecycle reason codes on a mixed cold + reconsolidating result",
+        "",
+        "Best next step:",
+        "- build a real daemon-path fixture/setup that actually materializes one cold-consolidated item and one reconsolidating item, then assert those exact reason codes on wrapper JSON rather than only in core tests.",
+        "",
+        "Also confirmed:",
+        "- CLI is the wrong next target for this slice; it would mostly duplicate passthrough/parity coverage rather than prove new lifecycle behavior."
+      ],
+      "synthetic": true
+    },
+    "next_step": "Resume from the transcript tail, avoid repeating completed setup, and continue with the smallest safe remaining step.",
+    "open_questions": [],
+    "progress": "Synthetic fallback checkpoint after NoProgress"
+  },
+  "saved_at": "2026-03-27T15:51:57.986373254Z",
+  "resume_generation": 1
+}

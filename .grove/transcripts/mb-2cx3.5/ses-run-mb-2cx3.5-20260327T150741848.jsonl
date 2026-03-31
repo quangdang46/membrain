@@ -1,0 +1,56 @@
+{"ts":"2026-03-27T15:07:41.852749624Z","kind":"session_started","session_id":"ses-run-mb-2cx3.5-20260327T150741848"}
+{"ts":"2026-03-27T15:17:00.881001197Z","kind":"stdout","line":"Done."}
+{"ts":"2026-03-27T15:17:01.865592923Z","kind":"stdout","line":""}
+{"ts":"2026-03-27T15:17:01.865605134Z","kind":"stdout","line":"GROVE_RESULT: done"}
+{"ts":"2026-03-27T15:17:01.865605134Z","kind":"protocol","event":{"type":"result","summary":"done"}}
+{"ts":"2026-03-27T15:17:01.933485225Z","kind":"stdout","line":""}
+{"ts":"2026-03-27T15:17:01.933514058Z","kind":"stdout","line":"GROVE_ARTIFACTS:"}
+{"ts":"2026-03-27T15:17:01.933514058Z","kind":"protocol","event":{"type":"artifacts","items":[]}}
+{"ts":"2026-03-27T15:17:01.933524833Z","kind":"stdout","line":"- Updated `crates/membrain-daemon/src/rpc.rs`"}
+{"ts":"2026-03-27T15:17:01.933524833Z","kind":"protocol","event":{"type":"artifacts","items":["Updated `crates/membrain-daemon/src/rpc.rs`"]}}
+{"ts":"2026-03-27T15:17:01.933531400Z","kind":"stdout","line":"- Updated `crates/membrain-daemon/src/daemon.rs`"}
+{"ts":"2026-03-27T15:17:01.933531400Z","kind":"protocol","event":{"type":"artifacts","items":["Updated `crates/membrain-daemon/src/daemon.rs`"]}}
+{"ts":"2026-03-27T15:17:01.933537864Z","kind":"stdout","line":"- Updated `crates/membrain-cli/src/main.rs`"}
+{"ts":"2026-03-27T15:17:01.933537864Z","kind":"protocol","event":{"type":"artifacts","items":["Updated `crates/membrain-cli/src/main.rs`"]}}
+{"ts":"2026-03-27T15:17:01.933545355Z","kind":"stdout","line":"- Updated `crates/membrain-daemon/tests/runtime_doctor_parity.rs`"}
+{"ts":"2026-03-27T15:17:01.933545355Z","kind":"protocol","event":{"type":"artifacts","items":["Updated `crates/membrain-daemon/tests/runtime_doctor_parity.rs`"]}}
+{"ts":"2026-03-27T15:17:01.933550896Z","kind":"stdout","line":"- Updated `crates/membrain-cli/tests/cli_end_to_end.rs`"}
+{"ts":"2026-03-27T15:17:01.933550896Z","kind":"protocol","event":{"type":"artifacts","items":["Updated `crates/membrain-cli/tests/cli_end_to_end.rs`"]}}
+{"ts":"2026-03-27T15:17:01.933569776Z","kind":"stdout","line":"- Closed bead `mb-2cx3.5`"}
+{"ts":"2026-03-27T15:17:01.933569776Z","kind":"protocol","event":{"type":"artifacts","items":["Closed bead `mb-2cx3.5`"]}}
+{"ts":"2026-03-27T15:17:01.933575009Z","kind":"stdout","line":""}
+{"ts":"2026-03-27T15:17:01.933577472Z","kind":"stdout","line":"GROVE_LESSONS:"}
+{"ts":"2026-03-27T15:17:01.933577472Z","kind":"protocol","event":{"type":"lessons","items":[]}}
+{"ts":"2026-03-27T15:17:01.933583116Z","kind":"stdout","line":"- Shared authority wording was duplicated across daemon and CLI surfaces; centralizing it in `RuntimeStatus` prevents semantic drift."}
+{"ts":"2026-03-27T15:17:01.933583116Z","kind":"protocol","event":{"type":"lessons","items":["Shared authority wording was duplicated across daemon and CLI surfaces; centralizing it in `RuntimeStatus` prevents semantic drift."]}}
+{"ts":"2026-03-27T15:17:01.933588964Z","kind":"stdout","line":"- Prefixing operator notes with `daemon_authority:` vs `stdio_adapter_process_local:` makes subprocess-only posture explicitly non-authoritative without changing the machine-readable fields."}
+{"ts":"2026-03-27T15:17:01.933588964Z","kind":"protocol","event":{"type":"lessons","items":["Prefixing operator notes with `daemon_authority:` vs `stdio_adapter_process_local:` makes subprocess-only posture explicitly non-authoritative without changing the machine-readable fields."]}}
+{"ts":"2026-03-27T15:17:01.933603125Z","kind":"stdout","line":""}
+{"ts":"2026-03-27T15:17:01.933605998Z","kind":"stdout","line":"GROVE_DECISIONS:"}
+{"ts":"2026-03-27T15:17:01.933605998Z","kind":"protocol","event":{"type":"decision","items":[]}}
+{"ts":"2026-03-27T15:17:01.933611128Z","kind":"stdout","line":"- Kept the contract fields (`authority_mode`, `authoritative_runtime`, `maintenance_active`, `warm_runtime_guarantees`) intact and only sharpened operator wording."}
+{"ts":"2026-03-27T15:17:01.933611128Z","kind":"protocol","event":{"type":"decision","items":["Kept the contract fields (`authority_mode`, `authoritative_runtime`, `maintenance_active`, `warm_runtime_guarantees`) intact and only sharpened operator wording."]}}
+{"ts":"2026-03-27T15:17:01.933629188Z","kind":"stdout","line":"- Scoped validation to targeted daemon/CLI posture tests plus `cargo check --all-targets`."}
+{"ts":"2026-03-27T15:17:01.933629188Z","kind":"protocol","event":{"type":"decision","items":["Scoped validation to targeted daemon/CLI posture tests plus `cargo check --all-targets`."]}}
+{"ts":"2026-03-27T15:17:01.933634216Z","kind":"stdout","line":""}
+{"ts":"2026-03-27T15:17:01.933635960Z","kind":"stdout","line":"GROVE_WARNINGS:"}
+{"ts":"2026-03-27T15:17:01.933635960Z","kind":"protocol","event":{"type":"warning","items":[]}}
+{"ts":"2026-03-27T15:17:01.933639449Z","kind":"stdout","line":"- `cargo check --all-targets` is green, but there is still a pre-existing dead-code warning at `crates/membrain-daemon/src/daemon.rs:1849` for `persisted_memory_count`."}
+{"ts":"2026-03-27T15:17:01.933639449Z","kind":"protocol","event":{"type":"warning","items":["`cargo check --all-targets` is green, but there is still a pre-existing dead-code warning at `crates/membrain-daemon/src/daemon.rs:1849` for `persisted_memory_count`."]}}
+{"ts":"2026-03-27T15:17:01.933643861Z","kind":"stdout","line":""}
+{"ts":"2026-03-27T15:17:01.933645605Z","kind":"stdout","line":"Key changes:"}
+{"ts":"2026-03-27T15:17:01.933647452Z","kind":"stdout","line":"- Added reusable authority helpers in `crates/membrain-daemon/src/rpc.rs:204`."}
+{"ts":"2026-03-27T15:17:01.933649813Z","kind":"stdout","line":"- Daemon health/doctor now use `daemon_authority:...` or `stdio_adapter_process_local:...` notes via shared formatting in `crates/membrain-daemon/src/daemon.rs:689`, `crates/membrain-daemon/src/daemon.rs:1065`, `crates/membrain-daemon/src/daemon.rs:1396`."}
+{"ts":"2026-03-27T15:17:01.933652275Z","kind":"stdout","line":"- CLI doctor/health now use the same wording in `crates/membrain-cli/src/main.rs:416` and `crates/membrain-cli/src/main.rs:4579`."}
+{"ts":"2026-03-27T15:17:01.933654122Z","kind":"stdout","line":"- Updated parity assertions in `crates/membrain-daemon/src/daemon.rs:6842`, `crates/membrain-daemon/tests/runtime_doctor_parity.rs:834`, and `crates/membrain-cli/tests/cli_end_to_end.rs:818`."}
+{"ts":"2026-03-27T15:17:01.933656174Z","kind":"stdout","line":""}
+{"ts":"2026-03-27T15:17:01.933657816Z","kind":"stdout","line":"Validation:"}
+{"ts":"2026-03-27T15:17:01.933659868Z","kind":"stdout","line":"- `cargo check --all-targets`"}
+{"ts":"2026-03-27T15:17:01.933662023Z","kind":"stdout","line":"- `cargo test -p membrain-daemon stdio_facade_status_and_operator_surfaces_do_not_claim_daemon_authority -- --nocapture`"}
+{"ts":"2026-03-27T15:17:01.933664486Z","kind":"stdout","line":"- `cargo test -p membrain-daemon runtime_doctor_resource_read_matches_runtime_doctor_payload_shape -- --nocapture`"}
+{"ts":"2026-03-27T15:17:01.933666949Z","kind":"stdout","line":"- `cargo test -p membrain-cli cli_health_json_reports_dashboard_contract_fields -- --nocapture`"}
+{"ts":"2026-03-27T15:17:01.933669206Z","kind":"stdout","line":"- `cargo test -p membrain-cli cli_health_human_output_renders_operator_dashboard_sections -- --nocapture`"}
+{"ts":"2026-03-27T15:17:01.933671361Z","kind":"stdout","line":""}
+{"ts":"2026-03-27T15:17:01.933673105Z","kind":"stdout","line":"GROVE_EXIT: true"}
+{"ts":"2026-03-27T15:17:01.933673105Z","kind":"protocol","event":{"type":"exit","value":true}}
+{"ts":"2026-03-27T15:17:03.056226014Z","kind":"session_ended","exit_code":0}

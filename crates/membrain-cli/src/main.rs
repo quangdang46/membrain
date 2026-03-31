@@ -55,6 +55,10 @@ use membrain_core::persistence::{
     resolve_local_paths, save_affect_row, save_cli_records, PersistedLocalMemoryRecord,
 };
 use membrain_core::policy::SharingVisibility;
+use membrain_core::reasoning::{
+    maybe_execute_with_query_rewrites, status_snapshot as reasoning_status_snapshot,
+    QueryRewriteOutcome, ReasoningState,
+};
 use membrain_core::store::audit::{
     AppendOnlyAuditLog, AuditLogEntry, AuditLogFilter, AuditLogSlice, AuditLogStore,
 };
@@ -67,6 +71,7 @@ use membrain_core::types::{
 };
 use membrain_core::{BrainStore, GoalWorkingState, RuntimeConfig, WorkingStateEngine};
 use membrain_daemon::daemon::{DaemonRuntime, DaemonRuntimeConfig};
+use membrain_daemon::init_file_tracing;
 use membrain_daemon::preflight::{
     evaluate_preflight as evaluate_shared_preflight,
     to_preflight_explain_response as to_shared_preflight_explain_response,
@@ -293,6 +298,7 @@ fn build_health_report(local_records: &[LocalMemoryRecord]) -> BrainHealthReport
         total_confidence / hot_memories as f32
     };
 
+    let reasoning_status = reasoning_status_snapshot();
     BrainHealthReport::from_inputs(
         BrainHealthInputs {
             hot_memories,
@@ -338,11 +344,28 @@ fn build_health_report(local_records: &[LocalMemoryRecord]) -> BrainHealthReport
             daemon_uptime_ticks: 0,
             index_reports: IndexModule.health_reports(),
             availability: None,
-            feature_availability: vec![FeatureAvailabilityEntry {
-                feature: "health".to_string(),
-                posture: membrain_core::api::AvailabilityPosture::Full,
-                note: Some("cli_local_persistence".to_string()),
-            }],
+            feature_availability: vec![
+                FeatureAvailabilityEntry {
+                    feature: "health".to_string(),
+                    posture: membrain_core::api::AvailabilityPosture::Full,
+                    note: Some("cli_local_persistence".to_string()),
+                },
+                FeatureAvailabilityEntry {
+                    feature: "reasoning_runtime".to_string(),
+                    posture: match reasoning_status.state {
+                        ReasoningState::Disabled => {
+                            membrain_core::api::AvailabilityPosture::ReadOnly
+                        }
+                        ReasoningState::NotLoaded
+                        | ReasoningState::Loaded
+                        | ReasoningState::Warm => membrain_core::api::AvailabilityPosture::Full,
+                        ReasoningState::Degraded | ReasoningState::Unavailable => {
+                            membrain_core::api::AvailabilityPosture::Degraded
+                        }
+                    },
+                    note: Some(reasoning_status.operator_note()),
+                },
+            ],
             previous_total_recalls: Some(0),
             previous_total_encodes: Some(0),
             previous_repair_queue_depth: Some(0),
@@ -3257,8 +3280,8 @@ fn recall_memories(
         "procedural" => CanonicalMemoryType::ToolOutcome,
         _ => CanonicalMemoryType::Event,
     });
-    let semantic_result = if config.like.is_some() || config.unlike.is_some() {
-        None
+    let (semantic_result, reasoning) = if config.like.is_some() || config.unlike.is_some() {
+        (None, None)
     } else {
         let hydrated_records = local_records
             .iter()
@@ -3272,26 +3295,15 @@ fn recall_memories(
             })
             .map(as_hydrated_memory_record)
             .collect::<Vec<_>>();
-        let mut local_config = store.embed().default_local_config();
-        local_config.show_download_progress = false;
-        Some(match store.embed().new_local_text_embedder(&local_config) {
-            Ok(mut embedder) => SharedSemanticRetrievalExecutor.execute(
-                &hydrated_records,
-                &config.namespace,
-                query_text,
-                None,
-                SemanticExecutorConfig::bounded(config.top),
-                &mut embedder,
-            ),
-            Err(error) => SharedSemanticRetrievalExecutor.execute_without_embeddings(
-                &hydrated_records,
-                &config.namespace,
-                query_text,
-                None,
-                SemanticExecutorConfig::bounded(config.top),
-                format!("semantic_embedding_unavailable:{error}"),
-            ),
-        })
+        let (semantic_result, reasoning) = semantic_recall_with_reasoning(
+            store,
+            &hydrated_records,
+            &config.namespace,
+            query_text,
+            None,
+            config.top,
+        );
+        (Some(semantic_result), reasoning)
     };
     let matched_ids = if let Some(semantic_result) = semantic_result.as_ref() {
         semantic_result
@@ -3326,6 +3338,9 @@ fn recall_memories(
     );
     if let Some(semantic_result) = semantic_result.as_ref() {
         append_semantic_executor_trace(&mut result_set, semantic_result, false);
+    }
+    if let Some(reasoning) = reasoning.as_ref() {
+        append_reasoning_trace(&mut result_set, reasoning, false);
     }
 
     let request_id = RequestId::new(format!(
@@ -3743,6 +3758,72 @@ fn append_semantic_executor_trace(
         });
 }
 
+fn append_reasoning_trace(
+    result_set: &mut RetrievalResultSet,
+    reasoning: &QueryRewriteOutcome,
+    explain_mode: bool,
+) {
+    let mut details = vec![reasoning.trace_note.clone()];
+    if !reasoning.rewritten_queries.is_empty() {
+        details.push(format!(
+            "rewritten_queries={}",
+            reasoning.rewritten_queries.join(" | ")
+        ));
+    }
+    if let Some(reason) = reasoning.degraded_reason.as_deref() {
+        details.push(format!("degraded_reason={reason}"));
+    }
+    result_set
+        .explain
+        .result_reasons
+        .push(membrain_core::engine::result::ResultReason {
+            memory_id: None,
+            reason_code: if explain_mode {
+                "reasoning_explain_trace"
+            } else {
+                "reasoning_recall_trace"
+            }
+            .to_string(),
+            detail: details.join("; "),
+        });
+}
+
+fn semantic_recall_with_reasoning(
+    store: &BrainStore,
+    hydrated_records: &[HydratedMemoryRecord],
+    namespace: &NamespaceId,
+    query: &str,
+    exact_memory_id: Option<MemoryId>,
+    top: usize,
+) -> (SemanticRetrievalResult, Option<QueryRewriteOutcome>) {
+    let mut local_config = store.embed().default_local_config();
+    local_config.show_download_progress = false;
+    match store.embed().new_local_text_embedder(&local_config) {
+        Ok(mut embedder) => {
+            let (semantic_result, reasoning, _traces) = maybe_execute_with_query_rewrites(
+                hydrated_records,
+                namespace,
+                query,
+                exact_memory_id,
+                SemanticExecutorConfig::bounded(top),
+                &mut embedder,
+            );
+            (semantic_result, reasoning)
+        }
+        Err(error) => (
+            SharedSemanticRetrievalExecutor.execute_without_embeddings(
+                hydrated_records,
+                namespace,
+                query,
+                exact_memory_id,
+                SemanticExecutorConfig::bounded(top),
+                format!("semantic_embedding_unavailable:{error}"),
+            ),
+            None,
+        ),
+    }
+}
+
 fn explain_query(
     store: &BrainStore,
     local_records: &[LocalMemoryRecord],
@@ -3792,34 +3873,23 @@ fn explain_query(
             store.config().graph_max_nodes,
         )
     });
-    let semantic_result = if causal_trace.is_some() {
-        None
+    let (semantic_result, reasoning) = if causal_trace.is_some() {
+        (None, None)
     } else {
         let hydrated_records = local_records
             .iter()
             .filter(|record| record.namespace == *namespace)
             .map(as_hydrated_memory_record)
             .collect::<Vec<_>>();
-        let mut local_config = store.embed().default_local_config();
-        local_config.show_download_progress = false;
-        Some(match store.embed().new_local_text_embedder(&local_config) {
-            Ok(mut embedder) => SharedSemanticRetrievalExecutor.execute(
-                &hydrated_records,
-                namespace,
-                query,
-                None,
-                SemanticExecutorConfig::bounded(config.top),
-                &mut embedder,
-            ),
-            Err(error) => SharedSemanticRetrievalExecutor.execute_without_embeddings(
-                &hydrated_records,
-                namespace,
-                query,
-                None,
-                SemanticExecutorConfig::bounded(config.top),
-                format!("semantic_embedding_unavailable:{error}"),
-            ),
-        })
+        let (semantic_result, reasoning) = semantic_recall_with_reasoning(
+            store,
+            &hydrated_records,
+            namespace,
+            query,
+            None,
+            config.top,
+        );
+        (Some(semantic_result), reasoning)
     };
     let matched_ids = if let Some(trace) = causal_trace.as_ref() {
         trace
@@ -3884,6 +3954,9 @@ fn explain_query(
         apply_causal_trace(&mut result_set, trace, memory_id, depth);
     } else if let Some(semantic_result) = semantic_result.as_ref() {
         append_semantic_executor_trace(&mut result_set, semantic_result, true);
+    }
+    if let Some(reasoning) = reasoning.as_ref() {
+        append_reasoning_trace(&mut result_set, reasoning, true);
     }
 
     let request_id = RequestId::new(format!(
@@ -5591,6 +5664,12 @@ fn print_preflight_allow_human(response: &PreflightOutcome) {
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
     let cli = Cli::parse();
+    if matches!(&cli.command, Commands::Mcp | Commands::Daemon { .. }) {
+        let tracing_root = resolve_local_paths(cli.db_path.as_deref())
+            .ok()
+            .map(|paths| paths.root_dir);
+        init_file_tracing(tracing_root.as_deref());
+    }
 
     // Shared core store and hot metadata store for encode/recall/inspect/explain.
     let (mut store, mut hot, mut local_records, mut hot_db) =

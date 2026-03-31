@@ -1,0 +1,36 @@
+{"ts":"2026-03-27T15:40:17.103336036Z","kind":"session_started","session_id":"ses-run-mb-2cx3.4-20260327T154016837"}
+{"ts":"2026-03-27T15:51:57.495940141Z","kind":"stdout","line":"Swarm is shut down and cleaned up."}
+{"ts":"2026-03-27T15:51:57.520649465Z","kind":"stdout","line":""}
+{"ts":"2026-03-27T15:51:57.520661782Z","kind":"stdout","line":"Final result:"}
+{"ts":"2026-03-27T15:51:57.520665272Z","kind":"stdout","line":"- Resumed from the latest checkpoint and narrowed the remaining gap correctly."}
+{"ts":"2026-03-27T15:51:57.520668557Z","kind":"stdout","line":"- Avoided the overlapping CLI/docs/parity slice after coordination review."}
+{"ts":"2026-03-27T15:51:57.520672252Z","kind":"stdout","line":"- `daemon-worker` landed a surgical daemon regression in `crates/membrain-daemon/tests/runtime_doctor_parity.rs`."}
+{"ts":"2026-03-27T15:51:57.520675023Z","kind":"stdout","line":""}
+{"ts":"2026-03-27T15:51:57.520677384Z","kind":"stdout","line":"What the new daemon test proves:"}
+{"ts":"2026-03-27T15:51:57.520680258Z","kind":"stdout","line":"- `recall` still returns hydrated evidence after maintenance"}
+{"ts":"2026-03-27T15:51:57.520683440Z","kind":"stdout","line":"- `why` still returns hydrated evidence after maintenance"}
+{"ts":"2026-03-27T15:51:57.520686108Z","kind":"stdout","line":"- `packaging_metadata.degraded_summary == null` remains true on both paths"}
+{"ts":"2026-03-27T15:51:57.520688572Z","kind":"stdout","line":"- `recall` trace still includes a kept-scoring reason"}
+{"ts":"2026-03-27T15:51:57.520691754Z","kind":"stdout","line":"- `why` still includes `query_by_example_seed_materialized`"}
+{"ts":"2026-03-27T15:51:57.520694422Z","kind":"stdout","line":"- freshness markers remain present after maintenance"}
+{"ts":"2026-03-27T15:51:57.520696988Z","kind":"stdout","line":""}
+{"ts":"2026-03-27T15:51:57.520699246Z","kind":"stdout","line":"Validated by worker:"}
+{"ts":"2026-03-27T15:51:57.520701710Z","kind":"stdout","line":"- `cargo test -p membrain-daemon runtime_recall_and_why_keep_hydrated_evidence_visible_after_maintenance -- --nocapture` ✅"}
+{"ts":"2026-03-27T15:51:57.520704994Z","kind":"stdout","line":"- `cargo check --all-targets` ✅"}
+{"ts":"2026-03-27T15:51:57.520707868Z","kind":"stdout","line":""}
+{"ts":"2026-03-27T15:51:57.520710126Z","kind":"stdout","line":"Important finding:"}
+{"ts":"2026-03-27T15:51:57.520712795Z","kind":"stdout","line":"- The real daemon wrapper path still does **not** surface the stronger lifecycle trio directly in this scenario:"}
+{"ts":"2026-03-27T15:51:57.520715464Z","kind":"stdout","line":"  - `cold_consolidated`"}
+{"ts":"2026-03-27T15:51:57.520718132Z","kind":"stdout","line":"  - `reconsolidation_window_open`"}
+{"ts":"2026-03-27T15:51:57.520720698Z","kind":"stdout","line":"  - `lifecycle_projection`"}
+{"ts":"2026-03-27T15:51:57.520723470Z","kind":"stdout","line":""}
+{"ts":"2026-03-27T15:51:57.520725728Z","kind":"stdout","line":"So the remaining honest gap is now narrower:"}
+{"ts":"2026-03-27T15:51:57.520728397Z","kind":"stdout","line":"- the runtime path proves maintenance preserves hydrated, explainable retrieval"}
+{"ts":"2026-03-27T15:51:57.520730963Z","kind":"stdout","line":"- but it does **not yet** prove that real wrapper-path `recall`/`why` emit those lifecycle reason codes on a mixed cold + reconsolidating result"}
+{"ts":"2026-03-27T15:51:57.520733939Z","kind":"stdout","line":""}
+{"ts":"2026-03-27T15:51:57.520736403Z","kind":"stdout","line":"Best next step:"}
+{"ts":"2026-03-27T15:51:57.520739174Z","kind":"stdout","line":"- build a real daemon-path fixture/setup that actually materializes one cold-consolidated item and one reconsolidating item, then assert those exact reason codes on wrapper JSON rather than only in core tests."}
+{"ts":"2026-03-27T15:51:57.520742150Z","kind":"stdout","line":""}
+{"ts":"2026-03-27T15:51:57.520744511Z","kind":"stdout","line":"Also confirmed:"}
+{"ts":"2026-03-27T15:51:57.520747488Z","kind":"stdout","line":"- CLI is the wrong next target for this slice; it would mostly duplicate passthrough/parity coverage rather than prove new lifecycle behavior."}
+{"ts":"2026-03-27T15:51:57.986373254Z","kind":"session_ended","exit_code":0}

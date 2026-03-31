@@ -1,0 +1,34 @@
+{
+  "id": "chk-run-mb-2cx3.4-20260327T152147360-fallback-1",
+  "bead_id": "mb-2cx3.4",
+  "run_id": "run-mb-2cx3.4-20260327T152147360",
+  "session_id": "ses-run-mb-2cx3.4-20260327T152147360",
+  "progress": "Synthetic fallback checkpoint after NoProgress",
+  "next_step": "Resume from the transcript tail, avoid repeating completed setup, and continue with the smallest safe remaining step.",
+  "payload": {
+    "claimed_paths": [],
+    "confidence": 0.25,
+    "context": {
+      "failure_class": "NoProgress",
+      "failure_detail": "session ended with Unknown",
+      "stderr_tail": [],
+      "stdout_tail": [
+        "",
+        "",
+        "",
+        "",
+        "",
+        "Validation:",
+        "- `cargo test -p membrain-core health_report_aggregates_subsystems_and_trends -- --nocapture`",
+        "- `cargo check --all-targets`",
+        ""
+      ],
+      "synthetic": true
+    },
+    "next_step": "Resume from the transcript tail, avoid repeating completed setup, and continue with the smallest safe remaining step.",
+    "open_questions": [],
+    "progress": "Synthetic fallback checkpoint after NoProgress"
+  },
+  "saved_at": "2026-03-27T15:33:35.900713271Z",
+  "resume_generation": 1
+}

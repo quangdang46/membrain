@@ -1,0 +1,45 @@
+{
+  "id": "chk-run-mb-2cx3.4-20260327T153337254-fallback-1",
+  "bead_id": "mb-2cx3.4",
+  "run_id": "run-mb-2cx3.4-20260327T153337254",
+  "session_id": "ses-run-mb-2cx3.4-20260327T153337254",
+  "progress": "Synthetic fallback checkpoint after NoProgress",
+  "next_step": "Resume from the transcript tail, avoid repeating completed setup, and continue with the smallest safe remaining step.",
+  "payload": {
+    "claimed_paths": [],
+    "confidence": 0.25,
+    "context": {
+      "failure_class": "NoProgress",
+      "failure_detail": "session ended with Unknown",
+      "stderr_tail": [],
+      "stdout_tail": [
+        "   - one `tier3_cold` / cold-consolidated item",
+        "   - one `tier2_indexed` / reconsolidating item",
+        "3. Assert on the wrapper JSON:",
+        "   - `result_reasons` contains `cold_consolidated`",
+        "   - `result_reasons` contains `reconsolidation_window_open`",
+        "   - `freshness_markers` contains `lifecycle_projection`",
+        "   - evidence remains hydrated/visible in the same result envelope",
+        "",
+        "Why this is the right next step:",
+        "- It directly addresses the user complaint that the system still feels like “persistence + query.”",
+        "- It reuses existing core machinery instead of inventing new architecture.",
+        "- It closes the exact proof gap the workers independently converged on.",
+        "",
+        "Most relevant files:",
+        "- `crates/membrain-core/src/engine/result.rs:3201`",
+        "- `crates/membrain-core/tests/retrieval_quality_proof.rs:331`",
+        "- `crates/membrain-daemon/tests/runtime_doctor_parity.rs:726`",
+        "- `crates/membrain-cli/tests/cli_end_to_end.rs:285`",
+        "",
+        "If you want, I can take that next slice and implement the regression now."
+      ],
+      "synthetic": true
+    },
+    "next_step": "Resume from the transcript tail, avoid repeating completed setup, and continue with the smallest safe remaining step.",
+    "open_questions": [],
+    "progress": "Synthetic fallback checkpoint after NoProgress"
+  },
+  "saved_at": "2026-03-27T15:40:15.135438296Z",
+  "resume_generation": 1
+}

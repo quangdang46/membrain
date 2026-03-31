@@ -1,0 +1,24 @@
+{
+  "id": "chk-run-mb-2cx3.5-20260327T141936377-fallback-1",
+  "bead_id": "mb-2cx3.5",
+  "run_id": "run-mb-2cx3.5-20260327T141936377",
+  "session_id": "ses-run-mb-2cx3.5-20260327T141936377",
+  "progress": "Synthetic fallback checkpoint after Interrupted",
+  "next_step": "Resume from the transcript tail, avoid repeating completed setup, and continue with the smallest safe remaining step.",
+  "payload": {
+    "claimed_paths": [],
+    "confidence": 0.25,
+    "context": {
+      "failure_class": "Interrupted",
+      "failure_detail": "session ended with Kill",
+      "stderr_tail": [],
+      "stdout_tail": [],
+      "synthetic": true
+    },
+    "next_step": "Resume from the transcript tail, avoid repeating completed setup, and continue with the smallest safe remaining step.",
+    "open_questions": [],
+    "progress": "Synthetic fallback checkpoint after Interrupted"
+  },
+  "saved_at": "2026-03-27T14:20:22.131315493Z",
+  "resume_generation": 1
+}

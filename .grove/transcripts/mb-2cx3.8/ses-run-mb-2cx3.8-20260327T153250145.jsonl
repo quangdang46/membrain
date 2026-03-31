@@ -1,0 +1,41 @@
+{"ts":"2026-03-27T15:32:50.203861446Z","kind":"session_started","session_id":"ses-run-mb-2cx3.8-20260327T153250145"}
+{"ts":"2026-03-27T15:40:22.676213353Z","kind":"stdout","line":"GROVE_RESULT: success"}
+{"ts":"2026-03-27T15:40:22.676213353Z","kind":"protocol","event":{"type":"result","summary":"success"}}
+{"ts":"2026-03-27T15:40:22.780895506Z","kind":"stdout","line":""}
+{"ts":"2026-03-27T15:40:22.780937409Z","kind":"stdout","line":"GROVE_ARTIFACTS:"}
+{"ts":"2026-03-27T15:40:22.780937409Z","kind":"protocol","event":{"type":"artifacts","items":[]}}
+{"ts":"2026-03-27T15:40:22.780969989Z","kind":"stdout","line":"- Updated `MISSING.md` to make the scoreboard truthful: main hydrated cross-surface contract is treated as closed for the normal path, and the remaining unresolved proof is narrowed to transport parity for `archival_recovery_partial`."}
+{"ts":"2026-03-27T15:40:22.780969989Z","kind":"protocol","event":{"type":"artifacts","items":["Updated `MISSING.md` to make the scoreboard truthful: main hydrated cross-surface contract is treated as closed for the normal path, and the remaining unresolved proof is narrowed to transport parity for `archival_recovery_partial`."]}}
+{"ts":"2026-03-27T15:40:22.781003183Z","kind":"stdout","line":"- Updated `docs/CLI.md` to keep ordinary hydrated recall separate from inspect/degraded archival-recovery markers."}
+{"ts":"2026-03-27T15:40:22.781003183Z","kind":"protocol","event":{"type":"artifacts","items":["Updated `docs/CLI.md` to keep ordinary hydrated recall separate from inspect/degraded archival-recovery markers."]}}
+{"ts":"2026-03-27T15:40:22.781033714Z","kind":"stdout","line":"- Updated `docs/MCP_API.md` status notes to mention the shared-core `archival_recovery_partial` behavior only when partial restore state actually shapes the returned envelope."}
+{"ts":"2026-03-27T15:40:22.781033714Z","kind":"protocol","event":{"type":"artifacts","items":["Updated `docs/MCP_API.md` status notes to mention the shared-core `archival_recovery_partial` behavior only when partial restore state actually shapes the returned envelope."]}}
+{"ts":"2026-03-27T15:40:22.781067626Z","kind":"stdout","line":"- Updated `docs/RETRIEVAL.md` freshness-marker contract to document the current proof split: no over-claim on ordinary recall, positive proof on partial-restore packaging."}
+{"ts":"2026-03-27T15:40:22.781067626Z","kind":"protocol","event":{"type":"artifacts","items":["Updated `docs/RETRIEVAL.md` freshness-marker contract to document the current proof split: no over-claim on ordinary recall, positive proof on partial-restore packaging."]}}
+{"ts":"2026-03-27T15:40:22.781097849Z","kind":"stdout","line":""}
+{"ts":"2026-03-27T15:40:22.781110553Z","kind":"stdout","line":"GROVE_LESSONS:"}
+{"ts":"2026-03-27T15:40:22.781110553Z","kind":"protocol","event":{"type":"lessons","items":[]}}
+{"ts":"2026-03-27T15:40:22.781136576Z","kind":"stdout","line":"- The biggest remaining docs-truth risk was not normal recall wording anymore; it was stale text implying the broader runtime contract was still open when the only real unresolved proof is transport preservation of archival-recovery markers."}
+{"ts":"2026-03-27T15:40:22.781136576Z","kind":"protocol","event":{"type":"lessons","items":["The biggest remaining docs-truth risk was not normal recall wording anymore; it was stale text implying the broader runtime contract was still open when the only real unresolved proof is transport preservation of archival-recovery markers."]}}
+{"ts":"2026-03-27T15:40:22.781167927Z","kind":"stdout","line":"- Shared-core proof for `archival_recovery_partial` already exists; the missing piece is cross-transport parity coverage, not core semantics."}
+{"ts":"2026-03-27T15:40:22.781167927Z","kind":"protocol","event":{"type":"lessons","items":["Shared-core proof for `archival_recovery_partial` already exists; the missing piece is cross-transport parity coverage, not core semantics."]}}
+{"ts":"2026-03-27T15:40:22.781201429Z","kind":"stdout","line":""}
+{"ts":"2026-03-27T15:40:22.781215055Z","kind":"stdout","line":"GROVE_DECISIONS:"}
+{"ts":"2026-03-27T15:40:22.781215055Z","kind":"protocol","event":{"type":"decision","items":[]}}
+{"ts":"2026-03-27T15:40:22.781277551Z","kind":"stdout","line":"- Kept `MISSING.md` as a scoreboard, not aspirational prose."}
+{"ts":"2026-03-27T15:40:22.781277551Z","kind":"protocol","event":{"type":"decision","items":["Kept `MISSING.md` as a scoreboard, not aspirational prose."]}}
+{"ts":"2026-03-27T15:40:22.781302037Z","kind":"stdout","line":"- Marked `gap.restore_archival_recovery_projection` as `partial`, not `open`, because core proof now exists in `crates/membrain-core/src/engine/result.rs:3201` and `crates/membrain-core/src/observability.rs:1502`."}
+{"ts":"2026-03-27T15:40:22.781302037Z","kind":"protocol","event":{"type":"decision","items":["Marked `gap.restore_archival_recovery_projection` as `partial`, not `open`, because core proof now exists in `crates/membrain-core/src/engine/result.rs:3201` and `crates/membrain-core/src/observability.rs:1502`."]}}
+{"ts":"2026-03-27T15:40:22.781324576Z","kind":"stdout","line":"- Marked the checklist item about daemon/MCP/CLI coherent runtime contract as effectively closed for the main hydrated path, with a narrowed note about the remaining archival-recovery parity proof."}
+{"ts":"2026-03-27T15:40:22.781324576Z","kind":"protocol","event":{"type":"decision","items":["Marked the checklist item about daemon/MCP/CLI coherent runtime contract as effectively closed for the main hydrated path, with a narrowed note about the remaining archival-recovery parity proof."]}}
+{"ts":"2026-03-27T15:40:22.781346604Z","kind":"stdout","line":""}
+{"ts":"2026-03-27T15:40:22.781355210Z","kind":"stdout","line":"GROVE_WARNINGS:"}
+{"ts":"2026-03-27T15:40:22.781355210Z","kind":"protocol","event":{"type":"warning","items":[]}}
+{"ts":"2026-03-27T15:40:22.781374368Z","kind":"stdout","line":"- `cargo check --all-targets` passes, but there is a pre-existing warning in `crates/membrain-daemon/src/daemon.rs:1849` for unused `persisted_memory_count`."}
+{"ts":"2026-03-27T15:40:22.781374368Z","kind":"protocol","event":{"type":"warning","items":["`cargo check --all-targets` passes, but there is a pre-existing warning in `crates/membrain-daemon/src/daemon.rs:1849` for unused `persisted_memory_count`."]}}
+{"ts":"2026-03-27T15:40:22.781397420Z","kind":"stdout","line":"- I did not add transport-level archival-recovery parity tests because those test surfaces are currently reserved by other agents; this pass documents the narrowed remaining gap truthfully instead of overlapping their lane."}
+{"ts":"2026-03-27T15:40:22.781397420Z","kind":"protocol","event":{"type":"warning","items":["I did not add transport-level archival-recovery parity tests because those test surfaces are currently reserved by other agents; this pass documents the narrowed remaining gap truthfully instead of overlapping their lane."]}}
+{"ts":"2026-03-27T15:40:22.781419140Z","kind":"stdout","line":""}
+{"ts":"2026-03-27T15:40:22.781428770Z","kind":"stdout","line":"GROVE_EXIT: true"}
+{"ts":"2026-03-27T15:40:22.781428770Z","kind":"protocol","event":{"type":"exit","value":true}}
+{"ts":"2026-03-27T15:40:25.656164971Z","kind":"session_ended","exit_code":0}

@@ -11,8 +11,113 @@ const RUNTIME_DOCTOR_URI: &str = "membrain://daemon/runtime/doctor";
 const RUNTIME_STREAMS_URI: &str = "membrain://daemon/runtime/streams";
 const INSPECT_RESOURCE_URI_TEMPLATE: &str = "membrain://{namespace}/memories/{memory_id}";
 
+struct ContextBudgetResultSetInputs<'a> {
+    common: &'a crate::rpc::RuntimeCommonFields,
+    query_by_example: &'a QueryByExampleNormalization,
+    mood_congruent: bool,
+    semantic_result: Option<&'a membrain_core::engine::semantic_retrieval::SemanticRetrievalResult>,
+    reasoning: Option<&'a QueryRewriteOutcome>,
+    state: &'a RuntimeState,
+}
+
 fn daemon_log(marker: &str, message: &str) {
     eprintln!("[membrain-daemon] {marker} {message}");
+}
+
+fn jsonrpc_id_label(id: Option<&Value>) -> String {
+    match id {
+        Some(Value::String(value)) => value.clone(),
+        Some(value) => value.to_string(),
+        None => "notification".to_string(),
+    }
+}
+
+fn mcp_action_label(method: &str, params: Option<&Value>) -> Option<String> {
+    match method {
+        "tools/call" | "prompts/get" => params
+            .and_then(|value| value.get("name"))
+            .and_then(Value::as_str)
+            .map(|value| value.to_string()),
+        "resources/read" => params
+            .and_then(|value| value.get("uri"))
+            .and_then(Value::as_str)
+            .map(|value| value.to_string()),
+        _ => None,
+    }
+}
+
+fn log_mcp_stdio_request(
+    method: &str,
+    action: Option<&str>,
+    request_id: &str,
+    is_notification: bool,
+    params: Option<&Value>,
+) {
+    let action = action.unwrap_or(method);
+    info!(
+        transport = "stdio",
+        method,
+        action,
+        request_id,
+        notification = is_notification,
+        "received MCP request"
+    );
+    if let Some(params) = params {
+        debug!(
+            transport = "stdio",
+            method,
+            action,
+            request_id,
+            params = %params,
+            "MCP request payload"
+        );
+    } else {
+        debug!(
+            transport = "stdio",
+            method, action, request_id, "MCP request has empty params"
+        );
+    }
+}
+
+fn log_mcp_stdio_response(
+    method: &str,
+    action: Option<&str>,
+    request_id: &str,
+    is_notification: bool,
+    response: &JsonRpcResponse,
+) {
+    let action = action.unwrap_or(method);
+    if let Some(error) = response.error.as_ref() {
+        warn!(
+            transport = "stdio",
+            method,
+            action,
+            request_id,
+            notification = is_notification,
+            code = error.code,
+            message = %error.message,
+            "MCP request failed"
+        );
+    } else {
+        info!(
+            transport = "stdio",
+            method,
+            action,
+            request_id,
+            notification = is_notification,
+            "completed MCP request"
+        );
+    }
+    debug!(
+        transport = "stdio",
+        method,
+        action,
+        request_id,
+        notification = is_notification,
+        result = ?response.result,
+        error = ?response.error,
+        "MCP response payload"
+    );
 }
 
 fn summarize_memory_ids(memory_ids: &[u64]) -> String {
@@ -112,6 +217,10 @@ use membrain_core::persistence::{
 use membrain_core::policy::{
     PolicyModule, SharingAccessDecision, SharingAccessOutcome, SharingVisibility,
 };
+use membrain_core::reasoning::{
+    maybe_execute_with_query_rewrites, status_snapshot as reasoning_status_snapshot,
+    QueryRewriteOutcome, ReasoningState,
+};
 use membrain_core::store::audit::{AuditLogEntry, AuditLogFilter};
 use membrain_core::store::cache::{
     CacheEvent, CacheFamily, CacheGenerationAnchors, CacheKey, CacheLookupResult, CacheManager,
@@ -127,6 +236,7 @@ use std::collections::{HashMap, VecDeque};
 use std::hash::{Hash, Hasher};
 use std::time::Instant;
 use tokio::io::{self, AsyncBufReadExt, AsyncWriteExt};
+use tracing::{debug, info, warn};
 
 fn cache_family_label(family: CacheFamily) -> CacheFamilyLabel {
     match family {
@@ -1076,6 +1186,7 @@ impl RuntimeState {
         } else {
             0.0
         };
+        let reasoning_status = reasoning_status_snapshot();
         let health = {
             let cache = self
                 .cache
@@ -1225,6 +1336,23 @@ impl RuntimeState {
                                 self.embedder_semantic_batch_hits.load(Ordering::SeqCst),
                                 self.embedder_semantic_batch_misses.load(Ordering::SeqCst),
                             )),
+                        },
+                        FeatureAvailabilityEntry {
+                            feature: "reasoning_runtime".to_string(),
+                            posture: match reasoning_status.state {
+                                ReasoningState::Disabled => {
+                                    membrain_core::api::AvailabilityPosture::ReadOnly
+                                }
+                                ReasoningState::NotLoaded
+                                | ReasoningState::Loaded
+                                | ReasoningState::Warm => {
+                                    membrain_core::api::AvailabilityPosture::Full
+                                }
+                                ReasoningState::Degraded | ReasoningState::Unavailable => {
+                                    membrain_core::api::AvailabilityPosture::Degraded
+                                }
+                            },
+                            note: Some(reasoning_status.operator_note()),
                         },
                     ],
                     previous_total_recalls: Some(total_recalls.saturating_sub(1)),
@@ -2411,6 +2539,11 @@ impl DaemonRuntime {
         self.state
             .set_authority_mode(RuntimeAuthorityMode::StdioFacade)
             .await;
+        info!(
+            transport = "stdio",
+            socket_path = %self.config.socket_path.display(),
+            "starting MCP stdio server"
+        );
         daemon_log("▶️", "mcp stdio server listening");
         let stdin = io::stdin();
         let stdout = io::stdout();
@@ -2431,6 +2564,12 @@ impl DaemonRuntime {
             let request = match serde_json::from_str::<JsonRpcRequest>(&line) {
                 Ok(request) => request,
                 Err(err) => {
+                    warn!(transport = "stdio", error = %err, "failed to parse MCP request");
+                    debug!(
+                        transport = "stdio",
+                        raw = line.trim_end(),
+                        "invalid MCP request payload"
+                    );
                     let response =
                         JsonRpcResponse::error(None, -32700, format!("invalid json: {err}"), None);
                     let encoded = serde_json::to_vec(&response)?;
@@ -2444,15 +2583,26 @@ impl DaemonRuntime {
             // In JSON-RPC 2.0, notifications have no id and don't expect responses
             let is_notification = request.id.is_none();
             let is_shutdown = request.method == "shutdown";
+            let method = request.method.clone();
+            let action = mcp_action_label(&method, request.params.as_ref());
+            let request_id = jsonrpc_id_label(request.id.as_ref());
+
+            log_mcp_stdio_request(
+                &method,
+                action.as_deref(),
+                &request_id,
+                is_notification,
+                request.params.as_ref(),
+            );
 
             if is_notification {
-                // Process notification but don't send response
-                let _ = Self::dispatch_request(
+                let response = Self::dispatch_request(
                     request,
                     Arc::clone(&self.state),
                     self.state.next_request_id(),
                 )
                 .await;
+                log_mcp_stdio_response(&method, action.as_deref(), &request_id, true, &response);
                 continue;
             }
 
@@ -2462,6 +2612,7 @@ impl DaemonRuntime {
                 self.state.next_request_id(),
             )
             .await;
+            log_mcp_stdio_response(&method, action.as_deref(), &request_id, false, &response);
             let encoded = serde_json::to_vec(&response)?;
             writer.write_all(&encoded).await?;
             writer.write_all(b"\n").await?;
@@ -2471,6 +2622,7 @@ impl DaemonRuntime {
             }
         }
 
+        info!(transport = "stdio", "MCP stdio server exiting");
         daemon_log("❌", "mcp stdio server exiting");
         Ok(())
     }
@@ -4632,11 +4784,14 @@ impl DaemonRuntime {
         let result_set = Self::build_context_budget_result_set(
             &namespace,
             &normalized.retrieval_request,
-            &common,
-            &normalized.normalized_query_by_example,
-            normalized.mood_congruent,
-            None,
-            state,
+            ContextBudgetResultSetInputs {
+                common: &common,
+                query_by_example: &normalized.normalized_query_by_example,
+                mood_congruent: normalized.mood_congruent,
+                semantic_result: None,
+                reasoning: None,
+                state,
+            },
         );
 
         let request = ContextBudgetRequest {
@@ -5647,14 +5802,17 @@ impl DaemonRuntime {
     fn build_context_budget_result_set(
         namespace: &NamespaceId,
         retrieval_request: &RetrievalRequest,
-        common: &crate::rpc::RuntimeCommonFields,
-        query_by_example: &QueryByExampleNormalization,
-        mood_congruent: bool,
-        semantic_result: Option<
-            &membrain_core::engine::semantic_retrieval::SemanticRetrievalResult,
-        >,
-        state: &RuntimeState,
+        inputs: ContextBudgetResultSetInputs<'_>,
     ) -> RetrievalResultSet {
+        let ContextBudgetResultSetInputs {
+            common,
+            query_by_example,
+            mood_congruent,
+            semantic_result,
+            reasoning,
+            state,
+        } = inputs;
+
         let current_mood = current_mood_snapshot(state, namespace);
         let mut explain = RetrievalExplain::from_plan(
             &RecallEngine.plan_recall(
@@ -5915,6 +6073,23 @@ impl DaemonRuntime {
         )];
         result.packaging_metadata.result_budget = RuntimeConfig::default().tier1_candidate_budget;
         result.packaging_metadata.degraded_summary = None;
+        if let Some(reasoning) = reasoning {
+            let mut details = vec![reasoning.trace_note.clone()];
+            if !reasoning.rewritten_queries.is_empty() {
+                details.push(format!(
+                    "rewritten_queries={}",
+                    reasoning.rewritten_queries.join(" | ")
+                ));
+            }
+            if let Some(reason) = reasoning.degraded_reason.as_deref() {
+                details.push(format!("degraded_reason={reason}"));
+            }
+            result.explain.result_reasons.push(ResultReason {
+                memory_id: None,
+                reason_code: "reasoning_recall_trace".to_string(),
+                detail: details.join("; "),
+            });
+        }
         result
     }
 
@@ -5994,67 +6169,78 @@ impl DaemonRuntime {
             seeds: Vec::new(),
         };
         let fallback_result = if exact_match.is_none() {
-            let semantic_result = if query_by_example
-                .is_none_or(|normalized| !normalized.has_example_seeds())
-            {
-                let records = state
-                    .memories
-                    .lock()
-                    .expect("runtime memory registry lock should be available")
-                    .values()
-                    .cloned()
-                    .collect::<Vec<_>>();
-                let hydrated_records = records
-                    .iter()
-                    .map(hydrated_memory_record)
-                    .collect::<Vec<_>>();
-                let query_text = query_by_example
-                    .and_then(|normalized| normalized.normalized_query_text.as_deref())
-                    .unwrap_or_default();
-                let semantic_result = match state.local_text_embedder() {
-                    Ok(mut embedder) => Some(if let Some(embedder) = embedder.as_mut() {
-                        SharedSemanticRetrievalExecutor.execute(
-                            &hydrated_records,
-                            &namespace,
-                            query_text,
-                            request.exact_memory_id,
-                            SemanticExecutorConfig::bounded(result_budget),
-                            embedder,
-                        )
-                    } else {
-                        SharedSemanticRetrievalExecutor.execute_without_embeddings(
-                            &hydrated_records,
-                            &namespace,
-                            query_text,
-                            request.exact_memory_id,
-                            SemanticExecutorConfig::bounded(result_budget),
-                            "semantic_embedding_unavailable:embedder_not_initialized",
-                        )
-                    }),
-                    Err(error) => Some(SharedSemanticRetrievalExecutor.execute_without_embeddings(
-                        &hydrated_records,
-                        &namespace,
-                        query_text,
-                        request.exact_memory_id,
-                        SemanticExecutorConfig::bounded(result_budget),
-                        format!("semantic_embedding_unavailable:{error}"),
-                    )),
+            let (semantic_result, reasoning) =
+                if query_by_example.is_none_or(|normalized| !normalized.has_example_seeds()) {
+                    let records = state
+                        .memories
+                        .lock()
+                        .expect("runtime memory registry lock should be available")
+                        .values()
+                        .cloned()
+                        .collect::<Vec<_>>();
+                    let hydrated_records = records
+                        .iter()
+                        .map(hydrated_memory_record)
+                        .collect::<Vec<_>>();
+                    let query_text = query_by_example
+                        .and_then(|normalized| normalized.normalized_query_text.as_deref())
+                        .unwrap_or_default();
+                    match state.local_text_embedder() {
+                        Ok(mut embedder) => {
+                            if let Some(embedder) = embedder.as_mut() {
+                                let (semantic_result, reasoning, traces) =
+                                    maybe_execute_with_query_rewrites(
+                                        &hydrated_records,
+                                        &namespace,
+                                        query_text,
+                                        request.exact_memory_id,
+                                        SemanticExecutorConfig::bounded(result_budget),
+                                        embedder,
+                                    );
+                                for trace in &traces {
+                                    state.observe_semantic_trace(trace);
+                                }
+                                (Some(semantic_result), reasoning)
+                            } else {
+                                (
+                                Some(SharedSemanticRetrievalExecutor.execute_without_embeddings(
+                                    &hydrated_records,
+                                    &namespace,
+                                    query_text,
+                                    request.exact_memory_id,
+                                    SemanticExecutorConfig::bounded(result_budget),
+                                    "semantic_embedding_unavailable:embedder_not_initialized",
+                                )),
+                                None,
+                            )
+                            }
+                        }
+                        Err(error) => (
+                            Some(SharedSemanticRetrievalExecutor.execute_without_embeddings(
+                                &hydrated_records,
+                                &namespace,
+                                query_text,
+                                request.exact_memory_id,
+                                SemanticExecutorConfig::bounded(result_budget),
+                                format!("semantic_embedding_unavailable:{error}"),
+                            )),
+                            None,
+                        ),
+                    }
+                } else {
+                    (None, None)
                 };
-                if let Some(trace) = semantic_result.as_ref().map(|result| &result.trace) {
-                    state.observe_semantic_trace(trace);
-                }
-                semantic_result
-            } else {
-                None
-            };
             Some(Self::build_context_budget_result_set(
                 &namespace,
                 retrieval_request,
-                &common,
-                query_by_example.unwrap_or(&empty_query_by_example),
-                mood_congruent,
-                semantic_result.as_ref(),
-                state,
+                ContextBudgetResultSetInputs {
+                    common: &common,
+                    query_by_example: query_by_example.unwrap_or(&empty_query_by_example),
+                    mood_congruent,
+                    semantic_result: semantic_result.as_ref(),
+                    reasoning: reasoning.as_ref(),
+                    state,
+                },
             ))
         } else {
             None

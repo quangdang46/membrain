@@ -1,0 +1,32 @@
+{
+  "id": "chk-run-mb-2cx3.4-20260327T130849357-fallback-1",
+  "bead_id": "mb-2cx3.4",
+  "run_id": "run-mb-2cx3.4-20260327T130849357",
+  "session_id": "ses-run-mb-2cx3.4-20260327T130849357",
+  "progress": "Synthetic fallback checkpoint after NoProgress",
+  "next_step": "Resume from the transcript tail, avoid repeating completed setup, and continue with the smallest safe remaining step.",
+  "payload": {
+    "claimed_paths": [],
+    "confidence": 0.25,
+    "context": {
+      "failure_class": "NoProgress",
+      "failure_detail": "session ended with Unknown",
+      "stderr_tail": [],
+      "stdout_tail": [
+        "Added one more validation result: the background CLI tests also passed.",
+        "",
+        "Extra validation confirmed:",
+        "- `cargo test -p membrain-cli cli_recall_json_preserves_route_and_result_fields -- --nocapture`",
+        "- `cargo test -p membrain-cli cli_explain_json_preserves_trace_stages_and_patterns -- --nocapture`",
+        "",
+        "Both completed successfully."
+      ],
+      "synthetic": true
+    },
+    "next_step": "Resume from the transcript tail, avoid repeating completed setup, and continue with the smallest safe remaining step.",
+    "open_questions": [],
+    "progress": "Synthetic fallback checkpoint after NoProgress"
+  },
+  "saved_at": "2026-03-27T14:11:17.561581919Z",
+  "resume_generation": 1
+}

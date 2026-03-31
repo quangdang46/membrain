@@ -1,0 +1,24 @@
+{
+  "id": "chk-run-mb-2cx3.4-20260327T162458825-fallback-1",
+  "bead_id": "mb-2cx3.4",
+  "run_id": "run-mb-2cx3.4-20260327T162458825",
+  "session_id": "ses-run-mb-2cx3.4-20260327T162458825",
+  "progress": "Synthetic fallback checkpoint after Unknown",
+  "next_step": "Resume from the transcript tail, avoid repeating completed setup, and continue with the smallest safe remaining step.",
+  "payload": {
+    "claimed_paths": [],
+    "confidence": 0.25,
+    "context": {
+      "failure_class": "Unknown",
+      "failure_detail": "session ended with Unknown",
+      "stderr_tail": [],
+      "stdout_tail": [],
+      "synthetic": true
+    },
+    "next_step": "Resume from the transcript tail, avoid repeating completed setup, and continue with the smallest safe remaining step.",
+    "open_questions": [],
+    "progress": "Synthetic fallback checkpoint after Unknown"
+  },
+  "saved_at": "2026-03-27T16:50:41.073551071Z",
+  "resume_generation": 1
+}

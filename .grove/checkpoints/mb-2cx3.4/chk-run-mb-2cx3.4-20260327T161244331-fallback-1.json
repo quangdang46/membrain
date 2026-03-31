@@ -1,0 +1,45 @@
+{
+  "id": "chk-run-mb-2cx3.4-20260327T161244331-fallback-1",
+  "bead_id": "mb-2cx3.4",
+  "run_id": "run-mb-2cx3.4-20260327T161244331",
+  "session_id": "ses-run-mb-2cx3.4-20260327T161244331",
+  "progress": "Synthetic fallback checkpoint after NoProgress",
+  "next_step": "Resume from the transcript tail, avoid repeating completed setup, and continue with the smallest safe remaining step.",
+  "payload": {
+    "claimed_paths": [],
+    "confidence": 0.25,
+    "context": {
+      "failure_class": "NoProgress",
+      "failure_detail": "session ended with Unknown",
+      "stderr_tail": [],
+      "stdout_tail": [
+        "",
+        "What changed:",
+        "- Added `RuntimeState::answered_from_for_record(...)` in `crates/membrain-daemon/src/daemon.rs:369`.",
+        "- Replaced daemon builder callsites that forced `AnsweredFrom::Tier2Indexed` with runtime-derived provenance in `crates/membrain-daemon/src/daemon.rs:5354`, `crates/membrain-daemon/src/daemon.rs:5594`, and `crates/membrain-daemon/src/daemon.rs:5962`.",
+        "- Added wrapper-path regression in `crates/membrain-daemon/src/daemon.rs:9321`.",
+        "",
+        "What the new regression proves:",
+        "- real daemon `explain` wrapper path returns hydrated evidence with `degraded_summary == null`",
+        "- mixed lifecycle result now shows:",
+        "  - `answered_from = tier3_cold`",
+        "  - `entry_lane = cold_fallback`",
+        "  - `result_reasons` includes `cold_consolidated`",
+        "  - `result_reasons` includes `reconsolidation_window_open`",
+        "  - `freshness_markers` includes `lifecycle_projection`",
+        "",
+        "Validation:",
+        "- `cargo test -p membrain-daemon runtime_query_explain_surfaces_mixed_lifecycle_reasons_on_wrapper_path -- --nocapture`",
+        "- `cargo test -p membrain-daemon runtime_query_explain_reports_policy_filtered_hydration_omission_reasons -- --nocapture`",
+        "- `cargo check --all-targets`",
+        ""
+      ],
+      "synthetic": true
+    },
+    "next_step": "Resume from the transcript tail, avoid repeating completed setup, and continue with the smallest safe remaining step.",
+    "open_questions": [],
+    "progress": "Synthetic fallback checkpoint after NoProgress"
+  },
+  "saved_at": "2026-03-27T16:24:56.170781321Z",
+  "resume_generation": 1
+}

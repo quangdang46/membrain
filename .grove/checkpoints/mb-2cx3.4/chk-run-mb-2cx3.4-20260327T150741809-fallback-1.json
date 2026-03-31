@@ -1,0 +1,45 @@
+{
+  "id": "chk-run-mb-2cx3.4-20260327T150741809-fallback-1",
+  "bead_id": "mb-2cx3.4",
+  "run_id": "run-mb-2cx3.4-20260327T150741809",
+  "session_id": "ses-run-mb-2cx3.4-20260327T150741809",
+  "progress": "Synthetic fallback checkpoint after NoProgress",
+  "next_step": "Resume from the transcript tail, avoid repeating completed setup, and continue with the smallest safe remaining step.",
+  "payload": {
+    "claimed_paths": [],
+    "confidence": 0.25,
+    "context": {
+      "failure_class": "NoProgress",
+      "failure_detail": "session ended with Unknown",
+      "stderr_tail": [],
+      "stdout_tail": [
+        "    - `cargo test -p membrain-daemon runtime_doctor_resource_read_matches_runtime_doctor_payload_shape -- --exact`",
+        "    - `cargo check --all-targets`",
+        "",
+        "- `mb-2cx3.4` got a small but real user-visible slice and should remain partial.",
+        "  - `crates/membrain-core/src/api.rs:1401` maps `semantic_executor_trace` into shared API reason translation.",
+        "  - `crates/membrain-core/src/observability.rs:803` adds the same reason-code label to observability.",
+        "  - `crates/membrain-core/tests/recall_pipeline_integration.rs:910` extends semantic recall proof to assert bounded Tier2 semantic executor details.",
+        "  - User-visible consequence: normal semantic recall/why/explain can now surface bounded shortlist/candidate/result-budget evidence as first-class shared reasons rather than opaque custom metadata.",
+        "  - Reported validation:",
+        "    - `cargo check --all-targets`",
+        "    - `cargo test -p membrain-core realistic_semantic_query_beats_lexical_distractor_on_normal_tier2_path -- --exact`",
+        "    - `cargo test -p membrain-core result_reason_from_threshold_reason_maps_threshold_family_and_policy_flag -- --exact`",
+        "",
+        "Checkpoint summary:",
+        "- `mb-2cx3.5`: treat as done, pending your own reconciliation of overlapping diffs if needed.",
+        "- `mb-2cx3.4`: improved, but still partial; remaining gap is the broader hot/cold/lifecycle runtime proof.",
+        "- `mb-2cx3.3` remains blocked by `mb-2cx3.5` in the bead graph, so it should be ready to revisit next.",
+        "- There is still an existing unrelated warning in `crates/membrain-daemon/src/daemon.rs` about unused `persisted_memory_count`.",
+        "",
+        "If you want, I can now inspect the actual changed files and reconcile the overlapping daemon posture edits directly."
+      ],
+      "synthetic": true
+    },
+    "next_step": "Resume from the transcript tail, avoid repeating completed setup, and continue with the smallest safe remaining step.",
+    "open_questions": [],
+    "progress": "Synthetic fallback checkpoint after NoProgress"
+  },
+  "saved_at": "2026-03-27T15:21:46.832670253Z",
+  "resume_generation": 1
+}

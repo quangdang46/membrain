@@ -1,0 +1,46 @@
+{"ts":"2026-03-27T16:50:41.559919785Z","kind":"session_started","session_id":"ses-run-mb-2cx3.4-20260327T165041557"}
+{"ts":"2026-03-27T16:58:21.034281312Z","kind":"stdout","line":"Done."}
+{"ts":"2026-03-27T16:58:21.242615891Z","kind":"stdout","line":""}
+{"ts":"2026-03-27T16:58:21.242653522Z","kind":"stdout","line":"- Extended `crates/membrain-daemon/src/daemon.rs:9316` so the existing mixed-lifecycle wrapper regression now proves:"}
+{"ts":"2026-03-27T16:58:21.242670796Z","kind":"stdout","line":"  - query `explain` shows `cold_consolidated`, `reconsolidation_window_open`, and `lifecycle_projection`"}
+{"ts":"2026-03-27T16:58:21.242686321Z","kind":"stdout","line":"  - `recall` shows the same mixed lifecycle effects on a user-visible retrieval path"}
+{"ts":"2026-03-27T16:58:21.242703800Z","kind":"stdout","line":"  - `why` still shows the targeted-memory contract: `query_by_example_seed_materialized`, `reconsolidation_window_open`, and `lifecycle_projection`"}
+{"ts":"2026-03-27T16:58:21.242718606Z","kind":"stdout","line":""}
+{"ts":"2026-03-27T16:58:21.242730841Z","kind":"stdout","line":"Validated:"}
+{"ts":"2026-03-27T16:58:21.242744515Z","kind":"stdout","line":"- `cargo test -p membrain-daemon runtime_query_explain_surfaces_mixed_lifecycle_reasons_on_wrapper_path -- --nocapture`"}
+{"ts":"2026-03-27T16:58:21.242760349Z","kind":"stdout","line":"- `cargo check --all-targets`"}
+{"ts":"2026-03-27T16:58:21.242773921Z","kind":"stdout","line":""}
+{"ts":"2026-03-27T16:58:21.242786156Z","kind":"stdout","line":"Note:"}
+{"ts":"2026-03-27T16:58:21.242799728Z","kind":"stdout","line":"- `cargo check --all-targets` still reports a pre-existing warning at `crates/membrain-daemon/src/daemon.rs:1859` for unused `persisted_memory_count`."}
+{"ts":"2026-03-27T16:58:21.242813711Z","kind":"stdout","line":""}
+{"ts":"2026-03-27T16:58:21.242825638Z","kind":"stdout","line":"GROVE_RESULT: success  "}
+{"ts":"2026-03-27T16:58:21.242825638Z","kind":"protocol","event":{"type":"result","summary":"success"}}
+{"ts":"2026-03-27T16:58:21.275030167Z","kind":"stdout","line":"GROVE_ARTIFACTS:"}
+{"ts":"2026-03-27T16:58:21.275030167Z","kind":"protocol","event":{"type":"artifacts","items":[]}}
+{"ts":"2026-03-27T16:58:21.276798927Z","kind":"stdout","line":"- Extended `crates/membrain-daemon/src/daemon.rs:9316` mixed-lifecycle wrapper regression to cover `recall` and `why`"}
+{"ts":"2026-03-27T16:58:21.276798927Z","kind":"protocol","event":{"type":"artifacts","items":["Extended `crates/membrain-daemon/src/daemon.rs:9316` mixed-lifecycle wrapper regression to cover `recall` and `why`"]}}
+{"ts":"2026-03-27T16:58:21.276844063Z","kind":"stdout","line":"- Proved real wrapper-path retrieval behavior differs from simple DB lookup via lifecycle reason codes and freshness markers"}
+{"ts":"2026-03-27T16:58:21.276844063Z","kind":"protocol","event":{"type":"artifacts","items":["Proved real wrapper-path retrieval behavior differs from simple DB lookup via lifecycle reason codes and freshness markers"]}}
+{"ts":"2026-03-27T16:58:21.276932177Z","kind":"stdout","line":""}
+{"ts":"2026-03-27T16:58:21.276957882Z","kind":"stdout","line":"GROVE_LESSONS:"}
+{"ts":"2026-03-27T16:58:21.276957882Z","kind":"protocol","event":{"type":"lessons","items":[]}}
+{"ts":"2026-03-27T16:58:21.276994999Z","kind":"stdout","line":"- The remaining honest gap was narrower than “add lifecycle behavior”; it was proving that wrapper-path `recall` also surfaces mixed cold/reconsolidating consequences"}
+{"ts":"2026-03-27T16:58:21.276994999Z","kind":"protocol","event":{"type":"lessons","items":["The remaining honest gap was narrower than “add lifecycle behavior”; it was proving that wrapper-path `recall` also surfaces mixed cold/reconsolidating consequences"]}}
+{"ts":"2026-03-27T16:58:21.277039313Z","kind":"stdout","line":"- `why` has a narrower exact/query-by-example envelope than query `recall`/`explain`, so its truthful lifecycle contract is not identical to mixed-query recall"}
+{"ts":"2026-03-27T16:58:21.277039313Z","kind":"protocol","event":{"type":"lessons","items":["`why` has a narrower exact/query-by-example envelope than query `recall`/`explain`, so its truthful lifecycle contract is not identical to mixed-query recall"]}}
+{"ts":"2026-03-27T16:58:21.277153028Z","kind":"stdout","line":""}
+{"ts":"2026-03-27T16:58:21.277164030Z","kind":"stdout","line":"GROVE_DECISIONS:"}
+{"ts":"2026-03-27T16:58:21.277164030Z","kind":"protocol","event":{"type":"decision","items":[]}}
+{"ts":"2026-03-27T16:58:21.277186444Z","kind":"stdout","line":"- Reused the existing internal daemon mixed-lifecycle fixture instead of inventing new public test hooks"}
+{"ts":"2026-03-27T16:58:21.277186444Z","kind":"protocol","event":{"type":"decision","items":["Reused the existing internal daemon mixed-lifecycle fixture instead of inventing new public test hooks"]}}
+{"ts":"2026-03-27T16:58:21.277215335Z","kind":"stdout","line":"- Tightened assertions to the real contracts each surface already guarantees"}
+{"ts":"2026-03-27T16:58:21.277215335Z","kind":"protocol","event":{"type":"decision","items":["Tightened assertions to the real contracts each surface already guarantees"]}}
+{"ts":"2026-03-27T16:58:21.277240525Z","kind":"stdout","line":""}
+{"ts":"2026-03-27T16:58:21.277251321Z","kind":"stdout","line":"GROVE_WARNINGS:"}
+{"ts":"2026-03-27T16:58:21.277251321Z","kind":"protocol","event":{"type":"warning","items":[]}}
+{"ts":"2026-03-27T16:58:21.277270959Z","kind":"stdout","line":"- Pre-existing unused-method warning remains at `crates/membrain-daemon/src/daemon.rs:1859`"}
+{"ts":"2026-03-27T16:58:21.277270959Z","kind":"protocol","event":{"type":"warning","items":["Pre-existing unused-method warning remains at `crates/membrain-daemon/src/daemon.rs:1859`"]}}
+{"ts":"2026-03-27T16:58:21.277295327Z","kind":"stdout","line":""}
+{"ts":"2026-03-27T16:58:21.277385806Z","kind":"stdout","line":"GROVE_EXIT: false"}
+{"ts":"2026-03-27T16:58:21.277385806Z","kind":"protocol","event":{"type":"exit","value":false}}
+{"ts":"2026-03-27T16:58:24.226932995Z","kind":"session_ended","exit_code":0}

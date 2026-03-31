@@ -1,0 +1,31 @@
+{"ts":"2026-03-27T15:07:41.850161323Z","kind":"session_started","session_id":"ses-run-mb-2cx3.4-20260327T150741809"}
+{"ts":"2026-03-27T15:21:46.285701155Z","kind":"stdout","line":"Swarm is shut down and cleaned up."}
+{"ts":"2026-03-27T15:21:46.299658274Z","kind":"stdout","line":""}
+{"ts":"2026-03-27T15:21:46.299668009Z","kind":"stdout","line":"Results from the resumed work:"}
+{"ts":"2026-03-27T15:21:46.299670791Z","kind":"stdout","line":""}
+{"ts":"2026-03-27T15:21:46.299673075Z","kind":"stdout","line":"- `mb-2cx3.5` likely moved to done."}
+{"ts":"2026-03-27T15:21:46.299676453Z","kind":"stdout","line":"  - A worker landed a proof slice in `crates/membrain-daemon/tests/runtime_doctor_parity.rs` asserting unix-socket resource fields like `authority_mode`, `authoritative_runtime`, `maintenance_active`, and `warm_runtime_guarantees`."}
+{"ts":"2026-03-27T15:21:46.299679532Z","kind":"stdout","line":"  - `MISSING.md` was also updated to mark `gap.daemon_authoritative_runtime_posture` done."}
+{"ts":"2026-03-27T15:21:46.299682314Z","kind":"stdout","line":"  - Reported validation:"}
+{"ts":"2026-03-27T15:21:46.299684896Z","kind":"stdout","line":"    - `cargo test -p membrain-daemon runtime_health_resource_read_matches_runtime_health_payload_shape -- --exact`"}
+{"ts":"2026-03-27T15:21:46.299688572Z","kind":"stdout","line":"    - `cargo test -p membrain-daemon runtime_doctor_resource_read_matches_runtime_doctor_payload_shape -- --exact`"}
+{"ts":"2026-03-27T15:21:46.299690956Z","kind":"stdout","line":"    - `cargo check --all-targets`"}
+{"ts":"2026-03-27T15:21:46.299693340Z","kind":"stdout","line":""}
+{"ts":"2026-03-27T15:21:46.299695625Z","kind":"stdout","line":"- `mb-2cx3.4` got a small but real user-visible slice and should remain partial."}
+{"ts":"2026-03-27T15:21:46.299698009Z","kind":"stdout","line":"  - `crates/membrain-core/src/api.rs:1401` maps `semantic_executor_trace` into shared API reason translation."}
+{"ts":"2026-03-27T15:21:46.299700492Z","kind":"stdout","line":"  - `crates/membrain-core/src/observability.rs:803` adds the same reason-code label to observability."}
+{"ts":"2026-03-27T15:21:46.299703174Z","kind":"stdout","line":"  - `crates/membrain-core/tests/recall_pipeline_integration.rs:910` extends semantic recall proof to assert bounded Tier2 semantic executor details."}
+{"ts":"2026-03-27T15:21:46.299706552Z","kind":"stdout","line":"  - User-visible consequence: normal semantic recall/why/explain can now surface bounded shortlist/candidate/result-budget evidence as first-class shared reasons rather than opaque custom metadata."}
+{"ts":"2026-03-27T15:21:46.299709532Z","kind":"stdout","line":"  - Reported validation:"}
+{"ts":"2026-03-27T15:21:46.299711916Z","kind":"stdout","line":"    - `cargo check --all-targets`"}
+{"ts":"2026-03-27T15:21:46.299714399Z","kind":"stdout","line":"    - `cargo test -p membrain-core realistic_semantic_query_beats_lexical_distractor_on_normal_tier2_path -- --exact`"}
+{"ts":"2026-03-27T15:21:46.299716883Z","kind":"stdout","line":"    - `cargo test -p membrain-core result_reason_from_threshold_reason_maps_threshold_family_and_policy_flag -- --exact`"}
+{"ts":"2026-03-27T15:21:46.299719366Z","kind":"stdout","line":""}
+{"ts":"2026-03-27T15:21:46.299721651Z","kind":"stdout","line":"Checkpoint summary:"}
+{"ts":"2026-03-27T15:21:46.299723936Z","kind":"stdout","line":"- `mb-2cx3.5`: treat as done, pending your own reconciliation of overlapping diffs if needed."}
+{"ts":"2026-03-27T15:21:46.299726519Z","kind":"stdout","line":"- `mb-2cx3.4`: improved, but still partial; remaining gap is the broader hot/cold/lifecycle runtime proof."}
+{"ts":"2026-03-27T15:21:46.299729101Z","kind":"stdout","line":"- `mb-2cx3.3` remains blocked by `mb-2cx3.5` in the bead graph, so it should be ready to revisit next."}
+{"ts":"2026-03-27T15:21:46.299731386Z","kind":"stdout","line":"- There is still an existing unrelated warning in `crates/membrain-daemon/src/daemon.rs` about unused `persisted_memory_count`."}
+{"ts":"2026-03-27T15:21:46.299733969Z","kind":"stdout","line":""}
+{"ts":"2026-03-27T15:21:46.299736154Z","kind":"stdout","line":"If you want, I can now inspect the actual changed files and reconcile the overlapping daemon posture edits directly."}
+{"ts":"2026-03-27T15:21:46.832670253Z","kind":"session_ended","exit_code":0}

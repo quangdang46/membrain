@@ -1,1 +1,9 @@
 {"ts":"2026-03-27T13:08:49.363184688Z","kind":"session_started","session_id":"ses-run-mb-2cx3.4-20260327T130849357"}
+{"ts":"2026-03-27T14:11:10.526309242Z","kind":"stdout","line":"Added one more validation result: the background CLI tests also passed."}
+{"ts":"2026-03-27T14:11:11.592516064Z","kind":"stdout","line":""}
+{"ts":"2026-03-27T14:11:11.592578525Z","kind":"stdout","line":"Extra validation confirmed:"}
+{"ts":"2026-03-27T14:11:11.592587536Z","kind":"stdout","line":"- `cargo test -p membrain-cli cli_recall_json_preserves_route_and_result_fields -- --nocapture`"}
+{"ts":"2026-03-27T14:11:11.592593679Z","kind":"stdout","line":"- `cargo test -p membrain-cli cli_explain_json_preserves_trace_stages_and_patterns -- --nocapture`"}
+{"ts":"2026-03-27T14:11:11.592600233Z","kind":"stdout","line":""}
+{"ts":"2026-03-27T14:11:11.592604943Z","kind":"stdout","line":"Both completed successfully."}
+{"ts":"2026-03-27T14:11:17.561581919Z","kind":"session_ended","exit_code":0}

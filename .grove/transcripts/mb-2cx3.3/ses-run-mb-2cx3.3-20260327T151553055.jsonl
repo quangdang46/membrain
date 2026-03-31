@@ -1,0 +1,62 @@
+{"ts":"2026-03-27T15:15:55.281856376Z","kind":"session_started","session_id":"ses-run-mb-2cx3.3-20260327T151553055"}
+{"ts":"2026-03-27T15:33:06.413812964Z","kind":"stdout","line":"GROVE_RESULT: success"}
+{"ts":"2026-03-27T15:33:06.413812964Z","kind":"protocol","event":{"type":"result","summary":"success"}}
+{"ts":"2026-03-27T15:33:06.493706708Z","kind":"stdout","line":""}
+{"ts":"2026-03-27T15:33:06.493723650Z","kind":"stdout","line":"GROVE_ARTIFACTS:"}
+{"ts":"2026-03-27T15:33:06.493723650Z","kind":"protocol","event":{"type":"artifacts","items":[]}}
+{"ts":"2026-03-27T15:33:06.493731967Z","kind":"stdout","line":"- Added grouped cross-surface parity coverage in `crates/membrain-cli/tests/cli_end_to_end.rs`"}
+{"ts":"2026-03-27T15:33:06.493731967Z","kind":"protocol","event":{"type":"artifacts","items":["Added grouped cross-surface parity coverage in `crates/membrain-cli/tests/cli_end_to_end.rs`"]}}
+{"ts":"2026-03-27T15:33:06.493738846Z","kind":"stdout","line":"- New test: `cross_surface_restart_rehydrates_persisted_memory_for_cli_daemon_and_mcp`"}
+{"ts":"2026-03-27T15:33:06.493738846Z","kind":"protocol","event":{"type":"artifacts","items":["New test: `cross_surface_restart_rehydrates_persisted_memory_for_cli_daemon_and_mcp`"]}}
+{"ts":"2026-03-27T15:33:06.493744596Z","kind":"stdout","line":"- Bead closed: `mb-2cx3.3`"}
+{"ts":"2026-03-27T15:33:06.493744596Z","kind":"protocol","event":{"type":"artifacts","items":["Bead closed: `mb-2cx3.3`"]}}
+{"ts":"2026-03-27T15:33:06.493751064Z","kind":"stdout","line":""}
+{"ts":"2026-03-27T15:33:06.493753529Z","kind":"stdout","line":"GROVE_LESSONS:"}
+{"ts":"2026-03-27T15:33:06.493753529Z","kind":"protocol","event":{"type":"lessons","items":[]}}
+{"ts":"2026-03-27T15:33:06.493758457Z","kind":"stdout","line":"- CLI, daemon JSON-RPC, and MCP already shared most durable semantics; the missing proof was a single harness over one persisted DB root."}
+{"ts":"2026-03-27T15:33:06.493758457Z","kind":"protocol","event":{"type":"lessons","items":["CLI, daemon JSON-RPC, and MCP already shared most durable semantics; the missing proof was a single harness over one persisted DB root."]}}
+{"ts":"2026-03-27T15:33:06.493764207Z","kind":"stdout","line":"- Output shape differs by wrapper:"}
+{"ts":"2026-03-27T15:33:06.493764207Z","kind":"protocol","event":{"type":"lessons","items":["Output shape differs by wrapper:"]}}
+{"ts":"2026-03-27T15:33:06.493769444Z","kind":"stdout","line":"  - CLI `why` exposes seed semantics via `result.result_reasons`"}
+{"ts":"2026-03-27T15:33:06.493769444Z","kind":"protocol","event":{"type":"lessons","items":["CLI `why` exposes seed semantics via `result.result_reasons`"]}}
+{"ts":"2026-03-27T15:33:06.493776323Z","kind":"stdout","line":"  - daemon/MCP `why` additionally expose `materialized_seed_descriptors`"}
+{"ts":"2026-03-27T15:33:06.493776323Z","kind":"protocol","event":{"type":"lessons","items":["daemon/MCP `why` additionally expose `materialized_seed_descriptors`"]}}
+{"ts":"2026-03-27T15:33:06.493781559Z","kind":"stdout","line":"  - MCP `health`/`doctor` return direct payloads in this path, not always `{status,payload}`"}
+{"ts":"2026-03-27T15:33:06.493781559Z","kind":"protocol","event":{"type":"lessons","items":["MCP `health`/`doctor` return direct payloads in this path, not always `{status,payload}`"]}}
+{"ts":"2026-03-27T15:33:06.493796756Z","kind":"stdout","line":"- Parity tests need to assert semantic sameness, not wrapper-local JSON scaffolding."}
+{"ts":"2026-03-27T15:33:06.493796756Z","kind":"protocol","event":{"type":"lessons","items":["Parity tests need to assert semantic sameness, not wrapper-local JSON scaffolding."]}}
+{"ts":"2026-03-27T15:33:06.493802197Z","kind":"stdout","line":""}
+{"ts":"2026-03-27T15:33:06.493804662Z","kind":"stdout","line":"GROVE_DECISIONS:"}
+{"ts":"2026-03-27T15:33:06.493804662Z","kind":"protocol","event":{"type":"decision","items":[]}}
+{"ts":"2026-03-27T15:33:06.493809693Z","kind":"stdout","line":"- Used `remember` as the deterministic persisted fixture for cross-surface parity."}
+{"ts":"2026-03-27T15:33:06.493809693Z","kind":"protocol","event":{"type":"decision","items":["Used `remember` as the deterministic persisted fixture for cross-surface parity."]}}
+{"ts":"2026-03-27T15:33:06.493824170Z","kind":"stdout","line":"- Kept assertions focused on shared durable visibility and meaning:"}
+{"ts":"2026-03-27T15:33:06.493824170Z","kind":"protocol","event":{"type":"decision","items":["Kept assertions focused on shared durable visibility and meaning:"]}}
+{"ts":"2026-03-27T15:33:06.493828380Z","kind":"stdout","line":"  - same memory visible after restart"}
+{"ts":"2026-03-27T15:33:06.493828380Z","kind":"protocol","event":{"type":"decision","items":["same memory visible after restart"]}}
+{"ts":"2026-03-27T15:33:06.493832282Z","kind":"stdout","line":"  - exact-id and explain paths agree semantically"}
+{"ts":"2026-03-27T15:33:06.493832282Z","kind":"protocol","event":{"type":"decision","items":["exact-id and explain paths agree semantically"]}}
+{"ts":"2026-03-27T15:33:06.493837518Z","kind":"stdout","line":"  - `degraded_summary` remains null on success"}
+{"ts":"2026-03-27T15:33:06.493837518Z","kind":"protocol","event":{"type":"decision","items":["`degraded_summary` remains null on success"]}}
+{"ts":"2026-03-27T15:33:06.493841523Z","kind":"stdout","line":"  - `health` / `doctor` reflect the same persisted encode count and namespace hotspot"}
+{"ts":"2026-03-27T15:33:06.493841523Z","kind":"protocol","event":{"type":"decision","items":["`health` / `doctor` reflect the same persisted encode count and namespace hotspot"]}}
+{"ts":"2026-03-27T15:33:06.493845219Z","kind":"stdout","line":"- Avoided asserting wrapper-only fields as parity requirements."}
+{"ts":"2026-03-27T15:33:06.493845219Z","kind":"protocol","event":{"type":"decision","items":["Avoided asserting wrapper-only fields as parity requirements."]}}
+{"ts":"2026-03-27T15:33:06.493849018Z","kind":"stdout","line":""}
+{"ts":"2026-03-27T15:33:06.493850764Z","kind":"stdout","line":"GROVE_WARNINGS:"}
+{"ts":"2026-03-27T15:33:06.493850764Z","kind":"protocol","event":{"type":"warning","items":[]}}
+{"ts":"2026-03-27T15:33:06.493854255Z","kind":"stdout","line":"- `cargo check --all-targets` passed, but there is an existing warning in `crates/membrain-daemon/src/daemon.rs:1849` for unused `persisted_memory_count`."}
+{"ts":"2026-03-27T15:33:06.493854255Z","kind":"protocol","event":{"type":"warning","items":["`cargo check --all-targets` passed, but there is an existing warning in `crates/membrain-daemon/src/daemon.rs:1849` for unused `persisted_memory_count`."]}}
+{"ts":"2026-03-27T15:33:06.493859183Z","kind":"stdout","line":"- I did not touch unrelated warning cleanup."}
+{"ts":"2026-03-27T15:33:06.493859183Z","kind":"protocol","event":{"type":"warning","items":["I did not touch unrelated warning cleanup."]}}
+{"ts":"2026-03-27T15:33:06.493863085Z","kind":"stdout","line":""}
+{"ts":"2026-03-27T15:33:06.493864933Z","kind":"stdout","line":"GROVE_EXIT: true"}
+{"ts":"2026-03-27T15:33:06.493864933Z","kind":"protocol","event":{"type":"exit","value":true}}
+{"ts":"2026-03-27T15:33:06.499603943Z","kind":"stdout","line":""}
+{"ts":"2026-03-27T15:33:06.521609093Z","kind":"stdout","line":"Implemented and validated:"}
+{"ts":"2026-03-27T15:33:06.521620285Z","kind":"stdout","line":"- `cargo test -p membrain-cli cross_surface_restart_rehydrates_persisted_memory_for_cli_daemon_and_mcp -- --nocapture`"}
+{"ts":"2026-03-27T15:33:06.521623160Z","kind":"stdout","line":"- `cargo check --all-targets`"}
+{"ts":"2026-03-27T15:33:06.521626446Z","kind":"stdout","line":""}
+{"ts":"2026-03-27T15:33:06.521628191Z","kind":"stdout","line":"Key file:"}
+{"ts":"2026-03-27T15:33:06.521630039Z","kind":"stdout","line":"- `crates/membrain-cli/tests/cli_end_to_end.rs`"}
+{"ts":"2026-03-27T15:33:08.256792125Z","kind":"session_ended","exit_code":0}

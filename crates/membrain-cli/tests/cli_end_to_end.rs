@@ -126,16 +126,29 @@ fn seeded_runtime_record(
     }
 }
 
-fn spawn_membrain_mcp(db_root: &std::path::Path) -> Child {
-    Command::new(env!("CARGO_BIN_EXE_membrain"))
-        .arg("--db-path")
-        .arg(db_root)
-        .arg("mcp")
+fn spawn_membrain_mcp_with_logging(
+    db_root: &std::path::Path,
+    log_path: Option<&std::path::Path>,
+    log_filter: Option<&str>,
+) -> Child {
+    let mut command = Command::new(env!("CARGO_BIN_EXE_membrain"));
+    command.arg("--db-path").arg(db_root).arg("mcp");
+    if let Some(log_path) = log_path {
+        command.env("MEMBRAIN_LOG_PATH", log_path);
+    }
+    if let Some(log_filter) = log_filter {
+        command.env("MEMBRAIN_LOG", log_filter);
+    }
+    command
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .spawn()
         .expect("membrain mcp should spawn")
+}
+
+fn spawn_membrain_mcp(db_root: &std::path::Path) -> Child {
+    spawn_membrain_mcp_with_logging(db_root, None, None)
 }
 
 #[cfg(unix)]
@@ -915,6 +928,73 @@ fn mcp_protocol_discovers_bounded_live_tools_and_placeholder_prompts() {
     assert_eq!(shutdown_json["result"]["shutting_down"], json!(true));
     let status = mcp.wait().expect("mcp process should exit");
     assert!(status.success(), "mcp exit status: {status}");
+}
+
+#[test]
+fn mcp_tracing_logs_stdio_actions_to_file() {
+    let db_root = test_db_root();
+    let log_path = db_root.join("mcp-debug.log");
+    let mut mcp = spawn_membrain_mcp_with_logging(&db_root, Some(&log_path), Some("debug"));
+
+    let initialize = send_mcp_request(
+        &mut mcp,
+        json!({
+            "jsonrpc":"2.0",
+            "method":"initialize",
+            "params":{
+                "protocolVersion":"2024-11-05",
+                "capabilities":{"tools":{}},
+                "clientInfo":{"name":"trace-test","version":"1.0"}
+            },
+            "id":"mcp-trace-init"
+        }),
+    );
+    assert_eq!(
+        initialize["result"]["serverInfo"]["name"],
+        json!("membrain")
+    );
+
+    let tool_call = send_mcp_request(
+        &mut mcp,
+        json!({
+            "jsonrpc":"2.0",
+            "method":"tools/call",
+            "params":{"name":"health","arguments":{}},
+            "id":"mcp-trace-health"
+        }),
+    );
+    assert!(tool_call["result"]["feature_availability"].is_array());
+
+    let shutdown_json = send_mcp_request(
+        &mut mcp,
+        json!({
+            "jsonrpc":"2.0",
+            "method":"shutdown",
+            "params":{},
+            "id":"mcp-trace-shutdown"
+        }),
+    );
+    assert_eq!(shutdown_json["result"]["shutting_down"], json!(true));
+    let status = mcp.wait().expect("mcp process should exit");
+    assert!(status.success(), "mcp exit status: {status}");
+
+    let log = std::fs::read_to_string(&log_path).expect("mcp tracing log should exist");
+    assert!(
+        log.contains("starting MCP stdio server"),
+        "log contents: {log}"
+    );
+    assert!(
+        log.contains("received MCP request") && log.contains("method=\"initialize\""),
+        "log contents: {log}"
+    );
+    assert!(
+        log.contains("action=\"health\"") && log.contains("method=\"tools/call\""),
+        "log contents: {log}"
+    );
+    assert!(
+        log.contains("completed MCP request") && log.contains("request_id=\"mcp-trace-health\""),
+        "log contents: {log}"
+    );
 }
 
 #[test]
