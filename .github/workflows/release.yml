@@ -34,7 +34,7 @@ jobs:
             suffix: macos-x86_64
             archive_ext: tar.gz
             use_cross: false
-          - os: macos-latest
+          - os: macos-14
             target: aarch64-apple-darwin
             suffix: macos-aarch64
             archive_ext: tar.gz
@@ -52,7 +52,7 @@ jobs:
       - uses: Swatinem/rust-cache@v2
       - name: Install cross
         if: matrix.use_cross
-        run: cargo install cross --git https://github.com/cross-rs/cross
+        uses: taiki-e/install-action@cross
       - name: Build release binaries
         shell: bash
         run: |
