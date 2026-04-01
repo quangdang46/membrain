@@ -2497,48 +2497,11 @@ impl RuntimeState {
         }
     }
 
-    fn sharing_scope_label(outcome: &SharingAccessOutcome) -> FieldPresence<String> {
-        match outcome.decision {
-            SharingAccessDecision::Allow | SharingAccessDecision::Redact => outcome
-                .sharing_scope
-                .map(|scope| FieldPresence::Present(scope.as_str().to_string()))
-                .unwrap_or(FieldPresence::Absent),
-            SharingAccessDecision::Deny => FieldPresence::Redacted,
-        }
-    }
-
     fn share_policy_summary(
         namespace: &NamespaceId,
         outcome: &SharingAccessOutcome,
     ) -> membrain_core::api::TracePolicySummary {
-        membrain_core::api::TracePolicySummary {
-            effective_namespace: namespace.as_str().to_string(),
-            policy_family: "visibility_sharing",
-            outcome_class: outcome.policy_summary.outcome_class,
-            blocked_stage: "policy_gate",
-            redaction_fields: outcome.redaction_fields.clone(),
-            retention_state: FieldPresence::Absent,
-            sharing_scope: match outcome.decision {
-                SharingAccessDecision::Allow | SharingAccessDecision::Redact => outcome
-                    .sharing_scope
-                    .map(|scope| FieldPresence::Present(scope.as_str()))
-                    .unwrap_or(FieldPresence::Absent),
-                SharingAccessDecision::Deny => FieldPresence::Redacted,
-            },
-            filters: vec![PolicyFilterSummary::new(
-                namespace.as_str(),
-                "visibility_sharing",
-                outcome.policy_summary.outcome_class,
-                "policy_gate",
-                Self::sharing_scope_label(outcome),
-                FieldPresence::Absent,
-                outcome
-                    .redaction_fields
-                    .iter()
-                    .map(|field| (*field).to_string())
-                    .collect(),
-            )],
-        }
+        outcome.trace_policy_summary(namespace)
     }
 }
 

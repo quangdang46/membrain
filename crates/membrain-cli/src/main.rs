@@ -3910,6 +3910,12 @@ fn sharing_trace_policy_summary(
     outcome_class: membrain_core::observability::OutcomeClass,
     redaction_fields: Vec<&'static str>,
 ) -> TracePolicySummary {
+    let redaction_fields_present = redaction_fields.is_empty();
+    let reason_codes = if redaction_fields_present {
+        vec![format!("visibility_{visibility}")]
+    } else {
+        vec!["visibility_tightened".to_string()]
+    };
     TracePolicySummary {
         effective_namespace: namespace.as_str().to_string(),
         policy_family: "visibility_sharing",
@@ -3930,6 +3936,12 @@ fn sharing_trace_policy_summary(
         redaction_fields,
         retention_state: membrain_core::api::FieldPresence::Absent,
         sharing_scope: membrain_core::api::FieldPresence::Present(visibility),
+        reason_codes,
+        operator_note: Some(if redaction_fields_present {
+            format!("visibility is now {visibility}")
+        } else {
+            format!("visibility is now {visibility} and prior sharing scope was redacted")
+        }),
     }
 }
 

@@ -916,7 +916,9 @@ impl BrainStore {
         let bound = request_context
             .bind_namespace(Some(namespace.clone()))
             .expect("promotion namespace binding should succeed");
-        if bound.evaluate_policy(&self.policy).decision == crate::policy::PolicyDecision::Deny {
+        if bound.evaluate_policy(&self.policy).policy_summary.decision
+            == crate::policy::PolicyDecision::Deny
+        {
             return Err(ProceduralStoreError::new(
                 namespace,
                 pattern_handle,

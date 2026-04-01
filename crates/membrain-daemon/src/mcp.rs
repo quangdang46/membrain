@@ -1806,6 +1806,8 @@ mod tests {
                 redaction_fields: Vec::new(),
                 retention_state: FieldPresence::Absent,
                 sharing_scope: FieldPresence::Present("shared"),
+                reason_codes: vec!["visibility_shared".to_string()],
+                operator_note: Some("visibility is now shared".to_string()),
                 filters: vec![PolicyFilterSummary::new(
                     "team.beta",
                     "visibility_sharing",

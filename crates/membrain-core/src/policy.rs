@@ -1,3 +1,4 @@
+use crate::api::{FieldPresence, NamespaceId, PolicyFilterSummary, TracePolicySummary};
 use crate::observability::OutcomeClass;
 
 /// Effective policy decision shared across core APIs and wrappers.
@@ -7,6 +8,16 @@ pub enum PolicyDecision {
     Allow,
     /// The request must stop before expensive work begins.
     Deny,
+}
+
+impl PolicyDecision {
+    /// Returns the stable machine-readable policy decision label.
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Allow => "allow",
+            Self::Deny => "deny",
+        }
+    }
 }
 
 /// Canonical ingest modes that remain inspectable across intake surfaces.
@@ -105,6 +116,49 @@ impl SharingDenialReason {
             Self::LegalHold => "legal_hold",
         }
     }
+
+    /// Returns an operator-facing explanation for the denial reason.
+    pub const fn operator_message(self) -> &'static str {
+        match self {
+            Self::NamespaceIsolation => {
+                "cross-namespace access stays blocked until the request is explicitly widened"
+            }
+            Self::ApprovedScopeRequired => {
+                "public visibility requires an explicit include-public approval path"
+            }
+            Self::VisibilityNotShareable => {
+                "private visibility cannot be widened beyond the effective namespace"
+            }
+            Self::WorkspaceAclDenied => "workspace ACL denied the requested visibility widening",
+            Self::AgentAclDenied => "agent ACL denied the requested visibility widening",
+            Self::SessionVisibilityDenied => {
+                "session visibility policy denied the requested visibility widening"
+            }
+            Self::LegalHold => "legal hold blocks cross-namespace visibility widening",
+        }
+    }
+}
+
+/// Stable denial reasons for the namespace gate itself.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
+pub enum NamespaceDenialReason {
+    CallerIdentityUnbound,
+}
+
+impl NamespaceDenialReason {
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::CallerIdentityUnbound => "caller_identity_unbound",
+        }
+    }
+
+    pub const fn operator_message(self) -> &'static str {
+        match self {
+            Self::CallerIdentityUnbound => {
+                "caller identity must be bound before the effective namespace can be trusted"
+            }
+        }
+    }
 }
 
 /// Final mediation outcome for namespace-aware sharing access.
@@ -142,6 +196,69 @@ impl PolicySummary {
             decision: PolicyDecision::Deny,
             namespace_bound,
             outcome_class: OutcomeClass::Rejected,
+        }
+    }
+}
+
+/// Machine-readable outcome for the namespace gate with stable denial reasons.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+pub struct NamespaceAccessOutcome {
+    pub policy_summary: PolicySummary,
+    pub denial_reasons: Vec<NamespaceDenialReason>,
+}
+
+impl NamespaceAccessOutcome {
+    /// Returns stable reason codes for trace and operator surfaces.
+    pub fn reason_codes(&self) -> Vec<String> {
+        if self.denial_reasons.is_empty() {
+            vec!["namespace_bound".to_string()]
+        } else {
+            self.denial_reasons
+                .iter()
+                .map(|reason| reason.as_str().to_string())
+                .collect()
+        }
+    }
+
+    /// Returns a concise operator-facing explanation for the namespace decision.
+    pub fn operator_message(&self) -> String {
+        self.denial_reasons
+            .first()
+            .map(|reason| reason.operator_message().to_string())
+            .unwrap_or_else(|| {
+                "caller identity is bound and the effective namespace is trusted".to_string()
+            })
+    }
+
+    /// Projects the namespace decision into the shared trace policy surface.
+    pub fn trace_policy_summary(&self, namespace: &NamespaceId) -> TracePolicySummary {
+        TracePolicySummary {
+            effective_namespace: namespace.as_str().to_string(),
+            policy_family: "namespace_binding",
+            outcome_class: self.policy_summary.outcome_class,
+            blocked_stage: if self.denial_reasons.is_empty() {
+                "not_blocked"
+            } else {
+                "policy_gate"
+            },
+            redaction_fields: Vec::new(),
+            retention_state: FieldPresence::Absent,
+            sharing_scope: FieldPresence::Absent,
+            reason_codes: self.reason_codes(),
+            operator_note: Some(self.operator_message()),
+            filters: vec![PolicyFilterSummary::new(
+                namespace.as_str(),
+                "namespace_binding",
+                self.policy_summary.outcome_class,
+                if self.denial_reasons.is_empty() {
+                    "not_blocked"
+                } else {
+                    "policy_gate"
+                },
+                FieldPresence::Absent,
+                FieldPresence::Absent,
+                Vec::new(),
+            )],
         }
     }
 }
@@ -188,6 +305,49 @@ pub enum SafeguardReasonCode {
     ConfidenceTooLow,
     PolicyDenied,
     LegalHold,
+}
+
+impl SafeguardReasonCode {
+    /// Returns the stable machine-readable safeguard reason label.
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::ConfirmationRequired => "confirmation_required",
+            Self::StalePreflight => "stale_preflight",
+            Self::GenerationMismatch => "generation_mismatch",
+            Self::SnapshotRequired => "snapshot_required",
+            Self::MaintenanceWindowRequired => "maintenance_window_required",
+            Self::DependencyPending => "dependency_pending",
+            Self::ScopeAmbiguous => "scope_ambiguous",
+            Self::AuthoritativeInputUnreadable => "authoritative_input_unreadable",
+            Self::ConfidenceTooLow => "confidence_too_low",
+            Self::PolicyDenied => "policy_denied",
+            Self::LegalHold => "legal_hold",
+        }
+    }
+
+    /// Returns the operator-facing explanation for the safeguard reason.
+    pub const fn operator_message(self) -> &'static str {
+        match self {
+            Self::ConfirmationRequired => {
+                "destructive action requires explicit confirmation before execution"
+            }
+            Self::StalePreflight | Self::GenerationMismatch => {
+                "preflight confirmation is stale for the requested scope"
+            }
+            Self::SnapshotRequired => "a fresh snapshot is required before this action can proceed",
+            Self::MaintenanceWindowRequired => {
+                "the requested action is restricted to an active maintenance window"
+            }
+            Self::DependencyPending => "operation dependencies are not ready yet",
+            Self::ScopeAmbiguous => "the requested scope is ambiguous and must be narrowed",
+            Self::AuthoritativeInputUnreadable => {
+                "authoritative inputs are unreadable for the requested action"
+            }
+            Self::ConfidenceTooLow => "confidence is too low for this action",
+            Self::PolicyDenied => "policy denied the requested action",
+            Self::LegalHold => "legal hold blocks the requested action",
+        }
+    }
 }
 
 /// Recovery posture for risky operations.
@@ -247,6 +407,101 @@ pub struct SharingAccessOutcome {
     pub redaction_fields: Vec<&'static str>,
 }
 
+impl SharingAccessOutcome {
+    /// Returns stable reason codes for the sharing decision.
+    pub fn reason_codes(&self) -> Vec<String> {
+        if !self.denial_reasons.is_empty() {
+            return self
+                .denial_reasons
+                .iter()
+                .map(|reason| reason.as_str().to_string())
+                .collect();
+        }
+
+        let mut reason_codes = self
+            .sharing_scope
+            .map(|scope| scope.as_str().to_string())
+            .into_iter()
+            .collect::<Vec<_>>();
+        if matches!(self.decision, SharingAccessDecision::Redact) {
+            reason_codes.push("redacted_cross_namespace".to_string());
+        }
+        if reason_codes.is_empty() {
+            reason_codes.push("same_namespace".to_string());
+        }
+        reason_codes
+    }
+
+    /// Returns one operator-facing explanation for the sharing decision.
+    pub fn operator_message(&self) -> String {
+        if let Some(reason) = self.denial_reasons.first() {
+            return reason.operator_message().to_string();
+        }
+
+        match (self.decision, self.sharing_scope) {
+            (SharingAccessDecision::Allow, Some(SharingScope::NamespaceOnly)) => {
+                "same-namespace access is allowed without redaction".to_string()
+            }
+            (SharingAccessDecision::Redact, Some(SharingScope::ApprovedShared)) => {
+                "shared visibility is allowed across namespaces with workspace and session redaction"
+                    .to_string()
+            }
+            (SharingAccessDecision::Redact, Some(SharingScope::ApprovedPublic)) => {
+                "public visibility is allowed across namespaces with workspace and session redaction"
+                    .to_string()
+            }
+            (SharingAccessDecision::Allow, Some(SharingScope::ApprovedShared)) => {
+                "shared visibility is allowed for the requested scope".to_string()
+            }
+            (SharingAccessDecision::Allow, Some(SharingScope::ApprovedPublic)) => {
+                "public visibility is allowed for the requested scope".to_string()
+            }
+            _ => "policy evaluated the sharing request".to_string(),
+        }
+    }
+
+    /// Projects the sharing decision into the shared trace policy surface.
+    pub fn trace_policy_summary(&self, namespace: &NamespaceId) -> TracePolicySummary {
+        let blocked_stage = "policy_gate";
+        TracePolicySummary {
+            effective_namespace: namespace.as_str().to_string(),
+            policy_family: "visibility_sharing",
+            outcome_class: self.policy_summary.outcome_class,
+            blocked_stage,
+            redaction_fields: self.redaction_fields.clone(),
+            retention_state: FieldPresence::Absent,
+            sharing_scope: match self.decision {
+                SharingAccessDecision::Allow | SharingAccessDecision::Redact => self
+                    .sharing_scope
+                    .map(SharingScope::as_str)
+                    .map(FieldPresence::Present)
+                    .unwrap_or(FieldPresence::Absent),
+                SharingAccessDecision::Deny => FieldPresence::Redacted,
+            },
+            reason_codes: self.reason_codes(),
+            operator_note: Some(self.operator_message()),
+            filters: vec![PolicyFilterSummary::new(
+                namespace.as_str(),
+                "visibility_sharing",
+                self.policy_summary.outcome_class,
+                blocked_stage,
+                match self.decision {
+                    SharingAccessDecision::Allow | SharingAccessDecision::Redact => self
+                        .sharing_scope
+                        .map(|scope| FieldPresence::Present(scope.as_str().to_string()))
+                        .unwrap_or(FieldPresence::Absent),
+                    SharingAccessDecision::Deny => FieldPresence::Redacted,
+                },
+                FieldPresence::Absent,
+                self.redaction_fields
+                    .iter()
+                    .map(|field| (*field).to_string())
+                    .collect(),
+            )],
+        }
+    }
+}
+
 /// Shared confirmation state for previewed risky operations.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
 pub struct ConfirmationState {
@@ -291,6 +546,40 @@ pub struct SafeguardOutcome {
     pub confirmation: ConfirmationState,
     pub audit: SafeguardAudit,
     pub policy_summary: PolicySummary,
+}
+
+impl SafeguardOutcome {
+    /// Returns stable machine-readable safeguard reason codes in precedence order.
+    pub fn reason_codes(&self) -> Vec<String> {
+        self.blocked_reasons
+            .iter()
+            .copied()
+            .map(SafeguardReasonCode::as_str)
+            .map(str::to_string)
+            .collect()
+    }
+
+    /// Returns a concise operator-facing explanation for the safeguard outcome.
+    pub fn operator_message(&self) -> Option<String> {
+        if let Some(reason) = self.blocked_reasons.first().copied() {
+            return Some(reason.operator_message().to_string());
+        }
+
+        match self.outcome_class {
+            OutcomeClass::Degraded => Some(
+                "operation may proceed in degraded mode because readiness checks did not fully pass"
+                    .to_string(),
+            ),
+            OutcomeClass::Accepted => {
+                Some("all safeguard checks passed for the requested scope".to_string())
+            }
+            OutcomeClass::Preview => Some(
+                "preview completed; inspect the preflight checks before applying the operation"
+                    .to_string(),
+            ),
+            _ => None,
+        }
+    }
 }
 
 /// Input facts evaluated by the shared preflight safeguard machine.
@@ -347,7 +636,7 @@ impl SafeguardRequest {
 /// Stable core policy boundary that wrappers call instead of reimplementing policy behavior.
 pub trait PolicyGateway {
     /// Evaluates the namespace gate before expensive work starts.
-    fn evaluate_namespace(&self, namespace_bound: bool) -> PolicySummary;
+    fn evaluate_namespace(&self, namespace_bound: bool) -> NamespaceAccessOutcome;
 
     /// Evaluates namespace-aware sharing access before candidate generation or packaging.
     fn evaluate_sharing_access(&self, request: SharingAccessRequest) -> SharingAccessOutcome;
@@ -489,11 +778,17 @@ impl PolicyModule {
 }
 
 impl PolicyGateway for PolicyModule {
-    fn evaluate_namespace(&self, namespace_bound: bool) -> PolicySummary {
+    fn evaluate_namespace(&self, namespace_bound: bool) -> NamespaceAccessOutcome {
         if namespace_bound {
-            PolicySummary::allow(true)
+            NamespaceAccessOutcome {
+                policy_summary: PolicySummary::allow(true),
+                denial_reasons: Vec::new(),
+            }
         } else {
-            PolicySummary::deny(false)
+            NamespaceAccessOutcome {
+                policy_summary: PolicySummary::deny(false),
+                denial_reasons: vec![NamespaceDenialReason::CallerIdentityUnbound],
+            }
         }
     }
 
@@ -897,12 +1192,38 @@ impl PolicyGateway for PolicyModule {
 #[cfg(test)]
 mod tests {
     use super::{
-        IngestMode, ObservationWriteRequest, OperationClass, PassiveObservationDecision,
-        PolicyDecision, PolicyGateway, PolicyModule, PreflightCheckStatus, PreflightState,
-        ReversibilityKind, SafeguardReasonCode, SafeguardRequest, SharingAccessDecision,
-        SharingAccessRequest, SharingDenialReason, SharingVisibility,
+        IngestMode, NamespaceDenialReason, ObservationWriteRequest, OperationClass,
+        PassiveObservationDecision, PolicyDecision, PolicyGateway, PolicyModule,
+        PreflightCheckStatus, PreflightState, ReversibilityKind, SafeguardReasonCode,
+        SafeguardRequest, SharingAccessDecision, SharingAccessRequest, SharingDenialReason,
+        SharingVisibility,
     };
+    use crate::api::NamespaceId;
     use crate::observability::OutcomeClass;
+
+    #[test]
+    fn namespace_gate_exposes_reason_codes_and_operator_note(
+    ) -> Result<(), crate::api::ContextValidationError> {
+        let gateway = PolicyModule;
+        let outcome = gateway.evaluate_namespace(false);
+        let trace = outcome.trace_policy_summary(&NamespaceId::new("team.alpha")?);
+
+        assert_eq!(outcome.policy_summary.decision, PolicyDecision::Deny);
+        assert_eq!(
+            outcome.denial_reasons,
+            vec![NamespaceDenialReason::CallerIdentityUnbound]
+        );
+        assert_eq!(
+            trace.reason_codes,
+            vec!["caller_identity_unbound".to_string()]
+        );
+        assert!(trace
+            .operator_note
+            .as_deref()
+            .map(|note| note.contains("caller identity"))
+            .unwrap_or(false));
+        Ok(())
+    }
 
     #[test]
     fn sharing_access_allows_same_namespace_private_scope() {
@@ -921,6 +1242,38 @@ mod tests {
         assert_eq!(outcome.sharing_scope.unwrap().as_str(), "namespace_only");
         assert!(outcome.denial_reasons.is_empty());
         assert!(outcome.redaction_fields.is_empty());
+    }
+
+    #[test]
+    fn sharing_trace_summary_uses_policy_reason_precedence(
+    ) -> Result<(), crate::api::ContextValidationError> {
+        let gateway = PolicyModule;
+        let outcome = gateway.evaluate_sharing_access(SharingAccessRequest {
+            same_namespace: false,
+            include_public: false,
+            visibility: SharingVisibility::Private,
+            workspace_acl_allowed: false,
+            agent_acl_allowed: true,
+            session_visibility_allowed: true,
+            legal_hold: true,
+        });
+        let trace = outcome.trace_policy_summary(&NamespaceId::new("team.alpha")?);
+
+        assert_eq!(outcome.decision, SharingAccessDecision::Deny);
+        assert_eq!(
+            trace.reason_codes[0],
+            SharingDenialReason::LegalHold.as_str()
+        );
+        assert_eq!(
+            trace.reason_codes[1],
+            SharingDenialReason::WorkspaceAclDenied.as_str()
+        );
+        assert!(trace
+            .operator_note
+            .as_deref()
+            .map(|note| note.contains("legal hold"))
+            .unwrap_or(false));
+        Ok(())
     }
 
     #[test]
@@ -1344,5 +1697,30 @@ mod tests {
         assert!(outcome
             .blocked_reasons
             .contains(&SafeguardReasonCode::LegalHold));
+    }
+
+    #[test]
+    fn safeguard_operator_message_prefers_first_blocking_reason() {
+        let gateway = PolicyModule;
+        let mut request = SafeguardRequest::ready(OperationClass::IrreversibleMutation);
+        request.snapshot_required = true;
+        request.snapshot_available = false;
+        request.requires_confirmation = true;
+
+        let outcome = gateway.evaluate_safeguard(request);
+
+        assert_eq!(
+            outcome.reason_codes(),
+            vec![
+                SafeguardReasonCode::SnapshotRequired.as_str().to_string(),
+                SafeguardReasonCode::ConfirmationRequired
+                    .as_str()
+                    .to_string(),
+            ]
+        );
+        assert_eq!(
+            outcome.operator_message().as_deref(),
+            Some(SafeguardReasonCode::SnapshotRequired.operator_message())
+        );
     }
 }

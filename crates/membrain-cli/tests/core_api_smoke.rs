@@ -99,9 +99,10 @@ fn cli_depends_on_shared_core_boundaries() {
     requires_cold_store(store.cold_store());
 
     let summary = store.policy().evaluate_namespace(true);
-    assert_eq!(summary.decision, PolicyDecision::Allow);
-    assert!(summary.namespace_bound);
-    assert_eq!(summary.outcome_class, OutcomeClass::Accepted);
+    assert_eq!(summary.policy_summary.decision, PolicyDecision::Allow);
+    assert!(summary.policy_summary.namespace_bound);
+    assert_eq!(summary.policy_summary.outcome_class, OutcomeClass::Accepted);
+    assert_eq!(summary.reason_codes(), vec!["namespace_bound".to_string()]);
     assert_eq!(
         store.encode_engine().tier1_candidate_budget(store.config()),
         store.config().tier1_candidate_budget,
@@ -774,8 +775,12 @@ fn cli_parity_denial_scenarios() {
     };
     let bound = request_unbound.bind_namespace(None).unwrap();
     let policy = bound.evaluate_policy(&PolicyModule);
-    assert_eq!(policy.decision, PolicyDecision::Deny);
-    assert_eq!(policy.outcome_class, OutcomeClass::Rejected);
+    assert_eq!(policy.policy_summary.decision, PolicyDecision::Deny);
+    assert_eq!(policy.policy_summary.outcome_class, OutcomeClass::Rejected);
+    assert_eq!(
+        policy.reason_codes(),
+        vec!["caller_identity_unbound".to_string()]
+    );
 
     // Denial 3: Failed response envelope preserves error taxonomy
     let failure = ResponseContext::<()>::failure(

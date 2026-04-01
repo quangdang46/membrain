@@ -3,7 +3,7 @@ use crate::engine::result::{EntryLane, OmissionSummary, RetrievalResultSet};
 use crate::graph::RelationKind;
 use crate::observability::{CacheEvalTrace, OutcomeClass};
 use crate::policy::{
-    PolicyGateway, PolicySummary, SafeguardOutcome as PolicySafeguardOutcome, SharingAccessOutcome,
+    PolicyGateway, SafeguardOutcome as PolicySafeguardOutcome, SharingAccessOutcome,
     SharingAccessRequest, SharingVisibility,
 };
 use crate::types::{
@@ -185,12 +185,11 @@ impl BoundRequestContext {
     }
 
     /// Evaluates the shared namespace gate before expensive work begins.
-    pub fn evaluate_policy(&self, gateway: &impl PolicyGateway) -> PolicySummary {
-        if self.request.policy_context.caller_identity_bound {
-            gateway.evaluate_namespace(true)
-        } else {
-            PolicySummary::deny(true)
-        }
+    pub fn evaluate_policy(
+        &self,
+        gateway: &impl PolicyGateway,
+    ) -> crate::policy::NamespaceAccessOutcome {
+        gateway.evaluate_namespace(self.request.policy_context.caller_identity_bound)
     }
 
     /// Evaluates namespace-aware sharing access before candidate generation or packaging.
@@ -1084,6 +1083,8 @@ pub struct TracePolicySummary {
     pub redaction_fields: Vec<&'static str>,
     pub retention_state: FieldPresence<&'static str>,
     pub sharing_scope: FieldPresence<&'static str>,
+    pub reason_codes: Vec<String>,
+    pub operator_note: Option<String>,
     pub filters: Vec<PolicyFilterSummary>,
 }
 
@@ -1536,6 +1537,16 @@ impl TracePolicySummary {
             },
             retention_state: FieldPresence::Absent,
             sharing_scope: FieldPresence::Absent,
+            reason_codes: if result_set.policy_summary.redactions_applied {
+                vec!["policy_redaction".to_string()]
+            } else {
+                vec!["namespace_bound".to_string()]
+            },
+            operator_note: Some(if result_set.policy_summary.redactions_applied {
+                "retrieval results were redacted by policy before packaging".to_string()
+            } else {
+                "retrieval stayed within the effective namespace".to_string()
+            }),
             filters: result_set
                 .policy_summary
                 .filters
@@ -2073,7 +2084,8 @@ mod tests {
 
         assert_eq!(bound.namespace().as_str(), "team.alpha");
         assert_eq!(bound.request().session_id, Some(SessionId(7)));
-        assert_eq!(policy.decision, PolicyDecision::Allow);
+        assert_eq!(policy.policy_summary.decision, PolicyDecision::Allow);
+        assert_eq!(policy.reason_codes(), vec!["namespace_bound".to_string()]);
     }
 
     #[test]
@@ -2100,9 +2112,14 @@ mod tests {
         let bound = request.bind_namespace(None).unwrap();
         let policy = bound.evaluate_policy(&PolicyModule);
 
-        assert_eq!(policy.decision, PolicyDecision::Deny);
-        assert!(policy.namespace_bound);
-        assert_eq!(policy.outcome_class, OutcomeClass::Rejected);
+        assert_eq!(policy.policy_summary.decision, PolicyDecision::Deny);
+        assert!(!policy.policy_summary.namespace_bound);
+        assert_eq!(policy.policy_summary.outcome_class, OutcomeClass::Rejected);
+        assert_eq!(
+            policy.reason_codes(),
+            vec!["caller_identity_unbound".to_string()]
+        );
+        assert!(policy.operator_message().contains("caller identity"));
     }
 
     #[test]
@@ -2411,7 +2428,7 @@ mod tests {
                 related_run: Some("authoritative-rewrite-run"),
                 scope_handle: "effective_namespace",
             },
-            policy_summary: PolicyModule.evaluate_namespace(true),
+            policy_summary: PolicyModule.evaluate_namespace(true).policy_summary,
         };
         let success = ResponseContext::success(namespace.clone(), request_id.clone(), 7u8)
             .with_partial_success()
@@ -3186,6 +3203,10 @@ mod tests {
                 redaction_fields: vec!["raw_text"],
                 retention_state: FieldPresence::Absent,
                 sharing_scope: FieldPresence::Present("same_namespace"),
+                reason_codes: vec!["policy_redaction".to_string()],
+                operator_note: Some(
+                    "retrieval results were redacted by policy before packaging".to_string(),
+                ),
                 filters: vec![PolicyFilterSummary::new(
                     "team.gamma",
                     "namespace",
@@ -3567,6 +3588,8 @@ mod tests {
                 redaction_fields: Vec::new(),
                 retention_state: FieldPresence::Absent,
                 sharing_scope: FieldPresence::Present("same_namespace"),
+                reason_codes: vec!["namespace_bound".to_string()],
+                operator_note: Some("retrieval stayed within the effective namespace".to_string()),
                 filters: Vec::new(),
             },
             TraceProvenanceSummary {
@@ -3748,6 +3771,10 @@ mod tests {
                 redaction_fields: vec!["raw_text"],
                 retention_state: FieldPresence::Absent,
                 sharing_scope: FieldPresence::Present("same_namespace"),
+                reason_codes: vec!["policy_redaction".to_string()],
+                operator_note: Some(
+                    "retrieval results were redacted by policy before packaging".to_string(),
+                ),
                 filters: vec![PolicyFilterSummary::new(
                     "team.gamma",
                     "namespace",

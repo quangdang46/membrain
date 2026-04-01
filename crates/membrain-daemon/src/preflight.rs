@@ -237,20 +237,7 @@ pub fn check_status_label(status: PreflightCheckStatus) -> String {
 }
 
 pub fn reason_code_label(reason: SafeguardReasonCode) -> String {
-    match reason {
-        SafeguardReasonCode::ConfirmationRequired => "confirmation_required",
-        SafeguardReasonCode::StalePreflight => "stale_preflight",
-        SafeguardReasonCode::GenerationMismatch => "generation_mismatch",
-        SafeguardReasonCode::SnapshotRequired => "snapshot_required",
-        SafeguardReasonCode::MaintenanceWindowRequired => "maintenance_window_required",
-        SafeguardReasonCode::DependencyPending => "dependency_pending",
-        SafeguardReasonCode::ScopeAmbiguous => "scope_ambiguous",
-        SafeguardReasonCode::AuthoritativeInputUnreadable => "authoritative_input_unreadable",
-        SafeguardReasonCode::ConfidenceTooLow => "confidence_too_low",
-        SafeguardReasonCode::PolicyDenied => "policy_denied",
-        SafeguardReasonCode::LegalHold => "legal_hold",
-    }
-    .to_string()
+    reason.as_str().to_string()
 }
 
 pub fn check_view(check: &PreflightCheck) -> PreflightCheckView {
@@ -277,10 +264,7 @@ pub fn preflight_state_label(state: PreflightState) -> &'static str {
 }
 
 pub fn policy_decision_label(decision: PolicyDecision) -> &'static str {
-    match decision {
-        PolicyDecision::Allow => "allow",
-        PolicyDecision::Deny => "deny",
-    }
+    decision.as_str()
 }
 
 pub fn preflight_outcome_label(
@@ -315,25 +299,19 @@ pub fn confirmation_reason(outcome: &SafeguardOutcome, local_confirmation: bool)
     .then_some("operator confirmed exact previewed scope".to_string())
 }
 
-pub fn blocked_reason_message(reasons: &[String]) -> Option<String> {
-    reasons.first().map(|reason| {
-        match reason.as_str() {
-            "confirmation_required" => "destructive action requires explicit confirmation",
-            "policy_denied" => "policy denied the requested action",
-            "legal_hold" => "legal hold blocks the requested action",
-            "snapshot_required" => "snapshot is required before this action can proceed",
-            "stale_preflight" | "generation_mismatch" => {
-                "preflight confirmation is stale for the requested scope"
-            }
-            "scope_ambiguous" => "requested scope is ambiguous",
-            "maintenance_window_required" => "maintenance window is required",
-            "dependency_pending" => "operation dependencies are not ready",
-            "confidence_too_low" => "confidence is too low for this action",
-            "authoritative_input_unreadable" => "authoritative inputs are unreadable",
-            _ => "preflight blocked the requested action",
-        }
-        .to_string()
-    })
+pub fn blocked_reason_message(
+    outcome: &SafeguardOutcome,
+    confirmation_pending: bool,
+) -> Option<String> {
+    if confirmation_pending {
+        return Some(
+            SafeguardReasonCode::ConfirmationRequired
+                .operator_message()
+                .to_string(),
+        );
+    }
+
+    outcome.operator_message()
 }
 
 pub fn required_overrides(outcome: &SafeguardOutcome) -> Vec<String> {
@@ -437,7 +415,10 @@ pub fn to_preflight_explain_response(
         preflight_state,
         preflight_outcome: preflight_outcome_label(&outcome, false).to_string(),
         blocked_reasons: blocked_reasons.clone(),
-        blocked_reason: blocked_reason_message(&blocked_reasons),
+        blocked_reason: blocked_reason_message(
+            &outcome,
+            outcome.confirmation.required && !outcome.confirmation.confirmed,
+        ),
         required_overrides: if outcome.confirmation.required && !outcome.confirmation.confirmed {
             vec!["human_confirmation".to_string()]
         } else {
