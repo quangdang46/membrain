@@ -1,0 +1,7 @@
+crates/*/tests/*.rs
+crates/*/src/tests.rs
+crates/*/src/**/tests.rs
+crates/*/src/*_tests.rs
+crates/*/src/**/*_tests.rs
+crates/membrain-cli/src/main.rs
+crates/membrain-daemon/src/daemon.rs
