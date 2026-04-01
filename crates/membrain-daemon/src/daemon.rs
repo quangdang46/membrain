@@ -5607,8 +5607,7 @@ impl DaemonRuntime {
                     .lock()
                     .expect("runtime memory registry lock should be available")
                     .values()
-                    .cloned()
-                    .map(|record| as_operation_memory_record(&record))
+                    .map(as_operation_memory_record)
                     .collect::<Vec<_>>(),
                 &namespace,
             );
