@@ -692,6 +692,14 @@ async fn runtime_doctor_jsonrpc_response_matches_shared_doctor_contract_fields()
             .collect::<Vec<_>>(),
         vec![json!("repair_backlog_growth"), json!("incident_response")]
     );
+    assert_eq!(
+        result["runbook_hints"][0]["source_doc"],
+        json!("docs/workflows/repair_backlog_growth.md")
+    );
+    assert_eq!(
+        result["runbook_hints"][0]["steps"][0],
+        json!("Inspect the current repair queue depth and identify whether work is merely in flight or repeatedly rolling back.")
+    );
     assert_eq!(result["availability"]["posture"], json!("degraded"));
     assert_eq!(
         result["availability"]["degraded_reasons"],

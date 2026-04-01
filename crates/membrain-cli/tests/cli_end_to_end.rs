@@ -1755,6 +1755,14 @@ fn cli_doctor_json_reports_health_and_repair_state() {
         json["runbook_hints"][0]["runbook_id"],
         "index_rebuild_operations"
     );
+    assert_eq!(
+        json["runbook_hints"][0]["source_doc"],
+        "docs/workflows/index_rebuild_operations.md"
+    );
+    assert_eq!(
+        json["runbook_hints"][0]["steps"][0],
+        "Confirm which index families are degraded or bypassed in the current doctor or health output."
+    );
     assert!(json["indexes"].is_array());
     assert!(json["repair_reports"].is_array());
     assert_eq!(

@@ -67,6 +67,7 @@ use membrain_core::types::{
     GoalLifecycleStatus, GoalStackFrame, MemoryId, RawEncodeInput, RawIntakeKind, SessionId,
     Tier1HotRecord,
 };
+use membrain_core::workflow::OperatorWorkflowCatalog;
 use membrain_core::{BrainStore, GoalWorkingState, RuntimeConfig, WorkingStateEngine};
 use membrain_daemon::daemon::{DaemonRuntime, DaemonRuntimeConfig};
 use membrain_daemon::init_file_tracing;
@@ -510,6 +511,43 @@ fn doctor_report(local_records: &[LocalMemoryRecord]) -> DoctorReport {
         remediation: None,
         availability: None,
         health,
+    }
+}
+
+fn doctor_runbook_hint(
+    catalog: Option<&OperatorWorkflowCatalog>,
+    runbook_id: &str,
+    fallback_source_doc: &str,
+    fallback_section: &str,
+    reason: impl Into<String>,
+) -> DoctorRunbookHint {
+    let reason = reason.into();
+    let hint = catalog
+        .map(|catalog| {
+            catalog.hint_for(
+                runbook_id,
+                fallback_source_doc,
+                fallback_section,
+                reason.clone(),
+            )
+        })
+        .unwrap_or_else(|| {
+            OperatorWorkflowCatalog::default().hint_for(
+                runbook_id,
+                fallback_source_doc,
+                fallback_section,
+                reason,
+            )
+        });
+    DoctorRunbookHint {
+        runbook_id: hint.runbook_id,
+        title: hint.title,
+        source_doc: hint.source_doc,
+        section: hint.section,
+        summary: hint.summary,
+        steps: hint.steps,
+        definition_digest: hint.definition_digest,
+        reason: hint.reason,
     }
 }
 
@@ -1589,9 +1627,13 @@ struct DoctorSummary {
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 struct DoctorRunbookHint {
-    runbook_id: &'static str,
-    source_doc: &'static str,
-    section: &'static str,
+    runbook_id: String,
+    title: String,
+    source_doc: String,
+    section: String,
+    summary: String,
+    steps: Vec<String>,
+    definition_digest: String,
     reason: String,
 }
 
@@ -4639,41 +4681,45 @@ fn legacy_doctor_report_sample() -> DoctorReport {
         warn_checks: checks.iter().filter(|check| check.status == "warn").count(),
         fail_checks: checks.iter().filter(|check| check.status == "fail").count(),
     };
+    let workflow_catalog = OperatorWorkflowCatalog::load_default().ok();
     let mut runbook_hints = Vec::new();
     if index_issue_count > 0 {
-        runbook_hints.push(DoctorRunbookHint {
-            runbook_id: "index_rebuild_operations",
-            source_doc: "docs/OPERATIONS.md",
-            section: "## 5. Index Rebuild Operations",
-            reason: "derived index serving is degraded or bypassed; rebuild and parity proof should be reviewed"
+        runbook_hints.push(doctor_runbook_hint(
+            workflow_catalog.as_ref(),
+            "index_rebuild_operations",
+            "docs/OPERATIONS.md",
+            "## 5. Index Rebuild Operations",
+            "derived index serving is degraded or bypassed; rebuild and parity proof should be reviewed"
                 .to_string(),
-        });
-        runbook_hints.push(DoctorRunbookHint {
-            runbook_id: "tier2_index_drift",
-            source_doc: "docs/FAILURE_PLAYBOOK.md",
-            section: "## 2. Tier2 index drift",
-            reason:
-                "index-related degraded mode should follow the canonical drift containment matrix"
-                    .to_string(),
-        });
+        ));
+        runbook_hints.push(doctor_runbook_hint(
+            workflow_catalog.as_ref(),
+            "tier2_index_drift",
+            "docs/FAILURE_PLAYBOOK.md",
+            "## 2. Tier2 index drift",
+            "index-related degraded mode should follow the canonical drift containment matrix"
+                .to_string(),
+        ));
     }
     if repair_issue_count > 0 {
-        runbook_hints.push(DoctorRunbookHint {
-            runbook_id: "repair_backlog_growth",
-            source_doc: "docs/FAILURE_PLAYBOOK.md",
-            section: "## 9. Repair backlog growth",
-            reason: "repair follow-up is still visible in operator diagnostics and should be drained before declaring recovery"
+        runbook_hints.push(doctor_runbook_hint(
+            workflow_catalog.as_ref(),
+            "repair_backlog_growth",
+            "docs/FAILURE_PLAYBOOK.md",
+            "## 9. Repair backlog growth",
+            "repair follow-up is still visible in operator diagnostics and should be drained before declaring recovery"
                 .to_string(),
-        });
+        ));
     }
     if stale_action_critical {
-        runbook_hints.push(DoctorRunbookHint {
-            runbook_id: "incident_response",
-            source_doc: "docs/OPERATIONS.md",
-            section: "## 7. Incident Response",
-            reason: "stale action-critical evidence requires explicit recheck/withhold review before acting"
+        runbook_hints.push(doctor_runbook_hint(
+            workflow_catalog.as_ref(),
+            "incident_response",
+            "docs/OPERATIONS.md",
+            "## 7. Incident Response",
+            "stale action-critical evidence requires explicit recheck/withhold review before acting"
                 .to_string(),
-        });
+        ));
     }
 
     DoctorReport {

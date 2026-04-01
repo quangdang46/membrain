@@ -33,6 +33,8 @@ pub mod reasoning;
 pub mod store;
 /// Shared canonical data shapes exported to wrappers.
 pub mod types;
+/// Markdown-defined operator workflow loading surfaces.
+pub mod workflow;
 
 /// Stable top-level core facade for downstream wrappers.
 pub use brain_store::BrainStore;

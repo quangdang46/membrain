@@ -295,9 +295,13 @@ pub struct RuntimeDoctorSummary {
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct RuntimeDoctorRunbookHint {
-    pub runbook_id: &'static str,
-    pub source_doc: &'static str,
-    pub section: &'static str,
+    pub runbook_id: String,
+    pub title: String,
+    pub source_doc: String,
+    pub section: String,
+    pub summary: String,
+    pub steps: Vec<String>,
+    pub definition_digest: String,
     pub reason: String,
 }
 

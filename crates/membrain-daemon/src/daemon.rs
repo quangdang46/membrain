@@ -234,6 +234,7 @@ use membrain_core::types::{
     AffectSignals, BlackboardEvidenceHandle, BlackboardState, GoalCheckpoint, GoalLifecycleStatus,
     GoalStackFrame, MemoryId, RawIntakeKind, SessionId,
 };
+use membrain_core::workflow::OperatorWorkflowCatalog;
 use serde_json::{json, Value};
 use std::collections::{HashMap, VecDeque};
 use std::hash::{Hash, Hasher};
@@ -474,6 +475,43 @@ fn as_operation_memory_record(record: &RuntimeMemoryRecord) -> OperationMemoryRe
             .agent_id
             .as_ref()
             .map(|agent_id| agent_id.as_str().to_string()),
+    }
+}
+
+fn runtime_doctor_runbook_hint(
+    catalog: Option<&OperatorWorkflowCatalog>,
+    runbook_id: &str,
+    fallback_source_doc: &str,
+    fallback_section: &str,
+    reason: impl Into<String>,
+) -> RuntimeDoctorRunbookHint {
+    let reason = reason.into();
+    let hint = catalog
+        .map(|catalog| {
+            catalog.hint_for(
+                runbook_id,
+                fallback_source_doc,
+                fallback_section,
+                reason.clone(),
+            )
+        })
+        .unwrap_or_else(|| {
+            OperatorWorkflowCatalog::default().hint_for(
+                runbook_id,
+                fallback_source_doc,
+                fallback_section,
+                reason,
+            )
+        });
+    RuntimeDoctorRunbookHint {
+        runbook_id: hint.runbook_id,
+        title: hint.title,
+        source_doc: hint.source_doc,
+        section: hint.section,
+        summary: hint.summary,
+        steps: hint.steps,
+        definition_digest: hint.definition_digest,
+        reason: hint.reason,
     }
 }
 
@@ -1745,26 +1783,29 @@ impl RuntimeState {
             warn_checks: checks.iter().filter(|check| check.status == "warn").count(),
             fail_checks: checks.iter().filter(|check| check.status == "fail").count(),
         };
+        let workflow_catalog = OperatorWorkflowCatalog::load_default().ok();
         let mut runbook_hints = Vec::new();
         if index_issue_count > 0
             || degraded_reasons
                 .iter()
                 .any(|reason| reason == "index_bypassed")
         {
-            runbook_hints.push(RuntimeDoctorRunbookHint {
-                runbook_id: "index_rebuild_operations",
-                source_doc: "docs/OPERATIONS.md",
-                section: "## 5. Index Rebuild Operations",
-                reason: "derived index serving is degraded or bypassed; rebuild and parity proof should be reviewed"
+            runbook_hints.push(runtime_doctor_runbook_hint(
+                workflow_catalog.as_ref(),
+                "index_rebuild_operations",
+                "docs/OPERATIONS.md",
+                "## 5. Index Rebuild Operations",
+                "derived index serving is degraded or bypassed; rebuild and parity proof should be reviewed"
                     .to_string(),
-            });
-            runbook_hints.push(RuntimeDoctorRunbookHint {
-                runbook_id: "tier2_index_drift",
-                source_doc: "docs/FAILURE_PLAYBOOK.md",
-                section: "## 2. Tier2 index drift",
-                reason: "index-related degraded mode should follow the canonical drift containment matrix"
+            ));
+            runbook_hints.push(runtime_doctor_runbook_hint(
+                workflow_catalog.as_ref(),
+                "tier2_index_drift",
+                "docs/FAILURE_PLAYBOOK.md",
+                "## 2. Tier2 index drift",
+                "index-related degraded mode should follow the canonical drift containment matrix"
                     .to_string(),
-            });
+            ));
         }
         if failing_repair_targets > 0
             || degraded_reasons.iter().any(|reason| {
@@ -1774,27 +1815,29 @@ impl RuntimeState {
                 )
             })
         {
-            runbook_hints.push(RuntimeDoctorRunbookHint {
-                runbook_id: "repair_backlog_growth",
-                source_doc: "docs/FAILURE_PLAYBOOK.md",
-                section: "## 9. Repair backlog growth",
-                reason: "repair follow-up is still visible in operator diagnostics and should be drained before declaring recovery"
+            runbook_hints.push(runtime_doctor_runbook_hint(
+                workflow_catalog.as_ref(),
+                "repair_backlog_growth",
+                "docs/FAILURE_PLAYBOOK.md",
+                "## 9. Repair backlog growth",
+                "repair follow-up is still visible in operator diagnostics and should be drained before declaring recovery"
                     .to_string(),
-            });
+            ));
         }
         if error_kind.is_some() || stale_action_critical {
-            runbook_hints.push(RuntimeDoctorRunbookHint {
-                runbook_id: "incident_response",
-                source_doc: "docs/OPERATIONS.md",
-                section: "## 7. Incident Response",
-                reason: if error_kind.is_some() {
+            runbook_hints.push(runtime_doctor_runbook_hint(
+                workflow_catalog.as_ref(),
+                "incident_response",
+                "docs/OPERATIONS.md",
+                "## 7. Incident Response",
+                if error_kind.is_some() {
                     "safe serving is impaired and incident-response containment should be followed"
                         .to_string()
                 } else {
                     "stale action-critical evidence requires explicit recheck/withhold review before acting"
                         .to_string()
                 },
-            });
+            ));
         }
 
         RuntimeDoctorReport {
