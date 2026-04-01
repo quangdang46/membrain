@@ -1,12 +1,10 @@
 use clap::{ArgAction, Parser, Subcommand};
 use membrain_core::api::{
-    AvailabilityReason, AvailabilitySummary, BlackboardSnapshotOutput, CacheMetricsSummary,
-    ConflictMarker, DeadZonesOutput, FieldPresence, ForkInfoOutput, ForkInheritance,
-    FreshnessMarker, GoalAbandonOutput, GoalPauseOutput, GoalResumeOutput, GoalStateOutput,
-    HotPathsOutput, MergeConflictStrategy, MergeReportOutput, NamespaceId,
-    PassiveObservationInspectSummary, PolicyContext, RemediationStep, RequestId, ResponseContext,
-    ResponseWarning, TaskId, TraceOmissionSummary, TracePolicySummary, TraceProvenanceSummary,
-    TraceScoreComponent, TraceStage, UncertaintyMarker,
+    AvailabilityReason, AvailabilitySummary, BlackboardSnapshotOutput, DeadZonesOutput,
+    FieldPresence, ForkInfoOutput, ForkInheritance, GoalAbandonOutput, GoalPauseOutput,
+    GoalResumeOutput, GoalStateOutput, HotPathsOutput, MergeConflictStrategy, MergeReportOutput,
+    NamespaceId, PassiveObservationInspectSummary, PolicyContext, RemediationStep, RequestId,
+    ResponseContext, ResponseWarning, TaskId, TracePolicySummary,
 };
 use membrain_core::brain_store::{ForkConfig, MergeConfig};
 use membrain_core::embed::EmbeddingPurpose;
@@ -27,12 +25,15 @@ use membrain_core::engine::maintenance::{
     MaintenanceController, MaintenanceJobHandle, MaintenanceJobState,
 };
 use membrain_core::engine::observe::{ObserveConfig, ObserveEngine};
+use membrain_core::engine::operation::{
+    EncodeOperationRequest, OperationEngine, OperationMemoryRecord,
+};
 use membrain_core::engine::ranking::{
     adjusted_ranking_input_for_affect, fuse_scores, ranking_profile_for_recall,
     ranking_profile_name_for_recall, ConfidenceDisplayConfig, ConfidenceExplain, RankingInput,
 };
 use membrain_core::engine::recall::RecallRuntime;
-use membrain_core::engine::repair::{IndexRepairEntrypoint, RepairTarget};
+use membrain_core::engine::repair::IndexRepairEntrypoint;
 use membrain_core::engine::result::{
     AnsweredFrom, EntryLane, EvidenceRole, ResultBuilder, RetrievalExplain, RetrievalResultSet,
 };
@@ -43,10 +44,7 @@ use membrain_core::engine::semantic_retrieval::{
     HydratedMemoryRecord, SemanticExecutorConfig, SemanticRetrievalResult,
     SharedSemanticRetrievalExecutor,
 };
-use membrain_core::graph::{
-    CausalEvidenceAttribution, CausalEvidenceKind, CausalLink, CausalLinkType, EntityId,
-    RelationKind,
-};
+use membrain_core::graph::{CausalLink, CausalLinkType, EntityId, RelationKind};
 use membrain_core::health::{BrainHealthInputs, BrainHealthReport, FeatureAvailabilityEntry};
 use membrain_core::index::{IndexApi, IndexModule};
 use membrain_core::observability::{AuditEventCategory, AuditEventKind};
@@ -1999,151 +1997,12 @@ fn validate_recall_command(
     })
 }
 
-type ResponseTraceBundle = (
-    membrain_core::api::RouteSummary,
-    Vec<TraceStage>,
-    Vec<membrain_core::api::ResultReason>,
-    TraceOmissionSummary,
-    membrain_core::api::GraphExpansionSummary,
-    Vec<TraceScoreComponent>,
-    TracePolicySummary,
-    TraceProvenanceSummary,
-    Vec<FreshnessMarker>,
-    Vec<ConflictMarker>,
-    Vec<UncertaintyMarker>,
-);
-
-fn response_trace_for_result_set(result_set: &RetrievalResultSet) -> ResponseTraceBundle {
-    let route_summary = membrain_core::api::RouteSummary::from_result_set(result_set);
-    let trace_stages = result_set
-        .explain
-        .trace_stages
-        .iter()
-        .copied()
-        .map(membrain_core::api::TraceStage::from_recall)
-        .chain([
-            membrain_core::api::TraceStage::PolicyGate,
-            membrain_core::api::TraceStage::Packaging,
-        ])
-        .collect();
-    let result_reasons = result_set
-        .explain
-        .result_reasons
-        .iter()
-        .map(membrain_core::api::ResultReason::from_result_reason)
-        .collect();
-    let omitted_summary = TraceOmissionSummary::from_result_set(result_set);
-    let graph_expansion = result_set.explain_graph_expansion();
-    let policy_summary = TracePolicySummary::from_result_set(result_set);
-    let provenance_summary = TraceProvenanceSummary::from_result_set(result_set);
-    let (freshness_markers, conflict_markers, uncertainty_markers) = result_set.explain_markers();
-    let freshness_markers = freshness_markers
-        .into_iter()
-        .map(|marker| FreshnessMarker {
-            code: marker.code,
-            detail: marker.detail,
-        })
-        .collect();
-    let conflict_markers = conflict_markers
-        .into_iter()
-        .map(|marker| ConflictMarker {
-            code: marker.code,
-            detail: marker.detail,
-        })
-        .collect();
-    let uncertainty_markers = uncertainty_markers
-        .into_iter()
-        .map(|marker| UncertaintyMarker {
-            code: marker.code,
-            detail: marker.detail,
-        })
-        .collect();
-    let score_components = result_set
-        .top()
-        .map(|top| {
-            top.result
-                .score_summary
-                .signal_breakdown
-                .iter()
-                .map(
-                    |(signal_family, raw_value, weight, _)| TraceScoreComponent {
-                        signal_family: match signal_family.as_str() {
-                            "recency" => "recency",
-                            "salience" => "salience",
-                            "strength" => "strength",
-                            "provenance" => "provenance",
-                            "conflict_adjustment" => "conflict_adjustment",
-                            "confidence" => "confidence",
-                            _ => "custom",
-                        },
-                        raw_value: *raw_value,
-                        weight: *weight,
-                    },
-                )
-                .collect()
-        })
-        .unwrap_or_default();
-
-    (
-        route_summary,
-        trace_stages,
-        result_reasons,
-        omitted_summary,
-        graph_expansion,
-        score_components,
-        policy_summary,
-        provenance_summary,
-        freshness_markers,
-        conflict_markers,
-        uncertainty_markers,
-    )
-}
-
 fn response_from_result_set(
     namespace: &NamespaceId,
     request_id: RequestId,
     result_set: RetrievalResultSet,
 ) -> ResponseContext<RetrievalResultSet> {
-    let partial_success = matches!(
-        result_set.outcome_class,
-        membrain_core::observability::OutcomeClass::Partial
-    ) || result_set.truncated;
-    let (
-        route_summary,
-        trace_stages,
-        result_reasons,
-        omitted_summary,
-        graph_expansion,
-        score_components,
-        policy_summary,
-        provenance_summary,
-        freshness_markers,
-        conflict_markers,
-        uncertainty_markers,
-    ) = response_trace_for_result_set(&result_set);
-    let policy_filters = policy_summary.filters.clone();
-    let mut response = ResponseContext::success(namespace.clone(), request_id, result_set)
-        .with_trace_schema(
-            route_summary,
-            trace_stages,
-            result_reasons,
-            omitted_summary,
-            graph_expansion,
-            CacheMetricsSummary::from_cache_traces(Vec::new(), false),
-            score_components,
-            policy_summary,
-            provenance_summary,
-            freshness_markers,
-            conflict_markers,
-            uncertainty_markers,
-        );
-    if !policy_filters.is_empty() {
-        response = response.with_policy_filters(policy_filters);
-    }
-    if partial_success {
-        response = response.with_partial_success();
-    }
-    response
+    OperationEngine::response_from_result_set(namespace, request_id, result_set)
 }
 
 fn parse_injection_format(raw: &str) -> anyhow::Result<InjectionFormat> {
@@ -2184,6 +2043,30 @@ fn as_hydrated_memory_record(record: &LocalMemoryRecord) -> HydratedMemoryRecord
         compact_text: record.compact_text.clone(),
         raw_text: record.compact_text.clone(),
         affect: record.affect,
+    }
+}
+
+fn as_operation_memory_record(record: &LocalMemoryRecord) -> OperationMemoryRecord {
+    OperationMemoryRecord {
+        memory_id: record.memory_id,
+        namespace: record.namespace.clone(),
+        session_id: record.session_id,
+        memory_type: record.memory_type,
+        route_family: record.route_family,
+        compact_text: record.compact_text.clone(),
+        provisional_salience: record.provisional_salience,
+        affect: record.affect,
+        fingerprint: record.fingerprint,
+        payload_size_bytes: record.payload_size_bytes,
+        payload_state: "metadata_only".to_string(),
+        visibility: SharingVisibility::Private,
+        is_landmark: record.is_landmark,
+        landmark_label: record.landmark_label.clone(),
+        era_id: record.era_id.clone(),
+        passive_observation: record.passive_observation.clone(),
+        causal_parents: record.causal_parents.clone(),
+        causal_link_type: record.causal_link_type,
+        agent_id: None,
     }
 }
 
@@ -2258,33 +2141,13 @@ fn causal_links_for_records(
     local_records: &[LocalMemoryRecord],
     namespace: &NamespaceId,
 ) -> Vec<CausalLink> {
-    let mut links = local_records
-        .iter()
-        .filter(|record| record.namespace == *namespace)
-        .flat_map(|record| {
-            record
-                .causal_parents
-                .iter()
-                .copied()
-                .map(move |parent_id| CausalLink {
-                    src_memory_id: parent_id,
-                    dst_memory_id: record.memory_id,
-                    link_type: record.causal_link_type.unwrap_or(CausalLinkType::Derived),
-                    created_at_ms: record.memory_id.0,
-                    agent_id: Some("cli_local".to_string()),
-                    evidence: vec![CausalEvidenceAttribution {
-                        evidence_kind: CausalEvidenceKind::DurableMemory,
-                        source_ref: format!(
-                            "memory://{}/{}",
-                            record.namespace.as_str(),
-                            parent_id.0
-                        ),
-                        supporting_memory_ids: vec![parent_id],
-                        confidence: record.provisional_salience.max(600),
-                    }],
-                })
-        })
-        .collect::<Vec<_>>();
+    let mut links = OperationEngine::causal_links_for_records(
+        &local_records
+            .iter()
+            .map(as_operation_memory_record)
+            .collect::<Vec<_>>(),
+        namespace,
+    );
     links.sort_by_key(|link| {
         (
             link.dst_memory_id.0,
@@ -3082,45 +2945,55 @@ fn encode_memory(
     source: &str,
 ) -> ResponseContext<EncodeOutput> {
     let intake_kind = parse_memory_kind(kind);
-    let input = local_records
-        .iter()
-        .rev()
-        .find(|record| record.namespace == *namespace)
-        .and_then(|record| record.era_id.clone())
-        .map(|era_id| RawEncodeInput::new(intake_kind, content).with_active_era_id(era_id))
-        .unwrap_or_else(|| RawEncodeInput::new(intake_kind, content))
-        .with_affect_signals(AffectSignals::new(valence, arousal).clamped());
-    let prepared = store.encode_engine().prepare_fast_path(input);
-
     let memory_id = MemoryId(NEXT_MEMORY_ID.fetch_add(1, Ordering::SeqCst));
     let session_id = SessionId(SESSION_ID.load(Ordering::SeqCst));
+    let prepared = OperationEngine::prepare_encode_candidate(
+        store,
+        EncodeOperationRequest {
+            namespace: namespace.clone(),
+            memory_id,
+            session_id,
+            content: content.to_string(),
+            intake_kind,
+            active_era_id: local_records
+                .iter()
+                .rev()
+                .find(|record| record.namespace == *namespace)
+                .and_then(|record| record.era_id.clone()),
+            affect: Some(AffectSignals::new(valence, arousal).clamped()),
+            visibility: SharingVisibility::Private,
+            workspace_id: None,
+            agent_id: None,
+            payload_state: "metadata_only".to_string(),
+        },
+    );
 
     let local = LocalMemoryRecord {
-        memory_id,
-        namespace: namespace.clone(),
-        session_id,
-        memory_type: prepared.normalized.memory_type,
-        route_family: prepared.classification.route_family,
-        compact_text: prepared.normalized.compact_text.clone(),
-        provisional_salience: prepared.provisional_salience,
-        affect: prepared.normalized.affect,
-        fingerprint: prepared.fingerprint,
-        payload_size_bytes: prepared.normalized.payload_size_bytes,
-        is_landmark: prepared.normalized.landmark.is_landmark,
-        landmark_label: prepared.normalized.landmark.landmark_label.clone(),
-        era_id: prepared.normalized.landmark.era_id.clone(),
-        passive_observation: None,
+        memory_id: prepared.memory.memory_id,
+        namespace: prepared.memory.namespace.clone(),
+        session_id: prepared.memory.session_id,
+        memory_type: prepared.memory.memory_type,
+        route_family: prepared.memory.route_family,
+        compact_text: prepared.memory.compact_text.clone(),
+        provisional_salience: prepared.memory.provisional_salience,
+        affect: prepared.memory.affect,
+        fingerprint: prepared.memory.fingerprint,
+        payload_size_bytes: prepared.memory.payload_size_bytes,
+        is_landmark: prepared.memory.is_landmark,
+        landmark_label: prepared.memory.landmark_label.clone(),
+        era_id: prepared.memory.era_id.clone(),
+        passive_observation: prepared.memory.passive_observation.clone(),
         causal_parents: Vec::new(),
         causal_link_type: None,
     };
 
     hot.seed(local.as_hot_record());
     local_records.push(local);
-    if let Some(affect) = prepared.normalized.affect {
+    if let Some(affect) = prepared.memory.affect {
         let _ = store.record_affect_trajectory(
             namespace.clone(),
-            memory_id,
-            prepared.normalized.landmark.era_id.clone(),
+            prepared.memory.memory_id,
+            prepared.memory.era_id.clone(),
             store.current_tick(),
             affect,
         );
@@ -3128,19 +3001,20 @@ fn encode_memory(
 
     ResponseContext::success(
         namespace.clone(),
-        RequestId::new(format!("encode-{}", memory_id.0)).expect("encode request id"),
+        RequestId::new(format!("encode-{}", prepared.memory.memory_id.0))
+            .expect("encode request id"),
         EncodeOutput {
             outcome: "accepted",
-            memory_id: memory_id.0,
-            namespace: namespace.as_str().to_string(),
-            memory_type: prepared.normalized.memory_type.as_str(),
-            route_family: prepared.classification.route_family.as_str(),
-            compact_text: prepared.normalized.compact_text.clone(),
-            provisional_salience: prepared.provisional_salience,
-            fingerprint: prepared.fingerprint,
-            payload_size_bytes: prepared.normalized.payload_size_bytes,
-            is_landmark: prepared.normalized.landmark.is_landmark,
-            landmark_label: prepared.normalized.landmark.landmark_label.clone(),
+            memory_id: prepared.memory.memory_id.0,
+            namespace: prepared.memory.namespace.as_str().to_string(),
+            memory_type: prepared.memory.memory_type.as_str(),
+            route_family: prepared.memory.route_family.as_str(),
+            compact_text: prepared.memory.compact_text.clone(),
+            provisional_salience: prepared.memory.provisional_salience,
+            fingerprint: prepared.memory.fingerprint,
+            payload_size_bytes: prepared.memory.payload_size_bytes,
+            is_landmark: prepared.memory.is_landmark,
+            landmark_label: prepared.memory.landmark_label.clone(),
             context: _context.map(String::from),
             source: source.to_string(),
         },
@@ -3360,63 +3234,32 @@ fn inspect_memory(
     namespace: &NamespaceId,
     memory_id: MemoryId,
 ) -> Result<InspectOutput, String> {
-    // Try hot store first, then fall back to local records
-    let lookup = _hot.exact_lookup(namespace, memory_id);
-    if let Some(record) = lookup.record {
-        let passive_observation = local_records
+    let inspect = OperationEngine::inspect_record(
+        &local_records
             .iter()
-            .find(|local| {
-                local.memory_id == record.memory_id && local.namespace == record.namespace
-            })
-            .and_then(|local| local.passive_observation.clone());
-
-        return Ok(InspectOutput {
-            outcome: "accepted",
-            memory_id: record.memory_id.0,
-            namespace: record.namespace.as_str().to_string(),
-            memory_type: record.memory_type.as_str(),
-            route_family: record.route_family.as_str(),
-            compact_text: record.compact_text,
-            provisional_salience: record.provisional_salience,
-            fingerprint: record.fingerprint,
-            payload_size_bytes: record.payload_size_bytes,
-            payload_state: match record.payload_state {
-                membrain_core::types::Tier1PayloadState::MetadataOnly => "metadata_only",
-                membrain_core::types::Tier1PayloadState::PreviewInline => "preview_inline",
-            },
-            is_landmark: false,
-            session_id: record.session_id.0,
-            passive_observation,
-        });
-    }
-
-    // Fall back to local records
-    if let Some(record) = local_records
-        .iter()
-        .find(|r| r.memory_id == memory_id && r.namespace == *namespace)
-    {
-        return Ok(InspectOutput {
-            outcome: "accepted",
-            memory_id: record.memory_id.0,
-            namespace: record.namespace.as_str().to_string(),
-            memory_type: record.memory_type.as_str(),
-            route_family: record.route_family.as_str(),
-            compact_text: record.compact_text.clone(),
-            provisional_salience: record.provisional_salience,
-            fingerprint: record.fingerprint,
-            payload_size_bytes: record.payload_size_bytes,
-            payload_state: "metadata_only",
-            is_landmark: false,
-            session_id: record.session_id.0,
-            passive_observation: record.passive_observation.clone(),
-        });
-    }
-
-    Err(format!(
-        "memory {} not found in namespace '{}'",
-        memory_id.0,
-        namespace.as_str()
-    ))
+            .map(as_operation_memory_record)
+            .collect::<Vec<_>>(),
+        namespace,
+        memory_id,
+    )?;
+    Ok(InspectOutput {
+        outcome: inspect.outcome,
+        memory_id: inspect.memory_id,
+        namespace: inspect.namespace,
+        memory_type: inspect.memory_type,
+        route_family: inspect.route_family,
+        compact_text: inspect.compact_text,
+        provisional_salience: inspect.provisional_salience,
+        fingerprint: inspect.fingerprint,
+        payload_size_bytes: inspect.payload_size_bytes,
+        payload_state: match inspect.payload_state.as_str() {
+            "preview_inline" => "preview_inline",
+            _ => "metadata_only",
+        },
+        is_landmark: inspect.is_landmark,
+        session_id: inspect.session_id,
+        passive_observation: inspect.passive_observation,
+    })
 }
 
 // ── Explain ──────────────────────────────────────────────────────────────────
@@ -3715,47 +3558,16 @@ fn append_semantic_executor_trace(
     semantic_result: &SemanticRetrievalResult,
     explain_mode: bool,
 ) {
-    let mut details = vec![format!(
-        "semantic executor considered {} namespace candidate(s), lexical prefilter kept {}, semantic ranking returned {} within bounded result_limit={}",
-        semantic_result.trace.namespace_candidate_count,
-        semantic_result.trace.lexical_prefilter_count,
-        semantic_result.trace.semantic_candidate_count,
-        semantic_result.trace.result_limit,
-    )];
-    if semantic_result.trace.bounded_shortlist_truncated {
-        details.push("bounded shortlist truncated lower-ranked candidates before hydration to preserve the declared runtime budget".to_string());
-    }
-    if let Some(reason) = semantic_result.trace.degraded_reason.as_deref() {
-        details.push(format!("degraded_reason={reason}"));
-    }
-    if let Some(query_trace) = semantic_result.trace.query_trace.as_ref() {
-        details.push(format!(
-            "query_embedding={} generation={} dims={}",
-            query_trace.backend_kind, query_trace.generation, query_trace.dimensions
-        ));
-    }
-    if let Some(batch_trace) = semantic_result.trace.batch_trace.as_ref() {
-        details.push(format!(
-            "batch_embedding={} generation={} count={} dims={}",
-            batch_trace.backend_kind,
-            batch_trace.generation,
-            batch_trace.batch_size,
-            batch_trace.dimensions
-        ));
-    }
-    result_set
-        .explain
-        .result_reasons
-        .push(membrain_core::engine::result::ResultReason {
-            memory_id: None,
-            reason_code: if explain_mode {
-                "semantic_explain_trace"
-            } else {
-                "semantic_recall_trace"
-            }
-            .to_string(),
-            detail: details.join("; "),
-        });
+    OperationEngine::append_semantic_trace(
+        result_set,
+        semantic_result,
+        if explain_mode {
+            "semantic_explain_trace"
+        } else {
+            "semantic_recall_trace"
+        },
+        true,
+    );
 }
 
 fn append_reasoning_trace(
@@ -3763,29 +3575,15 @@ fn append_reasoning_trace(
     reasoning: &QueryRewriteOutcome,
     explain_mode: bool,
 ) {
-    let mut details = vec![reasoning.trace_note.clone()];
-    if !reasoning.rewritten_queries.is_empty() {
-        details.push(format!(
-            "rewritten_queries={}",
-            reasoning.rewritten_queries.join(" | ")
-        ));
-    }
-    if let Some(reason) = reasoning.degraded_reason.as_deref() {
-        details.push(format!("degraded_reason={reason}"));
-    }
-    result_set
-        .explain
-        .result_reasons
-        .push(membrain_core::engine::result::ResultReason {
-            memory_id: None,
-            reason_code: if explain_mode {
-                "reasoning_explain_trace"
-            } else {
-                "reasoning_recall_trace"
-            }
-            .to_string(),
-            detail: details.join("; "),
-        });
+    OperationEngine::append_reasoning_trace(
+        result_set,
+        reasoning,
+        if explain_mode {
+            "reasoning_explain_trace"
+        } else {
+            "reasoning_recall_trace"
+        },
+    );
 }
 
 fn semantic_recall_with_reasoning(
@@ -6116,31 +5914,10 @@ async fn main() -> anyhow::Result<()> {
             let ns_str = namespace.as_deref().unwrap_or("default");
             let ns = NamespaceId::new(ns_str)?;
 
-            let targets = match action.as_str() {
-                "repair" | "repair_all" => vec![
-                    RepairTarget::LexicalIndex,
-                    RepairTarget::MetadataIndex,
-                    RepairTarget::SemanticHotIndex,
-                    RepairTarget::SemanticColdIndex,
-                    RepairTarget::GraphConsistency,
-                    RepairTarget::CacheWarmState,
-                    RepairTarget::EngramIndex,
-                ],
-                "repair_index" | "repair_indexes" => vec![
-                    RepairTarget::LexicalIndex,
-                    RepairTarget::MetadataIndex,
-                    RepairTarget::SemanticHotIndex,
-                    RepairTarget::SemanticColdIndex,
-                ],
-                "repair_metadata" => vec![RepairTarget::MetadataIndex],
-                "repair_graph" => vec![RepairTarget::GraphConsistency],
-                "repair_lineage" => vec![RepairTarget::EngramIndex],
-                "repair_cache" => vec![RepairTarget::CacheWarmState],
-                _ => {
-                    eprintln!(
-                        "Unknown maintenance action '{}'. Available: repair, repair_index, repair_metadata, repair_graph, repair_lineage, repair_cache",
-                        action
-                    );
+            let targets = match OperationEngine::resolve_maintenance_targets(action) {
+                Ok(targets) => targets,
+                Err(message) => {
+                    eprintln!("{message}");
                     std::process::exit(1);
                 }
             };
@@ -7598,15 +7375,15 @@ mod tests {
         confidence_explain_for_result, dream_skip_reason_label, explain_query, filter_audit_rows,
         fork_output, inspect_memory, merge_output, observe_memories, parse_audit_category,
         parse_audit_kind, print_audit_rows, procedures_output, query_by_example_memory_ids,
-        response_trace_for_result_set, sample_audit_log, share_output, skills_output,
-        unshare_output, Cli, Commands, DreamOutput, GoalCommands, LocalMemoryRecord,
-        PreflightCommands, RecallCommandConfig,
+        sample_audit_log, share_output, skills_output, unshare_output, Cli, Commands, DreamOutput,
+        GoalCommands, LocalMemoryRecord, PreflightCommands, RecallCommandConfig,
     };
     use clap::Parser;
     use membrain_core::api::{FieldPresence, NamespaceId, TraceStage};
     use membrain_core::engine::confidence::{ConfidenceInputs, ConfidencePolicy};
     use membrain_core::engine::dream::{DreamEngine, DreamPolicy, DreamTrigger};
     use membrain_core::engine::observe::ObserveConfig;
+    use membrain_core::engine::operation::OperationEngine;
     use membrain_core::engine::ranking::{
         fuse_scores, ConfidenceDisplayConfig, RankingInput, RankingProfile,
     };
@@ -8340,7 +8117,7 @@ mod tests {
             16,
         );
 
-        let (_, trace_stages, ..) = response_trace_for_result_set(&result_set);
+        let (_, trace_stages, ..) = OperationEngine::response_trace_for_result_set(&result_set);
 
         assert_eq!(
             trace_stages,
@@ -9033,7 +8810,7 @@ mod tests {
         let result_set = builder.build(explain);
 
         let (_, _, _, _, _, _, _, _, _, _, uncertainty_markers) =
-            response_trace_for_result_set(&result_set);
+            OperationEngine::response_trace_for_result_set(&result_set);
         let (_, _, expected_uncertainty_markers) = result_set.explain_markers();
 
         assert_eq!(uncertainty_markers.len(), 1);

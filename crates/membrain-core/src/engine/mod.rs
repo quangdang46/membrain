@@ -32,6 +32,8 @@ pub mod lease;
 pub mod maintenance;
 /// Passive-observation segmentation and bounded intake surfaces.
 pub mod observe;
+/// Shared transport operation helpers reused by CLI and daemon wrappers.
+pub mod operation;
 /// Predictive pre-recall sequence learning and bounded speculative prewarm surfaces.
 pub mod predictive;
 /// Ranking and score-fusion surfaces.

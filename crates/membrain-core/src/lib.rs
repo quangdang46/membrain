@@ -45,6 +45,8 @@ pub use engine::intent::{
     IntentClassification, IntentClassificationLog, IntentEngine, IntentRankingProfile,
     IntentRouteInputs, IntentSignalKind, IntentSignalMatch, IntentTaxonomyRecord, QueryIntent,
 };
+/// Shared transport operation engine exposed to CLI and daemon wrappers.
+pub use engine::operation::OperationEngine;
 /// Shared predictive pre-recall surfaces exposed to wrappers.
 pub use engine::predictive::{
     PredictivePrewarmAction, PredictivePrewarmDecision, PredictiveRecallConfig,

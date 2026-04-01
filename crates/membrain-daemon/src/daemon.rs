@@ -185,6 +185,9 @@ use membrain_core::engine::context_budget::{ContextBudgetRequest, InjectionForma
 use membrain_core::engine::forgetting::{ForgettingAction, ForgettingPolicy};
 use membrain_core::engine::lease::{LeaseMetadata, LeasePolicy};
 use membrain_core::engine::observe::{ObserveConfig, ObserveEngine};
+use membrain_core::engine::operation::{
+    EncodeOperationRequest, OperationEngine, OperationMemoryRecord,
+};
 use membrain_core::engine::ranking::{
     adjusted_ranking_input_for_affect, fuse_scores, ranking_profile_for_recall,
     ranking_profile_name_for_recall, RankingInput,
@@ -229,7 +232,7 @@ use membrain_core::store::cache::{
 use membrain_core::store::tier2::Tier2DurableItemLayout;
 use membrain_core::types::{
     AffectSignals, BlackboardEvidenceHandle, BlackboardState, GoalCheckpoint, GoalLifecycleStatus,
-    GoalStackFrame, MemoryId, RawEncodeInput, RawIntakeKind, SessionId,
+    GoalStackFrame, MemoryId, RawIntakeKind, SessionId,
 };
 use serde_json::{json, Value};
 use std::collections::{HashMap, VecDeque};
@@ -439,6 +442,38 @@ fn hydrated_memory_record(record: &RuntimeMemoryRecord) -> HydratedMemoryRecord 
         compact_text: record.layout.metadata.compact_text.clone(),
         raw_text: record.layout.payload.raw_text.clone(),
         affect: record.layout.metadata.affect,
+    }
+}
+
+fn as_operation_memory_record(record: &RuntimeMemoryRecord) -> OperationMemoryRecord {
+    OperationMemoryRecord {
+        memory_id: record.layout.metadata.memory_id,
+        namespace: record.layout.metadata.namespace.clone(),
+        session_id: record.layout.metadata.session_id,
+        memory_type: record.layout.metadata.memory_type,
+        route_family: record.layout.metadata.route_family,
+        compact_text: record.layout.metadata.compact_text.clone(),
+        provisional_salience: record
+            .confidence_inputs
+            .authoritativeness
+            .saturating_sub(100),
+        affect: record.layout.metadata.affect,
+        fingerprint: record.layout.metadata.fingerprint,
+        payload_size_bytes: record.layout.metadata.payload_size_bytes,
+        payload_state: "durable_payload".to_string(),
+        visibility: record.layout.metadata.visibility,
+        is_landmark: record.layout.metadata.landmark.is_landmark,
+        landmark_label: record.layout.metadata.landmark.landmark_label.clone(),
+        era_id: record.layout.metadata.landmark.era_id.clone(),
+        passive_observation: record.passive_observation.clone(),
+        causal_parents: record.causal_parents.clone(),
+        causal_link_type: record.causal_link_type,
+        agent_id: record
+            .layout
+            .metadata
+            .agent_id
+            .as_ref()
+            .map(|agent_id| agent_id.as_str().to_string()),
     }
 }
 
@@ -1899,23 +1934,29 @@ impl RuntimeState {
         visibility: SharingVisibility,
     ) -> RuntimeMemoryRecord {
         let store = membrain_core::BrainStore::new(RuntimeConfig::default());
-        let affect_signals = emotional_annotations.and_then(Self::parse_affect_signals);
-        let mut input = RawEncodeInput::new(RawIntakeKind::Event, content);
-        if let Some(affect_signals) = affect_signals {
-            input = input.with_affect_signals(affect_signals);
-        }
-        let mut prepared = store.encode_engine().prepare_fast_path(input);
-        prepared.normalized.sharing.visibility = visibility;
-        if let Some(workspace_id) = common.workspace_id.as_deref() {
-            prepared.normalized.sharing.workspace_id = Some(WorkspaceId::new(workspace_id));
-        }
-        if let Some(agent_id) = common.agent_id.as_deref() {
-            prepared.normalized.sharing.agent_id = Some(AgentId::new(agent_id));
-        }
-        self.ensure_embedder_warm_for(EmbeddingPurpose::Content, &prepared.normalized.compact_text);
+        let prepared = OperationEngine::prepare_encode_candidate(
+            &store,
+            EncodeOperationRequest {
+                namespace: namespace.clone(),
+                memory_id,
+                session_id: SessionId(1),
+                content: content.to_string(),
+                intake_kind: RawIntakeKind::Event,
+                active_era_id: None,
+                affect: emotional_annotations.and_then(Self::parse_affect_signals),
+                visibility,
+                workspace_id: common.workspace_id.clone(),
+                agent_id: common.agent_id.clone(),
+                payload_state: "durable_payload".to_string(),
+            },
+        );
+        self.ensure_embedder_warm_for(
+            EmbeddingPurpose::Content,
+            &prepared.prepared.normalized.compact_text,
+        );
         let confidence_inputs = Self::build_confidence_inputs(
-            &prepared.normalized,
-            prepared.provisional_salience,
+            &prepared.prepared.normalized,
+            prepared.prepared.provisional_salience,
             None,
             memory_id,
             0,
@@ -1927,8 +1968,8 @@ impl RuntimeState {
             namespace,
             memory_id,
             SessionId(1),
-            prepared.fingerprint,
-            &prepared.normalized,
+            prepared.prepared.fingerprint,
+            &prepared.prepared.normalized,
             Some(confidence_inputs.clone()),
             Some(confidence_output.clone()),
         );
@@ -1937,7 +1978,7 @@ impl RuntimeState {
             confidence_inputs,
             confidence_output,
             projected_freshness_markers: None,
-            passive_observation: None,
+            passive_observation: prepared.memory.passive_observation.clone(),
             causal_parents: Vec::new(),
             causal_link_type: None,
         }
@@ -5554,41 +5595,17 @@ impl DaemonRuntime {
             let namespace = NamespaceId::new(namespace).map_err(|err| err.to_string())?;
             let request_id = RequestId::new(format!("daemon-explain-{request_correlation_id}"))
                 .map_err(|err| err.to_string())?;
-            let links = state
-                .memories
-                .lock()
-                .expect("runtime memory registry lock should be available")
-                .values()
-                .filter(|record| record.layout.metadata.namespace == namespace)
-                .flat_map(|record| {
-                    record
-                        .causal_parents
-                        .iter()
-                        .copied()
-                        .map(move |parent_id| CausalLink {
-                            src_memory_id: parent_id,
-                            dst_memory_id: record.layout.metadata.memory_id,
-                            link_type: record.causal_link_type.unwrap_or(CausalLinkType::Derived),
-                            created_at_ms: record.layout.metadata.memory_id.0,
-                            agent_id: record
-                                .layout
-                                .metadata
-                                .agent_id
-                                .as_ref()
-                                .map(|id| id.as_str().to_string()),
-                            evidence: vec![CausalEvidenceAttribution {
-                                evidence_kind: CausalEvidenceKind::DurableMemory,
-                                source_ref: format!(
-                                    "memory://{}/{}",
-                                    record.layout.metadata.namespace.as_str(),
-                                    parent_id.0
-                                ),
-                                supporting_memory_ids: vec![parent_id],
-                                confidence: 800,
-                            }],
-                        })
-                })
-                .collect::<Vec<_>>();
+            let links = OperationEngine::causal_links_for_records(
+                &state
+                    .memories
+                    .lock()
+                    .expect("runtime memory registry lock should be available")
+                    .values()
+                    .cloned()
+                    .map(|record| as_operation_memory_record(&record))
+                    .collect::<Vec<_>>(),
+                &namespace,
+            );
             let requested_depth =
                 depth.unwrap_or(RuntimeConfig::default().graph_max_depth as usize);
             let trace = membrain_core::BrainStore::new(RuntimeConfig::default())
@@ -5865,41 +5882,18 @@ impl DaemonRuntime {
                     .collect::<HashMap<_, _>>()
             })
             .unwrap_or_default();
-        if let Some(trace) = semantic_result.map(|result| &result.trace) {
-            explain.result_reasons.push(ResultReason {
-                memory_id: None,
-                reason_code: if trace.exact_match_used {
-                    "tier2_exact_match"
-                } else {
-                    "semantic_executor_trace"
-                }
-                .to_string(),
-                detail: {
-                    let mut detail = if let Some(reason) = trace.degraded_reason.as_deref() {
-                        format!(
-                            "shared semantic executor used lexical prefilter over {} namespace candidate(s), produced {} prefilter candidate(s), returned {} semantic candidate(s), and enforced bounded result_limit={}; degraded_reason={reason}",
-                            trace.namespace_candidate_count,
-                            trace.lexical_prefilter_count,
-                            trace.semantic_candidate_count,
-                            trace.result_limit,
-                        )
+        if let Some(semantic_result) = semantic_result {
+            explain
+                .result_reasons
+                .push(OperationEngine::semantic_trace_reason(
+                    semantic_result,
+                    if semantic_result.trace.exact_match_used {
+                        "tier2_exact_match"
                     } else {
-                        format!(
-                            "shared semantic executor used lexical prefilter over {} namespace candidate(s), produced {} prefilter candidate(s), returned {} semantic candidate(s), and enforced bounded result_limit={}",
-                            trace.namespace_candidate_count,
-                            trace.lexical_prefilter_count,
-                            trace.semantic_candidate_count,
-                            trace.result_limit,
-                        )
-                    };
-                    if trace.bounded_shortlist_truncated {
-                        detail.push_str(
-                            "; bounded shortlist truncated lower-ranked candidates before hydration to preserve the declared runtime budget",
-                        );
-                    }
-                    detail
-                },
-            });
+                        "semantic_executor_trace"
+                    },
+                    false,
+                ));
         }
         let semantic_mode_active = semantic_result.is_some();
         let mut selected_records = records
@@ -6074,21 +6068,13 @@ impl DaemonRuntime {
         result.packaging_metadata.result_budget = RuntimeConfig::default().tier1_candidate_budget;
         result.packaging_metadata.degraded_summary = None;
         if let Some(reasoning) = reasoning {
-            let mut details = vec![reasoning.trace_note.clone()];
-            if !reasoning.rewritten_queries.is_empty() {
-                details.push(format!(
-                    "rewritten_queries={}",
-                    reasoning.rewritten_queries.join(" | ")
+            result
+                .explain
+                .result_reasons
+                .push(OperationEngine::reasoning_trace_reason(
+                    reasoning,
+                    "reasoning_recall_trace",
                 ));
-            }
-            if let Some(reason) = reasoning.degraded_reason.as_deref() {
-                details.push(format!("degraded_reason={reason}"));
-            }
-            result.explain.result_reasons.push(ResultReason {
-                memory_id: None,
-                reason_code: "reasoning_recall_trace".to_string(),
-                detail: details.join("; "),
-            });
         }
         result
     }
